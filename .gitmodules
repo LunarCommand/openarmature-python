@@ -1,0 +1,3 @@
+[submodule "openarmature-spec"]
+	path = openarmature-spec
+	url = git@github.com:LunarCommand/openarmature-spec.git
