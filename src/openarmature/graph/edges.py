@@ -10,14 +10,14 @@ from dataclasses import dataclass
 from typing import Any, Final
 
 
-class _EndSentinel:
+class EndSentinel:
     """Engine-provided sentinel routing target. Use the module-level `END`."""
 
     def __repr__(self) -> str:
         return "END"
 
 
-END: Final[_EndSentinel] = _EndSentinel()
+END: Final[EndSentinel] = EndSentinel()
 
 
 @dataclass(frozen=True)
@@ -25,7 +25,7 @@ class StaticEdge:
     """Always routes from `source` to `target`."""
 
     source: str
-    target: str | _EndSentinel
+    target: str | EndSentinel
 
 
 @dataclass(frozen=True)
@@ -36,4 +36,4 @@ class ConditionalEdge:
     """
 
     source: str
-    fn: Callable[[Any], str | _EndSentinel]
+    fn: Callable[[Any], str | EndSentinel]

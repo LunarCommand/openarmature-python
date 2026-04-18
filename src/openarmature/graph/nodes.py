@@ -16,7 +16,8 @@ from typing import Any, Protocol
 class Node(Protocol):
     """A unit of work in a compiled graph."""
 
-    name: str
+    @property
+    def name(self) -> str: ...
 
     async def run(self, state: Any) -> Mapping[str, Any]: ...
 
