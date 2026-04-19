@@ -74,6 +74,8 @@ class RuntimeGraphError(GraphError):
 
 class NodeException(RuntimeGraphError):
     category = "node_exception"
+    node_name: str
+    recoverable_state: Any
 
     def __init__(self, node_name: str, cause: BaseException, recoverable_state: Any) -> None:
         super().__init__(f"node {node_name!r} raised {type(cause).__name__}: {cause}")
@@ -84,6 +86,8 @@ class NodeException(RuntimeGraphError):
 
 class EdgeException(RuntimeGraphError):
     category = "edge_exception"
+    source_node: str
+    recoverable_state: Any
 
     def __init__(self, source_node: str, cause: BaseException, recoverable_state: Any) -> None:
         super().__init__(f"edge from {source_node!r} raised {type(cause).__name__}: {cause}")
@@ -94,6 +98,10 @@ class EdgeException(RuntimeGraphError):
 
 class ReducerError(RuntimeGraphError):
     category = "reducer_error"
+    field_name: str
+    reducer_name: str
+    producing_node: str
+    recoverable_state: Any
 
     def __init__(
         self,
@@ -117,6 +125,9 @@ class ReducerError(RuntimeGraphError):
 
 class RoutingError(RuntimeGraphError):
     category = "routing_error"
+    source_node: str
+    returned: object
+    recoverable_state: Any
 
     def __init__(self, source_node: str, returned: object, recoverable_state: Any) -> None:
         super().__init__(

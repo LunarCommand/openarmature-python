@@ -8,7 +8,7 @@ compile-time and runtime error categories from spec §2 and §4.
 
 from .builder import GraphBuilder
 from .compiled import CompiledGraph
-from .edges import END, ConditionalEdge, StaticEdge
+from .edges import END, ConditionalEdge, EndSentinel, StaticEdge
 from .errors import (
     CompileError,
     ConflictingReducers,
@@ -38,6 +38,7 @@ __all__ = [
     "ConflictingReducers",
     "DanglingEdge",
     "EdgeException",
+    "EndSentinel",
     "FieldNameMatching",
     "FunctionNode",
     "GraphBuilder",
