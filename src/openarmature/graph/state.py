@@ -21,7 +21,10 @@ from .reducers import Reducer, last_write_wins
 class State(BaseModel):
     """Base for graph state schemas. Immutable; reducers attach via Annotated."""
 
-    model_config = ConfigDict(frozen=True)
+    # `extra="forbid"` makes node updates that name an undeclared field surface
+    # as a `state_validation_error` at the merge step, matching spec §2's
+    # "typed product type validated at graph boundaries" intent.
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
 
 def field_reducers(state_cls: type[State]) -> Mapping[str, list[Reducer]]:
