@@ -35,7 +35,7 @@ async def test_subgraph_node_run_projects_via_field_name_matching() -> None:
 
     inner = GraphBuilder(Inner).add_node("x", x).add_edge("x", END).set_entry("x").compile()
 
-    sub = SubgraphNode(name="sub", compiled=inner, projection=FieldNameMatching())
+    sub = SubgraphNode[Outer, Inner](name="sub", compiled=inner, projection=FieldNameMatching[Outer, Inner]())
     result = await sub.run(Outer())
 
     # Field-name matching projects shared fields back; subgraph runs from its own defaults.

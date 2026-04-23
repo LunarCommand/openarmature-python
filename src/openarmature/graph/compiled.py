@@ -7,6 +7,10 @@ END to halt).
 
 Per spec §4 Error semantics: node, edge, reducer, and routing errors carry
 recoverable state; state validation errors do not.
+
+`CompiledGraph[StateT]` and `_merge_partial[StateT]` carry the concrete state
+subclass through to `invoke()`'s return type, so consumers don't need
+`cast(MyState, ...)` at the call site.
 """
 
 from collections.abc import Mapping
@@ -28,12 +32,12 @@ from .reducers import Reducer
 from .state import State
 
 
-def _merge_partial(
-    prior: State,
+def _merge_partial[StateT: State](
+    prior: StateT,
     partial: Mapping[str, Any],
     reducers: Mapping[str, Reducer],
     producing_node: str,
-) -> State:
+) -> StateT:
     """Apply per-field reducers to merge a node's partial update into prior state.
 
     Re-validates the resulting state against the schema (per spec §2 SHOULD
@@ -60,6 +64,7 @@ def _merge_partial(
             ) from e
 
     try:
+        # type(prior) narrows to `type[StateT]`; model_validate returns StateT.
         return type(prior).model_validate(new_values)
     except ValidationError as e:
         offending = sorted({str(err["loc"][0]) for err in e.errors() if err["loc"]})
@@ -71,16 +76,16 @@ def _merge_partial(
 
 
 @dataclass(frozen=True)
-class CompiledGraph:
+class CompiledGraph[StateT: State]:
     """An immutable, executable graph produced by `GraphBuilder.compile()`."""
 
-    state_cls: type[State]
+    state_cls: type[StateT]
     entry: str
-    nodes: Mapping[str, Node]
-    edges: Mapping[str, StaticEdge | ConditionalEdge]
+    nodes: Mapping[str, Node[StateT]]
+    edges: Mapping[str, StaticEdge | ConditionalEdge[StateT]]
     reducers: Mapping[str, Reducer]
 
-    async def invoke(self, initial_state: State) -> State:
+    async def invoke(self, initial_state: StateT) -> StateT:
         """Run the graph from `initial_state` to END and return the final state.
 
         Raises one of the runtime error categories from spec §4 on failure.

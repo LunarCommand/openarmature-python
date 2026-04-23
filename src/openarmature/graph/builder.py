@@ -3,6 +3,11 @@
 Per spec §2: compilation MUST fail if the graph has no declared entry,
 unreachable nodes, dangling edges, a node with more than one outgoing edge,
 or a field with more than one declared reducer.
+
+`GraphBuilder[StateT]` is parameterized on the graph's state type. Node
+functions, conditional-edge functions, and the returned `CompiledGraph[StateT]`
+all carry `StateT` forward so consumers get typed `invoke()` return values and
+a type-checked `state` parameter on every callback — without `cast(...)` calls.
 """
 
 from collections.abc import Awaitable, Callable, Mapping
@@ -24,35 +29,37 @@ from .state import State, field_reducers, resolve_reducer
 from .subgraph import SubgraphNode
 
 
-class GraphBuilder:
+class GraphBuilder[StateT: State]:
     """Mutable builder for a graph; call `compile()` to produce a `CompiledGraph`."""
 
-    def __init__(self, state_cls: type[State]) -> None:
-        self.state_cls = state_cls
-        self._nodes: dict[str, Node] = {}
-        self._edges: list[StaticEdge | ConditionalEdge] = []
+    def __init__(self, state_cls: type[StateT]) -> None:
+        self.state_cls: type[StateT] = state_cls
+        self._nodes: dict[str, Node[StateT]] = {}
+        self._edges: list[StaticEdge | ConditionalEdge[StateT]] = []
         self._entry: str | None = None
 
     def add_node(
         self,
         name: str,
-        fn: Callable[[Any], Awaitable[Mapping[str, Any]]],
+        fn: Callable[[StateT], Awaitable[Mapping[str, Any]]],
     ) -> Self:
         if name in self._nodes:
             raise ValueError(f"node {name!r} already declared")
-        self._nodes[name] = FunctionNode(name=name, fn=fn)
+        self._nodes[name] = FunctionNode[StateT](name=name, fn=fn)
         return self
 
-    def add_subgraph_node(
+    def add_subgraph_node[ChildT: State](
         self,
         name: str,
-        compiled: CompiledGraph,
-        projection: ProjectionStrategy | None = None,
+        compiled: CompiledGraph[ChildT],
+        projection: ProjectionStrategy[StateT, ChildT] | None = None,
     ) -> Self:
         if name in self._nodes:
             raise ValueError(f"node {name!r} already declared")
-        proj: ProjectionStrategy = projection if projection is not None else FieldNameMatching()
-        self._nodes[name] = SubgraphNode(name=name, compiled=compiled, projection=proj)
+        proj: ProjectionStrategy[StateT, ChildT] = (
+            projection if projection is not None else FieldNameMatching[StateT, ChildT]()
+        )
+        self._nodes[name] = SubgraphNode[StateT, ChildT](name=name, compiled=compiled, projection=proj)
         return self
 
     def add_edge(self, source: str, target: str | EndSentinel) -> Self:
@@ -62,16 +69,16 @@ class GraphBuilder:
     def add_conditional_edge(
         self,
         source: str,
-        fn: Callable[[Any], str | EndSentinel],
+        fn: Callable[[StateT], str | EndSentinel],
     ) -> Self:
-        self._edges.append(ConditionalEdge(source=source, fn=fn))
+        self._edges.append(ConditionalEdge[StateT](source=source, fn=fn))
         return self
 
     def set_entry(self, name: str) -> Self:
         self._entry = name
         return self
 
-    def compile(self) -> CompiledGraph:
+    def compile(self) -> CompiledGraph[StateT]:
         # 1. ConflictingReducers — state schema check.
         per_field = field_reducers(self.state_cls)
         for fname, declared in per_field.items():
@@ -98,7 +105,7 @@ class GraphBuilder:
                     raise DanglingEdge(source=edge.source, target=edge.target)
 
         # 5. MultipleOutgoingEdges + index by source for the reachability pass.
-        edges_by_source: dict[str, StaticEdge | ConditionalEdge] = {}
+        edges_by_source: dict[str, StaticEdge | ConditionalEdge[StateT]] = {}
         for edge in self._edges:
             if edge.source in edges_by_source:
                 raise MultipleOutgoingEdges(edge.source)
@@ -112,7 +119,7 @@ class GraphBuilder:
             if node_name not in reachable:
                 raise UnreachableNode(node_name)
 
-        return CompiledGraph(
+        return CompiledGraph[StateT](
             state_cls=self.state_cls,
             entry=self._entry,
             nodes=dict(self._nodes),
@@ -122,7 +129,7 @@ class GraphBuilder:
 
     def _reachable_nodes(
         self,
-        edges_by_source: Mapping[str, StaticEdge | ConditionalEdge],
+        edges_by_source: Mapping[str, StaticEdge | ConditionalEdge[StateT]],
     ) -> set[str]:
         assert self._entry is not None
         reachable: set[str] = {self._entry}
