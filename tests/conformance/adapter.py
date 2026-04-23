@@ -119,9 +119,9 @@ def _make_raising_fn(
 
 def _make_subgraph_fn(
     node_name: str,
-    compiled: CompiledGraph,
+    compiled: CompiledGraph[State],
     trace: list[str],
-    projection: ProjectionStrategy,
+    projection: ProjectionStrategy[State, State],
 ) -> Callable[[Any], Awaitable[Mapping[str, Any]]]:
     """Outer-graph node that delegates to a compiled subgraph.
 
@@ -160,7 +160,7 @@ class BuiltGraph:
     """Result of translating a fixture into runnable engine constructs."""
 
     state_cls: type[State]
-    builder: GraphBuilder
+    builder: GraphBuilder[State]
     trace: list[str]
 
     def initial_state(self, overrides: Mapping[str, Any]) -> State:
@@ -170,7 +170,7 @@ class BuiltGraph:
 def build_graph(
     spec: Mapping[str, Any],
     *,
-    subgraphs: Mapping[str, CompiledGraph] | None = None,
+    subgraphs: Mapping[str, CompiledGraph[State]] | None = None,
     trace: list[str] | None = None,
     model_name: str = "FixtureState",
 ) -> BuiltGraph:
@@ -196,7 +196,7 @@ def build_graph(
             compiled = subgraphs[sub_name]
             builder.add_node(
                 node_name,
-                _make_subgraph_fn(node_name, compiled, trace, FieldNameMatching()),
+                _make_subgraph_fn(node_name, compiled, trace, FieldNameMatching[State, State]()),
             )
         elif "raises" in node_spec:
             builder.add_node(node_name, _make_raising_fn(node_name, node_spec["raises"], trace))

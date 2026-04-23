@@ -22,14 +22,14 @@ def test_project_in_returns_subgraph_defaults() -> None:
     """Per spec v0.1.1 §2: default projection-in is no projection — subgraph
     starts from its own field defaults regardless of parent state."""
 
-    proj = FieldNameMatching()
+    proj = FieldNameMatching[Parent, ChildOverlap]()
     sub = proj.project_in(Parent(shared="ignored"), ChildOverlap)
     assert isinstance(sub, ChildOverlap)
     assert sub.shared == "child-shared"
 
 
 def test_project_out_returns_only_shared_field_names() -> None:
-    proj = FieldNameMatching()
+    proj = FieldNameMatching[Parent, ChildOverlap]()
     sub_final = ChildOverlap(shared="child-final", child_only=["a"])
     out = proj.project_out(sub_final, Parent(), ChildOverlap)
 
@@ -38,7 +38,7 @@ def test_project_out_returns_only_shared_field_names() -> None:
 
 
 def test_project_out_is_empty_when_no_overlap() -> None:
-    proj = FieldNameMatching()
+    proj = FieldNameMatching[Parent, ChildNoOverlap]()
     sub_final = ChildNoOverlap(completely_different="y")
     out = proj.project_out(sub_final, Parent(), ChildNoOverlap)
     assert dict(out) == {}

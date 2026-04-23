@@ -3,11 +3,17 @@
 Per spec §2 Concepts (Edge, END): edges are static or conditional; each node
 has exactly one outgoing edge. END is a distinct engine sentinel (not a
 reserved node name) used as a routing target to halt execution.
+
+`ConditionalEdge` is generic on the outer graph's state type so the routing
+function's parameter is typed against the user's `State` subclass — not
+`Any` — at type-check time.
 """
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Final
+from typing import Final
+
+from .state import State
 
 
 class EndSentinel:
@@ -29,11 +35,11 @@ class StaticEdge:
 
 
 @dataclass(frozen=True)
-class ConditionalEdge:
+class ConditionalEdge[StateT: State]:
     """Routes from `source` to whichever node `fn(state)` returns. The function
     MUST return either a declared node name or `END`; any other value raises
     `RoutingError` at runtime.
     """
 
     source: str
-    fn: Callable[[Any], str | EndSentinel]
+    fn: Callable[[StateT], str | EndSentinel]
