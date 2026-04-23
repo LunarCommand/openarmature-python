@@ -35,7 +35,7 @@ async def test_edge_exception_when_conditional_fn_raises() -> None:
     def bad_edge(_state: Any) -> str | EndSentinel:
         raise RuntimeError("edge boom")
 
-    g = GraphBuilder(S).add_node("a", node_a).add_conditional("a", bad_edge).set_entry("a").compile()
+    g = GraphBuilder(S).add_node("a", node_a).add_conditional_edge("a", bad_edge).set_entry("a").compile()
 
     with pytest.raises(EdgeException) as excinfo:
         await g.invoke(S())
