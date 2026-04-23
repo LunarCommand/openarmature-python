@@ -1,5 +1,9 @@
 .claude/
 
+# Local-only implementation notes (concepts walkthrough, rough edges log,
+# future-work log, langgraph comparison). Kept out of public history.
+_docs/
+
 # Python
 __pycache__/
 *.py[cod]
