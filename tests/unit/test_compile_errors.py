@@ -36,4 +36,4 @@ def test_duplicate_subgraph_name_raises_value_error() -> None:
     inner = GraphBuilder(S).add_node("x", _noop).add_edge("x", END).set_entry("x").compile()
     builder = GraphBuilder(S).add_node("a", _noop)
     with pytest.raises(ValueError, match="already declared"):
-        builder.add_subgraph("a", inner)
+        builder.add_subgraph_node("a", inner)

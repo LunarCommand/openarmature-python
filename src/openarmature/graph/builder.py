@@ -43,7 +43,7 @@ class GraphBuilder:
         self._nodes[name] = FunctionNode(name=name, fn=fn)
         return self
 
-    def add_subgraph(
+    def add_subgraph_node(
         self,
         name: str,
         compiled: CompiledGraph,
@@ -59,7 +59,7 @@ class GraphBuilder:
         self._edges.append(StaticEdge(source=source, target=target))
         return self
 
-    def add_conditional(
+    def add_conditional_edge(
         self,
         source: str,
         fn: Callable[[Any], str | EndSentinel],

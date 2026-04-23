@@ -3,7 +3,7 @@
 The conformance adapter routes around `SubgraphNode` via a function-node
 wrapper (so it can record outer-graph execution order in the parent trace).
 These tests exercise `SubgraphNode.run` directly, plus the
-`builder.add_subgraph` path that constructs one internally.
+`builder.add_subgraph_node` path that constructs one internally.
 """
 
 from typing import Annotated, Any
@@ -42,7 +42,7 @@ async def test_subgraph_node_run_projects_via_field_name_matching() -> None:
     assert dict(result) == {"msg": "hello", "trace": ["x"]}
 
 
-async def test_outer_graph_composes_subgraph_via_add_subgraph() -> None:
+async def test_outer_graph_composes_subgraph_via_add_subgraph_node() -> None:
     async def x(_s: Any) -> dict[str, Any]:
         return {"msg": "from-x", "trace": ["x"]}
 
@@ -68,7 +68,7 @@ async def test_outer_graph_composes_subgraph_via_add_subgraph() -> None:
     outer = (
         GraphBuilder(Outer)
         .add_node("outer_a", outer_a)
-        .add_subgraph("outer_sub", inner)
+        .add_subgraph_node("outer_sub", inner)
         .add_node("outer_b", outer_b)
         .add_edge("outer_a", "outer_sub")
         .add_edge("outer_sub", "outer_b")

@@ -211,7 +211,7 @@ def build_graph(
             builder.add_edge(source, _resolve_target(edge_spec["to"]))
         elif "condition" in edge_spec:
             cond = edge_spec["condition"]
-            builder.add_conditional(
+            builder.add_conditional_edge(
                 source,
                 _make_conditional_fn(cond["if_field"], cond["equals"], cond["then"], cond["else"]),
             )
