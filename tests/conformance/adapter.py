@@ -12,8 +12,8 @@ from __future__ import annotations
 
 import copy
 from collections.abc import Awaitable, Callable, Mapping
-from dataclasses import dataclass
-from typing import Annotated, Any, cast
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Annotated, Any, cast
 
 from openarmature.graph import (
     END,
@@ -25,11 +25,17 @@ from openarmature.graph import (
     ProjectionStrategy,
     Reducer,
     State,
+    SubgraphNode,
     append,
     last_write_wins,
     merge,
 )
+from openarmature.graph.events import NodeEvent
+from openarmature.graph.observer import Observer
 from pydantic import Field, create_model
+
+if TYPE_CHECKING:
+    from openarmature.graph.observer import _InvocationContext
 
 REDUCERS: dict[str, Reducer] = {
     "last_write_wins": last_write_wins,
@@ -118,27 +124,28 @@ def _make_raising_fn(
     return fn
 
 
-def _make_subgraph_fn(
-    node_name: str,
-    compiled: CompiledGraph[State],
-    trace: list[str],
-    projection: ProjectionStrategy[State, State],
-) -> Callable[[Any], Awaitable[Mapping[str, Any]]]:
-    """Outer-graph node that delegates to a compiled subgraph.
+@dataclass(frozen=True)
+class _TracingSubgraphNode(SubgraphNode[State, State]):
+    """Conformance helper: a SubgraphNode that appends its name to a shared
+    trace list when the engine runs it.
 
-    Records the outer node name in the parent trace before invoking the
-    subgraph; the subgraph's inner nodes record into their own trace, which
-    the parametrized test discards (subgraph fixtures only assert outer-graph
-    execution order).
+    Lets the conformance adapter use real SubgraphNode (so observer-context
+    threading works for fixture 013, and compile-time projection validation
+    works for the mapping_references_undeclared_field 007 case) while still
+    supporting `execution_order` assertions that include the wrapper name —
+    the engine itself doesn't dispatch an event for the wrapper per fixture
+    013's spec.
     """
 
-    async def fn(state: Any) -> Mapping[str, Any]:
-        trace.append(node_name)
-        sub_initial = projection.project_in(state, compiled.state_cls)
-        sub_final = await compiled.invoke(sub_initial)
-        return projection.project_out(sub_final, state, compiled.state_cls)
+    trace_list: list[str] = field(default_factory=list[str])
 
-    return fn
+    async def run(
+        self,
+        state: State,
+        context: _InvocationContext | None = None,
+    ) -> Mapping[str, Any]:
+        self.trace_list.append(self.name)
+        return await super().run(state, context=context)
 
 
 def _make_conditional_fn(
@@ -188,7 +195,6 @@ def build_graph(
     subgraphs: Mapping[str, CompiledGraph[State]] | None = None,
     trace: list[str] | None = None,
     model_name: str = "FixtureState",
-    real_subgraph_nodes: bool = False,
 ) -> BuiltGraph:
     """Translate a graph-shaped fixture block into a `BuiltGraph`.
 
@@ -197,12 +203,10 @@ def build_graph(
     used by 006-style fixtures to look up a compiled subgraph by its declared
     name.
 
-    `real_subgraph_nodes` controls how subgraph references are added to the
-    builder. Default `False` wraps each subgraph in a function node that
-    records the outer node name in `trace` (preserves execution-order tracking
-    for runtime fixtures). Set `True` for compile-error fixtures whose error
-    must surface from the engine's compile-time projection validation — that
-    only fires for real `SubgraphNode` instances added via `add_subgraph_node`.
+    Subgraph references in `spec.nodes` resolve to `_TracingSubgraphNode`
+    (a SubgraphNode subclass) so the engine threads observer context through
+    AND the conformance adapter's `execution_order` trace gets the wrapper
+    name appended when it runs.
     """
 
     state_cls = build_state_cls(model_name, spec["state"]["fields"])
@@ -218,13 +222,14 @@ def build_graph(
             sub_name = node_spec["subgraph"]
             compiled = subgraphs[sub_name]
             projection = _projection_for(node_spec)
-            if real_subgraph_nodes:
-                builder.add_subgraph_node(node_name, compiled, projection)
-            else:
-                builder.add_node(
-                    node_name,
-                    _make_subgraph_fn(node_name, compiled, trace, projection),
-                )
+            if node_name in builder._nodes:
+                raise ValueError(f"node {node_name!r} already declared")
+            builder._nodes[node_name] = _TracingSubgraphNode(
+                name=node_name,
+                compiled=compiled,
+                projection=projection,
+                trace_list=trace,
+            )
         elif "raises" in node_spec:
             builder.add_node(node_name, _make_raising_fn(node_name, node_spec["raises"], trace))
         elif "update" in node_spec:
@@ -246,3 +251,71 @@ def build_graph(
             raise ValueError(f"edge from {source!r} has neither `to` nor `condition`")
 
     return BuiltGraph(state_cls=state_cls, builder=builder, trace=trace)
+
+
+# ---------------------------------------------------------------------------
+# Observer fixture support (spec v0.3.0 §6, fixtures 012–015)
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class ObserverFixture:
+    """Captured per-observer state for assertion against an observer fixture.
+
+    Built once per observer declared in a fixture's `observers:` block. The
+    observer callable produced by `make_observer_fn` records every event it
+    receives into `events` and (if behavior == "raise") raises after
+    recording.
+    """
+
+    name: str
+    attach: str  # "graph" | "invocation"
+    target: str  # "outer" | <subgraph name>
+    behavior: str  # "record" | "raise"
+    events: list[dict[str, Any]] = field(default_factory=list[dict[str, Any]])
+
+
+def _record_event(event: NodeEvent) -> dict[str, Any]:
+    """Convert a NodeEvent into a dict matching the YAML expected shape."""
+    rec: dict[str, Any] = {
+        "step": event.step,
+        "node_name": event.node_name,
+        "namespace": list(event.namespace),
+        "pre_state": event.pre_state.model_dump(),
+        "parent_states": [ps.model_dump() for ps in event.parent_states],
+    }
+    if event.post_state is not None:
+        rec["post_state"] = event.post_state.model_dump()
+    if event.error is not None:
+        rec["error"] = event.error.category
+    return rec
+
+
+def make_observer_fn(
+    fixture: ObserverFixture,
+    delivery: list[tuple[str, int]],
+) -> Observer:
+    """Build the async observer callable for an `ObserverFixture`.
+
+    Records every event into `fixture.events` and appends `(name, step)` to
+    the shared `delivery` list (the order observers are called in across the
+    whole invocation, used to assert `delivery_order`). Raising observers
+    record + append before raising, so the engine's error isolation can be
+    verified by checking that subsequent observers/events still get through.
+    """
+
+    async def observer(event: NodeEvent) -> None:
+        delivery.append((fixture.name, event.step))
+        fixture.events.append(_record_event(event))
+        if fixture.behavior == "raise":
+            raise RuntimeError(f"{fixture.name} raised on event at step {event.step}")
+
+    return observer
+
+
+def normalize_expected_event(ev: Mapping[str, Any]) -> dict[str, Any]:
+    """Fill in defaults for keys the YAML omits, so equality with the
+    recorded event dict works as-is."""
+    e = dict(ev)
+    e.setdefault("parent_states", [])
+    return e
