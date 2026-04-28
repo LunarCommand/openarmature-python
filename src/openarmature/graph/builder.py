@@ -11,7 +11,7 @@ a type-checked `state` parameter on every callback — without `cast(...)` calls
 """
 
 from collections.abc import Awaitable, Callable, Mapping
-from typing import Any, Self
+from typing import Any, Self, cast
 
 from .compiled import CompiledGraph
 from .edges import ConditionalEdge, EndSentinel, StaticEdge
@@ -88,15 +88,32 @@ class GraphBuilder[StateT: State]:
             fname: resolve_reducer(declared) for fname, declared in per_field.items()
         }
 
-        # 2. NoDeclaredEntry.
+        # 2. MappingReferencesUndeclaredField — declarative projection
+        #    strategies (e.g. `ExplicitMapping`) expose an optional
+        #    `validate(parent_cls, child_cls)` hook that we invoke here so
+        #    misconfigured mappings fail compile rather than at runtime.
+        #    The hook is duck-typed: strategies with nothing declarative to
+        #    check (the default `FieldNameMatching`, hand-written imperative
+        #    projections) simply omit `validate` and the engine skips it.
+        #    ChildT is erased once SubgraphNode is stored as Node[StateT];
+        #    the cast restores enough type info to access `compiled.state_cls`
+        #    without pyright flagging an unknown member type.
+        for node in self._nodes.values():
+            if isinstance(node, SubgraphNode):
+                sub = cast(SubgraphNode[StateT, State], node)
+                validate = getattr(sub.projection, "validate", None)
+                if validate is not None:
+                    validate(self.state_cls, sub.compiled.state_cls)
+
+        # 3. NoDeclaredEntry.
         if self._entry is None:
             raise NoDeclaredEntry()
 
-        # 3. Entry must point to a declared node (treat as DanglingEdge).
+        # 4. Entry must point to a declared node (treat as DanglingEdge).
         if self._entry not in self._nodes:
             raise DanglingEdge(source="<entry>", target=self._entry)
 
-        # 4. DanglingEdge — both endpoints of every edge must be declared.
+        # 5. DanglingEdge — both endpoints of every edge must be declared.
         for edge in self._edges:
             if edge.source not in self._nodes:
                 raise DanglingEdge(source=edge.source, target=edge.source)
@@ -104,14 +121,14 @@ class GraphBuilder[StateT: State]:
                 if edge.target not in self._nodes:
                     raise DanglingEdge(source=edge.source, target=edge.target)
 
-        # 5. MultipleOutgoingEdges + index by source for the reachability pass.
+        # 6. MultipleOutgoingEdges + index by source for the reachability pass.
         edges_by_source: dict[str, StaticEdge | ConditionalEdge[StateT]] = {}
         for edge in self._edges:
             if edge.source in edges_by_source:
                 raise MultipleOutgoingEdges(edge.source)
             edges_by_source[edge.source] = edge
 
-        # 6. UnreachableNode — BFS from entry. Conditional edges over-approximate
+        # 7. UnreachableNode — BFS from entry. Conditional edges over-approximate
         #    by reaching every declared node (we cannot statically know the fn's
         #    range), which keeps the check sound (no false positives).
         reachable = self._reachable_nodes(edges_by_source)

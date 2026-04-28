@@ -15,6 +15,7 @@ from .errors import (
     DanglingEdge,
     EdgeException,
     GraphError,
+    MappingReferencesUndeclaredField,
     MultipleOutgoingEdges,
     NoDeclaredEntry,
     NodeException,
@@ -25,7 +26,7 @@ from .errors import (
     UnreachableNode,
 )
 from .nodes import FunctionNode, Node
-from .projection import FieldNameMatching, ProjectionStrategy
+from .projection import ExplicitMapping, FieldNameMatching, ProjectionStrategy
 from .reducers import Reducer, append, last_write_wins, merge
 from .state import State
 from .subgraph import SubgraphNode
@@ -39,10 +40,12 @@ __all__ = [
     "DanglingEdge",
     "EdgeException",
     "EndSentinel",
+    "ExplicitMapping",
     "FieldNameMatching",
     "FunctionNode",
     "GraphBuilder",
     "GraphError",
+    "MappingReferencesUndeclaredField",
     "MultipleOutgoingEdges",
     "Node",
     "NodeException",

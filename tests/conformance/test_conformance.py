@@ -113,7 +113,17 @@ def _compile_error_cases() -> list[tuple[str, dict[str, Any], str]]:
     ids=[name for name, _, _ in _compile_error_cases()],
 )
 def test_compile_error(graph_spec: dict[str, Any], expected_category: str) -> None:
-    built = build_graph(graph_spec)
+    # Cases that compose a subgraph (e.g. mapping_references_undeclared_field)
+    # need that subgraph compiled and registered before the parent compiles,
+    # and the parent must use a real SubgraphNode so the engine's compile-time
+    # projection validation runs.
+    subgraphs: dict[str, Any] = {}
+    if "subgraph" in graph_spec:
+        sub_spec = graph_spec["subgraph"]
+        sub_built = build_graph(sub_spec, model_name=f"{sub_spec['name'].title()}State")
+        subgraphs[sub_spec["name"]] = sub_built.builder.compile()
+
+    built = build_graph(graph_spec, subgraphs=subgraphs, real_subgraph_nodes=bool(subgraphs))
     with pytest.raises(CompileError) as excinfo:
         built.builder.compile()
     assert excinfo.value.category == expected_category

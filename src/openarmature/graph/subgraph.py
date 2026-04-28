@@ -1,9 +1,9 @@
 """Subgraphs as nodes.
 
-Per spec v0.1.1 §2 Subgraph: a compiled graph is used as a node inside another
+Per spec v0.2.0 §2 Subgraph: a compiled graph is used as a node inside another
 graph. The subgraph runs against its own state schema; projection between
 parent and subgraph is delegated to a `ProjectionStrategy` (default:
-`FieldNameMatching`).
+`FieldNameMatching`; spec v0.2.0 also defines `ExplicitMapping`).
 
 Parameterized on both the parent's state type (`ParentT`) and the subgraph's
 state type (`ChildT`). The outer graph only ever sees `run(state: ParentT)`

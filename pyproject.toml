@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "openarmature"
-version = "0.2.0"
+version = "0.3.0"
 description = "Workflow framework for LLM pipelines and tool-calling agents."
 readme = "README.md"
 requires-python = ">=3.12"
@@ -20,7 +20,7 @@ Repository = "https://github.com/LunarCommand/openarmature-python"
 Specification = "https://github.com/LunarCommand/openarmature-spec"
 
 [tool.openarmature]
-spec_version = "0.1.1"
+spec_version = "0.2.0"
 
 [dependency-groups]
 dev = [
