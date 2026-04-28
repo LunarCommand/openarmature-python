@@ -62,6 +62,19 @@ class ConflictingReducers(CompileError):
         self.field_name = field_name
 
 
+class MappingReferencesUndeclaredField(CompileError):
+    """Per spec v0.2.0 §2: a subgraph-as-node `inputs` or `outputs` mapping
+    names a field that is not declared in the relevant state schema."""
+
+    category = "mapping_references_undeclared_field"
+
+    def __init__(self, *, direction: str, side: str, field_name: str) -> None:
+        super().__init__(f"subgraph {direction!r} mapping references undeclared {side} field {field_name!r}")
+        self.direction = direction
+        self.side = side
+        self.field_name = field_name
+
+
 # ===== Runtime errors (spec §4) =====
 
 

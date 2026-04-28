@@ -19,6 +19,7 @@ from openarmature.graph import (
     END,
     CompiledGraph,
     EndSentinel,
+    ExplicitMapping,
     FieldNameMatching,
     GraphBuilder,
     ProjectionStrategy,
@@ -167,12 +168,27 @@ class BuiltGraph:
         return self.state_cls(**overrides)
 
 
+def _projection_for(node_spec: Mapping[str, Any]) -> ProjectionStrategy[State, State]:
+    """Pick the projection strategy declared on a subgraph node spec.
+
+    `inputs:` and/or `outputs:` in the YAML → `ExplicitMapping`. Both absent →
+    the spec's default `FieldNameMatching`.
+    """
+
+    inputs = node_spec.get("inputs")
+    outputs = node_spec.get("outputs")
+    if inputs is None and outputs is None:
+        return FieldNameMatching[State, State]()
+    return ExplicitMapping[State, State](inputs=inputs, outputs=outputs)
+
+
 def build_graph(
     spec: Mapping[str, Any],
     *,
     subgraphs: Mapping[str, CompiledGraph[State]] | None = None,
     trace: list[str] | None = None,
     model_name: str = "FixtureState",
+    real_subgraph_nodes: bool = False,
 ) -> BuiltGraph:
     """Translate a graph-shaped fixture block into a `BuiltGraph`.
 
@@ -180,6 +196,13 @@ def build_graph(
     `graph:` block for the table-style 007 cases. `subgraphs` is the registry
     used by 006-style fixtures to look up a compiled subgraph by its declared
     name.
+
+    `real_subgraph_nodes` controls how subgraph references are added to the
+    builder. Default `False` wraps each subgraph in a function node that
+    records the outer node name in `trace` (preserves execution-order tracking
+    for runtime fixtures). Set `True` for compile-error fixtures whose error
+    must surface from the engine's compile-time projection validation — that
+    only fires for real `SubgraphNode` instances added via `add_subgraph_node`.
     """
 
     state_cls = build_state_cls(model_name, spec["state"]["fields"])
@@ -194,10 +217,14 @@ def build_graph(
         if "subgraph" in node_spec:
             sub_name = node_spec["subgraph"]
             compiled = subgraphs[sub_name]
-            builder.add_node(
-                node_name,
-                _make_subgraph_fn(node_name, compiled, trace, FieldNameMatching[State, State]()),
-            )
+            projection = _projection_for(node_spec)
+            if real_subgraph_nodes:
+                builder.add_subgraph_node(node_name, compiled, projection)
+            else:
+                builder.add_node(
+                    node_name,
+                    _make_subgraph_fn(node_name, compiled, trace, projection),
+                )
         elif "raises" in node_spec:
             builder.add_node(node_name, _make_raising_fn(node_name, node_spec["raises"], trace))
         elif "update" in node_spec:
