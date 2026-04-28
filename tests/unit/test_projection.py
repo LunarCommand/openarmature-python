@@ -53,11 +53,12 @@ def test_project_out_is_empty_when_no_overlap() -> None:
     assert dict(out) == {}
 
 
-def test_field_name_matching_validate_is_noop() -> None:
-    """No declarations to validate; spec v0.2.0 has nothing for this strategy
-    to assert against schemas at compile time."""
+def test_field_name_matching_has_no_validate_method() -> None:
+    """`validate` is an optional duck-typed compile hook — strategies with
+    nothing declarative to check (FieldNameMatching, custom imperative
+    projections) simply omit it. `compile()` skips them via `getattr`."""
 
-    FieldNameMatching[Parent, ChildOverlap]().validate(Parent, ChildOverlap)
+    assert not hasattr(FieldNameMatching[Parent, ChildOverlap](), "validate")
 
 
 # ===== ExplicitMapping =====

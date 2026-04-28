@@ -88,9 +88,6 @@ async def test_subgraph_node_preserves_both_state_types() -> None:
         ) -> dict[str, Any]:
             return {"tag": subgraph_final_state.tag, "trace": subgraph_final_state.trace}
 
-        def validate(self, parent_cls: type[ParentS], subgraph_state_cls: type[ChildS]) -> None:
-            return None
-
     _: ProjectionStrategy[ParentS, ChildS] = PassTag()
 
     outer = (

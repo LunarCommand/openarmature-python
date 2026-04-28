@@ -88,17 +88,22 @@ class GraphBuilder[StateT: State]:
             fname: resolve_reducer(declared) for fname, declared in per_field.items()
         }
 
-        # 2. MappingReferencesUndeclaredField — projection strategies on every
-        #    subgraph-as-node validate against the parent and child schemas.
-        #    Default `FieldNameMatching.validate` is a no-op.
-        #    ChildT is erased once SubgraphNode is stored as Node[StateT]; the
-        #    cast restores enough type info to call `validate` without pyright
-        #    flagging unknown member types. The runtime values still match —
-        #    `compiled.state_cls` is exactly the type the projection expects.
+        # 2. MappingReferencesUndeclaredField — declarative projection
+        #    strategies (e.g. `ExplicitMapping`) expose an optional
+        #    `validate(parent_cls, child_cls)` hook that we invoke here so
+        #    misconfigured mappings fail compile rather than at runtime.
+        #    The hook is duck-typed: strategies with nothing declarative to
+        #    check (the default `FieldNameMatching`, hand-written imperative
+        #    projections) simply omit `validate` and the engine skips it.
+        #    ChildT is erased once SubgraphNode is stored as Node[StateT];
+        #    the cast restores enough type info to access `compiled.state_cls`
+        #    without pyright flagging an unknown member type.
         for node in self._nodes.values():
             if isinstance(node, SubgraphNode):
                 sub = cast("SubgraphNode[StateT, State]", node)
-                sub.projection.validate(self.state_cls, sub.compiled.state_cls)
+                validate = getattr(sub.projection, "validate", None)
+                if validate is not None:
+                    validate(self.state_cls, sub.compiled.state_cls)
 
         # 3. NoDeclaredEntry.
         if self._entry is None:

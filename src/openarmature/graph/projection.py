@@ -23,7 +23,22 @@ from .state import State
 
 
 class ProjectionStrategy[ParentT: State, ChildT: State](Protocol):
-    """Strategy for moving state across the parent ↔ subgraph boundary."""
+    """Strategy for moving state across the parent ↔ subgraph boundary.
+
+    Two required methods plus one optional hook:
+
+    - `project_in` and `project_out` are required: the engine calls them on
+      every subgraph step.
+    - `validate(parent_cls, subgraph_state_cls) -> None` is an *optional*
+      compile-time validation hook. If a strategy defines it, the parent
+      graph's `compile()` calls it once per `SubgraphNode`; the strategy
+      may raise a `CompileError` subclass when its declarations don't
+      match the supplied schemas. Declarative strategies like
+      `ExplicitMapping` use this to catch field-name typos before any
+      node runs. Imperative custom projections typically have nothing
+      declarative to check and can simply omit the method — the engine
+      uses duck typing (`getattr`) to find it.
+    """
 
     def project_in(self, parent_state: ParentT, subgraph_state_cls: type[ChildT]) -> ChildT: ...
 
@@ -33,12 +48,6 @@ class ProjectionStrategy[ParentT: State, ChildT: State](Protocol):
         parent_state: ParentT,
         subgraph_state_cls: type[ChildT],
     ) -> Mapping[str, Any]: ...
-
-    def validate(self, parent_cls: type[ParentT], subgraph_state_cls: type[ChildT]) -> None:
-        """Compile-time validation hook. Implementations raise a `CompileError`
-        subclass when the strategy is incompatible with the supplied schemas.
-        """
-        ...
 
 
 class FieldNameMatching[ParentT: State, ChildT: State]:
@@ -64,12 +73,6 @@ class FieldNameMatching[ParentT: State, ChildT: State]:
         sub_fields = set(subgraph_state_cls.model_fields.keys())
         shared = parent_fields & sub_fields
         return {name: getattr(subgraph_final_state, name) for name in shared}
-
-    def validate(self, parent_cls: type[ParentT], subgraph_state_cls: type[ChildT]) -> None:
-        # Field-name matching has no declarations to validate against the
-        # schemas — overlap is computed at runtime and non-overlap is silent
-        # by spec.
-        return None
 
 
 class ExplicitMapping[ParentT: State, ChildT: State]:
