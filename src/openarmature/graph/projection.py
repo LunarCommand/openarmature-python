@@ -22,6 +22,25 @@ from .errors import MappingReferencesUndeclaredField
 from .state import State
 
 
+def _field_name_match_projection[ChildT: State](
+    subgraph_final_state: ChildT,
+    parent_state: State,
+    subgraph_state_cls: type[ChildT],
+) -> Mapping[str, Any]:
+    """Spec v0.2 §2 default projection-out: subgraph fields whose names
+    match parent fields are merged back via the parent's reducers; non-
+    matching subgraph fields are discarded.
+
+    Shared by `FieldNameMatching.project_out` (which always uses it) and
+    `ExplicitMapping.project_out` (which falls back to it when `outputs`
+    was not declared, per spec v0.2).
+    """
+    parent_fields = set(type(parent_state).model_fields.keys())
+    sub_fields = set(subgraph_state_cls.model_fields.keys())
+    shared = parent_fields & sub_fields
+    return {name: getattr(subgraph_final_state, name) for name in shared}
+
+
 class ProjectionStrategy[ParentT: State, ChildT: State](Protocol):
     """Strategy for moving state across the parent ↔ subgraph boundary.
 
@@ -40,14 +59,18 @@ class ProjectionStrategy[ParentT: State, ChildT: State](Protocol):
       uses duck typing (`getattr`) to find it.
     """
 
-    def project_in(self, parent_state: ParentT, subgraph_state_cls: type[ChildT]) -> ChildT: ...
+    def project_in(self, parent_state: ParentT, subgraph_state_cls: type[ChildT]) -> ChildT:
+        """Build the subgraph's initial state at the moment it begins."""
+        ...
 
     def project_out(
         self,
         subgraph_final_state: ChildT,
         parent_state: ParentT,
         subgraph_state_cls: type[ChildT],
-    ) -> Mapping[str, Any]: ...
+    ) -> Mapping[str, Any]:
+        """Project the subgraph's final state back to the parent as a partial update."""
+        ...
 
 
 class FieldNameMatching[ParentT: State, ChildT: State]:
@@ -69,10 +92,7 @@ class FieldNameMatching[ParentT: State, ChildT: State]:
         parent_state: ParentT,
         subgraph_state_cls: type[ChildT],
     ) -> Mapping[str, Any]:
-        parent_fields = set(type(parent_state).model_fields.keys())
-        sub_fields = set(subgraph_state_cls.model_fields.keys())
-        shared = parent_fields & sub_fields
-        return {name: getattr(subgraph_final_state, name) for name in shared}
+        return _field_name_match_projection(subgraph_final_state, parent_state, subgraph_state_cls)
 
 
 class ExplicitMapping[ParentT: State, ChildT: State]:
@@ -122,10 +142,7 @@ class ExplicitMapping[ParentT: State, ChildT: State]:
     ) -> Mapping[str, Any]:
         if self.outputs is None:
             # Outputs absent → spec default of field-name matching applies.
-            parent_fields = set(type(parent_state).model_fields.keys())
-            sub_fields = set(subgraph_state_cls.model_fields.keys())
-            shared = parent_fields & sub_fields
-            return {name: getattr(subgraph_final_state, name) for name in shared}
+            return _field_name_match_projection(subgraph_final_state, parent_state, subgraph_state_cls)
         return {
             parent_field: getattr(subgraph_final_state, sub_field)
             for parent_field, sub_field in self.outputs.items()
