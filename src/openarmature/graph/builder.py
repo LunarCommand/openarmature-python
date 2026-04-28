@@ -100,7 +100,7 @@ class GraphBuilder[StateT: State]:
         #    without pyright flagging an unknown member type.
         for node in self._nodes.values():
             if isinstance(node, SubgraphNode):
-                sub = cast("SubgraphNode[StateT, State]", node)
+                sub = cast(SubgraphNode[StateT, State], node)
                 validate = getattr(sub.projection, "validate", None)
                 if validate is not None:
                     validate(self.state_cls, sub.compiled.state_cls)
