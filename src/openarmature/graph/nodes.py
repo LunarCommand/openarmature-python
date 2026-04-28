@@ -23,11 +23,11 @@ class Node[StateT: State](Protocol):
     @property
     def name(self) -> str:
         """The name this node was registered under in its containing graph."""
-        ...
+        raise NotImplementedError
 
     async def run(self, state: StateT) -> Mapping[str, Any]:
         """Execute against `state` and return a partial update to be merged via reducers."""
-        ...
+        raise NotImplementedError
 
 
 @dataclass(frozen=True)

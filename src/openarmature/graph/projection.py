@@ -61,7 +61,7 @@ class ProjectionStrategy[ParentT: State, ChildT: State](Protocol):
 
     def project_in(self, parent_state: ParentT, subgraph_state_cls: type[ChildT]) -> ChildT:
         """Build the subgraph's initial state at the moment it begins."""
-        ...
+        raise NotImplementedError
 
     def project_out(
         self,
@@ -70,7 +70,7 @@ class ProjectionStrategy[ParentT: State, ChildT: State](Protocol):
         subgraph_state_cls: type[ChildT],
     ) -> Mapping[str, Any]:
         """Project the subgraph's final state back to the parent as a partial update."""
-        ...
+        raise NotImplementedError
 
 
 class FieldNameMatching[ParentT: State, ChildT: State]:
