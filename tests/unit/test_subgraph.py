@@ -8,6 +8,8 @@ These tests exercise `SubgraphNode.run` directly, plus the
 
 from typing import Annotated, Any
 
+from pydantic import Field
+
 from openarmature.graph import (
     END,
     FieldNameMatching,
@@ -16,7 +18,6 @@ from openarmature.graph import (
     SubgraphNode,
     append,
 )
-from pydantic import Field
 
 
 class Inner(State):

@@ -15,6 +15,8 @@ from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Annotated, Any, cast
 
+from pydantic import Field, create_model
+
 from openarmature.graph import (
     END,
     CompiledGraph,
@@ -32,7 +34,6 @@ from openarmature.graph import (
 )
 from openarmature.graph.events import NodeEvent
 from openarmature.graph.observer import Observer
-from pydantic import Field, create_model
 
 if TYPE_CHECKING:
     from openarmature.graph.observer import _InvocationContext

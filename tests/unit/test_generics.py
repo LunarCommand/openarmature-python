@@ -11,6 +11,8 @@ kept minimal — the point is the static types.
 
 from typing import Annotated, Any, assert_type
 
+from pydantic import Field
+
 from openarmature.graph import (
     END,
     CompiledGraph,
@@ -20,7 +22,6 @@ from openarmature.graph import (
     State,
     append,
 )
-from pydantic import Field
 
 
 class ParentS(State):

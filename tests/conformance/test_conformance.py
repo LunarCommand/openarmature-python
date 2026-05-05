@@ -12,6 +12,7 @@ from typing import Any
 
 import pytest
 import yaml
+
 from openarmature.graph import (
     CompileError,
     NodeException,
@@ -139,15 +140,15 @@ async def test_runtime_fixture(fixture_path: Path) -> None:
         for name, expected_events in expected["observer_events"].items():
             actual = observer_fixtures[name].events
             normalized = [normalize_expected_event(ev) for ev in expected_events]
-            assert (
-                actual == normalized
-            ), f"observer events mismatch for {name!r}: actual={actual}, expected={normalized}"
+            assert actual == normalized, (
+                f"observer events mismatch for {name!r}: actual={actual}, expected={normalized}"
+            )
 
     if "delivery_order" in expected:
         expected_delivery = [(d["observer"], d["step"]) for d in expected["delivery_order"]]
-        assert (
-            delivery == expected_delivery
-        ), f"delivery_order mismatch: actual={delivery}, expected={expected_delivery}"
+        assert delivery == expected_delivery, (
+            f"delivery_order mismatch: actual={delivery}, expected={expected_delivery}"
+        )
 
 
 # ---------------------------------------------------------------------------

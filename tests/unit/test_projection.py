@@ -1,13 +1,14 @@
 """Projection strategy unit coverage: FieldNameMatching + ExplicitMapping."""
 
 import pytest
+from pydantic import Field
+
 from openarmature.graph import (
     ExplicitMapping,
     FieldNameMatching,
     MappingReferencesUndeclaredField,
     State,
 )
-from pydantic import Field
 
 
 class Parent(State):

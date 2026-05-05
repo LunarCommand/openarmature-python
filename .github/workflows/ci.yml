@@ -1,0 +1,51 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+# Least-privilege: the workflow only needs to read code (checkout +
+# submodule). No writes anywhere.
+permissions:
+  contents: read
+
+# Cancel in-flight runs on the same ref when a new push lands.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # Conformance fixtures live in the openarmature-spec submodule.
+          submodules: recursive
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+        with:
+          enable-cache: true
+
+      # No explicit `uv python install` — `uv sync` auto-provisions the
+      # interpreter pinned in `.python-version`, so CI tests the same
+      # version developers run locally.
+
+      - name: Sync deps
+        run: uv sync --frozen
+
+      - name: Lint (ruff check)
+        run: uv run ruff check .
+
+      - name: Format check (ruff format --check)
+        run: uv run ruff format --check .
+
+      - name: Type check (pyright)
+        run: uv run pyright src/ tests/
+
+      - name: Run tests (pytest)
+        run: uv run pytest -q

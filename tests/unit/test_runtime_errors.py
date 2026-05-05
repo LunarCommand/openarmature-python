@@ -10,6 +10,8 @@ fixture triggers: `edge_exception`, `reducer_error`, and
 from typing import Annotated, Any
 
 import pytest
+from pydantic import Field
+
 from openarmature.graph import (
     END,
     EdgeException,
@@ -20,7 +22,6 @@ from openarmature.graph import (
     StateValidationError,
     append,
 )
-from pydantic import Field
 
 
 class S(State):

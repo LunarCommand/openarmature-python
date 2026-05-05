@@ -3,6 +3,7 @@
 from typing import Any
 
 import pytest
+
 from openarmature.graph import (
     END,
     DanglingEdge,
