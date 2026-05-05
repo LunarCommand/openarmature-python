@@ -1,0 +1,36 @@
+"""Conformance fixture harness — typed parsing for the four spec capabilities.
+
+Phase 0 (per the implementation plan): every fixture under
+``openarmature-spec/spec/<capability>/conformance/`` lands as a typed pydantic
+config. Phases 1–6 add runtime interpretation under ``harness/runtime/``;
+they never re-touch parsing.
+
+Public surface:
+
+- :func:`loader.load_fixture` — parse one YAML path into a typed fixture.
+- :func:`loader.discover_fixtures` — auto-discover fixture paths across the
+  four capability directories on the spec submodule.
+- :class:`fixtures.Fixture` — the root discriminated union
+  (``LlmProviderFixture | CasesFixture | GraphFixture``).
+- :class:`skip.SkipReason` — structured "fixture needs directives X, current
+  phase doesn't support them" used by the test runner to skip cleanly.
+"""
+
+from .fixtures import (
+    CasesFixture,
+    Fixture,
+    GraphFixture,
+    LlmProviderFixture,
+)
+from .loader import discover_fixtures, load_fixture
+from .skip import SkipReason
+
+__all__ = [
+    "CasesFixture",
+    "Fixture",
+    "GraphFixture",
+    "LlmProviderFixture",
+    "SkipReason",
+    "discover_fixtures",
+    "load_fixture",
+]

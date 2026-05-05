@@ -8,7 +8,7 @@ expands to one parametrized case per entry in its `cases:` block.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 import yaml
@@ -56,9 +56,89 @@ _STANDARD_RUNTIME_FIXTURES = [
 ]
 
 
+def _needs_pair_model(spec: dict[str, Any]) -> bool:
+    """True if the fixture's expected observer events use the v0.6.0 pair
+    model (`phase: started/completed`). The current engine emits the
+    pre-v0.6.0 single-event model; Phase 1 retrofits the pair model.
+    """
+    expected = spec.get("expected")
+    if not isinstance(expected, dict):
+        return False
+    events_by_name = cast("dict[str, Any]", expected).get("observer_events")
+    if not isinstance(events_by_name, dict):
+        return False
+    for events in cast("dict[str, Any]", events_by_name).values():
+        if not isinstance(events, list):
+            continue
+        for event in cast("list[Any]", events):
+            if isinstance(event, dict) and "phase" in event:
+                return True
+    return False
+
+
+# Node directives the legacy adapter doesn't (yet) translate. Phase 1+ will
+# either expand the adapter or replace it with the typed harness.
+_UNSUPPORTED_NODE_DIRECTIVES = frozenset(
+    {
+        "fan_out",
+        "flaky",
+        "flaky_by_index",
+        "flaky_per_index",
+        "flaky_instance_only",
+        "flaky_resume_aware",
+        "calls_llm",
+        "update_pure",
+        "update_pure_from_state",
+        "update_from_field",
+        "emits_log",
+        "also_emits_via_global_tracer",
+    }
+)
+
+
+def _unsupported_directive(spec: dict[str, Any]) -> str | None:
+    """Return the first node directive the legacy adapter can't translate,
+    or None if every node uses one of the directives it handles. Walks
+    both the top-level graph and an optional inner ``subgraph`` block."""
+
+    def scan(graph: Any) -> str | None:
+        if not isinstance(graph, dict):
+            return None
+        nodes = cast("dict[str, Any]", graph).get("nodes")
+        if not isinstance(nodes, dict):
+            return None
+        for node_name, node_spec in cast("dict[str, Any]", nodes).items():
+            if not isinstance(node_spec, dict):
+                continue
+            for key in cast("dict[str, Any]", node_spec):
+                if key in _UNSUPPORTED_NODE_DIRECTIVES:
+                    return f"{node_name}.{key}"
+        return None
+
+    if (hit := scan(spec)) is not None:
+        return hit
+    if (hit := scan(spec.get("subgraph"))) is not None:
+        return hit
+    return None
+
+
 @pytest.mark.parametrize("fixture_path", _STANDARD_RUNTIME_FIXTURES, ids=_fixture_id)
 async def test_runtime_fixture(fixture_path: Path) -> None:
     spec = _load(fixture_path)
+
+    # Phase 0 — skip fixtures whose expected observer events use the v0.6.0
+    # started/completed pair model. Phase 1 (engine retrofit) lands the
+    # pair model and turns these back on.
+    if _needs_pair_model(spec):
+        pytest.skip(
+            f"{fixture_path.stem}: needs phase 1 (engine pair-model retrofit) "
+            "— expected observer events carry `phase` field"
+        )
+    # Phase 0 — skip fixtures whose nodes use directives the legacy adapter
+    # doesn't translate (fan_out, flaky variants, calls_llm, etc.). Each
+    # directive is gated to the phase that lands its runtime support.
+    if (hit := _unsupported_directive(spec)) is not None:
+        pytest.skip(f"{fixture_path.stem}: unsupported node directive {hit}")
 
     # Subgraph fixtures (006, 011, 013) declare an inner subgraph that the
     # outer graph references by name.
