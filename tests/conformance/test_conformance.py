@@ -100,6 +100,9 @@ def _unsupported_directive(spec: dict[str, Any]) -> str | None:
         return hit
     if (hit := scan(spec.get("subgraph"))) is not None:
         return hit
+    for sub_spec in spec.get("subgraphs", {}).values():
+        if (hit := scan(sub_spec)) is not None:
+            return hit
     return None
 
 
@@ -139,6 +142,15 @@ def _compile_subgraphs_map(
                 continue
             # Plural form omits the `name:` field (the dict key IS the name);
             # synthesize it for build_graph's existing singular-form lookup.
+            # Validate against fixture authoring errors first.
+            existing_name = sub_spec.get("name")
+            if existing_name is not None and existing_name != name:
+                raise ValueError(f"subgraph dict key {name!r} does not match name field {existing_name!r}")
+            if name in registry:
+                raise ValueError(
+                    f"subgraph name {name!r} is already registered "
+                    f"(collision with singular subgraph: form or duplicate plural entry)"
+                )
             sub_with_name = {**sub_spec, "name": name}
             sub_built = build_graph(
                 sub_with_name,
