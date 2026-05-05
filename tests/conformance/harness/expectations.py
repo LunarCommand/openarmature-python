@@ -224,7 +224,21 @@ def _discriminate_expected(
     blocks themselves don't know that, so we discriminate on the keys
     that ARE distinctive and fall back to graph-engine for plain
     ``final_state``-only fixtures.
+
+    Pydantic invokes this callable on both the validation and
+    serialization paths. On serialization the value is already one of the
+    concrete variants, so route by ``isinstance`` first; otherwise the
+    dump path falls through to ``graph_engine`` and warns that the
+    serialized variant doesn't match the union's first arm.
     """
+    if isinstance(value, GraphEngineExpected):
+        return "graph_engine"
+    if isinstance(value, LlmProviderExpected):
+        return "llm_provider"
+    if isinstance(value, PipelineUtilitiesExpected):
+        return "pipeline_utilities"
+    if isinstance(value, ObservabilityExpected):
+        return "observability"
     if not isinstance(value, dict):
         return "graph_engine"
     keys: set[str] = {str(k) for k in cast("dict[str, Any]", value)}
