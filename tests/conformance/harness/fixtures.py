@@ -241,7 +241,17 @@ def _discriminate_fixture(value: Any) -> Literal["llm_provider", "cases", "graph
     llm-provider fixtures (e.g. 003-message-validation) have BOTH —
     ``mock_provider`` is the load-bearing discriminator, ``cases`` is just
     the table style for sub-cases.
+
+    Also handle the serialization path (where the value is a concrete
+    variant) so a future ``model_dump`` through the top-level union
+    doesn't fall through to ``graph`` and warn.
     """
+    if isinstance(value, LlmProviderFixture):
+        return "llm_provider"
+    if isinstance(value, CasesFixture):
+        return "cases"
+    if isinstance(value, GraphFixture):
+        return "graph"
     if isinstance(value, dict):
         if "mock_provider" in value:
             return "llm_provider"
