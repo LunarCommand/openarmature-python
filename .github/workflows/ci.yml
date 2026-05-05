@@ -6,6 +6,11 @@ on:
   push:
     branches: [main]
 
+# Least-privilege: the workflow only needs to read code (checkout +
+# submodule). No writes anywhere.
+permissions:
+  contents: read
+
 # Cancel in-flight runs on the same ref when a new push lands.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
