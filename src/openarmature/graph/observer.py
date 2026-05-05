@@ -38,20 +38,31 @@ from .state import State
 
 
 class Observer(Protocol):
-    """An async callable invoked once per node-boundary event.
+    """The shape of a callable that receives node-boundary events.
 
-    Per spec v0.6.0 §6: observers MUST be asynchronous so the delivery
-    queue can await each one to coordinate completion. Observers MUST
-    NOT alter state, routing, or any other aspect of the graph run.
+    `Observer` is a structural Protocol — any async callable matching the
+    signature qualifies, no subclass required. Plain functions, bound
+    methods, and class instances with `__call__` all work::
 
-    The parameter is positional-only (`event, /`) so structural conformance
-    isn't tied to a specific parameter name — implementations can use
-    `event`, `_event`, or any other name.
+        async def log_observer(event: NodeEvent) -> None:
+            print(event.node_name, event.phase)
+
+        compiled.attach_observer(log_observer)
+
+    Per spec v0.6.0 §6:
+
+    - Observers MUST be async so the delivery queue can await each one
+      and coordinate ordering. The graph itself never awaits observers.
+    - Observers MUST NOT alter state, routing, or any other aspect of
+      the graph run — read-only side effects (logging, metrics, span
+      emission) only.
+
+    The event parameter is positional-only (`event, /`) so structural
+    conformance doesn't pin you to that name — any of `event`, `_event`,
+    `e`, etc. matches.
     """
 
-    async def __call__(self, event: NodeEvent, /) -> None:
-        """Receive a single node-boundary event."""
-        raise NotImplementedError
+    async def __call__(self, event: NodeEvent, /) -> None: ...
 
 
 # Per spec v0.6.0 §6: the two valid phase strings. Used as the default
