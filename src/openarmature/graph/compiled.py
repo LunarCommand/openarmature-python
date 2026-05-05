@@ -156,7 +156,7 @@ class CompiledGraph[StateT: State]:
         """Await delivery of every observer event produced by prior
         invocations of this graph.
 
-        Per spec v0.3.0 §6: callers running in short-lived processes (scripts,
+        Per spec v0.6.0 §6: callers running in short-lived processes (scripts,
         serverless functions, CLIs) MUST use drain to avoid losing observer
         events that were dispatched but not yet delivered.
 
@@ -164,6 +164,15 @@ class CompiledGraph[StateT: State]:
         invocations started concurrently with drain may or may not be
         included. Subgraph events from active invocations are part of the
         parent invocation's worker and are covered automatically.
+
+        **Unbounded by design.** Drain blocks until every queued event has
+        been delivered to every subscribed observer. A slow, hung, or
+        misbehaving observer can therefore hold drain — and the calling
+        process — indefinitely. If you need a bounded wait, wrap the call
+        in `asyncio.wait_for` and accept that events still queued when the
+        deadline elapses will not be delivered::
+
+            await asyncio.wait_for(compiled.drain(), timeout=5.0)
         """
         if not self._active_workers:
             return
