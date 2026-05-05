@@ -1,14 +1,16 @@
 """Node-boundary observer events.
 
-Per spec v0.3.0 §6 (proposal 0003): a NodeEvent is delivered to registered
-observers once per node execution, carrying enough context to reconstruct
-where in the (potentially nested) execution path the node sat and what the
-state looked like before/after the node's update merged.
+Per spec v0.6.0 §6 (proposal 0005): each node attempt produces a
+started/completed event PAIR. The engine dispatches the started event
+before invoking the wrapped node function and the completed event after
+the reducer merge succeeds (with `post_state` populated) or after the
+node, reducer, or state validation fails (with `error` populated).
 
 Frozen dataclass — observers receive a snapshot, not a live handle.
 """
 
 from dataclasses import dataclass
+from typing import Literal
 
 from .errors import RuntimeGraphError
 from .state import State
@@ -18,8 +20,12 @@ from .state import State
 class NodeEvent:
     """A single node-boundary event delivered to observers.
 
-    Per spec v0.3.0 §6:
+    Per spec v0.6.0 §6:
 
+    - `phase` is `"started"` (dispatched before the node runs) or
+      `"completed"` (dispatched after the node returns or raises and the
+      merge runs/fails). Each node attempt produces exactly one of each
+      in that order.
     - `node_name` is the name under which this node was registered in its
       immediate containing graph.
     - `namespace` is an ordered sequence of node names from the outermost
@@ -28,28 +34,39 @@ class NodeEvent:
       extends.
     - `step` is a monotonically-increasing counter starting at 0, scoped
       to a single outermost-invocation. Subgraph-internal nodes increment
-      the same counter.
+      the same counter. The started/completed pair for one attempt share
+      the same step.
     - `pre_state` is the state the node received, before reducer merge.
+      Populated on both phases (identical across the pair).
     - `post_state` is the state after the node's partial update merged
-      successfully. Populated only on success.
+      successfully. Populated only on `completed` events that succeeded.
     - `error` is the wrapped runtime error (NodeException, ReducerError,
-      or StateValidationError) when the node failed. Read `event.error.category`
-      for the spec category identifier and `event.error.__cause__` for the
-      original user/framework exception. Populated only on failure.
+      or StateValidationError) when the node failed. Populated only on
+      `completed` events that failed.
     - `parent_states` carries one state snapshot per containing graph,
       outermost first; for a node in the outermost graph it's an empty
       tuple. Invariant: `len(parent_states) == len(namespace) - 1`.
+    - `attempt_index` is the 0-based index of this attempt among any
+      retries. `0` for nodes not wrapped by retry middleware.
+    - `fan_out_index` is the 0-based index of this fan-out instance among
+      its siblings. `None` for nodes not inside a fan-out.
 
-    Exactly one of `post_state` or `error` is populated per event.
+    Invariants:
+    - On `started` events, `post_state` and `error` MUST both be None.
+    - On `completed` events, exactly one of `post_state` and `error` is
+      populated.
     """
 
     node_name: str
     namespace: tuple[str, ...]
     step: int
+    phase: Literal["started", "completed"]
     pre_state: State
     post_state: State | None
     error: RuntimeGraphError | None
     parent_states: tuple[State, ...]
+    attempt_index: int = 0
+    fan_out_index: int | None = None
 
 
 __all__ = ["NodeEvent"]

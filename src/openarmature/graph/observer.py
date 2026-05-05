@@ -1,30 +1,35 @@
-"""Observer hooks: protocol, delivery queue, per-invocation context.
+"""Observer hooks: protocol, subscription, delivery queue, per-invocation context.
 
-Per spec v0.3.0 §6 (proposal 0003): a registered observer receives a
-`NodeEvent` once per node execution, asynchronously with respect to the
-graph's execution loop. The graph never awaits observer processing.
+Per spec v0.6.0 §6 (proposal 0005): each node attempt produces a started/
+completed event pair, and observers register with an optional `phases`
+set so they can subscribe to one phase or both. The graph never awaits
+observer processing.
 
 This module defines:
 
 - `Observer`: the callable shape an observer satisfies.
-- `RemoveHandle`: returned by `CompiledGraph.attach_observer` so the caller
-  can detach later without reference-equality games.
+- `SubscribedObserver`: pairs an `Observer` with the phase set it
+  subscribes to. Public — users construct one directly when passing
+  phase-filtered observers to `invoke(observers=...)`.
+- `RemoveHandle`: returned by `CompiledGraph.attach_observer` so the
+  caller can detach later.
 - `_InvocationContext`: the cross-graph state threaded through one
-  outermost-invocation, including any nested subgraphs. Carries the queue,
-  observer chain (graph-attached, outermost → innermost) and the
+  outermost-invocation, including any nested subgraphs. Carries the
+  queue, observer chain (graph-attached, outermost → innermost) and the
   invocation-scoped observers, plus a shared step counter, namespace
   prefix, and parent-state stack.
 - `_QueuedItem`: an event paired with its delivery observer list.
 - `_dispatch`: enqueues an event for the worker to deliver.
 - `deliver_loop`: the worker coroutine. Reads items from the queue and
-  calls each observer in order, isolating exceptions via
-  `warnings.warn` per spec.
+  calls each observer in order, filtering by subscribed phase and
+  isolating exceptions via `warnings.warn` per spec.
 """
 
 from __future__ import annotations
 
 import asyncio
 import warnings
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import Protocol
 
@@ -33,20 +38,86 @@ from .state import State
 
 
 class Observer(Protocol):
-    """An async callable invoked once per node execution.
+    """The shape of a callable that receives node-boundary events.
 
-    Per spec v0.3.0 §6: observers MUST be asynchronous so the delivery
-    queue can await each one to coordinate completion. Observers MUST
-    NOT alter state, routing, or any other aspect of the graph run.
+    `Observer` is a structural Protocol — any async callable matching the
+    signature qualifies, no subclass required. Plain functions, bound
+    methods, and class instances with `__call__` all work::
 
-    The parameter is positional-only (`event, /`) so structural conformance
-    isn't tied to a specific parameter name — implementations can use
-    `event`, `_event`, or any other name.
+        async def log_observer(event: NodeEvent) -> None:
+            print(event.node_name, event.phase)
+
+        compiled.attach_observer(log_observer)
+
+    Per spec v0.6.0 §6:
+
+    - Observers MUST be async so the delivery queue can await each one
+      and coordinate ordering. The graph itself never awaits observers.
+    - Observers MUST NOT alter state, routing, or any other aspect of
+      the graph run — read-only side effects (logging, metrics, span
+      emission) only.
+
+    The event parameter is positional-only (`event, /`) so structural
+    conformance doesn't pin you to that name — any of `event`, `_event`,
+    `e`, etc. matches.
     """
 
-    async def __call__(self, event: NodeEvent, /) -> None:
-        """Receive a single node-boundary event."""
-        raise NotImplementedError
+    async def __call__(self, event: NodeEvent, /) -> None: ...
+
+
+# Per spec v0.6.0 §6: the two valid phase strings. Used as the default
+# subscription set when a caller doesn't restrict by phase.
+ALL_PHASES: frozenset[str] = frozenset({"started", "completed"})
+
+
+@dataclass(frozen=True)
+class SubscribedObserver:
+    """An observer paired with its phase subscription set.
+
+    Per spec v0.6.0 §6: observers register with an optional `phases`
+    parameter naming the phase strings they want to receive. The default
+    (`ALL_PHASES`) means "deliver every event." Empty phase sets are
+    forbidden — passing one raises `ValueError` at registration time per
+    the spec's "implementations SHOULD raise" guidance, hardened to MUST
+    here so misconfiguration surfaces immediately.
+
+    Construct one of these directly when handing phase-filtered observers
+    to `CompiledGraph.invoke(observers=...)`. For the single-observer
+    `attach_observer` path, pass `phases=` as a keyword argument and the
+    engine wraps it for you.
+    """
+
+    observer: Observer
+    phases: frozenset[str] = ALL_PHASES
+
+    def __post_init__(self) -> None:
+        if not self.phases:
+            raise ValueError("phases must be non-empty; spec §6 forbids empty phase subscriptions")
+        invalid = self.phases - ALL_PHASES
+        if invalid:
+            raise ValueError(f"unknown phase(s): {sorted(invalid)}; allowed: 'started', 'completed'")
+
+
+def _coerce_subscribed(
+    observer: Observer | SubscribedObserver,
+    *,
+    phases: Iterable[str] | None = None,
+) -> SubscribedObserver:
+    """Normalize a registration argument into a `SubscribedObserver`.
+
+    - A bare `Observer` callable becomes a `SubscribedObserver` with
+      either the supplied `phases` or `ALL_PHASES` (default).
+    - An existing `SubscribedObserver` passes through unchanged; supplying
+      a `phases` kwarg in that case is a misuse and raises.
+    """
+    if isinstance(observer, SubscribedObserver):
+        if phases is not None:
+            raise ValueError("cannot override phases on a SubscribedObserver; construct a new one")
+        return observer
+    return SubscribedObserver(
+        observer=observer,
+        phases=frozenset(phases) if phases is not None else ALL_PHASES,
+    )
 
 
 @dataclass(frozen=True)
@@ -55,12 +126,12 @@ class RemoveHandle:
     detach the observer. Idempotent — calling `.remove()` after the
     observer is already detached is a no-op.
 
-    Per spec v0.3.0 §6: changes to the registered observer set during a
+    Per spec v0.6.0 §6: changes to the registered observer set during a
     graph run do NOT take effect until the next invocation.
     """
 
-    _observers: list[Observer]
-    _observer: Observer
+    _observers: list[SubscribedObserver]
+    _observer: SubscribedObserver
 
     def remove(self) -> None:
         try:
@@ -81,7 +152,7 @@ class _QueuedItem:
     """
 
     event: NodeEvent
-    observers: tuple[Observer, ...]
+    observers: tuple[SubscribedObserver, ...]
 
 
 # A sentinel value the engine puts on the queue to signal the worker to
@@ -103,16 +174,16 @@ class _InvocationContext:
     queue: asyncio.Queue[_QueuedItem | None]
     # Graph-attached observers in delivery order: outermost graph first,
     # nested subgraph attached observers appended as we descend.
-    graph_attached: tuple[Observer, ...]
+    graph_attached: tuple[SubscribedObserver, ...]
     # Set once at the outermost invoke; carried unchanged into subgraphs.
-    invocation_scoped: tuple[Observer, ...]
+    invocation_scoped: tuple[SubscribedObserver, ...]
     # Shared mutable single-element list — a simple way to share an int by
     # reference across recursive subgraph contexts without leaking a class.
     step_counter: list[int] = field(default_factory=lambda: [0])
     namespace_prefix: tuple[str, ...] = ()
     parent_states_prefix: tuple[State, ...] = ()
 
-    def full_observers(self) -> tuple[Observer, ...]:
+    def full_observers(self) -> tuple[SubscribedObserver, ...]:
         """Return the ordered observer list to deliver for events from
         this depth. Per spec §6: graph-attached (outermost → innermost),
         then invocation-scoped (passed to the outermost invoke)."""
@@ -122,7 +193,7 @@ class _InvocationContext:
         self,
         subgraph_node_name: str,
         parent_state: State,
-        sub_attached: tuple[Observer, ...],
+        sub_attached: tuple[SubscribedObserver, ...],
     ) -> _InvocationContext:
         """Build the context for a subgraph-as-node call.
 
@@ -164,10 +235,13 @@ def _dispatch(context: _InvocationContext, event: NodeEvent) -> None:
 async def deliver_loop(queue: asyncio.Queue[_QueuedItem | None]) -> None:
     """Background worker: read queued events, deliver to observers serially.
 
-    Per spec v0.3.0 §6:
+    Per spec v0.6.0 §6:
     - No two observers receive the same event concurrently (we await each).
     - No observer receives event N+1 until everyone has finished N (the
       loop processes one item fully before pulling the next).
+    - Observers whose `phases` set excludes the event's phase do NOT
+      receive it. Phase filter applies at delivery, not dispatch — the
+      engine still produces both events for every attempt.
     - Observer exceptions don't propagate, don't break siblings, don't
       block subsequent events. Reported via `warnings.warn`.
 
@@ -177,9 +251,11 @@ async def deliver_loop(queue: asyncio.Queue[_QueuedItem | None]) -> None:
         item = await queue.get()
         if item is None:
             return
-        for observer in item.observers:
+        for subscribed in item.observers:
+            if item.event.phase not in subscribed.phases:
+                continue
             try:
-                await observer(item.event)
+                await subscribed.observer(item.event)
             except Exception as e:
                 warnings.warn(
                     f"observer raised {type(e).__name__}: {e}",
@@ -188,14 +264,17 @@ async def deliver_loop(queue: asyncio.Queue[_QueuedItem | None]) -> None:
 
 
 __all__ = [
+    "ALL_PHASES",
     "Observer",
     "RemoveHandle",
+    "SubscribedObserver",
     # Engine-internal but listed so pyright sees them as exported (they're
     # imported by `compiled.py` and `subgraph.py`). The underscore prefix
     # is the user-facing "don't import these" signal.
     "_DRAIN_SENTINEL",
     "_InvocationContext",
     "_QueuedItem",
+    "_coerce_subscribed",
     "_dispatch",
     "deliver_loop",
 ]
