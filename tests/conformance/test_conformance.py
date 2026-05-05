@@ -18,8 +18,14 @@ from openarmature.graph import (
     RoutingError,
     RuntimeGraphError,
 )
+from openarmature.graph.observer import Observer
 
-from .adapter import build_graph
+from .adapter import (
+    ObserverFixture,
+    build_graph,
+    make_observer_fn,
+    normalize_expected_event,
+)
 
 CONFORMANCE_DIR = (
     Path(__file__).resolve().parents[2] / "openarmature-spec" / "spec" / "graph-engine" / "conformance"
@@ -53,7 +59,8 @@ _STANDARD_RUNTIME_FIXTURES = [
 async def test_runtime_fixture(fixture_path: Path) -> None:
     spec = _load(fixture_path)
 
-    # 006 declares an inner subgraph that the outer graph references by name.
+    # Subgraph fixtures (006, 011, 013) declare an inner subgraph that the
+    # outer graph references by name.
     subgraphs: dict[str, Any] = {}
     if "subgraph" in spec:
         sub_spec = spec["subgraph"]
@@ -64,35 +71,83 @@ async def test_runtime_fixture(fixture_path: Path) -> None:
     compiled = built.builder.compile()
     initial = built.initial_state(spec.get("initial_state", {}))
 
+    # Wire observers per the fixture's `observers:` block (012–015). Each
+    # observer is recorded by name so we can assert event-by-event after
+    # invoke + drain.
+    observer_fixtures: dict[str, ObserverFixture] = {}
+    delivery: list[tuple[str, int]] = []
+    invocation_observers: list[Observer] = []
+    for o in spec.get("observers", []):
+        ofx = ObserverFixture(name=o["name"], attach=o["attach"], target=o["target"], behavior=o["behavior"])
+        observer_fixtures[ofx.name] = ofx
+        obs = make_observer_fn(ofx, delivery)
+        if ofx.attach == "graph":
+            target_graph = compiled if ofx.target == "outer" else subgraphs[ofx.target]
+            target_graph.attach_observer(obs)
+        else:
+            invocation_observers.append(obs)
+
+    # Top-level expected_error: legacy runtime-error fixtures (008, 009).
     if "expected_error" in spec:
-        # Runtime-error fixture (008, 009).
         with pytest.raises(RuntimeGraphError) as excinfo:
-            await compiled.invoke(initial)
+            await compiled.invoke(initial, observers=invocation_observers)
+        await compiled.drain()
 
         err = excinfo.value
-        expected = spec["expected_error"]
-        assert err.category == expected["category"]
+        expected_err = spec["expected_error"]
+        assert err.category == expected_err["category"]
 
-        if expected["category"] == "node_exception":
+        if expected_err["category"] == "node_exception":
             assert isinstance(err, NodeException)
-            assert err.node_name == expected["raised_from"]
-            assert str(err.__cause__) == expected["message"]
-            if "recoverable_state" in expected:
-                assert err.recoverable_state.model_dump() == expected["recoverable_state"]
-        elif expected["category"] == "routing_error":
+            assert err.node_name == expected_err["raised_from"]
+            assert str(err.__cause__) == expected_err["message"]
+            if "recoverable_state" in expected_err:
+                assert err.recoverable_state.model_dump() == expected_err["recoverable_state"]
+        elif expected_err["category"] == "routing_error":
             assert isinstance(err, RoutingError)
-            if "recoverable_state" in expected:
-                assert err.recoverable_state.model_dump() == expected["recoverable_state"]
+            if "recoverable_state" in expected_err:
+                assert err.recoverable_state.model_dump() == expected_err["recoverable_state"]
 
-        if "execution_order" in expected:
-            assert built.trace == expected["execution_order"]
+        if "execution_order" in expected_err:
+            assert built.trace == expected_err["execution_order"]
         return
 
-    # Happy-path fixture (001–006).
-    final = await compiled.invoke(initial)
     expected = spec["expected"]
-    assert final.model_dump() == expected["final_state"]
-    assert built.trace == expected["execution_order"]
+
+    # Observer-fixture-with-error (014): the run is expected to raise, and
+    # we still want to assert observer events captured before the failure
+    # propagated.
+    nested_error = expected.get("expected_error")
+    if nested_error is not None:
+        with pytest.raises(RuntimeGraphError) as excinfo:
+            await compiled.invoke(initial, observers=invocation_observers)
+        await compiled.drain()
+        assert excinfo.value.category == nested_error["category"]
+        if "message" in nested_error:
+            assert str(excinfo.value.__cause__) == nested_error["message"]
+    else:
+        # Happy path (001–006, 011, 012, 013, 015).
+        final = await compiled.invoke(initial, observers=invocation_observers)
+        await compiled.drain()
+        if "final_state" in expected:
+            assert final.model_dump() == expected["final_state"]
+        if "execution_order" in expected:
+            assert built.trace == expected["execution_order"]
+
+    # Observer event assertions (012–015 only).
+    if "observer_events" in expected:
+        for name, expected_events in expected["observer_events"].items():
+            actual = observer_fixtures[name].events
+            normalized = [normalize_expected_event(ev) for ev in expected_events]
+            assert (
+                actual == normalized
+            ), f"observer events mismatch for {name!r}: actual={actual}, expected={normalized}"
+
+    if "delivery_order" in expected:
+        expected_delivery = [(d["observer"], d["step"]) for d in expected["delivery_order"]]
+        assert (
+            delivery == expected_delivery
+        ), f"delivery_order mismatch: actual={delivery}, expected={expected_delivery}"
 
 
 # ---------------------------------------------------------------------------
@@ -123,7 +178,7 @@ def test_compile_error(graph_spec: dict[str, Any], expected_category: str) -> No
         sub_built = build_graph(sub_spec, model_name=f"{sub_spec['name'].title()}State")
         subgraphs[sub_spec["name"]] = sub_built.builder.compile()
 
-    built = build_graph(graph_spec, subgraphs=subgraphs, real_subgraph_nodes=bool(subgraphs))
+    built = build_graph(graph_spec, subgraphs=subgraphs)
     with pytest.raises(CompileError) as excinfo:
         built.builder.compile()
     assert excinfo.value.category == expected_category

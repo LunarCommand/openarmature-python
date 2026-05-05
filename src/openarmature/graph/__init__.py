@@ -25,7 +25,9 @@ from .errors import (
     StateValidationError,
     UnreachableNode,
 )
+from .events import NodeEvent
 from .nodes import FunctionNode, Node
+from .observer import Observer, RemoveHandle
 from .projection import ExplicitMapping, FieldNameMatching, ProjectionStrategy
 from .reducers import Reducer, append, last_write_wins, merge
 from .state import State
@@ -48,11 +50,14 @@ __all__ = [
     "MappingReferencesUndeclaredField",
     "MultipleOutgoingEdges",
     "Node",
+    "NodeEvent",
     "NodeException",
     "NoDeclaredEntry",
+    "Observer",
     "ProjectionStrategy",
     "Reducer",
     "ReducerError",
+    "RemoveHandle",
     "RoutingError",
     "RuntimeGraphError",
     "State",

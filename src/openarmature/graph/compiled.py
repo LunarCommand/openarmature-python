@@ -8,13 +8,21 @@ END to halt).
 Per spec §4 Error semantics: node, edge, reducer, and routing errors carry
 recoverable state; state validation errors do not.
 
+Per spec v0.3.0 §6 Observer hooks: between merge and edge evaluation, the
+engine dispatches a `NodeEvent` for the just-completed node onto the
+invocation's delivery queue. On node/reducer/state-validation failure, the
+event is dispatched (with `error` populated) before the failure propagates.
+Routing errors do NOT produce their own event — they arise after the
+preceding node's event has already been dispatched.
+
 `CompiledGraph[StateT]` and `_merge_partial[StateT]` carry the concrete state
 subclass through to `invoke()`'s return type, so consumers don't need
 `cast(MyState, ...)` at the call site.
 """
 
-from collections.abc import Mapping
-from dataclasses import dataclass
+import asyncio
+from collections.abc import Iterable, Mapping
+from dataclasses import dataclass, field
 from typing import Any
 
 from pydantic import ValidationError
@@ -25,11 +33,23 @@ from .errors import (
     NodeException,
     ReducerError,
     RoutingError,
+    RuntimeGraphError,
     StateValidationError,
 )
+from .events import NodeEvent
 from .nodes import Node
+from .observer import (
+    _DRAIN_SENTINEL,
+    Observer,
+    RemoveHandle,
+    _dispatch,
+    _InvocationContext,
+    _QueuedItem,
+    deliver_loop,
+)
 from .reducers import Reducer
 from .state import State
+from .subgraph import SubgraphNode
 
 
 def _merge_partial[StateT: State](
@@ -77,18 +97,128 @@ def _merge_partial[StateT: State](
 
 @dataclass(frozen=True)
 class CompiledGraph[StateT: State]:
-    """An immutable, executable graph produced by `GraphBuilder.compile()`."""
+    """An immutable, executable graph produced by `GraphBuilder.compile()`.
+
+    The compile-time topology (state class, entry, nodes, edges, reducers) is
+    immutable. Two mutable lists ride alongside for observer plumbing —
+    `_attached_observers` and `_active_workers` — neither of which affect the
+    compiled topology and both of which are scoped to the same instance.
+    """
 
     state_cls: type[StateT]
     entry: str
     nodes: Mapping[str, Node[StateT]]
     edges: Mapping[str, StaticEdge | ConditionalEdge[StateT]]
     reducers: Mapping[str, Reducer]
+    # Observer plumbing — see attach_observer/drain. Mutable on a frozen
+    # dataclass: the list reference is fixed but its contents change.
+    # Parameterized factories so pyright infers the element types.
+    _attached_observers: list[Observer] = field(default_factory=list[Observer])
+    # `set` (not list) so a per-task `add_done_callback(self._active_workers.discard)`
+    # auto-removes completed workers — long-running services that never call
+    # drain() don't accumulate completed Task references indefinitely.
+    _active_workers: set[asyncio.Task[None]] = field(default_factory=set[asyncio.Task[None]])
 
-    async def invoke(self, initial_state: StateT) -> StateT:
+    # ------------------------------------------------------------------
+    # Observer registration (spec v0.3.0 §6)
+    # ------------------------------------------------------------------
+
+    def attach_observer(self, observer: Observer) -> RemoveHandle:
+        """Register a graph-attached observer.
+
+        Per spec v0.3.0 §6: graph-attached observers fire on every invocation
+        of this graph until removed — including when this graph runs as a
+        subgraph inside a parent. Returns a `RemoveHandle` whose `.remove()`
+        method detaches the observer; idempotent.
+
+        Per spec: changes to the registered set during a graph run do NOT
+        take effect until the next invocation. The set of observers
+        delivering events for an in-flight invocation is fixed at the point
+        the invocation begins.
+        """
+        self._attached_observers.append(observer)
+        return RemoveHandle(_observers=self._attached_observers, _observer=observer)
+
+    async def drain(self) -> None:
+        """Await delivery of every observer event produced by prior
+        invocations of this graph.
+
+        Per spec v0.3.0 §6: callers running in short-lived processes (scripts,
+        serverless functions, CLIs) MUST use drain to avoid losing observer
+        events that were dispatched but not yet delivered.
+
+        Only events dispatched before this call are awaited; events from
+        invocations started concurrently with drain may or may not be
+        included. Subgraph events from active invocations are part of the
+        parent invocation's worker and are covered automatically.
+        """
+        if not self._active_workers:
+            return
+        # Snapshot the set: each worker's done-callback removes itself
+        # from `_active_workers`, so iterating it directly while gather
+        # awaits would mutate during iteration.
+        await asyncio.gather(*list(self._active_workers), return_exceptions=True)
+
+    # ------------------------------------------------------------------
+    # Public invocation
+    # ------------------------------------------------------------------
+
+    async def invoke(
+        self,
+        initial_state: StateT,
+        observers: Iterable[Observer] | None = None,
+    ) -> StateT:
         """Run the graph from `initial_state` to END and return the final state.
 
+        Optional `observers` are invocation-scoped — they fire only for this
+        run, after all graph-attached observers (including subgraph-attached
+        ones for events originating in subgraphs) per spec v0.3.0 §6.
+
+        Per spec v0.3.0 §6: this method returns as soon as the graph
+        execution loop completes, regardless of whether the observer
+        delivery queue has finished processing every dispatched event. Use
+        `await compiled.drain()` if you need delivery-completion guarantees.
+
         Raises one of the runtime error categories from spec §4 on failure.
+        """
+
+        invocation_scoped = tuple(observers) if observers else ()
+        queue: asyncio.Queue[_QueuedItem | None] = asyncio.Queue()
+        context = _InvocationContext(
+            queue=queue,
+            graph_attached=tuple(self._attached_observers),
+            invocation_scoped=invocation_scoped,
+        )
+        worker = asyncio.create_task(deliver_loop(queue))
+        self._active_workers.add(worker)
+        # Auto-prune: when the worker completes (after the sentinel is
+        # processed), remove it from the active set so long-running
+        # services don't leak Task references between drain() calls.
+        worker.add_done_callback(self._active_workers.discard)
+        try:
+            return await self._invoke(initial_state, context)
+        finally:
+            # Sentinel terminates the worker after it processes events
+            # already on the queue (including any error event we just
+            # dispatched on the failure path). Drain semantics live on
+            # `.drain()` — we do NOT await the worker here, per spec.
+            queue.put_nowait(_DRAIN_SENTINEL)
+
+    # ------------------------------------------------------------------
+    # Internal invocation (used by SubgraphNode for nested execution)
+    # ------------------------------------------------------------------
+
+    async def _invoke(
+        self,
+        initial_state: StateT,
+        context: _InvocationContext,
+    ) -> StateT:
+        """Execution loop that dispatches events through the supplied context.
+
+        Public `invoke()` builds a fresh root context. Subgraph-as-node
+        execution calls `_invoke` directly with a context derived from the
+        parent's, so the queue, step counter, and observer chain thread
+        through the boundary.
         """
 
         state = initial_state
@@ -97,18 +227,26 @@ class CompiledGraph[StateT: State]:
         while True:
             node = self.nodes[current]
 
-            # Run the node. Wrap user exceptions as NodeException with
-            # recoverable_state = state at point of failure (pre-update).
-            try:
-                partial = await node.run(state)
-            except Exception as e:
-                raise NodeException(node_name=current, cause=e, recoverable_state=state) from e
+            if isinstance(node, SubgraphNode):
+                # Subgraph wrappers are transparent to the observer protocol
+                # (per fixture 013): no event is dispatched for the wrapper
+                # itself, the step counter does not advance for it, and any
+                # `RuntimeGraphError` bubbling up from the subgraph's
+                # _invoke is already wrapped with the inner node's identity
+                # — pass it through. Other exceptions (projection errors,
+                # subgraph state-class init errors) escape the spec §4
+                # categories, so we wrap them as NodeException tagged with
+                # the wrapper's name.
+                try:
+                    partial = await node.run(state, context=context)
+                except RuntimeGraphError:
+                    raise
+                except Exception as e:
+                    raise NodeException(node_name=current, cause=e, recoverable_state=state) from e
+                state = _merge_partial(state, partial, self.reducers, current)
+            else:
+                state = await self._step_function_node(node, current, state, context)
 
-            # Merge partial into state via reducers (may raise ReducerError or
-            # StateValidationError; both already carry the right context).
-            state = _merge_partial(state, partial, self.reducers, current)
-
-            # Evaluate the outgoing edge against the post-update state.
             edge = self.edges[current]
             if isinstance(edge, StaticEdge):
                 target: str | EndSentinel = edge.target
@@ -125,3 +263,71 @@ class CompiledGraph[StateT: State]:
                 raise RoutingError(source_node=current, returned=target, recoverable_state=state)
 
             current = target
+
+    async def _step_function_node(
+        self,
+        node: Node[StateT],
+        current: str,
+        state: StateT,
+        context: _InvocationContext,
+    ) -> StateT:
+        """Run one function-node step: take a step, run, merge, dispatch.
+
+        Dispatches a `NodeEvent` exactly once per call:
+        - On run failure (NodeException): event with error populated.
+        - On merge failure (ReducerError or StateValidationError): event with
+          error populated; the original error propagates unchanged after.
+        - On success: event with post_state populated, then return.
+        """
+        step = context.take_step()
+        namespace = context.namespace_prefix + (current,)
+        pre_state = state
+
+        try:
+            partial = await node.run(state)
+        except Exception as e:
+            wrapped = NodeException(node_name=current, cause=e, recoverable_state=state)
+            self._dispatch_failure_event(context, current, namespace, step, pre_state, wrapped)
+            raise wrapped from e
+
+        try:
+            new_state = _merge_partial(state, partial, self.reducers, current)
+        except (ReducerError, StateValidationError) as e:
+            self._dispatch_failure_event(context, current, namespace, step, pre_state, e)
+            raise
+
+        _dispatch(
+            context,
+            NodeEvent(
+                node_name=current,
+                namespace=namespace,
+                step=step,
+                pre_state=pre_state,
+                post_state=new_state,
+                error=None,
+                parent_states=context.parent_states_prefix,
+            ),
+        )
+        return new_state
+
+    @staticmethod
+    def _dispatch_failure_event(
+        context: _InvocationContext,
+        current: str,
+        namespace: tuple[str, ...],
+        step: int,
+        pre_state: State,
+        error: RuntimeGraphError,
+    ) -> None:
+        _dispatch(
+            context,
+            NodeEvent(
+                node_name=current,
+                namespace=namespace,
+                step=step,
+                pre_state=pre_state,
+                post_state=None,
+                error=error,
+                parent_states=context.parent_states_prefix,
+            ),
+        )
