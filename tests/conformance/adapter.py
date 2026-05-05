@@ -267,12 +267,17 @@ class ObserverFixture:
     observer callable produced by `make_observer_fn` records every event it
     receives into `events` and (if behavior == "raise") raises after
     recording.
+
+    `phases` is the optional subscription set parsed from the fixture's
+    YAML. None means "no `phases:` key was present" — the harness leaves
+    the engine to default to both phases.
     """
 
     name: str
     attach: str  # "graph" | "invocation"
     target: str  # "outer" | <subgraph name>
     behavior: str  # "record" | "raise"
+    phases: frozenset[str] | None = None
     events: list[dict[str, Any]] = field(default_factory=list[dict[str, Any]])
 
 
@@ -280,33 +285,38 @@ def _record_event(event: NodeEvent) -> dict[str, Any]:
     """Convert a NodeEvent into a dict matching the YAML expected shape."""
     rec: dict[str, Any] = {
         "step": event.step,
+        "phase": event.phase,
         "node_name": event.node_name,
         "namespace": list(event.namespace),
         "pre_state": event.pre_state.model_dump(),
         "parent_states": [ps.model_dump() for ps in event.parent_states],
+        "attempt_index": event.attempt_index,
     }
     if event.post_state is not None:
         rec["post_state"] = event.post_state.model_dump()
     if event.error is not None:
         rec["error"] = event.error.category
+    if event.fan_out_index is not None:
+        rec["fan_out_index"] = event.fan_out_index
     return rec
 
 
 def make_observer_fn(
     fixture: ObserverFixture,
-    delivery: list[tuple[str, int]],
+    delivery: list[tuple[str, int, str]],
 ) -> Observer:
     """Build the async observer callable for an `ObserverFixture`.
 
-    Records every event into `fixture.events` and appends `(name, step)` to
-    the shared `delivery` list (the order observers are called in across the
-    whole invocation, used to assert `delivery_order`). Raising observers
-    record + append before raising, so the engine's error isolation can be
-    verified by checking that subsequent observers/events still get through.
+    Records every event into `fixture.events` and appends
+    `(name, step, phase)` to the shared `delivery` list (the order
+    observers are called in across the whole invocation, used to assert
+    `delivery_order`). Raising observers record + append before raising,
+    so the engine's error isolation can be verified by checking that
+    subsequent observers/events still get through.
     """
 
     async def observer(event: NodeEvent) -> None:
-        delivery.append((fixture.name, event.step))
+        delivery.append((fixture.name, event.step, event.phase))
         fixture.events.append(_record_event(event))
         if fixture.behavior == "raise":
             raise RuntimeError(f"{fixture.name} raised on event at step {event.step}")
@@ -316,7 +326,11 @@ def make_observer_fn(
 
 def normalize_expected_event(ev: Mapping[str, Any]) -> dict[str, Any]:
     """Fill in defaults for keys the YAML omits, so equality with the
-    recorded event dict works as-is."""
+    recorded event dict works as-is. Fixtures don't repeat the
+    `attempt_index: 0` and `parent_states: []` defaults for every event;
+    the engine emits both unconditionally, so backfill them here.
+    """
     e = dict(ev)
     e.setdefault("parent_states", [])
+    e.setdefault("attempt_index", 0)
     return e

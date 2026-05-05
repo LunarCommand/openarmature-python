@@ -18,6 +18,7 @@ from openarmature.graph import (
     NodeException,
     RoutingError,
     RuntimeGraphError,
+    SubscribedObserver,
 )
 from openarmature.graph.observer import Observer
 
@@ -54,26 +55,6 @@ def _fixture_id(path: Path) -> str:
 _STANDARD_RUNTIME_FIXTURES = [
     p for p in _fixture_paths() if p.stem not in {"007-compile-errors", "010-determinism"}
 ]
-
-
-def _needs_pair_model(spec: dict[str, Any]) -> bool:
-    """True if the fixture's expected observer events use the v0.6.0 pair
-    model (`phase: started/completed`). The current engine emits the
-    pre-v0.6.0 single-event model; Phase 1 retrofits the pair model.
-    """
-    expected = spec.get("expected")
-    if not isinstance(expected, dict):
-        return False
-    events_by_name = cast("dict[str, Any]", expected).get("observer_events")
-    if not isinstance(events_by_name, dict):
-        return False
-    for events in cast("dict[str, Any]", events_by_name).values():
-        if not isinstance(events, list):
-            continue
-        for event in cast("list[Any]", events):
-            if isinstance(event, dict) and "phase" in event:
-                return True
-    return False
 
 
 # Node directives the legacy adapter doesn't (yet) translate. Phase 1+ will
@@ -126,17 +107,9 @@ def _unsupported_directive(spec: dict[str, Any]) -> str | None:
 async def test_runtime_fixture(fixture_path: Path) -> None:
     spec = _load(fixture_path)
 
-    # Phase 0 — skip fixtures whose expected observer events use the v0.6.0
-    # started/completed pair model. Phase 1 (engine retrofit) lands the
-    # pair model and turns these back on.
-    if _needs_pair_model(spec):
-        pytest.skip(
-            f"{fixture_path.stem}: needs phase 1 (engine pair-model retrofit) "
-            "— expected observer events carry `phase` field"
-        )
-    # Phase 0 — skip fixtures whose nodes use directives the legacy adapter
-    # doesn't translate (fan_out, flaky variants, calls_llm, etc.). Each
-    # directive is gated to the phase that lands its runtime support.
+    # Skip fixtures whose nodes use directives the legacy adapter doesn't
+    # translate (fan_out, flaky variants, calls_llm, etc.). Each directive
+    # is gated to the phase that lands its runtime support.
     if (hit := _unsupported_directive(spec)) is not None:
         pytest.skip(f"{fixture_path.stem}: unsupported node directive {hit}")
 
@@ -152,21 +125,33 @@ async def test_runtime_fixture(fixture_path: Path) -> None:
     compiled = built.builder.compile()
     initial = built.initial_state(spec.get("initial_state", {}))
 
-    # Wire observers per the fixture's `observers:` block (012–015). Each
-    # observer is recorded by name so we can assert event-by-event after
-    # invoke + drain.
+    # Wire observers per the fixture's `observers:` block (012–016, 018).
+    # Each observer is recorded by name so we can assert event-by-event
+    # after invoke + drain. `phases:` (018) restricts which started/
+    # completed events the observer subscribes to.
     observer_fixtures: dict[str, ObserverFixture] = {}
-    delivery: list[tuple[str, int]] = []
-    invocation_observers: list[Observer] = []
+    delivery: list[tuple[str, int, str]] = []
+    invocation_observers: list[Observer | SubscribedObserver] = []
     for o in spec.get("observers", []):
-        ofx = ObserverFixture(name=o["name"], attach=o["attach"], target=o["target"], behavior=o["behavior"])
+        phases_list = o.get("phases")
+        phases = frozenset(phases_list) if phases_list else None
+        ofx = ObserverFixture(
+            name=o["name"],
+            attach=o["attach"],
+            target=o["target"],
+            behavior=o["behavior"],
+            phases=phases,
+        )
         observer_fixtures[ofx.name] = ofx
         obs = make_observer_fn(ofx, delivery)
         if ofx.attach == "graph":
             target_graph = compiled if ofx.target == "outer" else subgraphs[ofx.target]
-            target_graph.attach_observer(obs)
+            target_graph.attach_observer(obs, phases=phases)
         else:
-            invocation_observers.append(obs)
+            if phases is not None:
+                invocation_observers.append(SubscribedObserver(observer=obs, phases=phases))
+            else:
+                invocation_observers.append(obs)
 
     # Top-level expected_error: legacy runtime-error fixtures (008, 009).
     if "expected_error" in spec:
@@ -215,7 +200,7 @@ async def test_runtime_fixture(fixture_path: Path) -> None:
         if "execution_order" in expected:
             assert built.trace == expected["execution_order"]
 
-    # Observer event assertions (012–015 only).
+    # Observer event assertions (012–016, 018).
     if "observer_events" in expected:
         for name, expected_events in expected["observer_events"].items():
             actual = observer_fixtures[name].events
@@ -225,10 +210,27 @@ async def test_runtime_fixture(fixture_path: Path) -> None:
             )
 
     if "delivery_order" in expected:
-        expected_delivery = [(d["observer"], d["step"]) for d in expected["delivery_order"]]
+        expected_delivery = [(d["observer"], d["step"], d["phase"]) for d in expected["delivery_order"]]
         assert delivery == expected_delivery, (
             f"delivery_order mismatch: actual={delivery}, expected={expected_delivery}"
         )
+
+    # 018 — registering an observer with an empty `phases` set raises at
+    # registration time per spec §6.
+    if expected.get("empty_phases_raises_at_registration"):
+        with pytest.raises(ValueError):
+            compiled.attach_observer(
+                make_observer_fn(
+                    ObserverFixture(
+                        name="probe",
+                        attach="graph",
+                        target="outer",
+                        behavior="record",
+                    ),
+                    [],
+                ),
+                phases=frozenset(),
+            )
 
 
 # ---------------------------------------------------------------------------

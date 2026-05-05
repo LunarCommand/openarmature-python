@@ -27,7 +27,7 @@ from .errors import (
 )
 from .events import NodeEvent
 from .nodes import FunctionNode, Node
-from .observer import Observer, RemoveHandle
+from .observer import Observer, RemoveHandle, SubscribedObserver
 from .projection import ExplicitMapping, FieldNameMatching, ProjectionStrategy
 from .reducers import Reducer, append, last_write_wins, merge
 from .state import State
@@ -64,6 +64,7 @@ __all__ = [
     "StateValidationError",
     "StaticEdge",
     "SubgraphNode",
+    "SubscribedObserver",
     "UnreachableNode",
     "append",
     "last_write_wins",
