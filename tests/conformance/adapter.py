@@ -34,7 +34,6 @@ from openarmature.graph import (
 )
 from openarmature.graph.events import NodeEvent
 from openarmature.graph.observer import Observer
-from pydantic import Field, create_model
 
 if TYPE_CHECKING:
     from openarmature.graph.observer import _InvocationContext
