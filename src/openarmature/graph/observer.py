@@ -44,7 +44,9 @@ class Observer(Protocol):
     `event`, `_event`, or any other name.
     """
 
-    async def __call__(self, event: NodeEvent, /) -> None: ...
+    async def __call__(self, event: NodeEvent, /) -> None:
+        """Receive a single node-boundary event."""
+        raise NotImplementedError
 
 
 @dataclass(frozen=True)
@@ -64,6 +66,9 @@ class RemoveHandle:
         try:
             self._observers.remove(self._observer)
         except ValueError:
+            # Idempotency: the observer is already detached. Per the
+            # docstring, a second .remove() call is a no-op rather than
+            # an error.
             pass
 
 

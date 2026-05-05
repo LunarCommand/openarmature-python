@@ -96,3 +96,55 @@ async def test_state_validation_error_on_unknown_field() -> None:
     err = excinfo.value
     assert err.category == "state_validation_error"
     assert "undeclared" in err.fields
+
+
+async def test_subgraph_projection_error_wrapped_as_node_exception() -> None:
+    """Errors from a subgraph's projection (project_in / project_out) are
+    NOT spec §4 categories on their own. The engine wraps them as
+    NodeException tagged with the subgraph wrapper's name so callers see
+    a uniform error contract."""
+
+    from openarmature.graph import NodeException, ProjectionStrategy
+
+    class Inner(State):
+        x: int = 0
+
+    async def _inner_node(_s: Inner) -> dict[str, Any]:
+        return {}
+
+    inner_g = GraphBuilder(Inner).add_node("i", _inner_node).add_edge("i", END).set_entry("i").compile()
+
+    # Parameter names match the ProjectionStrategy Protocol exactly so
+    # pyright's strict structural conformance check passes.
+    class BoomProjection:
+        def project_in(self, parent_state: S, subgraph_state_cls: type[Inner]) -> Inner:
+            raise RuntimeError("project_in boom")
+
+        def project_out(
+            self,
+            subgraph_final_state: Inner,
+            parent_state: S,
+            subgraph_state_cls: type[Inner],
+        ) -> dict[str, Any]:
+            return {}
+
+    _: ProjectionStrategy[S, Inner] = BoomProjection()
+
+    g = (
+        GraphBuilder(S)
+        .add_subgraph_node("sub", inner_g, projection=BoomProjection())
+        .add_edge("sub", END)
+        .set_entry("sub")
+        .compile()
+    )
+
+    with pytest.raises(NodeException) as excinfo:
+        await g.invoke(S())
+
+    err = excinfo.value
+    assert err.category == "node_exception"
+    # The wrapper's name, not the inner node's — projection is at the
+    # boundary, not inside the subgraph.
+    assert err.node_name == "sub"
+    assert isinstance(err.__cause__, RuntimeError)
+    assert str(err.__cause__) == "project_in boom"

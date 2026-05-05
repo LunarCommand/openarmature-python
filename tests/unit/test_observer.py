@@ -174,8 +174,11 @@ async def test_dispatch_skips_when_no_observers_for_depth() -> None:
 
 
 async def test_dispatch_enqueues_with_full_observer_chain_in_order() -> None:
-    async def graph_obs(_event: NodeEvent) -> None: ...
-    async def invocation_obs(_event: NodeEvent) -> None: ...
+    async def graph_obs(_event: NodeEvent) -> None:
+        pass
+
+    async def invocation_obs(_event: NodeEvent) -> None:
+        pass
 
     queue: asyncio.Queue[_QueuedItem | None] = asyncio.Queue()
     ctx = _InvocationContext(queue=queue, graph_attached=(graph_obs,), invocation_scoped=(invocation_obs,))
@@ -192,9 +195,14 @@ async def test_dispatch_enqueues_with_full_observer_chain_in_order() -> None:
 
 
 async def test_descend_extends_chain_namespace_and_parent_states() -> None:
-    async def outer_obs(_event: NodeEvent) -> None: ...
-    async def sub_obs(_event: NodeEvent) -> None: ...
-    async def invocation_obs(_event: NodeEvent) -> None: ...
+    async def outer_obs(_event: NodeEvent) -> None:
+        pass
+
+    async def sub_obs(_event: NodeEvent) -> None:
+        pass
+
+    async def invocation_obs(_event: NodeEvent) -> None:
+        pass
 
     queue: asyncio.Queue[_QueuedItem | None] = asyncio.Queue()
     outer = _InvocationContext(queue=queue, graph_attached=(outer_obs,), invocation_scoped=(invocation_obs,))
@@ -227,7 +235,8 @@ async def test_take_step_shares_counter_across_descended_contexts() -> None:
 
 
 def test_remove_handle_detaches_observer() -> None:
-    async def obs(_event: NodeEvent) -> None: ...
+    async def obs(_event: NodeEvent) -> None:
+        pass
 
     observers: list[Observer] = [obs]
     handle = RemoveHandle(_observers=observers, _observer=obs)
@@ -238,7 +247,8 @@ def test_remove_handle_detaches_observer() -> None:
 
 
 def test_remove_handle_is_idempotent() -> None:
-    async def obs(_event: NodeEvent) -> None: ...
+    async def obs(_event: NodeEvent) -> None:
+        pass
 
     observers: list[Observer] = [obs]
     handle = RemoveHandle(_observers=observers, _observer=obs)

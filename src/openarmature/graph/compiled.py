@@ -114,7 +114,10 @@ class CompiledGraph[StateT: State]:
     # dataclass: the list reference is fixed but its contents change.
     # Parameterized factories so pyright infers the element types.
     _attached_observers: list[Observer] = field(default_factory=list[Observer])
-    _active_workers: list[asyncio.Task[None]] = field(default_factory=list[asyncio.Task[None]])
+    # `set` (not list) so a per-task `add_done_callback(self._active_workers.discard)`
+    # auto-removes completed workers — long-running services that never call
+    # drain() don't accumulate completed Task references indefinitely.
+    _active_workers: set[asyncio.Task[None]] = field(default_factory=set[asyncio.Task[None]])
 
     # ------------------------------------------------------------------
     # Observer registration (spec v0.3.0 §6)
@@ -151,11 +154,10 @@ class CompiledGraph[StateT: State]:
         """
         if not self._active_workers:
             return
-        pending = list(self._active_workers)
-        await asyncio.gather(*pending, return_exceptions=True)
-        for w in pending:
-            if w in self._active_workers:
-                self._active_workers.remove(w)
+        # Snapshot the set: each worker's done-callback removes itself
+        # from `_active_workers`, so iterating it directly while gather
+        # awaits would mutate during iteration.
+        await asyncio.gather(*list(self._active_workers), return_exceptions=True)
 
     # ------------------------------------------------------------------
     # Public invocation
@@ -188,7 +190,11 @@ class CompiledGraph[StateT: State]:
             invocation_scoped=invocation_scoped,
         )
         worker = asyncio.create_task(deliver_loop(queue))
-        self._active_workers.append(worker)
+        self._active_workers.add(worker)
+        # Auto-prune: when the worker completes (after the sentinel is
+        # processed), remove it from the active set so long-running
+        # services don't leak Task references between drain() calls.
+        worker.add_done_callback(self._active_workers.discard)
         try:
             return await self._invoke(initial_state, context)
         finally:
@@ -225,9 +231,18 @@ class CompiledGraph[StateT: State]:
                 # Subgraph wrappers are transparent to the observer protocol
                 # (per fixture 013): no event is dispatched for the wrapper
                 # itself, the step counter does not advance for it, and any
-                # exception bubbling up from the subgraph's _invoke is
-                # already wrapped with the inner node's identity.
-                partial = await node.run(state, context=context)
+                # `RuntimeGraphError` bubbling up from the subgraph's
+                # _invoke is already wrapped with the inner node's identity
+                # — pass it through. Other exceptions (projection errors,
+                # subgraph state-class init errors) escape the spec §4
+                # categories, so we wrap them as NodeException tagged with
+                # the wrapper's name.
+                try:
+                    partial = await node.run(state, context=context)
+                except RuntimeGraphError:
+                    raise
+                except Exception as e:
+                    raise NodeException(node_name=current, cause=e, recoverable_state=state) from e
                 state = _merge_partial(state, partial, self.reducers, current)
             else:
                 state = await self._step_function_node(node, current, state, context)
