@@ -31,8 +31,9 @@ jobs:
         with:
           enable-cache: true
 
-      - name: Install Python
-        run: uv python install 3.12
+      # No explicit `uv python install` — `uv sync` auto-provisions the
+      # interpreter pinned in `.python-version`, so CI tests the same
+      # version developers run locally.
 
       - name: Sync deps
         run: uv sync --frozen
