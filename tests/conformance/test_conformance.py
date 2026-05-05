@@ -12,6 +12,7 @@ from typing import Any
 
 import pytest
 import yaml
+
 from openarmature.graph import (
     CompileError,
     NodeException,

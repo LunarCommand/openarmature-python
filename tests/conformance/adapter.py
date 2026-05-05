@@ -15,6 +15,8 @@ from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Annotated, Any, cast
 
+from pydantic import Field, create_model
+
 from openarmature.graph import (
     END,
     CompiledGraph,

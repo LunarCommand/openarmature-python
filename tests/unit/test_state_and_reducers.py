@@ -3,9 +3,10 @@
 from typing import Annotated
 
 import pytest
+from pydantic import Field, ValidationError
+
 from openarmature.graph import END, State, append, last_write_wins, merge
 from openarmature.graph.state import field_reducers, resolve_reducer
-from pydantic import Field, ValidationError
 
 
 class S(State):
