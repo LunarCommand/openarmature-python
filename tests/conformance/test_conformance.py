@@ -134,7 +134,7 @@ async def test_runtime_fixture(fixture_path: Path) -> None:
     invocation_observers: list[Observer | SubscribedObserver] = []
     for o in spec.get("observers", []):
         phases_list = o.get("phases")
-        phases = frozenset(phases_list) if phases_list else None
+        phases = frozenset(phases_list) if phases_list is not None else None
         ofx = ObserverFixture(
             name=o["name"],
             attach=o["attach"],
