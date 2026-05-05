@@ -100,7 +100,68 @@ def _unsupported_directive(spec: dict[str, Any]) -> str | None:
         return hit
     if (hit := scan(spec.get("subgraph"))) is not None:
         return hit
+    for sub_spec in spec.get("subgraphs", {}).values():
+        if (hit := scan(sub_spec)) is not None:
+            return hit
     return None
+
+
+def _subgraph_dependencies(sub_spec: dict[str, Any]) -> set[str]:
+    """Names of subgraphs referenced by `subgraph: <name>` directives in
+    this subgraph's nodes. Used to order plural-form compilation so an
+    inner subgraph compiles before any subgraph that references it."""
+    deps: set[str] = set()
+    nodes = sub_spec.get("nodes")
+    if not isinstance(nodes, dict):
+        return deps
+    for node_spec in cast("dict[str, Any]", nodes).values():
+        if isinstance(node_spec, dict) and "subgraph" in cast("dict[str, Any]", node_spec):
+            ref = cast("dict[str, Any]", node_spec)["subgraph"]
+            if isinstance(ref, str):
+                deps.add(ref)
+    return deps
+
+
+def _compile_subgraphs_map(
+    subgraphs_spec: dict[str, dict[str, Any]],
+    registry: dict[str, Any],
+) -> None:
+    """Compile the plural `subgraphs:` map into ``registry``.
+
+    Iterates until every subgraph is compiled, picking entries whose
+    referenced subgraphs are already in the registry. This keeps the
+    fixture format order-independent — fixture 019 happens to list inner
+    before middle, but the harness shouldn't depend on that.
+    """
+    pending: dict[str, dict[str, Any]] = dict(subgraphs_spec)
+    while pending:
+        progress = False
+        for name, sub_spec in list(pending.items()):
+            deps = _subgraph_dependencies(sub_spec)
+            if not deps.issubset(registry):
+                continue
+            # Plural form omits the `name:` field (the dict key IS the name);
+            # synthesize it for build_graph's existing singular-form lookup.
+            # Validate against fixture authoring errors first.
+            existing_name = sub_spec.get("name")
+            if existing_name is not None and existing_name != name:
+                raise ValueError(f"subgraph dict key {name!r} does not match name field {existing_name!r}")
+            if name in registry:
+                raise ValueError(
+                    f"subgraph name {name!r} is already registered "
+                    f"(collision with singular subgraph: form or duplicate plural entry)"
+                )
+            sub_with_name = {**sub_spec, "name": name}
+            sub_built = build_graph(
+                sub_with_name,
+                subgraphs=registry,
+                model_name=f"{name.title()}State",
+            )
+            registry[name] = sub_built.builder.compile()
+            del pending[name]
+            progress = True
+        if not progress:
+            raise RuntimeError(f"unresolvable subgraph dependencies in subgraphs: map: {sorted(pending)}")
 
 
 @pytest.mark.parametrize("fixture_path", _STANDARD_RUNTIME_FIXTURES, ids=_fixture_id)
@@ -113,13 +174,17 @@ async def test_runtime_fixture(fixture_path: Path) -> None:
     if (hit := _unsupported_directive(spec)) is not None:
         pytest.skip(f"{fixture_path.stem}: unsupported node directive {hit}")
 
-    # Subgraph fixtures (006, 011, 013) declare an inner subgraph that the
-    # outer graph references by name.
+    # Subgraph fixtures (006, 011, 013) declare an inner subgraph via the
+    # singular `subgraph:` key. Fixture 019 introduces the plural `subgraphs:`
+    # map for two-level nesting; subgraphs there can reference each other,
+    # so they're compiled in dependency order.
     subgraphs: dict[str, Any] = {}
     if "subgraph" in spec:
         sub_spec = spec["subgraph"]
         sub_built = build_graph(sub_spec, model_name=f"{sub_spec['name'].title()}State")
         subgraphs[sub_spec["name"]] = sub_built.builder.compile()
+    if "subgraphs" in spec:
+        _compile_subgraphs_map(spec["subgraphs"], subgraphs)
 
     built = build_graph(spec, subgraphs=subgraphs)
     compiled = built.builder.compile()
