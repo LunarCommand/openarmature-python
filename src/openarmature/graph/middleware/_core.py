@@ -104,6 +104,17 @@ def compose_chain(
     Calling it once = one full chain traversal = at LEAST one call to
     ``innermost`` (more if a middleware calls ``next`` repeatedly, e.g.
     retry).
+
+    Performance note: this is called fresh per dispatch from
+    ``CompiledGraph._step_function_node``, producing one closure layer
+    per middleware on every node step. For typical workloads
+    (single-digit middleware × hundreds of node activations) this is
+    negligible. Under heavy fan-out (Phase 3+), e.g. 10K instances × 5
+    inner nodes × 3 middlewares = 150K closure constructions per
+    invocation; worth measuring with realistic workloads when the
+    fan-out runtime lands. The optimization shape (cache the chain at
+    compile time, inject only the per-dispatch attempt counter via a
+    thin wrapper) is straightforward but premature without numbers.
     """
     chain: ChainCall = innermost
     for mw in reversed(middlewares):

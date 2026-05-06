@@ -294,6 +294,68 @@ async def test_timing_records_failure_with_category() -> None:
     assert abs(rec.duration_ms - 10.0) < 0.01
 
 
+# ===== Reentrant next: middleware can call next more than twice =====
+
+
+async def test_middleware_can_call_next_repeatedly() -> None:
+    """Per spec §2: a middleware MAY call ``next`` more than once. Retry
+    exercises this with N=2-3 attempts; this test pins the contract
+    independently by calling ``next`` 5 times in a loop and asserting the
+    inner runs exactly that many times."""
+    inner_calls = [0]
+
+    async def call_five_times(state: Any, next_: NextCall) -> Mapping[str, Any]:
+        last: Mapping[str, Any] = {}
+        for _ in range(5):
+            last = await next_(state)
+        return last
+
+    async def innermost(_state: Any) -> Mapping[str, Any]:
+        inner_calls[0] += 1
+        return {"trace": [f"call-{inner_calls[0]}"]}
+
+    chain = compose_chain([call_five_times], innermost)
+    result = await chain(TraceState())
+
+    assert inner_calls[0] == 5
+    # Final result is the partial returned from the LAST call to next.
+    assert result == {"trace": ["call-5"]}
+
+
+# ===== Timing callback failure on the failure path masks the original =====
+
+
+async def test_timing_callback_failure_replaces_original_exception() -> None:
+    """Pins the current behavior: when a node raises and TimingMiddleware's
+    ``on_complete`` ALSO raises in the failure path, the callback's
+    exception propagates instead of the original. Python's standard
+    exception chaining preserves the original on ``__context__``, but the
+    active exception observers see is the callback's.
+
+    Spec §6.2 says callbacks SHOULD be fast and infallible — this test
+    documents what happens if a user violates that, so a future change
+    that wants to preserve the original (e.g., via explicit ``raise exc
+    from cb_exc``) doesn't silently regress this contract.
+    """
+
+    async def bad_callback(_record: TimingRecord) -> None:
+        raise ValueError("callback bug")
+
+    async def innermost(_state: Any) -> Mapping[str, Any]:
+        raise _CategorizedFatal()
+
+    timing = TimingMiddleware(node_name="alpha", on_complete=bad_callback)
+    chain = compose_chain([timing], innermost)
+
+    with pytest.raises(ValueError, match="callback bug") as excinfo:
+        await chain(TraceState())
+
+    # The original node exception is preserved on __context__, the
+    # standard Python exception-chaining link for "exception raised
+    # while handling another."
+    assert isinstance(excinfo.value.__context__, _CategorizedFatal)
+
+
 # ===== 8. Subgraph isolation =====
 
 

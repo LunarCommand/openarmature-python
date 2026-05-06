@@ -330,7 +330,7 @@ class CompiledGraph[StateT: State]:
         # The innermost layer dispatches the per-attempt event pair around a
         # single call to ``node.run``. Each call to this inner increments
         # the attempt counter; middleware composes around it.
-        attempt_counter = [0]
+        attempt_counter = 0
 
         async def innermost(s: Any) -> Mapping[str, Any]:
             # Per pipeline-utilities §5 + graph-engine §6: per-attempt
@@ -340,8 +340,9 @@ class CompiledGraph[StateT: State]:
             # the original `category` attribute (timing's
             # exception_category, retry's classifier). The engine wraps
             # any exception that escapes the chain, OUTSIDE this layer.
-            attempt_index = attempt_counter[0]
-            attempt_counter[0] = attempt_index + 1
+            nonlocal attempt_counter
+            attempt_index = attempt_counter
+            attempt_counter += 1
 
             self._dispatch_started(context, current, namespace, step, s, attempt_index=attempt_index)
 
