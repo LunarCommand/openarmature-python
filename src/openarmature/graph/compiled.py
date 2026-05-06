@@ -24,7 +24,7 @@ subclass through to `invoke()`'s return type, so consumers don't need
 import asyncio
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, cast
 
 from pydantic import ValidationError
 
@@ -38,6 +38,7 @@ from .errors import (
     StateValidationError,
 )
 from .events import NodeEvent
+from .middleware import ChainCall, Middleware, compose_chain
 from .nodes import Node
 from .observer import (
     _DRAIN_SENTINEL,
@@ -113,6 +114,9 @@ class CompiledGraph[StateT: State]:
     nodes: Mapping[str, Node[StateT]]
     edges: Mapping[str, StaticEdge | ConditionalEdge[StateT]]
     reducers: Mapping[str, Reducer]
+    # Per-graph middleware in registration order (outer-to-inner). Composes
+    # OUTSIDE per-node middleware at runtime per pipeline-utilities §3.
+    middleware: tuple[Middleware, ...] = ()
     # Observer plumbing — see attach_observer/drain. Mutable on a frozen
     # dataclass: the list reference is fixed but its contents change.
     # Parameterized factories so pyright infers the element types.
@@ -263,13 +267,17 @@ class CompiledGraph[StateT: State]:
                 # subgraph state-class init errors) escape the spec §4
                 # categories, so we wrap them as NodeException tagged with
                 # the wrapper's name.
-                try:
-                    partial = await node.run(state, context=context)
-                except RuntimeGraphError:
-                    raise
-                except Exception as e:
-                    raise NodeException(node_name=current, cause=e, recoverable_state=state) from e
-                state = _merge_partial(state, partial, self.reducers, current)
+                #
+                # Per pipeline-utilities §4: the parent's middleware wraps
+                # the subgraph dispatch as a single atomic call. Subgraph-
+                # internal nodes have their own middleware (from the
+                # subgraph's own CompiledGraph.middleware tuple) and do
+                # NOT see the parent's middleware. Cast erases ChildT
+                # because the dispatcher only needs to invoke `node.run`
+                # and pass the parent's chain — the inner state class
+                # lives on the subgraph's own CompiledGraph.
+                sub = cast("SubgraphNode[StateT, State]", node)
+                state = await self._step_subgraph_node(sub, current, state, context)
             else:
                 state = await self._step_function_node(node, current, state, context)
 
@@ -297,36 +305,156 @@ class CompiledGraph[StateT: State]:
         state: StateT,
         context: _InvocationContext,
     ) -> StateT:
-        """Run one function-node step: take a step, dispatch started, run,
-        merge, dispatch completed.
+        """Run one function-node step through the middleware chain.
 
-        Per spec v0.6.0 §6: each attempt produces a started/completed pair.
-        Both events share the same `step`. The completed event carries
-        `post_state` on success, or `error` on failure (one of run, reducer,
-        or state-validation). The completed event is dispatched before the
-        failure propagates.
+        Per pipeline-utilities §3, the runtime chain composes:
+
+            [per_graph...] -> [per_node...] -> innermost
+
+        where ``innermost`` is the per-attempt dispatch wrapper around
+        ``node.run`` + reducer merge + observer event dispatch. Each call
+        to ``innermost`` is one attempt; middleware that calls ``next``
+        repeatedly (e.g., retry) produces multiple attempts and therefore
+        multiple started/completed event pairs from the engine, each
+        tagged with an incrementing ``attempt_index`` (graph-engine §6).
+
+        The chain is built fresh per dispatch so each step has its own
+        attempt counter. Subgraph isolation per pipeline-utilities §4 is
+        achieved by NOT including the parent's per-graph middleware when
+        the subgraph's own ``_step_function_node`` runs — each
+        CompiledGraph carries its own ``middleware`` tuple.
         """
         step = context.take_step()
         namespace = context.namespace_prefix + (current,)
-        pre_state = state
 
-        self._dispatch_started(context, current, namespace, step, pre_state)
+        # The innermost layer dispatches the per-attempt event pair around a
+        # single call to ``node.run``. Each call to this inner increments
+        # the attempt counter; middleware composes around it.
+        attempt_counter = [0]
+
+        async def innermost(s: Any) -> Mapping[str, Any]:
+            # Per pipeline-utilities §5 + graph-engine §6: per-attempt
+            # events use the wrapped §4 error type (NodeException etc.)
+            # for the observer's `error` field, but the RAW exception
+            # propagates up the chain so middleware classifiers can read
+            # the original `category` attribute (timing's
+            # exception_category, retry's classifier). The engine wraps
+            # any exception that escapes the chain, OUTSIDE this layer.
+            attempt_index = attempt_counter[0]
+            attempt_counter[0] = attempt_index + 1
+
+            self._dispatch_started(context, current, namespace, step, s, attempt_index=attempt_index)
+
+            try:
+                partial = await node.run(s)
+            except Exception as e:
+                wrapped = NodeException(node_name=current, cause=e, recoverable_state=s)
+                self._dispatch_completed(
+                    context,
+                    current,
+                    namespace,
+                    step,
+                    s,
+                    error=wrapped,
+                    attempt_index=attempt_index,
+                )
+                raise
+
+            try:
+                merged = _merge_partial(s, partial, self.reducers, current)
+            except (ReducerError, StateValidationError) as e:
+                self._dispatch_completed(
+                    context,
+                    current,
+                    namespace,
+                    step,
+                    s,
+                    error=e,
+                    attempt_index=attempt_index,
+                )
+                raise
+
+            self._dispatch_completed(
+                context,
+                current,
+                namespace,
+                step,
+                s,
+                post_state=merged,
+                attempt_index=attempt_index,
+            )
+            # Return the partial (not the merged state) so middleware sees
+            # the partial-update shape per pipeline-utilities §2. The
+            # engine's canonical merge against the original state happens
+            # below, after the chain returns.
+            return partial
+
+        chain: ChainCall = compose_chain(
+            list(self.middleware) + list(node.middleware),
+            innermost,
+        )
 
         try:
-            partial = await node.run(state)
-        except Exception as e:
-            wrapped = NodeException(node_name=current, cause=e, recoverable_state=state)
-            self._dispatch_completed(context, current, namespace, step, pre_state, error=wrapped)
-            raise wrapped from e
-
-        try:
-            new_state = _merge_partial(state, partial, self.reducers, current)
-        except (ReducerError, StateValidationError) as e:
-            self._dispatch_completed(context, current, namespace, step, pre_state, error=e)
+            final_partial = await chain(state)
+        except RuntimeGraphError:
             raise
+        except Exception as e:
+            # A raw exception (node-raised or middleware-raised) escaped
+            # the chain unrecovered. Wrap as NodeException per §4.
+            raise NodeException(node_name=current, cause=e, recoverable_state=state) from e
+        # Engine's canonical merge uses the ORIGINAL state per §2: "the
+        # transformed state is passed to ``next``, NOT to the engine's
+        # merge step." If middleware transformed state mid-chain, the
+        # per-attempt completed events showed the transformed merge for
+        # observability, but the state advancing the graph loop is built
+        # from the original.
+        return _merge_partial(state, final_partial, self.reducers, current)
 
-        self._dispatch_completed(context, current, namespace, step, pre_state, post_state=new_state)
-        return new_state
+    async def _step_subgraph_node(
+        self,
+        node: SubgraphNode[StateT, State],
+        current: str,
+        state: StateT,
+        context: _InvocationContext,
+    ) -> StateT:
+        """Run one subgraph-as-node step through the parent's middleware chain.
+
+        Per pipeline-utilities §4: the parent's per-graph middleware plus
+        any per-node middleware on the SubgraphNode wraps the subgraph
+        dispatch as a single atomic call. The subgraph's INTERNAL nodes
+        get their own middleware via the subgraph's own CompiledGraph;
+        parent middleware does NOT cross the boundary.
+
+        No started/completed events fire for the wrapper itself; the
+        events come from the subgraph's internal node executions (per
+        fixture 013).
+        """
+
+        async def innermost(s: Any) -> Mapping[str, Any]:
+            try:
+                return await node.run(s, context=context)
+            except RuntimeGraphError:
+                raise
+            except Exception as e:
+                raise NodeException(node_name=current, cause=e, recoverable_state=s) from e
+
+        chain: ChainCall = compose_chain(
+            list(self.middleware) + list(node.middleware),
+            innermost,
+        )
+
+        try:
+            final_partial = await chain(state)
+        except RuntimeGraphError:
+            raise
+        except Exception as e:
+            # Same wrap as _step_function_node: a raw exception escaping
+            # the parent's middleware chain (e.g., a middleware bug or a
+            # projection error) becomes NodeException tagged with the
+            # SubgraphNode's wrapper name so §4 recoverable_state is
+            # preserved.
+            raise NodeException(node_name=current, cause=e, recoverable_state=state) from e
+        return _merge_partial(state, final_partial, self.reducers, current)
 
     @staticmethod
     def _dispatch_started(
@@ -335,6 +463,8 @@ class CompiledGraph[StateT: State]:
         namespace: tuple[str, ...],
         step: int,
         pre_state: State,
+        *,
+        attempt_index: int = 0,
     ) -> None:
         _dispatch(
             context,
@@ -347,6 +477,7 @@ class CompiledGraph[StateT: State]:
                 post_state=None,
                 error=None,
                 parent_states=context.parent_states_prefix,
+                attempt_index=attempt_index,
             ),
         )
 
@@ -360,6 +491,7 @@ class CompiledGraph[StateT: State]:
         *,
         post_state: State | None = None,
         error: RuntimeGraphError | None = None,
+        attempt_index: int = 0,
     ) -> None:
         _dispatch(
             context,
@@ -372,5 +504,6 @@ class CompiledGraph[StateT: State]:
                 post_state=post_state,
                 error=error,
                 parent_states=context.parent_states_prefix,
+                attempt_index=attempt_index,
             ),
         )

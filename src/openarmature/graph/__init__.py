@@ -26,6 +26,14 @@ from .errors import (
     UnreachableNode,
 )
 from .events import NodeEvent
+from .middleware import (
+    Middleware,
+    RetryMiddleware,
+    TimingMiddleware,
+    TimingRecord,
+    deterministic_backoff,
+    exponential_jitter_backoff,
+)
 from .nodes import FunctionNode, Node
 from .observer import Observer, RemoveHandle, SubscribedObserver
 from .projection import ExplicitMapping, FieldNameMatching, ProjectionStrategy
@@ -48,6 +56,7 @@ __all__ = [
     "GraphBuilder",
     "GraphError",
     "MappingReferencesUndeclaredField",
+    "Middleware",
     "MultipleOutgoingEdges",
     "Node",
     "NodeEvent",
@@ -58,6 +67,7 @@ __all__ = [
     "Reducer",
     "ReducerError",
     "RemoveHandle",
+    "RetryMiddleware",
     "RoutingError",
     "RuntimeGraphError",
     "State",
@@ -65,8 +75,12 @@ __all__ = [
     "StaticEdge",
     "SubgraphNode",
     "SubscribedObserver",
+    "TimingMiddleware",
+    "TimingRecord",
     "UnreachableNode",
     "append",
+    "deterministic_backoff",
+    "exponential_jitter_backoff",
     "last_write_wins",
     "merge",
 ]

@@ -11,7 +11,7 @@ against the fixture's `expected` block.
 from __future__ import annotations
 
 import copy
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Annotated, Any, cast
 
@@ -125,6 +125,53 @@ def _make_raising_fn(
     return fn
 
 
+class _CategorizedException(Exception):
+    """A test exception carrying a `category` attribute so the default
+    retry classifier can match it."""
+
+    def __init__(self, message: str, category: str) -> None:
+        super().__init__(message)
+        self.category = category
+
+
+def _make_flaky_fn(
+    node_name: str,
+    flaky: Mapping[str, Any],
+    trace: list[str],
+) -> Callable[[Any], Awaitable[Mapping[str, Any]]]:
+    """Build a flaky node body that fails per a configured failure_sequence
+    and finally returns a success_update.
+
+    Per fixture 007's contract: `failure_sequence` is a list of failures
+    keyed to attempt index. Each entry has a `transient` flag, a
+    `category` (matched by the retry classifier), and a `message`. When
+    the sequence is exhausted, subsequent attempts return `success_update`.
+    """
+    sequence = list(flaky.get("failure_sequence", []))
+    success_update = dict(flaky.get("success_update", {}))
+    attempt_counter = [0]
+
+    async def fn(_state: Any) -> Mapping[str, Any]:
+        idx = attempt_counter[0]
+        attempt_counter[0] = idx + 1
+        # `execution_order` is engine-step-scoped, not per-attempt — only
+        # append on the first attempt so retry middleware re-invocations
+        # don't double-count the node.
+        if idx == 0:
+            trace.append(node_name)
+        if idx < len(sequence):
+            entry = sequence[idx]
+            if entry is None:
+                return copy.deepcopy(success_update)
+            raise _CategorizedException(
+                message=entry.get("message", "flaky"),
+                category=entry.get("category", "provider_unavailable"),
+            )
+        return copy.deepcopy(success_update)
+
+    return fn
+
+
 @dataclass(frozen=True)
 class _TracingSubgraphNode(SubgraphNode[State, State]):
     """Conformance helper: a SubgraphNode that appends its name to a shared
@@ -196,6 +243,8 @@ def build_graph(
     subgraphs: Mapping[str, CompiledGraph[State]] | None = None,
     trace: list[str] | None = None,
     model_name: str = "FixtureState",
+    node_middleware: Mapping[str, Sequence[Any]] | None = None,
+    graph_middleware: Sequence[Any] | None = None,
 ) -> BuiltGraph:
     """Translate a graph-shaped fixture block into a `BuiltGraph`.
 
@@ -203,6 +252,12 @@ def build_graph(
     `graph:` block for the table-style 007 cases. `subgraphs` is the registry
     used by 006-style fixtures to look up a compiled subgraph by its declared
     name.
+
+    `node_middleware` (mapping node name to ordered middleware list) and
+    `graph_middleware` (ordered middleware list applied to every node)
+    are pipeline-utilities §3 hooks. The translation from a fixture's
+    `middleware:` block into actual instances lives in the
+    pipeline-utilities test driver.
 
     Subgraph references in `spec.nodes` resolve to `_TracingSubgraphNode`
     (a SubgraphNode subclass) so the engine threads observer context through
@@ -217,8 +272,13 @@ def build_graph(
 
     trace = trace if trace is not None else []
     subgraphs = subgraphs or {}
+    node_middleware = node_middleware or {}
+
+    for mw in graph_middleware or ():
+        builder.add_middleware(mw)
 
     for node_name, node_spec in spec.get("nodes", {}).items():
+        per_node_mw = tuple(node_middleware.get(node_name, ()))
         if "subgraph" in node_spec:
             sub_name = node_spec["subgraph"]
             compiled = subgraphs[sub_name]
@@ -230,11 +290,26 @@ def build_graph(
                 compiled=compiled,
                 projection=projection,
                 trace_list=trace,
+                middleware=per_node_mw,
             )
         elif "raises" in node_spec:
-            builder.add_node(node_name, _make_raising_fn(node_name, node_spec["raises"], trace))
+            builder.add_node(
+                node_name,
+                _make_raising_fn(node_name, node_spec["raises"], trace),
+                middleware=per_node_mw,
+            )
+        elif "flaky" in node_spec:
+            builder.add_node(
+                node_name,
+                _make_flaky_fn(node_name, node_spec["flaky"], trace),
+                middleware=per_node_mw,
+            )
         elif "update" in node_spec:
-            builder.add_node(node_name, _make_update_fn(node_name, node_spec["update"], trace))
+            builder.add_node(
+                node_name,
+                _make_update_fn(node_name, node_spec["update"], trace),
+                middleware=per_node_mw,
+            )
         else:
             raise ValueError(f"node {node_name!r} has neither update, raises, nor subgraph")
 
