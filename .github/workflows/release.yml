@@ -1,0 +1,174 @@
+name: Release
+
+# Tag conventions:
+# - v0.5.0-rc1, v0.5.0-rc2, ...   → TestPyPI only (staging / dry-run)
+# - v0.5.0                        → PyPI + GitHub Release
+#
+# pyproject.toml's version field MUST match the tag (minus the leading "v").
+# PEP 440 normalizes "0.5.0-rc1" to "0.5.0rc1" at build time, so either form
+# is accepted in pyproject; the tag uses the dash form for readability.
+on:
+  push:
+    tags:
+      - "v[0-9]*.[0-9]*.[0-9]*"
+
+# Read-only by default. Each publishing job opts in to id-token: write
+# (Trusted Publishing OIDC); the github-release job opts in to contents:
+# write to create the release.
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # Conformance fixtures live in the openarmature-spec submodule.
+          submodules: recursive
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+        with:
+          enable-cache: true
+
+      - name: Sync deps
+        run: uv sync --frozen
+
+      # Fail fast if pyproject.toml's version doesn't match the pushed
+      # tag. Both sides go through `packaging.version.Version` so PEP 440
+      # equivalences like "0.5.0-rc1" ≡ "0.5.0rc1" are accepted.
+      - name: Verify pyproject.toml version matches tag
+        run: |
+          uv run python <<'PY'
+          import os
+          import sys
+          import tomllib
+
+          from packaging.version import Version
+
+          tag = os.environ["GITHUB_REF_NAME"].removeprefix("v")
+          with open("pyproject.toml", "rb") as f:
+              pyproj = tomllib.load(f)["project"]["version"]
+
+          if Version(pyproj) != Version(tag):
+              sys.exit(
+                  f"::error::version mismatch: pyproject={pyproj!r} vs "
+                  f"tag={tag!r} (normalized: pyproject={Version(pyproj)} "
+                  f"tag={Version(tag)})"
+              )
+          print(
+              f"OK: pyproject={pyproj} matches tag={tag} "
+              f"(normalized: {Version(pyproj)})"
+          )
+          PY
+
+      - name: Lint (ruff check)
+        run: uv run ruff check .
+
+      - name: Format check (ruff format --check)
+        run: uv run ruff format --check .
+
+      - name: Type check (pyright)
+        run: uv run pyright src/ tests/
+
+      - name: Run tests (pytest)
+        run: uv run pytest -q
+
+  build:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+        with:
+          enable-cache: true
+
+      - name: Sync deps
+        run: uv sync --frozen
+
+      - name: Build package
+        run: uv build
+
+      - name: Upload dist artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  # Pre-release tags (vX.Y.Z-rc*) publish to TestPyPI for verification.
+  # The job is gated on the tag's name containing "-rc"; non-RC tags skip
+  # this job and proceed to publish-pypi instead.
+  publish-testpypi:
+    needs: build
+    if: contains(github.ref_name, '-rc')
+    runs-on: ubuntu-latest
+    environment: testpypi
+    permissions:
+      id-token: write
+    steps:
+      - name: Download dist artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - name: Publish to TestPyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          repository-url: https://test.pypi.org/legacy/
+
+  # Real-release tags (vX.Y.Z, no suffix) publish to PyPI. Gated on the
+  # tag containing NO `-` so that any pre-release suffix (`-rc`, `-beta`,
+  # `-alpha`, `-dev`, ...) is failsafe — only `-rc` lands on TestPyPI;
+  # the rest do nothing and require an explicit retag, preventing an
+  # unintended PyPI upload from a misnamed tag. The pypi environment is
+  # the recommended place to add a "required reviewers" protection rule
+  # so the job pauses for manual approval before any real-PyPI upload.
+  publish-pypi:
+    needs: build
+    if: ${{ !contains(github.ref_name, '-') }}
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - name: Download dist artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+
+  # GitHub Release with auto-generated notes from commits since the last
+  # tag. Only fires on real releases (no suffix); pre-release tags leave
+  # no GitHub Release behind.
+  github-release:
+    needs: publish-pypi
+    if: ${{ !contains(github.ref_name, '-') }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download dist artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
