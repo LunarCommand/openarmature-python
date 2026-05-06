@@ -1,6 +1,6 @@
 # Releasing openarmature
 
-The release pipeline is tag-driven. Pushing an annotated tag triggers
+The release pipeline is tag-driven. Pushing a tag triggers
 `.github/workflows/release.yml`, which builds the package and either uploads
 to TestPyPI (pre-release tags) or PyPI plus a GitHub Release (final tags).
 
@@ -171,9 +171,6 @@ intended. Click "Review deployments" on the Actions run, approve the
 
 ## Future work
 
-- The Node.js 20 actions warning surfaces on every workflow run; bump
-  `actions/checkout@v4` and `astral-sh/setup-uv@v4` to versions that
-  ship Node 24 before the September 2026 deadline.
 - A first-class `drain` deadline parameter (spec proposal in flight) will
   change the engine API; release notes for that version should call it
   out as a behavioral change.
