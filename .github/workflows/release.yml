@@ -36,6 +36,34 @@ jobs:
       - name: Sync deps
         run: uv sync --frozen
 
+      # Fail fast if pyproject.toml's version doesn't match the pushed
+      # tag. Both sides go through `packaging.version.Version` so PEP 440
+      # equivalences like "0.5.0-rc1" ≡ "0.5.0rc1" are accepted.
+      - name: Verify pyproject.toml version matches tag
+        run: |
+          uv run python <<'PY'
+          import os
+          import sys
+          import tomllib
+
+          from packaging.version import Version
+
+          tag = os.environ["GITHUB_REF_NAME"].removeprefix("v")
+          with open("pyproject.toml", "rb") as f:
+              pyproj = tomllib.load(f)["project"]["version"]
+
+          if Version(pyproj) != Version(tag):
+              sys.exit(
+                  f"::error::version mismatch: pyproject={pyproj!r} vs "
+                  f"tag={tag!r} (normalized: pyproject={Version(pyproj)} "
+                  f"tag={Version(tag)})"
+              )
+          print(
+              f"OK: pyproject={pyproj} matches tag={tag} "
+              f"(normalized: {Version(pyproj)})"
+          )
+          PY
+
       - name: Lint (ruff check)
         run: uv run ruff check .
 
@@ -96,13 +124,16 @@ jobs:
         with:
           repository-url: https://test.pypi.org/legacy/
 
-  # Real-release tags (vX.Y.Z, no rc) publish to PyPI. The pypi
-  # environment is the recommended place to add a "required reviewers"
-  # protection rule so the job pauses for manual approval before any
-  # real-PyPI upload. Without that rule it auto-publishes.
+  # Real-release tags (vX.Y.Z, no suffix) publish to PyPI. Gated on the
+  # tag containing NO `-` so that any pre-release suffix (`-rc`, `-beta`,
+  # `-alpha`, `-dev`, ...) is failsafe — only `-rc` lands on TestPyPI;
+  # the rest do nothing and require an explicit retag, preventing an
+  # unintended PyPI upload from a misnamed tag. The pypi environment is
+  # the recommended place to add a "required reviewers" protection rule
+  # so the job pauses for manual approval before any real-PyPI upload.
   publish-pypi:
     needs: build
-    if: ${{ !contains(github.ref_name, '-rc') }}
+    if: ${{ !contains(github.ref_name, '-') }}
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
@@ -118,10 +149,11 @@ jobs:
         uses: pypa/gh-action-pypi-publish@release/v1
 
   # GitHub Release with auto-generated notes from commits since the last
-  # tag. Only fires on real releases (RCs leave no GitHub Release behind).
+  # tag. Only fires on real releases (no suffix); pre-release tags leave
+  # no GitHub Release behind.
   github-release:
     needs: publish-pypi
-    if: ${{ !contains(github.ref_name, '-rc') }}
+    if: ${{ !contains(github.ref_name, '-') }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
