@@ -331,7 +331,7 @@ async def _run_one(spec: Mapping[str, Any], monkeypatch: pytest.MonkeyPatch) -> 
     if "subgraph" in spec:
         sub_spec = spec["subgraph"]
         sub_sinks = sinks  # same sinks; subgraph middleware shares the harness's lists
-        sub_graph_mw, sub_node_mw = _translate_middleware_block(sub_spec.get("middleware"), sub_sinks)
+        sub_graph_mw, sub_node_mw = _translate_middleware_block(sub_spec.get("middleware"), sub_sinks, clock)
         sub_built = build_graph(
             sub_spec,
             model_name=f"{sub_spec['name'].title()}State",
@@ -382,7 +382,7 @@ async def _run_one(spec: Mapping[str, Any], monkeypatch: pytest.MonkeyPatch) -> 
         run_graph_mw, run_node_mw = (
             (graph_mw, node_mw)
             if run_count == 1
-            else _translate_middleware_block(spec.get("middleware"), run_sinks)
+            else _translate_middleware_block(spec.get("middleware"), run_sinks, clock)
         )
         run_built = build_graph(
             spec,

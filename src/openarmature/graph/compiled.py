@@ -443,7 +443,17 @@ class CompiledGraph[StateT: State]:
             innermost,
         )
 
-        final_partial = await chain(state)
+        try:
+            final_partial = await chain(state)
+        except RuntimeGraphError:
+            raise
+        except Exception as e:
+            # Same wrap as _step_function_node: a raw exception escaping
+            # the parent's middleware chain (e.g., a middleware bug or a
+            # projection error) becomes NodeException tagged with the
+            # SubgraphNode's wrapper name so §4 recoverable_state is
+            # preserved.
+            raise NodeException(node_name=current, cause=e, recoverable_state=state) from e
         return _merge_partial(state, final_partial, self.reducers, current)
 
     @staticmethod
