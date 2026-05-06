@@ -36,7 +36,7 @@ TRANSIENT_CATEGORIES: frozenset[str] = frozenset(
 )
 
 
-def default_classifier(exc: Exception, state: Any) -> bool:
+def default_classifier(exc: Exception, _state: Any) -> bool:
     """Spec §6.1 default classifier — purely category-based, ignores state.
 
     Returns True if either the exception itself or its ``__cause__``
@@ -45,10 +45,12 @@ def default_classifier(exc: Exception, state: Any) -> bool:
     ``NodeException`` wrapping an llm-provider transient — per the spec:
     "a `node_exception` whose `__cause__` is a transient category MUST
     be classified as transient."
+
+    The ``_state`` parameter is ignored by the default; the leading
+    underscore is the canonical Python convention for "intentionally
+    unused" while keeping the signature stable for user-supplied
+    state-aware classifiers.
     """
-    # Suppress the unused-arg warning while keeping the signature stable
-    # for user-supplied state-aware classifiers.
-    del state
     direct = getattr(exc, "category", None)
     if isinstance(direct, str) and direct in TRANSIENT_CATEGORIES:
         return True
