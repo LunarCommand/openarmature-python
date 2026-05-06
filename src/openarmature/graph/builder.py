@@ -10,7 +10,7 @@ all carry `StateT` forward so consumers get typed `invoke()` return values and
 a type-checked `state` parameter on every callback — without `cast(...)` calls.
 """
 
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Iterable, Mapping
 from typing import Any, Self, cast
 
 from .compiled import CompiledGraph
@@ -22,6 +22,7 @@ from .errors import (
     NoDeclaredEntry,
     UnreachableNode,
 )
+from .middleware import Middleware
 from .nodes import FunctionNode, Node
 from .projection import FieldNameMatching, ProjectionStrategy
 from .reducers import Reducer
@@ -37,15 +38,24 @@ class GraphBuilder[StateT: State]:
         self._nodes: dict[str, Node[StateT]] = {}
         self._edges: list[StaticEdge | ConditionalEdge[StateT]] = []
         self._entry: str | None = None
+        # Per-graph middleware in registration order (outer-to-inner).
+        # Composed OUTSIDE per-node middleware at runtime per spec §3.
+        self._middleware: list[Middleware] = []
 
     def add_node(
         self,
         name: str,
         fn: Callable[[StateT], Awaitable[Mapping[str, Any]]],
+        *,
+        middleware: Iterable[Middleware] | None = None,
     ) -> Self:
         if name in self._nodes:
             raise ValueError(f"node {name!r} already declared")
-        self._nodes[name] = FunctionNode[StateT](name=name, fn=fn)
+        self._nodes[name] = FunctionNode[StateT](
+            name=name,
+            fn=fn,
+            middleware=tuple(middleware) if middleware is not None else (),
+        )
         return self
 
     def add_subgraph_node[ChildT: State](
@@ -53,13 +63,31 @@ class GraphBuilder[StateT: State]:
         name: str,
         compiled: CompiledGraph[ChildT],
         projection: ProjectionStrategy[StateT, ChildT] | None = None,
+        *,
+        middleware: Iterable[Middleware] | None = None,
     ) -> Self:
         if name in self._nodes:
             raise ValueError(f"node {name!r} already declared")
         proj: ProjectionStrategy[StateT, ChildT] = (
             projection if projection is not None else FieldNameMatching[StateT, ChildT]()
         )
-        self._nodes[name] = SubgraphNode[StateT, ChildT](name=name, compiled=compiled, projection=proj)
+        self._nodes[name] = SubgraphNode[StateT, ChildT](
+            name=name,
+            compiled=compiled,
+            projection=proj,
+            middleware=tuple(middleware) if middleware is not None else (),
+        )
+        return self
+
+    def add_middleware(self, middleware: Middleware) -> Self:
+        """Register a per-graph middleware applied to every node in this graph.
+
+        Per spec pipeline-utilities §3: per-graph middleware composes
+        OUTSIDE per-node middleware. Calling order is preserved
+        (outer-to-inner) — earlier ``add_middleware`` calls produce
+        outer layers in the runtime chain.
+        """
+        self._middleware.append(middleware)
         return self
 
     def add_edge(self, source: str, target: str | EndSentinel) -> Self:
@@ -142,6 +170,7 @@ class GraphBuilder[StateT: State]:
             nodes=dict(self._nodes),
             edges=edges_by_source,
             reducers=resolved,
+            middleware=tuple(self._middleware),
         )
 
     def _reachable_nodes(

@@ -23,6 +23,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
+from .middleware import Middleware
 from .projection import FieldNameMatching, ProjectionStrategy
 from .state import State
 
@@ -33,13 +34,20 @@ if TYPE_CHECKING:
 
 @dataclass(frozen=True)
 class SubgraphNode[ParentT: State, ChildT: State]:
-    """A node backed by a compiled subgraph."""
+    """A node backed by a compiled subgraph.
+
+    Per pipeline-utilities §4: the parent's per-node middleware on a
+    SubgraphNode wraps the subgraph dispatch as a single atomic call —
+    parent middleware does NOT cross into the subgraph's internal nodes
+    (those are wrapped by the subgraph's own middleware independently).
+    """
 
     name: str
     compiled: "CompiledGraph[ChildT]"
     projection: ProjectionStrategy[ParentT, ChildT] = field(
         default_factory=FieldNameMatching[ParentT, ChildT]
     )
+    middleware: tuple[Middleware, ...] = field(default_factory=tuple[Middleware, ...])
 
     async def run(
         self,
