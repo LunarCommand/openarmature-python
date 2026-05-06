@@ -49,3 +49,10 @@ jobs:
 
       - name: Run tests (pytest)
         run: uv run pytest -q
+
+      # Build the wheel + sdist so packaging bugs (missing files in the
+      # wheel, malformed metadata, README that won't render on PyPI)
+      # surface here rather than waiting for a release tag. No upload —
+      # the artifact is discarded after the job ends.
+      - name: Build package
+        run: uv build
