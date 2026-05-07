@@ -223,6 +223,17 @@ def _make_flaky_by_index_fn(
     success_compute = dict(cfg.get("success_compute", {}))
     fail_count_per_idx = cfg.get("fail_count_per_idx")
     fail_when_idx = cfg.get("fail_when_idx")
+    # Fixture-global attempt counter. Truly per-instance semantics
+    # would require an identifier stable across an instance's retries
+    # AND distinct across fan-out instances. id(state) works for
+    # NODE-LEVEL retry (state stable across retries) but not for
+    # INSTANCE-LEVEL retry (each instance retry constructs a fresh
+    # subgraph state). A state-field key would work in principle but
+    # the field name is fixture-specific. The current fixtures
+    # (020 node-level retry, 019 collect mode) pass with this global
+    # counter because the timing aligns; documenting the limitation
+    # here so a future fixture exercising the gap surfaces a real
+    # failure rather than silently miscounting.
     attempt_counter = [0]
 
     async def fn(state: Any) -> Mapping[str, Any]:
@@ -239,7 +250,8 @@ def _make_flaky_by_index_fn(
                     message=f"flaky_by_index fail_when_idx={fail_when_idx}",
                     category=category,
                 )
-        # fail_count_per_idx mode: fail the first N attempts.
+        # fail_count_per_idx mode: fail the first N attempts (counted
+        # globally across the fan-out).
         elif fail_count_per_idx is not None and idx < int(fail_count_per_idx):
             raise _CategorizedException(
                 message=f"flaky_by_index failure at attempt {idx}",
@@ -257,9 +269,13 @@ def _make_flaky_instance_only_fn(
     cfg: Mapping[str, Any],
     trace: list[str],
 ) -> Callable[[Any], Awaitable[Mapping[str, Any]]]:
-    """`flaky_instance_only` test seam — fails on first attempt of each
-    fan-out instance, succeeds thereafter. Like flaky_by_index but the
-    failure is keyed to the FIRST call only regardless of count."""
+    """`flaky_instance_only` test seam — fails on the first call,
+    succeeds thereafter. Same fixture-global counter as
+    flaky_by_index; see that function's note on the per-instance vs
+    per-fixture keying tradeoff. The current fixtures (021
+    instance-level retry) align with the global counter at runtime
+    even though strict per-instance semantics would need a richer
+    identifier."""
     fail_first_only = bool(cfg.get("fail_first_only", True))
     category = cfg.get("category", "provider_unavailable")
     success_compute = dict(cfg.get("success_compute", {}))
