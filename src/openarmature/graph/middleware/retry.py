@@ -20,20 +20,13 @@ import random
 from collections.abc import Awaitable, Callable, Mapping
 from typing import Any
 
+from openarmature.llm.errors import TRANSIENT_CATEGORIES
+
 from ._core import NextCall
 
-# Default transient set per pipeline-utilities §6.1: matches against an
-# exception's ``category`` attribute (or the cause's, if the exception is
-# a NodeException wrapper). The canonical strings are spec-defined and
-# loose-coupled to llm-provider §7 — implementers don't have to import
-# the llm-provider module to wire up retry.
-TRANSIENT_CATEGORIES: frozenset[str] = frozenset(
-    {
-        "provider_rate_limit",
-        "provider_unavailable",
-        "provider_model_not_loaded",
-    }
-)
+# ``TRANSIENT_CATEGORIES`` is re-exported via this module's __all__
+# below. Canonical source of truth lives in ``openarmature.llm.errors``
+# (per llm-provider §7) — the retry middleware is just a consumer.
 
 
 def default_classifier(exc: Exception, _state: Any) -> bool:
