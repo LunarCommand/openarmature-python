@@ -14,6 +14,11 @@ from .errors import (
     ConflictingReducers,
     DanglingEdge,
     EdgeException,
+    FanOutCountModeAmbiguous,
+    FanOutEmpty,
+    FanOutFieldNotList,
+    FanOutInvalidConcurrency,
+    FanOutInvalidCount,
     GraphError,
     MappingReferencesUndeclaredField,
     MultipleOutgoingEdges,
@@ -26,6 +31,7 @@ from .errors import (
     UnreachableNode,
 )
 from .events import NodeEvent
+from .fan_out import FanOutConfig, FanOutNode
 from .middleware import (
     Middleware,
     RetryMiddleware,
@@ -51,6 +57,13 @@ __all__ = [
     "EdgeException",
     "EndSentinel",
     "ExplicitMapping",
+    "FanOutConfig",
+    "FanOutCountModeAmbiguous",
+    "FanOutEmpty",
+    "FanOutFieldNotList",
+    "FanOutInvalidConcurrency",
+    "FanOutInvalidCount",
+    "FanOutNode",
     "FieldNameMatching",
     "FunctionNode",
     "GraphBuilder",

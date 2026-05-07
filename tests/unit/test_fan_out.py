@@ -1,0 +1,753 @@
+"""Unit tests for the fan-out runtime (pipeline-utilities §9).
+
+Covers the spec-corner cases the conformance fixtures exercise only
+implicitly:
+
+- items_field projection
+- count mode (literal int + state-reading callable)
+- inputs mapping per-instance projection
+- concurrency limit enforcement
+- concurrency callable resolved exactly once at fan-out entry
+- fail_fast: first failure cancels siblings; recoverable_state is the
+  parent's pre-fan-out snapshot
+- collect: per-instance errors recorded; successes merged
+- on_empty: raise (default) and noop
+- count_field write behavior
+- errors_field collection shape
+- extra_outputs merge
+- instance_middleware chain composition
+- fan-in determinism under nondeterministic completion timing
+- compile-time errors (count_mode_ambiguous, field_not_list)
+"""
+
+from __future__ import annotations
+
+import asyncio
+import random
+from collections.abc import Mapping
+from typing import Annotated, Any
+
+import pytest
+from pydantic import Field
+
+from openarmature.graph import (
+    END,
+    CompiledGraph,
+    FanOutCountModeAmbiguous,
+    FanOutFieldNotList,
+    GraphBuilder,
+    NodeException,
+    RetryMiddleware,
+    State,
+    append,
+    deterministic_backoff,
+)
+
+# ---------------------------------------------------------------------------
+# Shared state schemas + helper builders
+# ---------------------------------------------------------------------------
+
+
+class WorkerState(State):
+    item: int = 0
+    extra: int = 0
+    result: int = 0
+    side: int = 0
+
+
+def _build_doubler() -> CompiledGraph[WorkerState]:
+    """A trivial worker subgraph: result = item * 2."""
+
+    async def compute(state: WorkerState) -> Mapping[str, Any]:
+        return {"result": state.item * 2}
+
+    builder: GraphBuilder[WorkerState] = GraphBuilder(WorkerState)
+    builder.set_entry("compute")
+    builder.add_node("compute", compute)
+    builder.add_edge("compute", END)
+    return builder.compile()
+
+
+def _build_constant_one() -> CompiledGraph[WorkerState]:
+    """Worker that ignores input, returns result=1. Used for count-mode tests."""
+
+    async def compute(_state: WorkerState) -> Mapping[str, Any]:
+        return {"result": 1}
+
+    builder: GraphBuilder[WorkerState] = GraphBuilder(WorkerState)
+    builder.set_entry("compute")
+    builder.add_node("compute", compute)
+    builder.add_edge("compute", END)
+    return builder.compile()
+
+
+# ---------------------------------------------------------------------------
+# items_field projection + basic fan-in
+# ---------------------------------------------------------------------------
+
+
+class ItemsParentState(State):
+    items: list[int] = Field(default_factory=list[int])
+    results: Annotated[list[int], append] = Field(default_factory=list[int])
+
+
+async def test_items_field_projection_doubles_each() -> None:
+    """Each instance receives one item; collected results preserve input
+    order (per §9.3 / §9.4)."""
+    inner = _build_doubler()
+    builder: GraphBuilder[ItemsParentState] = GraphBuilder(ItemsParentState)
+    builder.set_entry("process")
+    builder.add_fan_out_node(
+        "process",
+        subgraph=inner,
+        items_field="items",
+        item_field="item",
+        collect_field="result",
+        target_field="results",
+    )
+    builder.add_edge("process", END)
+    compiled = builder.compile()
+
+    final = await compiled.invoke(ItemsParentState(items=[1, 2, 3]))
+    await compiled.drain()
+    assert final.results == [2, 4, 6]
+
+
+# ---------------------------------------------------------------------------
+# count mode
+# ---------------------------------------------------------------------------
+
+
+class CountParentState(State):
+    n: int = 0
+    results: Annotated[list[int], append] = Field(default_factory=list[int])
+
+
+async def test_count_mode_literal_int() -> None:
+    inner = _build_constant_one()
+    builder: GraphBuilder[CountParentState] = GraphBuilder(CountParentState)
+    builder.set_entry("process")
+    builder.add_fan_out_node(
+        "process",
+        subgraph=inner,
+        count=4,
+        collect_field="result",
+        target_field="results",
+    )
+    builder.add_edge("process", END)
+    compiled = builder.compile()
+
+    final = await compiled.invoke(CountParentState())
+    await compiled.drain()
+    assert final.results == [1, 1, 1, 1]
+
+
+async def test_count_mode_state_reading_callable() -> None:
+    """``count`` may be a callable that reads the parent state at entry."""
+    inner = _build_constant_one()
+    builder: GraphBuilder[CountParentState] = GraphBuilder(CountParentState)
+    builder.set_entry("process")
+    builder.add_fan_out_node(
+        "process",
+        subgraph=inner,
+        count=lambda s: int(s.n),
+        collect_field="result",
+        target_field="results",
+    )
+    builder.add_edge("process", END)
+    compiled = builder.compile()
+
+    final = await compiled.invoke(CountParentState(n=5))
+    await compiled.drain()
+    assert final.results == [1, 1, 1, 1, 1]
+
+
+async def test_count_callable_resolved_exactly_once_at_entry() -> None:
+    """Per §9.2: count callable is invoked exactly once at fan-out entry.
+    A callable with side effects (counter increment) MUST be observed to
+    run exactly once."""
+    inner = _build_constant_one()
+    invocations = [0]
+
+    def counting_count(s: CountParentState) -> int:
+        invocations[0] += 1
+        return int(s.n)
+
+    builder: GraphBuilder[CountParentState] = GraphBuilder(CountParentState)
+    builder.set_entry("process")
+    builder.add_fan_out_node(
+        "process",
+        subgraph=inner,
+        count=counting_count,
+        collect_field="result",
+        target_field="results",
+    )
+    builder.add_edge("process", END)
+    compiled = builder.compile()
+    await compiled.invoke(CountParentState(n=3))
+    await compiled.drain()
+
+    assert invocations[0] == 1
+
+
+async def test_concurrency_callable_resolved_exactly_once_at_entry() -> None:
+    """Per §9.2: concurrency callable, like count, is invoked exactly
+    once at fan-out entry — even with many instances (which would
+    otherwise be a natural place to call it per-instance by mistake)."""
+
+    class _State(State):
+        items: list[int] = Field(default_factory=list[int])
+        cap: int = 0
+        results: Annotated[list[int], append] = Field(default_factory=list[int])
+
+    invocations = [0]
+
+    def counting_concurrency(s: _State) -> int:
+        invocations[0] += 1
+        return int(s.cap)
+
+    inner = _build_doubler()
+    builder: GraphBuilder[_State] = GraphBuilder(_State)
+    builder.set_entry("process")
+    builder.add_fan_out_node(
+        "process",
+        subgraph=inner,
+        items_field="items",
+        item_field="item",
+        collect_field="result",
+        target_field="results",
+        concurrency=counting_concurrency,
+    )
+    builder.add_edge("process", END)
+    compiled = builder.compile()
+    await compiled.invoke(_State(items=[1, 2, 3, 4, 5], cap=2))
+    await compiled.drain()
+
+    assert invocations[0] == 1
+
+
+# ---------------------------------------------------------------------------
+# inputs mapping projection
+# ---------------------------------------------------------------------------
+
+
+class InputsParentState(State):
+    items: list[int] = Field(default_factory=list[int])
+    boost: int = 0
+    results: Annotated[list[int], append] = Field(default_factory=list[int])
+
+
+async def test_inputs_mapping_projects_parent_fields() -> None:
+    """Per §9.1: ``inputs`` maps parent fields onto the per-instance
+    subgraph state at entry, alongside item_field."""
+
+    async def compute(state: WorkerState) -> Mapping[str, Any]:
+        return {"result": state.item + state.extra}
+
+    inner_builder: GraphBuilder[WorkerState] = GraphBuilder(WorkerState)
+    inner_builder.set_entry("compute")
+    inner_builder.add_node("compute", compute)
+    inner_builder.add_edge("compute", END)
+    inner = inner_builder.compile()
+
+    builder: GraphBuilder[InputsParentState] = GraphBuilder(InputsParentState)
+    builder.set_entry("process")
+    builder.add_fan_out_node(
+        "process",
+        subgraph=inner,
+        items_field="items",
+        item_field="item",
+        collect_field="result",
+        target_field="results",
+        inputs={"extra": "boost"},  # subgraph.extra <- parent.boost
+    )
+    builder.add_edge("process", END)
+    compiled = builder.compile()
+
+    final = await compiled.invoke(InputsParentState(items=[1, 2, 3], boost=10))
+    await compiled.drain()
+    assert final.results == [11, 12, 13]
+
+
+# ---------------------------------------------------------------------------
+# concurrency
+# ---------------------------------------------------------------------------
+
+
+class ConcurrencyParentState(State):
+    items: list[int] = Field(default_factory=list[int])
+    results: Annotated[list[int], append] = Field(default_factory=list[int])
+
+
+async def test_concurrency_limit_caps_in_flight_instances() -> None:
+    """``concurrency: 2`` means at most 2 instances run concurrently —
+    verified by tracking peak in-flight via a shared counter."""
+    in_flight = [0]
+    peak = [0]
+
+    async def slow_compute(state: WorkerState) -> Mapping[str, Any]:
+        in_flight[0] += 1
+        peak[0] = max(peak[0], in_flight[0])
+        await asyncio.sleep(0.01)
+        in_flight[0] -= 1
+        return {"result": state.item}
+
+    inner_builder: GraphBuilder[WorkerState] = GraphBuilder(WorkerState)
+    inner_builder.set_entry("compute")
+    inner_builder.add_node("compute", slow_compute)
+    inner_builder.add_edge("compute", END)
+    inner = inner_builder.compile()
+
+    builder: GraphBuilder[ConcurrencyParentState] = GraphBuilder(ConcurrencyParentState)
+    builder.set_entry("process")
+    builder.add_fan_out_node(
+        "process",
+        subgraph=inner,
+        items_field="items",
+        item_field="item",
+        collect_field="result",
+        target_field="results",
+        concurrency=2,
+    )
+    builder.add_edge("process", END)
+    compiled = builder.compile()
+    await compiled.invoke(ConcurrencyParentState(items=list(range(10))))
+    await compiled.drain()
+
+    assert peak[0] <= 2
+
+
+# ---------------------------------------------------------------------------
+# fail_fast / collect
+# ---------------------------------------------------------------------------
+
+
+class FailFastParentState(State):
+    items: list[int] = Field(default_factory=list[int])
+    results: Annotated[list[int], append] = Field(default_factory=list[int])
+
+
+async def test_fail_fast_propagates_first_failure_with_parent_recoverable_state() -> None:
+    """Per §9.5: the first failure raises through the fan-out as a
+    NodeException whose recoverable_state is the parent's pre-fan-out
+    snapshot, NOT the inner instance's state."""
+
+    async def maybe_fail(state: WorkerState) -> Mapping[str, Any]:
+        if state.item == 1:
+            raise RuntimeError("boom on idx=1")
+        return {"result": state.item}
+
+    inner_builder: GraphBuilder[WorkerState] = GraphBuilder(WorkerState)
+    inner_builder.set_entry("compute")
+    inner_builder.add_node("compute", maybe_fail)
+    inner_builder.add_edge("compute", END)
+    inner = inner_builder.compile()
+
+    builder: GraphBuilder[FailFastParentState] = GraphBuilder(FailFastParentState)
+    builder.set_entry("process")
+    builder.add_fan_out_node(
+        "process",
+        subgraph=inner,
+        items_field="items",
+        item_field="item",
+        collect_field="result",
+        target_field="results",
+    )
+    builder.add_edge("process", END)
+    compiled = builder.compile()
+
+    with pytest.raises(NodeException) as excinfo:
+        await compiled.invoke(FailFastParentState(items=[0, 1, 2]))
+    await compiled.drain()
+    assert excinfo.value.node_name == "process"
+    assert excinfo.value.recoverable_state.items == [0, 1, 2]
+    assert excinfo.value.recoverable_state.results == []
+
+
+class CollectParentState(State):
+    items: list[int] = Field(default_factory=list[int])
+    results: Annotated[list[int], append] = Field(default_factory=list[int])
+    errors: Annotated[list[dict[str, str]], append] = Field(default_factory=list[dict[str, str]])
+
+
+async def test_collect_records_per_instance_errors() -> None:
+    """Per §9.5: collect mode runs all instances to completion; failures
+    are recorded in errors_field; successes contribute to target_field."""
+
+    async def maybe_fail(state: WorkerState) -> Mapping[str, Any]:
+        if state.item == 1:
+            raise RuntimeError("boom")
+        return {"result": state.item * 10}
+
+    inner_builder: GraphBuilder[WorkerState] = GraphBuilder(WorkerState)
+    inner_builder.set_entry("compute")
+    inner_builder.add_node("compute", maybe_fail)
+    inner_builder.add_edge("compute", END)
+    inner = inner_builder.compile()
+
+    builder: GraphBuilder[CollectParentState] = GraphBuilder(CollectParentState)
+    builder.set_entry("process")
+    builder.add_fan_out_node(
+        "process",
+        subgraph=inner,
+        items_field="items",
+        item_field="item",
+        collect_field="result",
+        target_field="results",
+        error_policy="collect",
+        errors_field="errors",
+    )
+    builder.add_edge("process", END)
+    compiled = builder.compile()
+    final = await compiled.invoke(CollectParentState(items=[0, 1, 2]))
+    await compiled.drain()
+
+    # Successes preserved in input order; failure (idx=1) omitted.
+    assert final.results == [0, 20]
+    # Errors carry instance index + category.
+    assert len(final.errors) == 1
+    assert final.errors[0] == {"fan_out_index": "1", "category": "node_exception"}
+
+
+# ---------------------------------------------------------------------------
+# on_empty
+# ---------------------------------------------------------------------------
+
+
+class EmptyParentState(State):
+    items: list[int] = Field(default_factory=list[int])
+    results: Annotated[list[int], append] = Field(default_factory=list[int])
+    processed_count: int = -1
+
+
+async def test_on_empty_raise_default_raises_fan_out_empty() -> None:
+    """Per §9.1: empty fan-out with on_empty='raise' (default) raises
+    a NodeException tagged with fan_out_category='fan_out_empty'."""
+    inner = _build_doubler()
+    builder: GraphBuilder[EmptyParentState] = GraphBuilder(EmptyParentState)
+    builder.set_entry("process")
+    builder.add_fan_out_node(
+        "process",
+        subgraph=inner,
+        items_field="items",
+        item_field="item",
+        collect_field="result",
+        target_field="results",
+    )
+    builder.add_edge("process", END)
+    compiled = builder.compile()
+
+    with pytest.raises(NodeException) as excinfo:
+        await compiled.invoke(EmptyParentState(items=[]))
+    await compiled.drain()
+    assert getattr(excinfo.value, "fan_out_category", None) == "fan_out_empty"
+
+
+async def test_on_empty_noop_writes_count_field_zero() -> None:
+    """Per §9.1: on_empty='noop' produces a clean no-op; count_field
+    captures the resolved 0."""
+    inner = _build_doubler()
+    builder: GraphBuilder[EmptyParentState] = GraphBuilder(EmptyParentState)
+    builder.set_entry("process")
+    builder.add_fan_out_node(
+        "process",
+        subgraph=inner,
+        items_field="items",
+        item_field="item",
+        collect_field="result",
+        target_field="results",
+        on_empty="noop",
+        count_field="processed_count",
+    )
+    builder.add_edge("process", END)
+    compiled = builder.compile()
+
+    final = await compiled.invoke(EmptyParentState(items=[]))
+    await compiled.drain()
+    assert final.results == []
+    assert final.processed_count == 0
+
+
+# ---------------------------------------------------------------------------
+# count_field write behavior
+# ---------------------------------------------------------------------------
+
+
+class CountFieldParentState(State):
+    items: list[int] = Field(default_factory=list[int])
+    results: Annotated[list[int], append] = Field(default_factory=list[int])
+    processed: int = -1
+
+
+async def test_count_field_records_actual_count_on_success() -> None:
+    """Per §9 Configuration: count_field is written with the resolved
+    instance count after fan-in, regardless of whether on_empty fires."""
+    inner = _build_doubler()
+    builder: GraphBuilder[CountFieldParentState] = GraphBuilder(CountFieldParentState)
+    builder.set_entry("process")
+    builder.add_fan_out_node(
+        "process",
+        subgraph=inner,
+        items_field="items",
+        item_field="item",
+        collect_field="result",
+        target_field="results",
+        count_field="processed",
+    )
+    builder.add_edge("process", END)
+    compiled = builder.compile()
+
+    final = await compiled.invoke(CountFieldParentState(items=[5, 10, 15]))
+    await compiled.drain()
+    assert final.processed == 3
+
+
+# ---------------------------------------------------------------------------
+# extra_outputs merge
+# ---------------------------------------------------------------------------
+
+
+class ExtraOutputsParentState(State):
+    items: list[int] = Field(default_factory=list[int])
+    results: Annotated[list[int], append] = Field(default_factory=list[int])
+    sides: Annotated[list[int], append] = Field(default_factory=list[int])
+
+
+async def test_extra_outputs_merges_additional_per_instance_fields() -> None:
+    """Per §9.3: extra_outputs collects additional non-collected fields
+    from each instance and merges them via the parent's reducer."""
+
+    async def compute(state: WorkerState) -> Mapping[str, Any]:
+        return {"result": state.item, "side": state.item * 100}
+
+    inner_builder: GraphBuilder[WorkerState] = GraphBuilder(WorkerState)
+    inner_builder.set_entry("compute")
+    inner_builder.add_node("compute", compute)
+    inner_builder.add_edge("compute", END)
+    inner = inner_builder.compile()
+
+    builder: GraphBuilder[ExtraOutputsParentState] = GraphBuilder(ExtraOutputsParentState)
+    builder.set_entry("process")
+    builder.add_fan_out_node(
+        "process",
+        subgraph=inner,
+        items_field="items",
+        item_field="item",
+        collect_field="result",
+        target_field="results",
+        extra_outputs={"sides": "side"},
+    )
+    builder.add_edge("process", END)
+    compiled = builder.compile()
+    final = await compiled.invoke(ExtraOutputsParentState(items=[1, 2, 3]))
+    await compiled.drain()
+    assert final.results == [1, 2, 3]
+    assert final.sides == [100, 200, 300]
+
+
+# ---------------------------------------------------------------------------
+# instance_middleware composition
+# ---------------------------------------------------------------------------
+
+
+class InstanceMwParentState(State):
+    items: list[int] = Field(default_factory=list[int])
+    results: Annotated[list[int], append] = Field(default_factory=list[int])
+
+
+async def test_instance_middleware_retry_recovers_per_instance() -> None:
+    """instance_middleware wraps each instance's whole subgraph
+    invocation. Retry around an instance retries the WHOLE invocation,
+    not the inner node — the chain runs from scratch on each retry."""
+
+    class _Transient(Exception):
+        category = "provider_rate_limit"
+
+    instance_attempts: dict[int, int] = {}
+
+    async def maybe_fail(state: WorkerState) -> Mapping[str, Any]:
+        n = instance_attempts.get(state.item, 0)
+        instance_attempts[state.item] = n + 1
+        if n == 0:
+            raise _Transient()
+        return {"result": state.item}
+
+    inner_builder: GraphBuilder[WorkerState] = GraphBuilder(WorkerState)
+    inner_builder.set_entry("compute")
+    inner_builder.add_node("compute", maybe_fail)
+    inner_builder.add_edge("compute", END)
+    inner = inner_builder.compile()
+
+    retry = RetryMiddleware(max_attempts=3, backoff=deterministic_backoff(0))
+
+    builder: GraphBuilder[InstanceMwParentState] = GraphBuilder(InstanceMwParentState)
+    builder.set_entry("process")
+    builder.add_fan_out_node(
+        "process",
+        subgraph=inner,
+        items_field="items",
+        item_field="item",
+        collect_field="result",
+        target_field="results",
+        instance_middleware=[retry],
+    )
+    builder.add_edge("process", END)
+    compiled = builder.compile()
+
+    final = await compiled.invoke(InstanceMwParentState(items=[7, 9]))
+    await compiled.drain()
+    assert final.results == [7, 9]
+    # Each instance ran twice (1 fail + 1 success).
+    assert instance_attempts == {7: 2, 9: 2}
+
+
+# ---------------------------------------------------------------------------
+# Fan-in determinism under nondeterministic completion order (§9.4)
+# ---------------------------------------------------------------------------
+
+
+class DetParentState(State):
+    items: list[int] = Field(default_factory=list[int])
+    results: Annotated[list[int], append] = Field(default_factory=list[int])
+
+
+async def _run_with_random_delays(seed: int) -> list[int]:
+    """Run a fan-out where each instance sleeps a random duration before
+    returning. The collected list MUST preserve input order regardless
+    of completion timing."""
+    rng = random.Random(seed)
+
+    async def slow(state: WorkerState) -> Mapping[str, Any]:
+        await asyncio.sleep(rng.uniform(0, 0.005))
+        return {"result": state.item}
+
+    inner_builder: GraphBuilder[WorkerState] = GraphBuilder(WorkerState)
+    inner_builder.set_entry("compute")
+    inner_builder.add_node("compute", slow)
+    inner_builder.add_edge("compute", END)
+    inner = inner_builder.compile()
+
+    builder: GraphBuilder[DetParentState] = GraphBuilder(DetParentState)
+    builder.set_entry("process")
+    builder.add_fan_out_node(
+        "process",
+        subgraph=inner,
+        items_field="items",
+        item_field="item",
+        collect_field="result",
+        target_field="results",
+        concurrency=None,  # unbounded — maximum nondeterminism in completion order
+    )
+    builder.add_edge("process", END)
+    compiled = builder.compile()
+    final = await compiled.invoke(DetParentState(items=list(range(20))))
+    await compiled.drain()
+    return list(final.results)
+
+
+async def test_fan_in_preserves_input_order_under_random_completion_timing() -> None:
+    """Per §9.4: target_field is in instance-index order, NOT completion
+    order. Run the same fan-out N times with different random sleep
+    seeds; every run produces the same result list."""
+    expected = list(range(20))
+    for seed in range(8):
+        result = await _run_with_random_delays(seed)
+        assert result == expected
+
+
+# ---------------------------------------------------------------------------
+# Compile-time errors
+# ---------------------------------------------------------------------------
+
+
+class _CompileTestState(State):
+    items: list[int] = Field(default_factory=list[int])
+    not_a_list: int = 0
+    results: Annotated[list[int], append] = Field(default_factory=list[int])
+
+
+def test_compile_error_count_mode_ambiguous_when_both_specified() -> None:
+    """Per spec §9: specifying both items_field AND count is a compile
+    error with category fan_out_count_mode_ambiguous."""
+    inner = _build_doubler()
+    builder: GraphBuilder[_CompileTestState] = GraphBuilder(_CompileTestState)
+    with pytest.raises(FanOutCountModeAmbiguous):
+        builder.add_fan_out_node(
+            "process",
+            subgraph=inner,
+            items_field="items",
+            item_field="item",
+            count=3,  # invalid — both items_field and count
+            collect_field="result",
+            target_field="results",
+        )
+
+
+def test_compile_error_count_mode_ambiguous_when_neither_specified() -> None:
+    inner = _build_doubler()
+    builder: GraphBuilder[_CompileTestState] = GraphBuilder(_CompileTestState)
+    with pytest.raises(FanOutCountModeAmbiguous):
+        builder.add_fan_out_node(
+            "process",
+            subgraph=inner,
+            collect_field="result",
+            target_field="results",
+            # no items_field, no count
+        )
+
+
+def test_compile_error_field_not_list() -> None:
+    """Per spec §9: items_field must reference a list-typed parent
+    field. A non-list type is a compile error with category
+    fan_out_field_not_list."""
+    inner = _build_doubler()
+    builder: GraphBuilder[_CompileTestState] = GraphBuilder(_CompileTestState)
+    with pytest.raises(FanOutFieldNotList):
+        builder.add_fan_out_node(
+            "process",
+            subgraph=inner,
+            items_field="not_a_list",  # int field, not list
+            item_field="item",
+            collect_field="result",
+            target_field="results",
+        )
+
+
+def test_compile_error_inputs_references_undeclared_parent_field() -> None:
+    """Per spec §9: ``inputs`` mapping entries MUST refer to declared
+    fields on both sides. An undeclared parent field raises
+    ``mapping_references_undeclared_field`` at registration time."""
+    from openarmature.graph import MappingReferencesUndeclaredField
+
+    inner = _build_doubler()
+    builder: GraphBuilder[_CompileTestState] = GraphBuilder(_CompileTestState)
+    with pytest.raises(MappingReferencesUndeclaredField):
+        builder.add_fan_out_node(
+            "process",
+            subgraph=inner,
+            items_field="items",
+            item_field="item",
+            collect_field="result",
+            target_field="results",
+            inputs={"extra": "no_such_parent_field"},  # parent side undeclared
+        )
+
+
+def test_compile_error_extra_outputs_references_undeclared_subgraph_field() -> None:
+    """Same shape as inputs validation, on the extra_outputs side: a
+    subgraph field reference that the inner schema doesn't declare
+    raises ``mapping_references_undeclared_field``."""
+    from openarmature.graph import MappingReferencesUndeclaredField
+
+    inner = _build_doubler()
+    builder: GraphBuilder[_CompileTestState] = GraphBuilder(_CompileTestState)
+    with pytest.raises(MappingReferencesUndeclaredField):
+        builder.add_fan_out_node(
+            "process",
+            subgraph=inner,
+            items_field="items",
+            item_field="item",
+            collect_field="result",
+            target_field="results",
+            extra_outputs={"results": "no_such_subgraph_field"},  # subgraph side undeclared
+        )

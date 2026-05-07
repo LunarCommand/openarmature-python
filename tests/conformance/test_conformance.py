@@ -61,16 +61,10 @@ _STANDARD_RUNTIME_FIXTURES = [
 # either expand the adapter or replace it with the typed harness.
 _UNSUPPORTED_NODE_DIRECTIVES = frozenset(
     {
-        "fan_out",
-        "flaky",
-        "flaky_by_index",
         "flaky_per_index",
-        "flaky_instance_only",
         "flaky_resume_aware",
         "calls_llm",
-        "update_pure",
         "update_pure_from_state",
-        "update_from_field",
         "emits_log",
         "also_emits_via_global_tracer",
     }

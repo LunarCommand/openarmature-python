@@ -75,6 +75,30 @@ class MappingReferencesUndeclaredField(CompileError):
         self.field_name = field_name
 
 
+class FanOutCountModeAmbiguous(CompileError):
+    """Per spec v0.4.0 §9: a fan-out node MUST specify exactly one of
+    ``items_field`` or ``count``. Specifying both or neither is a
+    compile error."""
+
+    category = "fan_out_count_mode_ambiguous"
+
+    def __init__(self, node_name: str, message: str) -> None:
+        super().__init__(f"fan-out node {node_name!r}: {message}")
+        self.node_name = node_name
+
+
+class FanOutFieldNotList(CompileError):
+    """Per spec v0.4.0 §9: a fan-out node's ``items_field`` MUST refer
+    to a declared list-typed field on the parent state schema."""
+
+    category = "fan_out_field_not_list"
+
+    def __init__(self, node_name: str, field_name: str) -> None:
+        super().__init__(f"fan-out node {node_name!r}: items_field {field_name!r} is not a list-typed field")
+        self.node_name = node_name
+        self.field_name = field_name
+
+
 # ===== Runtime errors (spec §4) =====
 
 
@@ -150,6 +174,59 @@ class RoutingError(RuntimeGraphError):
         self.source_node = source_node
         self.returned = returned
         self.recoverable_state = recoverable_state
+
+
+class FanOutEmpty(NodeException):
+    """Per spec v0.4.0 §9.1: a fan-out node resolved to zero instances
+    while its ``on_empty`` config was ``"raise"`` (the default).
+
+    Per fixture 023's expected shape, this surfaces as a regular §4
+    ``node_exception`` (so it integrates with the existing error
+    propagation and recoverable-state machinery) but exposes an
+    additional ``fan_out_category`` attribute so callers can
+    distinguish empty-fan-out from generic node failures.
+    """
+
+    fan_out_category = "fan_out_empty"
+
+    def __init__(self, node_name: str, recoverable_state: Any) -> None:
+        # Construct a synthetic cause so the NodeException message and
+        # __cause__ chain stay consistent with the rest of §4.
+        cause = RuntimeError(f"fan-out node {node_name!r} resolved to zero instances and on_empty='raise'")
+        super().__init__(
+            node_name=node_name,
+            cause=cause,
+            recoverable_state=recoverable_state,
+        )
+
+
+class FanOutInvalidCount(NodeException):
+    """Per spec v0.4.0 §9.1: a fan-out node's ``count`` callable returned
+    a negative integer at runtime. Same node_exception shape as
+    FanOutEmpty, with ``fan_out_category = "fan_out_invalid_count"``."""
+
+    fan_out_category = "fan_out_invalid_count"
+
+    def __init__(self, node_name: str, returned: int, recoverable_state: Any) -> None:
+        cause = ValueError(f"fan-out node {node_name!r}: count callable returned {returned!r} (must be >= 0)")
+        super().__init__(node_name=node_name, cause=cause, recoverable_state=recoverable_state)
+        self.returned = returned
+
+
+class FanOutInvalidConcurrency(NodeException):
+    """Per spec v0.4.0 §9.2: a fan-out node's ``concurrency`` callable
+    returned zero or a negative integer at runtime. Same node_exception
+    shape as FanOutEmpty."""
+
+    fan_out_category = "fan_out_invalid_concurrency"
+
+    def __init__(self, node_name: str, returned: int | None, recoverable_state: Any) -> None:
+        cause = ValueError(
+            f"fan-out node {node_name!r}: concurrency callable returned {returned!r} "
+            "(must be a positive integer or None)"
+        )
+        super().__init__(node_name=node_name, cause=cause, recoverable_state=recoverable_state)
+        self.returned = returned
 
 
 class StateValidationError(RuntimeGraphError):
