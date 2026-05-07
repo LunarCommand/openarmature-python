@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from .messages import AssistantMessage
 
@@ -38,9 +38,9 @@ class Usage(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    prompt_tokens: int | None
-    completion_tokens: int | None
-    total_tokens: int | None
+    prompt_tokens: int | None = Field(ge=0)
+    completion_tokens: int | None = Field(ge=0)
+    total_tokens: int | None = Field(ge=0)
 
 
 class Response(BaseModel):

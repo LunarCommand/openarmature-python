@@ -42,6 +42,7 @@ from collections.abc import Sequence
 from typing import Any, cast
 
 import httpx
+from pydantic import ValidationError
 
 from .errors import (
     ProviderAuthentication,
@@ -273,17 +274,23 @@ class OpenAIProvider:
             raise ProviderInvalidResponse(f"could not parse assistant message: {exc}") from exc
 
         # Usage is optional — build a Usage with all-None fields if
-        # the provider didn't report it.
+        # the provider didn't report it. Per spec §6, token counts MUST
+        # be non-negative integers; a wire response that violates that
+        # surfaces as ``provider_invalid_response`` rather than
+        # silently passing through.
         usage_wire_raw = payload.get("usage")
-        if isinstance(usage_wire_raw, dict):
-            usage_wire = cast("dict[str, Any]", usage_wire_raw)
-            usage = Usage(
-                prompt_tokens=usage_wire.get("prompt_tokens"),
-                completion_tokens=usage_wire.get("completion_tokens"),
-                total_tokens=usage_wire.get("total_tokens"),
-            )
-        else:
-            usage = Usage(prompt_tokens=None, completion_tokens=None, total_tokens=None)
+        try:
+            if isinstance(usage_wire_raw, dict):
+                usage_wire = cast("dict[str, Any]", usage_wire_raw)
+                usage = Usage(
+                    prompt_tokens=usage_wire.get("prompt_tokens"),
+                    completion_tokens=usage_wire.get("completion_tokens"),
+                    total_tokens=usage_wire.get("total_tokens"),
+                )
+            else:
+                usage = Usage(prompt_tokens=None, completion_tokens=None, total_tokens=None)
+        except ValidationError as exc:
+            raise ProviderInvalidResponse(f"invalid usage record: {exc}") from exc
 
         return Response(
             message=assistant_msg,

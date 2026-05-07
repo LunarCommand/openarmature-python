@@ -38,6 +38,7 @@ from openarmature.llm import (
     Tool,
     ToolCall,
     ToolMessage,
+    Usage,
     UserMessage,
     validate_message_list,
     validate_tools,
@@ -432,5 +433,52 @@ async def test_complete_does_not_mutate_messages_or_tools() -> None:
             assert actual == expected
         for actual_t, expected_t in zip(tools, before_tools, strict=True):
             assert actual_t == expected_t
+    finally:
+        await provider.aclose()
+
+
+# ---------------------------------------------------------------------------
+# Usage non-negative constraint (spec §6: "non-negative integer or None")
+# ---------------------------------------------------------------------------
+
+
+def test_usage_negative_token_count_rejected_at_construction() -> None:
+    with pytest.raises(ValidationError):
+        Usage(prompt_tokens=-1, completion_tokens=0, total_tokens=0)
+
+
+async def test_complete_negative_usage_surfaces_as_invalid_response() -> None:
+    """A wire response carrying a negative token count MUST surface as
+    ``provider_invalid_response`` rather than silently passing through —
+    spec §6 token counts are non-negative integers."""
+
+    def _bad(_req: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "id": "x",
+                "object": "chat.completion",
+                "created": 0,
+                "model": "m",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "ok"},
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {"prompt_tokens": -5, "completion_tokens": 1, "total_tokens": 1},
+            },
+        )
+
+    provider = OpenAIProvider(
+        base_url="http://test",
+        model="m",
+        api_key="k",
+        transport=httpx.MockTransport(_bad),
+    )
+    try:
+        with pytest.raises(ProviderInvalidResponse, match="invalid usage record"):
+            await provider.complete([UserMessage(content="hi")])
     finally:
         await provider.aclose()
