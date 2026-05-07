@@ -331,8 +331,20 @@ class CompiledGraph[StateT: State]:
             # State coercion: if the record carries a Pydantic instance
             # (in-memory backend), use it directly; if it's a dict (JSON-
             # mode SQLite), re-validate against the declared state class.
+            # A validation failure means the persisted record is
+            # incompatible with the current graph (state-shape mismatch
+            # or missing required fields), which §10.10 names as
+            # ``checkpoint_record_invalid`` — wrap the ValidationError
+            # so callers see the canonical category, not the raw
+            # pydantic exception.
             if isinstance(outer_raw, dict):
-                starting_state = self.state_cls.model_validate(outer_raw)
+                try:
+                    starting_state = self.state_cls.model_validate(outer_raw)
+                except ValidationError as exc:
+                    raise CheckpointRecordInvalid(
+                        resume_invocation,
+                        f"saved outer state does not validate against {self.state_cls.__name__}: {exc}",
+                    ) from exc
             else:
                 starting_state = cast("StateT", outer_raw)
             # §10.4 step 3: keep the original correlation_id verbatim.
@@ -355,6 +367,7 @@ class CompiledGraph[StateT: State]:
             completed_positions=completed_positions,
             resume_skip_set=resume_skip_set,
             pending_resume_states=pending_resume_states,
+            resume_invocation=resume_invocation,
         )
         worker = asyncio.create_task(deliver_loop(queue))
         self._active_workers.add(worker)
@@ -590,13 +603,16 @@ class CompiledGraph[StateT: State]:
         # Spec §10.3: save fires once the canonical merge succeeds —
         # the LAST attempt's index is what gets recorded (retries
         # don't multiply saves). attempt_counter[0] is one past the
-        # final attempt at this point, hence the -1.
+        # final attempt; ``max(0, ... - 1)`` covers the
+        # short-circuit case where middleware returns a partial
+        # without ever invoking ``next()`` (counter stays at 0,
+        # subtracting 1 would yield an invalid -1).
         await self._maybe_save_checkpoint(
             context,
             node_name=current,
             namespace=namespace,
             step=step,
-            attempt_index=attempt_counter[0] - 1,
+            attempt_index=max(0, attempt_counter[0] - 1),
             post_state=merged_outer,
         )
         return merged_outer
@@ -668,26 +684,55 @@ class CompiledGraph[StateT: State]:
         """
         step = context.take_step()
         namespace = context.namespace_prefix + (current,)
+        # Same pattern as ``_step_function_node``: a mutable counter the
+        # innermost closure reads-and-increments per attempt so retry
+        # middleware wrapped at the parent level (per fixture 020)
+        # produces correctly-indexed per-attempt events, and the save
+        # records the final successful attempt's index rather than a
+        # hardcoded 0.
+        attempt_counter: list[int] = [0]
 
         async def innermost(s: Any) -> Mapping[str, Any]:
-            self._dispatch_started(context, current, namespace, step, s)
+            attempt_index = attempt_counter[0]
+            attempt_counter[0] += 1
+            self._dispatch_started(context, current, namespace, step, s, attempt_index=attempt_index)
             try:
                 partial = await node.run_with_context(s, context)
             except RuntimeGraphError as e:
-                self._dispatch_completed(context, current, namespace, step, s, error=e)
+                self._dispatch_completed(
+                    context, current, namespace, step, s, error=e, attempt_index=attempt_index
+                )
                 raise
             except Exception as e:
                 wrapped = NodeException(node_name=current, cause=e, recoverable_state=s)
-                self._dispatch_completed(context, current, namespace, step, s, error=wrapped)
+                self._dispatch_completed(
+                    context,
+                    current,
+                    namespace,
+                    step,
+                    s,
+                    error=wrapped,
+                    attempt_index=attempt_index,
+                )
                 raise wrapped from e
 
             try:
                 merged = _merge_partial(s, partial, self.reducers, current)
             except (ReducerError, StateValidationError) as e:
-                self._dispatch_completed(context, current, namespace, step, s, error=e)
+                self._dispatch_completed(
+                    context, current, namespace, step, s, error=e, attempt_index=attempt_index
+                )
                 raise
 
-            self._dispatch_completed(context, current, namespace, step, s, post_state=merged)
+            self._dispatch_completed(
+                context,
+                current,
+                namespace,
+                step,
+                s,
+                post_state=merged,
+                attempt_index=attempt_index,
+            )
             return partial
 
         chain: ChainCall = compose_chain(
@@ -706,13 +751,15 @@ class CompiledGraph[StateT: State]:
         # one record once the fan-out as a whole has finished and
         # results have merged back. Per-instance internal saves are
         # gated off by the fan-out instance descent setting
-        # ``checkpointer=None`` on the inner context.
+        # ``checkpointer=None`` on the inner context. ``max(0, ...)``
+        # guards against the short-circuit case (middleware returns a
+        # partial without ever invoking ``next()``).
         await self._maybe_save_checkpoint(
             context,
             node_name=current,
             namespace=namespace,
             step=step,
-            attempt_index=0,
+            attempt_index=max(0, attempt_counter[0] - 1),
             post_state=merged_outer,
         )
         return merged_outer

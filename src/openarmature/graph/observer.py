@@ -84,11 +84,19 @@ class SubscribedObserver:
     """An observer paired with its phase subscription set.
 
     Per spec v0.6.0 §6: observers register with an optional `phases`
-    parameter naming the phase strings they want to receive. The default
-    (`ALL_PHASES`) means "deliver every event." Empty phase sets are
-    forbidden — passing one raises `ValueError` at registration time per
-    the spec's "implementations SHOULD raise" guidance, hardened to MUST
-    here so misconfiguration surfaces immediately.
+    parameter naming the phase strings they want to receive. The
+    default is `ALL_PHASES` — historically named when there were only
+    two phases, now meaning "the default subscription" (`{"started",
+    "completed"}`). The new `"checkpoint_saved"` phase from
+    pipeline-utilities §10.8 is opt-in: subscribe to it explicitly via
+    `phases={"checkpoint_saved"}` (or include it in a custom set).
+    `KNOWN_PHASES` is the full "every phase the engine can produce"
+    set used by the registration-time validator.
+
+    Empty phase sets are forbidden — passing one raises `ValueError`
+    at registration time per the spec's "implementations SHOULD raise"
+    guidance, hardened to MUST here so misconfiguration surfaces
+    immediately.
 
     Construct one of these directly when handing phase-filtered observers
     to `CompiledGraph.invoke(observers=...)`. For the single-observer
@@ -115,7 +123,9 @@ def _coerce_subscribed(
     """Normalize a registration argument into a `SubscribedObserver`.
 
     - A bare `Observer` callable becomes a `SubscribedObserver` with
-      either the supplied `phases` or `ALL_PHASES` (default).
+      either the supplied `phases` or `ALL_PHASES` (the default
+      subscription — `{"started", "completed"}`; subscribing to
+      `"checkpoint_saved"` is opt-in via an explicit ``phases``).
     - An existing `SubscribedObserver` passes through unchanged; supplying
       a `phases` kwarg in that case is a misuse and raises.
     """
@@ -220,6 +230,12 @@ class _InvocationContext:
     # import cycle between graph and checkpoint packages.
     completed_positions: list[Any] = field(default_factory=list[Any])  # list[NodePosition]
     resume_skip_set: frozenset[tuple[str, ...]] = field(default_factory=lambda: frozenset[tuple[str, ...]]())
+    # The invocation_id we LOADED FROM on a resumed run — distinct from
+    # ``invocation_id`` (the freshly-minted id for this resumed run per
+    # §10.4 step 4). ``None`` outside the resume path. Threaded through
+    # so inner-descent state-validation failures can populate
+    # CheckpointRecordInvalid with the source record's id.
+    resume_invocation: str | None = None
     # Resume-with-saved-inner-state plumbing: when the loaded record's
     # latest save fired from inside a subgraph (parent_states populated),
     # the engine restores the OUTER state from parent_states[0] but ALSO
@@ -271,6 +287,7 @@ class _InvocationContext:
             completed_positions=self.completed_positions,
             resume_skip_set=self.resume_skip_set,
             pending_resume_states=self.pending_resume_states,
+            resume_invocation=self.resume_invocation,
         )
 
     def descend_into_fan_out_instance(
@@ -312,6 +329,7 @@ class _InvocationContext:
             # Fan-out instances are atomic-restart per §10.7 — no
             # saved inner state to thread in. Drop the map.
             pending_resume_states={},
+            resume_invocation=self.resume_invocation,
         )
 
     def take_step(self) -> int:

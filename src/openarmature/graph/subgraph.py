@@ -23,6 +23,8 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, cast
 
+from pydantic import ValidationError
+
 from .middleware import Middleware
 from .projection import FieldNameMatching, ProjectionStrategy
 from .state import State
@@ -83,12 +85,28 @@ class SubgraphNode[ParentT: State, ChildT: State]:
             saved = context.pending_resume_states.pop(target_depth, None)
         if saved is not None:
             # Coerce dict → typed instance if the backend stored JSON;
-            # in-memory backends preserve the live instance.
-            sub_initial: ChildT = (
-                self.compiled.state_cls.model_validate(saved)
-                if isinstance(saved, dict)
-                else cast("ChildT", saved)
-            )
+            # in-memory backends preserve the live instance. A
+            # ValidationError on the JSON path means the persisted
+            # inner state is incompatible with the current subgraph's
+            # state class — surface as CheckpointRecordInvalid per
+            # §10.10 rather than a raw pydantic ValidationError.
+            sub_initial: ChildT
+            if isinstance(saved, dict):
+                try:
+                    sub_initial = self.compiled.state_cls.model_validate(saved)
+                except ValidationError as exc:
+                    # Local imports to avoid an import cycle between
+                    # graph and checkpoint at module load time.
+                    from openarmature.checkpoint.errors import CheckpointRecordInvalid
+
+                    assert context is not None  # saved is non-None only when context is set
+                    raise CheckpointRecordInvalid(
+                        context.resume_invocation or context.invocation_id,
+                        f"saved inner state for subgraph {self.name!r} does not "
+                        f"validate against {self.compiled.state_cls.__name__}: {exc}",
+                    ) from exc
+            else:
+                sub_initial = cast("ChildT", saved)
         else:
             sub_initial = self.projection.project_in(state, self.compiled.state_cls)
         if context is None:

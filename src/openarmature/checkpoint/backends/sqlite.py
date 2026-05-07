@@ -36,6 +36,8 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Literal, cast
 
+from pydantic import BaseModel
+
 from ..errors import CheckpointRecordInvalid
 from ..protocol import (
     CHECKPOINT_SCHEMA_VERSION,
@@ -62,6 +64,23 @@ CREATE TABLE IF NOT EXISTS checkpoints (
 CREATE INDEX IF NOT EXISTS idx_correlation_id
     ON checkpoints (correlation_id);
 """
+
+
+def _to_json_native(obj: Any) -> Any:
+    """Walk ``obj`` converting Pydantic ``BaseModel`` instances to
+    JSON-native dicts via ``model_dump(mode="json")``. Lists and
+    tuples recurse; dicts and scalars pass through unchanged. Used by
+    the JSON-mode encoder so callers don't have to pre-convert their
+    state objects."""
+    if isinstance(obj, BaseModel):
+        return obj.model_dump(mode="json")
+    if isinstance(obj, list | tuple):
+        seq: list[Any] = list(cast("list[Any]", obj))
+        out: list[Any] = []
+        for item in seq:
+            out.append(_to_json_native(item))
+        return out
+    return obj
 
 
 class SQLiteCheckpointer:
@@ -115,11 +134,13 @@ class SQLiteCheckpointer:
     def _encode(self, obj: Any) -> bytes:
         if self._serialization == "pickle":
             return pickle.dumps(obj)
-        # json mode — caller is responsible for handing us JSON-native
-        # values. The engine's wiring uses ``model_dump(mode="json")``
-        # on Pydantic state before save, so by the time we see the
-        # value it's already a dict/list/scalar tree.
-        return json.dumps(obj).encode("utf-8")
+        # JSON mode: the engine hands us live Pydantic State instances
+        # in record.state and record.parent_states. Walk the value
+        # tree converting every BaseModel via ``model_dump(mode="json")``
+        # so the result is JSON-native before passing to ``json.dumps``.
+        # Lists/tuples (parent_states is a tuple of states) recurse;
+        # dicts and scalars pass through unchanged.
+        return json.dumps(_to_json_native(obj)).encode("utf-8")
 
     def _decode(self, blob: bytes, recorded_mode: str, invocation_id: str) -> Any:
         if recorded_mode != self._serialization:

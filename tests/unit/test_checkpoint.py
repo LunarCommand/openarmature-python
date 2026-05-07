@@ -178,6 +178,43 @@ async def test_sqlite_pickle_round_trip(tmp_path: Path) -> None:
     assert loaded.completed_positions == record.completed_positions
 
 
+async def test_sqlite_json_round_trip_with_pydantic_state(tmp_path: Path) -> None:
+    """Spec §10.11: JSON mode accepts Pydantic State instances. The
+    backend's encoder MUST walk the value tree converting BaseModel
+    instances via ``model_dump(mode="json")`` before ``json.dumps`` —
+    otherwise live State instances handed in by the engine raise
+    TypeError. Round-trip a Pydantic State subclass plus a tuple of
+    parent states (also Pydantic) to lock the behavior in."""
+
+    class _SaveState(State):
+        x: int = 0
+        tag: str = ""
+
+    class _OuterState(State):
+        outer_flag: bool = False
+
+    cp = SQLiteCheckpointer(tmp_path / "ck.db", serialization="json")
+    record = CheckpointRecord(
+        invocation_id="i",
+        correlation_id="c",
+        state=_SaveState(x=1, tag="hi"),
+        completed_positions=(NodePosition(namespace=("dispatch",), node_name="step", step=0),),
+        parent_states=(_OuterState(outer_flag=True),),
+        last_saved_at=42.0,
+    )
+    # Save MUST NOT raise (the bug being fixed: live Pydantic in
+    # record.state -> json.dumps TypeError).
+    await cp.save("i", record)
+    loaded = await cp.load("i")
+    assert loaded is not None
+    # JSON mode loads dicts (no Pydantic types preserved). The resume
+    # path in CompiledGraph.invoke is responsible for re-validating
+    # against the declared state class — verified separately.
+    assert loaded.state == {"x": 1, "tag": "hi"}
+    assert list(loaded.parent_states) == [{"outer_flag": True}]
+    assert loaded.completed_positions == record.completed_positions
+
+
 async def test_sqlite_durability_across_reopen(tmp_path: Path) -> None:
     """A SQLite save MUST be durable: re-open the same file, load the
     record, and confirm it matches what was written."""
@@ -347,6 +384,34 @@ async def test_resume_against_empty_checkpointer_raises_not_found() -> None:
     compiled = _build_simple_graph(cp)
     with pytest.raises(CheckpointNotFound):
         await compiled.invoke(_SimpleState(), resume_invocation="ghost")
+
+
+async def test_resume_with_invalid_saved_state_raises_record_invalid() -> None:
+    """§10.10: a saved record whose state-shape doesn't validate
+    against the current graph's state class MUST surface as
+    ``checkpoint_record_invalid``, not a raw pydantic ValidationError.
+    Models the JSON-serialized backend path: the load returns a
+    dict that the engine re-validates against ``state_cls``; an
+    incompatible dict trips ``model_validate`` which the engine
+    wraps."""
+    cp = InMemoryCheckpointer()
+    # Hand-craft a record whose state dict can't validate against
+    # _SimpleState (extra="forbid" on State + missing required fields
+    # → ValidationError on model_validate).
+    bad_record = CheckpointRecord(
+        invocation_id="bogus",
+        correlation_id="c",
+        # _SimpleState has int fields; passing a string for `a` will
+        # trip the type-coerce guard.
+        state={"a": "not-an-int", "b": 0},
+        completed_positions=(),
+        parent_states=(),
+        last_saved_at=1.0,
+    )
+    await cp.save("bogus", bad_record)
+    compiled = _build_simple_graph(cp)
+    with pytest.raises(CheckpointRecordInvalid):
+        await compiled.invoke(_SimpleState(), resume_invocation="bogus")
 
 
 # ---------------------------------------------------------------------------
