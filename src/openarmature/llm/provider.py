@@ -98,9 +98,18 @@ def validate_message_list(messages: Sequence[Message]) -> None:
         )
 
     # System messages are only permitted at the first position. Per
-    # spec §3 the conversation begins with at most one system message,
-    # then alternates user/assistant/tool — a system message in the
-    # middle of the list is a request error.
+    # spec §3, at most one system message and only at the start of the
+    # conversation. A system message in the middle of the list is a
+    # request error.
+    #
+    # Note: this function does NOT enforce strict role alternation
+    # (e.g., user → assistant → user). Some servers (notably vLLM with
+    # Mistral templates, and other strict chat-template models) reject
+    # non-alternating sequences server-side and return 400 — that
+    # surfaces as ProviderInvalidRequest per §7, with the server's
+    # error message preserved. Pre-rejecting at the client boundary
+    # would over-restrict providers like OpenAI and Anthropic that
+    # handle templating permissively.
     for idx, msg in enumerate(messages):
         if idx > 0 and isinstance(msg, SystemMessage):
             raise ProviderInvalidRequest(
