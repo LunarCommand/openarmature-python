@@ -44,7 +44,7 @@ from typing import Any, cast
 import httpx
 from pydantic import ValidationError
 
-from .errors import (
+from ..errors import (
     ProviderAuthentication,
     ProviderInvalidModel,
     ProviderInvalidRequest,
@@ -53,7 +53,7 @@ from .errors import (
     ProviderRateLimit,
     ProviderUnavailable,
 )
-from .messages import (
+from ..messages import (
     AssistantMessage,
     Message,
     SystemMessage,
@@ -61,8 +61,8 @@ from .messages import (
     ToolCall,
     UserMessage,
 )
-from .provider import validate_message_list, validate_tools
-from .response import FinishReason, Response, RuntimeConfig, Usage
+from ..provider import validate_message_list, validate_tools
+from ..response import FinishReason, Response, RuntimeConfig, Usage
 
 
 class OpenAIProvider:

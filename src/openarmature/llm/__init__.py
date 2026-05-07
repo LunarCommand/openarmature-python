@@ -46,8 +46,8 @@ from .messages import (
     ToolMessage,
     UserMessage,
 )
-from .openai import OpenAIProvider
 from .provider import Provider, validate_message_list, validate_tools
+from .providers import OpenAIProvider
 from .response import FinishReason, Response, RuntimeConfig, Usage
 
 __all__ = [
