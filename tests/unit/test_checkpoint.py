@@ -1,0 +1,657 @@
+"""Focused tests for the checkpoint module.
+
+The conformance suite (``tests/conformance/test_checkpoint.py``)
+covers the spec's behavioral surface end-to-end against the
+fixtures. These unit tests fill gaps the conformance suite doesn't
+exercise directly: backend round-trip + durability, the canonical
+category-string contract, schema_version mismatch handling, the
+fan-out save gate, the §10.1.1 default-off behavior, and the
+subgraph-resume parent_states preservation that fixture 029 covers
+in conformance but is awaiting spec namespace clarification (see
+test_checkpoint.py's _DEFERRED_FIXTURES note).
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Any
+
+import pytest
+from pydantic import Field
+
+from openarmature.checkpoint import (
+    CHECKPOINT_SCHEMA_VERSION,
+    Checkpointer,
+    CheckpointFilter,
+    CheckpointNotFound,
+    CheckpointRecord,
+    CheckpointRecordInvalid,
+    CheckpointSaveFailed,
+    InMemoryCheckpointer,
+    NodePosition,
+    SQLiteCheckpointer,
+)
+from openarmature.graph import (
+    END,
+    CompiledGraph,
+    GraphBuilder,
+    NodeException,
+    State,
+)
+
+# ---------------------------------------------------------------------------
+# Error category contract
+# ---------------------------------------------------------------------------
+
+
+def test_checkpoint_not_found_category() -> None:
+    err = CheckpointNotFound("abc")
+    assert err.category == "checkpoint_not_found"
+    assert err.invocation_id == "abc"
+
+
+def test_checkpoint_save_failed_category_and_cause() -> None:
+    underlying = RuntimeError("disk full")
+    err = CheckpointSaveFailed("xyz", underlying)
+    assert err.category == "checkpoint_save_failed"
+    assert err.invocation_id == "xyz"
+    assert err.__cause__ is underlying
+
+
+def test_checkpoint_record_invalid_category() -> None:
+    err = CheckpointRecordInvalid("xyz", "schema mismatch")
+    assert err.category == "checkpoint_record_invalid"
+    assert err.invocation_id == "xyz"
+
+
+# ---------------------------------------------------------------------------
+# NodePosition + CheckpointRecord shape
+# ---------------------------------------------------------------------------
+
+
+def test_node_position_is_hashable() -> None:
+    p1 = NodePosition(namespace=("a",), node_name="x", step=0)
+    p2 = NodePosition(namespace=("a",), node_name="x", step=0)
+    s = {p1, p2}
+    # Equal positions collapse in a set.
+    assert len(s) == 1
+
+
+def test_node_position_distinct_attempts_unequal() -> None:
+    p1 = NodePosition(namespace=(), node_name="x", step=0, attempt_index=0)
+    p2 = NodePosition(namespace=(), node_name="x", step=0, attempt_index=1)
+    assert p1 != p2
+
+
+def test_checkpoint_record_default_schema_version() -> None:
+    record = CheckpointRecord(
+        invocation_id="i",
+        correlation_id="c",
+        state={},
+        completed_positions=(),
+        parent_states=(),
+        last_saved_at=0.0,
+    )
+    assert record.schema_version == CHECKPOINT_SCHEMA_VERSION
+    assert record.fan_out_progress is None
+
+
+# ---------------------------------------------------------------------------
+# InMemoryCheckpointer round-trip
+# ---------------------------------------------------------------------------
+
+
+async def test_in_memory_round_trip() -> None:
+    cp = InMemoryCheckpointer()
+    record = CheckpointRecord(
+        invocation_id="i",
+        correlation_id="c",
+        state={"x": 1},
+        completed_positions=(NodePosition(namespace=(), node_name="a", step=0),),
+        parent_states=(),
+        last_saved_at=42.0,
+    )
+    await cp.save("i", record)
+    loaded = await cp.load("i")
+    assert loaded == record
+
+
+async def test_in_memory_load_missing_returns_none() -> None:
+    cp = InMemoryCheckpointer()
+    assert await cp.load("ghost") is None
+
+
+async def test_in_memory_delete_missing_is_noop() -> None:
+    cp = InMemoryCheckpointer()
+    # No exception.
+    await cp.delete("ghost")
+
+
+async def test_in_memory_list_filter_by_correlation_id() -> None:
+    cp = InMemoryCheckpointer()
+    rec1 = CheckpointRecord(
+        invocation_id="i1",
+        correlation_id="A",
+        state={},
+        completed_positions=(),
+        parent_states=(),
+        last_saved_at=1.0,
+    )
+    rec2 = CheckpointRecord(
+        invocation_id="i2",
+        correlation_id="B",
+        state={},
+        completed_positions=(),
+        parent_states=(),
+        last_saved_at=2.0,
+    )
+    await cp.save("i1", rec1)
+    await cp.save("i2", rec2)
+    all_summaries = list(await cp.list())
+    assert len(all_summaries) == 2
+    just_a = list(await cp.list(CheckpointFilter(correlation_id="A")))
+    assert len(just_a) == 1
+    assert just_a[0].invocation_id == "i1"
+
+
+# ---------------------------------------------------------------------------
+# SQLiteCheckpointer round-trip + durability + serialization knob
+# ---------------------------------------------------------------------------
+
+
+async def test_sqlite_pickle_round_trip(tmp_path: Path) -> None:
+    cp = SQLiteCheckpointer(tmp_path / "ck.db", serialization="pickle")
+    record = CheckpointRecord(
+        invocation_id="i",
+        correlation_id="c",
+        state={"x": 1, "tag": "hi"},
+        completed_positions=(NodePosition(namespace=(), node_name="a", step=0),),
+        parent_states=(),
+        last_saved_at=42.0,
+    )
+    await cp.save("i", record)
+    loaded = await cp.load("i")
+    assert loaded is not None
+    assert loaded.invocation_id == "i"
+    assert loaded.correlation_id == "c"
+    assert loaded.state == {"x": 1, "tag": "hi"}
+    assert loaded.completed_positions == record.completed_positions
+
+
+async def test_sqlite_json_round_trip_with_pydantic_state(tmp_path: Path) -> None:
+    """Spec §10.11: JSON mode accepts Pydantic State instances. The
+    backend's encoder MUST walk the value tree converting BaseModel
+    instances via ``model_dump(mode="json")`` before ``json.dumps`` —
+    otherwise live State instances handed in by the engine raise
+    TypeError. Round-trip a Pydantic State subclass plus a tuple of
+    parent states (also Pydantic) to lock the behavior in."""
+
+    class _SaveState(State):
+        x: int = 0
+        tag: str = ""
+
+    class _OuterState(State):
+        outer_flag: bool = False
+
+    cp = SQLiteCheckpointer(tmp_path / "ck.db", serialization="json")
+    record = CheckpointRecord(
+        invocation_id="i",
+        correlation_id="c",
+        state=_SaveState(x=1, tag="hi"),
+        completed_positions=(NodePosition(namespace=("dispatch",), node_name="step", step=0),),
+        parent_states=(_OuterState(outer_flag=True),),
+        last_saved_at=42.0,
+    )
+    # Save MUST NOT raise (the bug being fixed: live Pydantic in
+    # record.state -> json.dumps TypeError).
+    await cp.save("i", record)
+    loaded = await cp.load("i")
+    assert loaded is not None
+    # JSON mode loads dicts (no Pydantic types preserved). The resume
+    # path in CompiledGraph.invoke is responsible for re-validating
+    # against the declared state class — verified separately.
+    assert loaded.state == {"x": 1, "tag": "hi"}
+    assert list(loaded.parent_states) == [{"outer_flag": True}]
+    assert loaded.completed_positions == record.completed_positions
+
+
+async def test_sqlite_durability_across_reopen(tmp_path: Path) -> None:
+    """A SQLite save MUST be durable: re-open the same file, load the
+    record, and confirm it matches what was written."""
+    db_path = tmp_path / "ck.db"
+    record = CheckpointRecord(
+        invocation_id="i",
+        correlation_id="c",
+        state={"x": 1},
+        completed_positions=(NodePosition(namespace=(), node_name="a", step=0),),
+        parent_states=(),
+        last_saved_at=99.0,
+    )
+    cp1 = SQLiteCheckpointer(db_path)
+    await cp1.save("i", record)
+    # New instance simulates a process restart.
+    cp2 = SQLiteCheckpointer(db_path)
+    loaded = await cp2.load("i")
+    assert loaded is not None
+    assert loaded.invocation_id == "i"
+    assert loaded.state == {"x": 1}
+
+
+async def test_sqlite_upsert_retention(tmp_path: Path) -> None:
+    """Spec §10.3.1: upsert — one row per invocation_id, overwritten on
+    every save. After two saves with the same id, only the second
+    record is retrievable."""
+    cp = SQLiteCheckpointer(tmp_path / "ck.db")
+    rec1 = CheckpointRecord(
+        invocation_id="i",
+        correlation_id="c",
+        state={"x": 1},
+        completed_positions=(),
+        parent_states=(),
+        last_saved_at=1.0,
+    )
+    rec2 = CheckpointRecord(
+        invocation_id="i",
+        correlation_id="c",
+        state={"x": 2},
+        completed_positions=(),
+        parent_states=(),
+        last_saved_at=2.0,
+    )
+    await cp.save("i", rec1)
+    await cp.save("i", rec2)
+    loaded = await cp.load("i")
+    assert loaded is not None
+    assert loaded.state == {"x": 2}
+    summaries = list(await cp.list())
+    assert len(summaries) == 1
+
+
+async def test_sqlite_serialization_mismatch_raises(tmp_path: Path) -> None:
+    """A record written with serialization=pickle MUST NOT be loadable
+    by a checkpointer constructed with serialization=json (and vice
+    versa). The mismatch raises CheckpointRecordInvalid per §10.10."""
+    db_path = tmp_path / "ck.db"
+    cp_pickle = SQLiteCheckpointer(db_path, serialization="pickle")
+    record = CheckpointRecord(
+        invocation_id="i",
+        correlation_id="c",
+        state={"x": 1},
+        completed_positions=(),
+        parent_states=(),
+        last_saved_at=1.0,
+    )
+    await cp_pickle.save("i", record)
+    cp_json = SQLiteCheckpointer(db_path, serialization="json")
+    with pytest.raises(CheckpointRecordInvalid):
+        await cp_json.load("i")
+
+
+# ---------------------------------------------------------------------------
+# Schema version round-trips and rejects mismatches
+# ---------------------------------------------------------------------------
+
+
+async def test_schema_version_round_trips(tmp_path: Path) -> None:
+    cp = SQLiteCheckpointer(tmp_path / "ck.db")
+    record = CheckpointRecord(
+        invocation_id="i",
+        correlation_id="c",
+        state={"x": 1},
+        completed_positions=(),
+        parent_states=(),
+        last_saved_at=1.0,
+    )
+    await cp.save("i", record)
+    loaded = await cp.load("i")
+    assert loaded is not None
+    assert loaded.schema_version == CHECKPOINT_SCHEMA_VERSION
+
+
+async def test_schema_version_mismatch_rejected_by_sqlite(tmp_path: Path) -> None:
+    """A persisted record with an unrecognized schema_version raises
+    CheckpointRecordInvalid on load — sentinel behavior so future
+    record-shape evolution doesn't silently coerce older records."""
+    cp = SQLiteCheckpointer(tmp_path / "ck.db")
+    record = CheckpointRecord(
+        invocation_id="i",
+        correlation_id="c",
+        state={"x": 1},
+        completed_positions=(),
+        parent_states=(),
+        last_saved_at=1.0,
+        schema_version="999",  # not the current version
+    )
+    await cp.save("i", record)
+    with pytest.raises(CheckpointRecordInvalid):
+        await cp.load("i")
+
+
+# ---------------------------------------------------------------------------
+# Engine integration: §10.1.1 default-off behavior
+# ---------------------------------------------------------------------------
+
+
+class _SimpleState(State):
+    a: int = 0
+    b: int = 0
+
+
+async def _node_a(_s: _SimpleState) -> dict[str, int]:
+    return {"a": 1}
+
+
+async def _node_b(_s: _SimpleState) -> dict[str, int]:
+    return {"b": 2}
+
+
+def _build_simple_graph(checkpointer: Checkpointer | None = None) -> CompiledGraph[_SimpleState]:
+    builder = (
+        GraphBuilder(_SimpleState)
+        .add_node("node_a", _node_a)
+        .add_node("node_b", _node_b)
+        .add_edge("node_a", "node_b")
+        .add_edge("node_b", END)
+        .set_entry("node_a")
+    )
+    if checkpointer is not None:
+        builder.with_checkpointer(checkpointer)
+    return builder.compile()
+
+
+async def test_no_checkpointer_means_no_saves() -> None:
+    """§10.1.1: without a registered Checkpointer the engine never
+    calls ``save()`` — no record is produced."""
+    compiled = _build_simple_graph(None)
+    final = await compiled.invoke(_SimpleState())
+    assert final.a == 1
+    assert final.b == 2
+
+
+async def test_no_checkpointer_resume_raises_not_found() -> None:
+    """§10.1.1: ``invoke(resume_invocation=X)`` against an unregistered
+    backend raises checkpoint_not_found — the user has misconfigured
+    the run."""
+    compiled = _build_simple_graph(None)
+    with pytest.raises(CheckpointNotFound):
+        await compiled.invoke(_SimpleState(), resume_invocation="ghost")
+
+
+async def test_resume_against_empty_checkpointer_raises_not_found() -> None:
+    """§10.10: load() returning None surfaces as
+    checkpoint_not_found."""
+    cp = InMemoryCheckpointer()
+    compiled = _build_simple_graph(cp)
+    with pytest.raises(CheckpointNotFound):
+        await compiled.invoke(_SimpleState(), resume_invocation="ghost")
+
+
+async def test_resume_with_invalid_saved_state_raises_record_invalid() -> None:
+    """§10.10: a saved record whose state-shape doesn't validate
+    against the current graph's state class MUST surface as
+    ``checkpoint_record_invalid``, not a raw pydantic ValidationError.
+    Models the JSON-serialized backend path: the load returns a
+    dict that the engine re-validates against ``state_cls``; an
+    incompatible dict trips ``model_validate`` which the engine
+    wraps."""
+    cp = InMemoryCheckpointer()
+    # Hand-craft a record whose state dict can't validate against
+    # _SimpleState (extra="forbid" on State + missing required fields
+    # → ValidationError on model_validate).
+    bad_record = CheckpointRecord(
+        invocation_id="bogus",
+        correlation_id="c",
+        # _SimpleState has int fields; passing a string for `a` will
+        # trip the type-coerce guard.
+        state={"a": "not-an-int", "b": 0},
+        completed_positions=(),
+        parent_states=(),
+        last_saved_at=1.0,
+    )
+    await cp.save("bogus", bad_record)
+    compiled = _build_simple_graph(cp)
+    with pytest.raises(CheckpointRecordInvalid):
+        await compiled.invoke(_SimpleState(), resume_invocation="bogus")
+
+
+# ---------------------------------------------------------------------------
+# Save-failure policy
+# ---------------------------------------------------------------------------
+
+
+class _AlwaysFailingCheckpointer:
+    """Backend whose ``save`` always raises. Engine wraps the failure
+    as :class:`CheckpointSaveFailed` and raises immediately to the
+    caller of ``invoke()`` per the documented save-failure policy."""
+
+    async def save(self, invocation_id: str, record: CheckpointRecord) -> None:
+        raise RuntimeError("simulated backend failure")
+
+    async def load(self, invocation_id: str) -> CheckpointRecord | None:
+        return None
+
+    async def list(self, filter: Any = None) -> Any:
+        return []
+
+    async def delete(self, invocation_id: str) -> None:
+        return None
+
+
+async def test_save_failure_raises_to_invoke_caller() -> None:
+    compiled = _build_simple_graph(_AlwaysFailingCheckpointer())
+    with pytest.raises(CheckpointSaveFailed):
+        await compiled.invoke(_SimpleState())
+
+
+# ---------------------------------------------------------------------------
+# Fan-out internal saves are gated off (§10.7 atomic restart)
+# ---------------------------------------------------------------------------
+
+
+class _CapturingCheckpointer:
+    def __init__(self) -> None:
+        self.saves: list[CheckpointRecord] = []
+
+    async def save(self, invocation_id: str, record: CheckpointRecord) -> None:
+        self.saves.append(record)
+
+    async def load(self, invocation_id: str) -> CheckpointRecord | None:
+        return None
+
+    async def list(self, filter: Any = None) -> Any:
+        return []
+
+    async def delete(self, invocation_id: str) -> None:
+        return None
+
+
+class _ItemState(State):
+    item: int = 0
+    out: int = 0
+
+
+class _ParentState(State):
+    items: list[int] = Field(default_factory=list[int])
+    results: list[int] = Field(default_factory=list[int])
+
+
+async def _scorer(s: _ItemState) -> dict[str, int]:
+    return {"out": s.item + 100}
+
+
+async def test_fan_out_internal_saves_are_gated_off() -> None:
+    """Spec §10.3 + §10.7: per-instance internal completed events do
+    NOT produce saves in v1. Only the fan-out node's own completion
+    (the parent dispatch) saves, with ``fan_out_index is None`` on
+    every recorded position."""
+    inner = (
+        GraphBuilder(_ItemState)
+        .add_node("scorer", _scorer)
+        .add_edge("scorer", END)
+        .set_entry("scorer")
+        .compile()
+    )
+    cp = _CapturingCheckpointer()
+    parent = (
+        GraphBuilder(_ParentState)
+        .add_fan_out_node(
+            "fan",
+            subgraph=inner,
+            collect_field="out",
+            target_field="results",
+            items_field="items",
+            item_field="item",
+            concurrency=2,
+        )
+        .add_edge("fan", END)
+        .set_entry("fan")
+        .with_checkpointer(cp)
+        .compile()
+    )
+    await parent.invoke(_ParentState(items=[1, 2, 3]))
+    # Exactly one save: the fan-out's own completion (parent dispatch).
+    assert len(cp.saves) == 1
+    record = cp.saves[0]
+    # Every position in the record is at the parent level — no
+    # fan_out_index populated, ever.
+    for pos in record.completed_positions:
+        assert pos.fan_out_index is None
+    # And no save fired with a position from inside an instance.
+    assert all(p.namespace == () for p in record.completed_positions)
+
+
+# ---------------------------------------------------------------------------
+# Resume re-entry into subgraph: parent_states populated on inner-node saves
+# ---------------------------------------------------------------------------
+
+
+class _OuterState(State):
+    flag: bool = False
+    result: int = 0
+
+
+class _InnerState(State):
+    inner_flag: bool = False
+    result: int = 0
+
+
+async def _inner_step(_s: _InnerState) -> dict[str, Any]:
+    return {"inner_flag": True, "result": 42}
+
+
+async def test_inner_node_save_carries_parent_states() -> None:
+    """Spec §10.2: a save from inside a subgraph populates
+    ``parent_states`` with the chain of containing-graph states.
+    This is the contract that fixture 029 verifies in conformance —
+    here we isolate the parent_states logic without depending on
+    the namespace-convention question."""
+    inner = (
+        GraphBuilder(_InnerState)
+        .add_node("step", _inner_step)
+        .add_edge("step", END)
+        .set_entry("step")
+        .compile()
+    )
+    cp = _CapturingCheckpointer()
+    outer = (
+        GraphBuilder(_OuterState)
+        .add_subgraph_node("dispatch", inner)
+        .add_edge("dispatch", END)
+        .set_entry("dispatch")
+        .with_checkpointer(cp)
+        .compile()
+    )
+    await outer.invoke(_OuterState())
+    # The subgraph wrapper has no started/completed events of its own
+    # (transparent per fixture 013), so no save fires for it. Only the
+    # inner "step" node saves. Per spec §10.2, that save's
+    # ``parent_states`` carries the chain of containing-graph states.
+    inner_save = next(
+        (s for s in cp.saves if s.completed_positions[-1].node_name == "step"),
+        None,
+    )
+    assert inner_save is not None, (
+        f"expected a save from the inner node; got {[s.completed_positions[-1].node_name for s in cp.saves]}"
+    )
+    assert len(inner_save.parent_states) == 1, (
+        f"inner save should carry one parent state; got {len(inner_save.parent_states)}"
+    )
+    # And no save fires for the wrapper itself.
+    assert all(s.completed_positions[-1].node_name != "dispatch" for s in cp.saves), (
+        "no save should fire for the subgraph wrapper (no completed event per graph-engine §6 + fixture 013)"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Resume mints new invocation_id but preserves correlation_id
+# ---------------------------------------------------------------------------
+
+
+_first_run_should_fail = [True]
+
+
+async def _flaky_node(_s: _SimpleState) -> dict[str, int]:
+    if _first_run_should_fail[0]:
+        _first_run_should_fail[0] = False
+        raise RuntimeError("first-run abort")
+    return {"a": 1}
+
+
+async def test_resume_preserves_correlation_id_and_mints_new_invocation_id() -> None:
+    """Spec §10.4 steps 3+4: resume MUST keep the original
+    correlation_id verbatim (cross-backend join key) AND mint a new
+    invocation_id (each attempt is its own invocation)."""
+    _first_run_should_fail[0] = True
+    cp = InMemoryCheckpointer()
+    # First run aborts; we install a capturing wrapper on save() to
+    # snag the engine-minted invocation_id and correlation_id from
+    # the most recent persisted record (the latest save fires from
+    # node_a, before flaky fails).
+    saved_invocation_ids: list[str] = []
+    saved_correlation_ids: list[str] = []
+    original_save = cp.save
+
+    async def capture_save(invocation_id: str, record: CheckpointRecord) -> None:
+        saved_invocation_ids.append(invocation_id)
+        saved_correlation_ids.append(record.correlation_id)
+        await original_save(invocation_id, record)
+
+    cp.save = capture_save  # type: ignore[method-assign]
+
+    # Drive the failing path. The flaky node fails before any save
+    # fires, so we need a successful first-run state. Use a graph
+    # where node_a saves before flaky.
+    saved_invocation_ids.clear()
+    saved_correlation_ids.clear()
+
+    builder2 = (
+        GraphBuilder(_SimpleState)
+        .add_node("node_a", _node_a)
+        .add_node("flaky", _flaky_node)
+        .add_edge("node_a", "flaky")
+        .add_edge("flaky", END)
+        .set_entry("node_a")
+        .with_checkpointer(cp)
+    )
+    compiled2 = builder2.compile()
+    _first_run_should_fail[0] = True
+    with pytest.raises(NodeException):
+        await compiled2.invoke(_SimpleState(), correlation_id="my-correlation")
+    assert saved_invocation_ids, "expected at least one save before the abort"
+    first_invocation_id = saved_invocation_ids[-1]
+    first_correlation_id = saved_correlation_ids[-1]
+    assert first_correlation_id == "my-correlation"
+
+    # Resume.
+    saved_invocation_ids.clear()
+    saved_correlation_ids.clear()
+    await compiled2.invoke(_SimpleState(), resume_invocation=first_invocation_id)
+    assert saved_invocation_ids, "expected saves on the resumed run"
+    resumed_invocation_id = saved_invocation_ids[-1]
+    resumed_correlation_id = saved_correlation_ids[-1]
+    assert resumed_invocation_id != first_invocation_id, (
+        "resume MUST mint a new invocation_id per §10.4 step 4"
+    )
+    assert resumed_correlation_id == "my-correlation", (
+        "resume MUST preserve the original correlation_id per §10.4 step 3"
+    )

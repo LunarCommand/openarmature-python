@@ -31,7 +31,7 @@ import asyncio
 import warnings
 from collections.abc import Iterable
 from dataclasses import dataclass, field
-from typing import Protocol
+from typing import Any, Protocol
 
 from .events import NodeEvent
 from .state import State
@@ -67,7 +67,16 @@ class Observer(Protocol):
 
 # Per spec v0.6.0 §6: the two valid phase strings. Used as the default
 # subscription set when a caller doesn't restrict by phase.
+# Default subscription — what a bare ``Observer`` callable receives
+# without an explicit ``phases`` argument. Stays ``{"started",
+# "completed"}`` so legacy observers don't unexpectedly receive
+# checkpoint events. Subscribing to ``"checkpoint_saved"`` is opt-in.
 ALL_PHASES: frozenset[str] = frozenset({"started", "completed"})
+
+# All phase values the engine produces (per spec graph-engine §6 +
+# pipeline-utilities §10.8). Used by the registration-time validator
+# to reject typos like ``phases={"complete"}``.
+KNOWN_PHASES: frozenset[str] = frozenset({"started", "completed", "checkpoint_saved"})
 
 
 @dataclass(frozen=True)
@@ -75,11 +84,19 @@ class SubscribedObserver:
     """An observer paired with its phase subscription set.
 
     Per spec v0.6.0 §6: observers register with an optional `phases`
-    parameter naming the phase strings they want to receive. The default
-    (`ALL_PHASES`) means "deliver every event." Empty phase sets are
-    forbidden — passing one raises `ValueError` at registration time per
-    the spec's "implementations SHOULD raise" guidance, hardened to MUST
-    here so misconfiguration surfaces immediately.
+    parameter naming the phase strings they want to receive. The
+    default is `ALL_PHASES` — historically named when there were only
+    two phases, now meaning "the default subscription" (`{"started",
+    "completed"}`). The new `"checkpoint_saved"` phase from
+    pipeline-utilities §10.8 is opt-in: subscribe to it explicitly via
+    `phases={"checkpoint_saved"}` (or include it in a custom set).
+    `KNOWN_PHASES` is the full "every phase the engine can produce"
+    set used by the registration-time validator.
+
+    Empty phase sets are forbidden — passing one raises `ValueError`
+    at registration time per the spec's "implementations SHOULD raise"
+    guidance, hardened to MUST here so misconfiguration surfaces
+    immediately.
 
     Construct one of these directly when handing phase-filtered observers
     to `CompiledGraph.invoke(observers=...)`. For the single-observer
@@ -93,9 +110,9 @@ class SubscribedObserver:
     def __post_init__(self) -> None:
         if not self.phases:
             raise ValueError("phases must be non-empty; spec §6 forbids empty phase subscriptions")
-        invalid = self.phases - ALL_PHASES
+        invalid = self.phases - KNOWN_PHASES
         if invalid:
-            raise ValueError(f"unknown phase(s): {sorted(invalid)}; allowed: 'started', 'completed'")
+            raise ValueError(f"unknown phase(s): {sorted(invalid)}; allowed: {sorted(KNOWN_PHASES)}")
 
 
 def _coerce_subscribed(
@@ -106,7 +123,9 @@ def _coerce_subscribed(
     """Normalize a registration argument into a `SubscribedObserver`.
 
     - A bare `Observer` callable becomes a `SubscribedObserver` with
-      either the supplied `phases` or `ALL_PHASES` (default).
+      either the supplied `phases` or `ALL_PHASES` (the default
+      subscription — `{"started", "completed"}`; subscribing to
+      `"checkpoint_saved"` is opt-in via an explicit ``phases``).
     - An existing `SubscribedObserver` passes through unchanged; supplying
       a `phases` kwarg in that case is a misuse and raises.
     """
@@ -189,6 +208,46 @@ class _InvocationContext:
     # instance, and absent (None) for nodes outside any fan-out.
     fan_out_index: int | None = None
 
+    # ----------------------------------------------------------------
+    # Checkpointing fields (spec pipeline-utilities §10)
+    #
+    # ``invocation_id`` and ``correlation_id`` are minted once at the
+    # outermost ``invoke`` call (or restored from a saved record on
+    # resume) and propagated unchanged through every descent. The
+    # checkpointer reference is set when a backend is registered; it
+    # is intentionally **None inside fan-out instances** so per-instance
+    # internal saves are gated off (§10.7 atomic-restart). The mutable
+    # ``completed_positions`` list is shared across descents so the
+    # save call sites can append the just-completed position before
+    # the engine's next step. ``resume_skip_set`` is a frozen set of
+    # namespace tuples whose corresponding nodes have already
+    # completed in a prior run and MUST be skipped on this resumed
+    # invocation.
+    # ----------------------------------------------------------------
+    invocation_id: str = ""
+    correlation_id: str = ""
+    checkpointer: Any = None  # Checkpointer | None; typed Any to avoid an
+    # import cycle between graph and checkpoint packages.
+    completed_positions: list[Any] = field(default_factory=list[Any])  # list[NodePosition]
+    resume_skip_set: frozenset[tuple[str, ...]] = field(default_factory=lambda: frozenset[tuple[str, ...]]())
+    # The invocation_id we LOADED FROM on a resumed run — distinct from
+    # ``invocation_id`` (the freshly-minted id for this resumed run per
+    # §10.4 step 4). ``None`` outside the resume path. Threaded through
+    # so inner-descent state-validation failures can populate
+    # CheckpointRecordInvalid with the source record's id.
+    resume_invocation: str | None = None
+    # Resume-with-saved-inner-state plumbing: when the loaded record's
+    # latest save fired from inside a subgraph (parent_states populated),
+    # the engine restores the OUTER state from parent_states[0] but ALSO
+    # needs the saved inner state(s) when re-descending into the
+    # in-flight subgraph(s). This map is keyed by descent depth — depth
+    # 1 = first subgraph level, depth 2 = nested two deep, etc. The
+    # subgraph descent path consumes (pops) its matching depth before
+    # falling back to the normal projection. After consumption, fresh
+    # descents at the same depth project as usual. Shared mutable dict
+    # propagates across descents.
+    pending_resume_states: dict[int, Any] = field(default_factory=dict[int, Any])
+
     def full_observers(self) -> tuple[SubscribedObserver, ...]:
         """Return the ordered observer list to deliver for events from
         this depth. Per spec §6: graph-attached (outermost → innermost),
@@ -209,6 +268,10 @@ class _InvocationContext:
         chain. Invocation-scoped observers carry through unchanged.
         ``fan_out_index`` is inherited so a subgraph descent inside a
         fan-out instance still tags inner events with the index.
+
+        Checkpointing fields propagate unchanged: subgraph-internal
+        nodes save to the same backend with the same invocation_id
+        (per spec §10.3 — one save per inner-node completion).
         """
         return _InvocationContext(
             queue=self.queue,
@@ -218,6 +281,13 @@ class _InvocationContext:
             namespace_prefix=self.namespace_prefix + (subgraph_node_name,),
             parent_states_prefix=self.parent_states_prefix + (parent_state,),
             fan_out_index=self.fan_out_index,
+            invocation_id=self.invocation_id,
+            correlation_id=self.correlation_id,
+            checkpointer=self.checkpointer,
+            completed_positions=self.completed_positions,
+            resume_skip_set=self.resume_skip_set,
+            pending_resume_states=self.pending_resume_states,
+            resume_invocation=self.resume_invocation,
         )
 
     def descend_into_fan_out_instance(
@@ -232,6 +302,16 @@ class _InvocationContext:
         Same shape as ``descend_into_subgraph`` but stamps the fan-out
         index onto the new context so every inner-node event carries it.
         Per spec §9 the index is the instance's 0-based position.
+
+        Per pipeline-utilities §10.3 / §10.7: fan-out instance internal
+        events do NOT produce checkpoint saves in v1. We achieve that
+        by clearing ``checkpointer`` to None on the descent so the
+        save gate inside the inner _step_function_node is False; the
+        rest of the checkpoint context (invocation_id, correlation_id,
+        etc.) still propagates so observability spans inside the
+        instance can correlate. ``resume_skip_set`` is also dropped:
+        a resumed invocation re-runs the entire fan-out from scratch
+        per §10.7 atomic-restart.
         """
         return _InvocationContext(
             queue=self.queue,
@@ -241,6 +321,15 @@ class _InvocationContext:
             namespace_prefix=self.namespace_prefix + (fan_out_node_name,),
             parent_states_prefix=self.parent_states_prefix + (parent_state,),
             fan_out_index=fan_out_index,
+            invocation_id=self.invocation_id,
+            correlation_id=self.correlation_id,
+            checkpointer=None,
+            completed_positions=self.completed_positions,
+            resume_skip_set=frozenset(),
+            # Fan-out instances are atomic-restart per §10.7 — no
+            # saved inner state to thread in. Drop the map.
+            pending_resume_states={},
+            resume_invocation=self.resume_invocation,
         )
 
     def take_step(self) -> int:

@@ -21,7 +21,9 @@ invisible at the outer graph's node dispatch site.
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
+
+from pydantic import ValidationError
 
 from .middleware import Middleware
 from .projection import FieldNameMatching, ProjectionStrategy
@@ -67,7 +69,46 @@ class SubgraphNode[ParentT: State, ChildT: State]:
         state stack. Observer events from inner nodes bubble up to outer
         observers per spec v0.3.0 §6.
         """
-        sub_initial = self.projection.project_in(state, self.compiled.state_cls)
+        # Resume-with-saved-inner-state (spec pipeline-utilities §10.4):
+        # if the loaded record's latest save fired from inside this
+        # subgraph (or a deeper nested one we'll re-enter), the engine
+        # threads the saved inner state through ``pending_resume_states``
+        # keyed by descent depth. Consume the matching depth here
+        # before falling back to the normal projection — this is what
+        # makes "skip step_one, run step_two with its post-merge inner
+        # state" work without re-running step_one.
+        saved: Any = None
+        if context is not None:
+            # Descent depth of THIS subgraph's inner = current
+            # depth + 1. Outer is depth 0; first subgraph is depth 1.
+            target_depth = len(context.parent_states_prefix) + 1
+            saved = context.pending_resume_states.pop(target_depth, None)
+        if saved is not None:
+            # Coerce dict → typed instance if the backend stored JSON;
+            # in-memory backends preserve the live instance. A
+            # ValidationError on the JSON path means the persisted
+            # inner state is incompatible with the current subgraph's
+            # state class — surface as CheckpointRecordInvalid per
+            # §10.10 rather than a raw pydantic ValidationError.
+            sub_initial: ChildT
+            if isinstance(saved, dict):
+                try:
+                    sub_initial = self.compiled.state_cls.model_validate(saved)
+                except ValidationError as exc:
+                    # Local imports to avoid an import cycle between
+                    # graph and checkpoint at module load time.
+                    from openarmature.checkpoint.errors import CheckpointRecordInvalid
+
+                    assert context is not None  # saved is non-None only when context is set
+                    raise CheckpointRecordInvalid(
+                        context.resume_invocation or context.invocation_id,
+                        f"saved inner state for subgraph {self.name!r} does not "
+                        f"validate against {self.compiled.state_cls.__name__}: {exc}",
+                    ) from exc
+            else:
+                sub_initial = cast("ChildT", saved)
+        else:
+            sub_initial = self.projection.project_in(state, self.compiled.state_cls)
         if context is None:
             sub_final = await self.compiled.invoke(sub_initial)
         else:

@@ -1,0 +1,171 @@
+"""Checkpointer Protocol + record types (spec pipeline-utilities §10.1, §10.2).
+
+The :class:`Checkpointer` Protocol is the persistence seam between the
+engine's save/resume machinery and a concrete backend (in-memory,
+SQLite, Temporal, DBOS, etc.). Backends receive structured records,
+not state-class instances directly — this lets them serialize, batch,
+or hand off to a durable backend without taking a hard dependency on
+the user's Pydantic state schema.
+
+A :class:`CheckpointRecord` is a frozen, hashable snapshot of one
+invocation's progress at one save point. The engine produces one
+record per ``completed`` event for outermost-graph nodes and
+subgraph-internal nodes (per §10.3). Fan-out instance internal events
+do NOT produce records in v1 (per §10.7's atomic-restart contract).
+
+The :data:`CHECKPOINT_SCHEMA_VERSION` constant is the single source
+of truth for the persisted record shape — bump it whenever the field
+set changes incompatibly so older saved records surface as
+:class:`CheckpointRecordInvalid` on load rather than silently coercing
+to a mismatched shape.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Iterable
+from dataclasses import dataclass, field
+from typing import Any, Protocol
+
+# Persisted record shape version. Bump when CheckpointRecord's field
+# set or invariants change incompatibly — proposal 0009 (per-instance
+# fan-out resume) is the concrete near-term candidate, since it
+# populates ``fan_out_progress`` and the load path will need to
+# distinguish v1 records (where it's None) from v2 records (where it
+# carries instance-level progress data). Backends that reject
+# mismatches MUST raise CheckpointRecordInvalid per §10.10.
+CHECKPOINT_SCHEMA_VERSION = "1"
+
+
+@dataclass(frozen=True)
+class NodePosition:
+    """A single completed-node coordinate in the resume map.
+
+    Frozen + automatically hashable (no mutable fields), so positions
+    can live in sets and dict keys — the engine's resume-entry
+    derivation relies on ``set`` membership to skip nodes that have
+    already completed.
+
+    Per spec §10.2:
+    - ``namespace`` is the chain of containing-graph node names from
+      outermost down to (but **not including**) this node. Empty for
+      outermost-graph nodes; one entry for subgraph-internal nodes;
+      two entries when nested two deep, and so on. Distinct from
+      graph-engine §6's NodeEvent namespace which includes the node's
+      own name — there NodeEvent.namespace == NodePosition.namespace +
+      (NodePosition.node_name,).
+    - ``node_name`` is the node's local name in its containing graph.
+    - ``step`` is the monotonic step counter at the time the node
+      completed (shared with §6 NodeEvent.step).
+    - ``attempt_index`` is the 0-based retry attempt index. The final
+      successful attempt's index is what gets recorded.
+    - ``fan_out_index`` is populated only for events from inside a
+      fan-out instance — but per §10.3 those events do NOT produce
+      records in v1. The field is part of the position shape so v2
+      per-instance fan-out resume can populate it without a
+      record-shape migration.
+    """
+
+    namespace: tuple[str, ...]
+    node_name: str
+    step: int
+    attempt_index: int = 0
+    fan_out_index: int | None = None
+
+
+@dataclass(frozen=True)
+class CheckpointRecord:
+    """One invocation's progress at one save point (spec §10.2).
+
+    Frozen — backends MUST treat the record as immutable; the engine
+    builds a fresh record per ``completed`` event rather than mutating
+    a shared one. The ``fan_out_progress`` field is reserved for the
+    v2 per-instance fan-out resume follow-on; in v1 it is always
+    ``None``.
+    """
+
+    invocation_id: str
+    correlation_id: str
+    state: Any
+    completed_positions: tuple[NodePosition, ...]
+    parent_states: tuple[Any, ...]
+    last_saved_at: float
+    schema_version: str = CHECKPOINT_SCHEMA_VERSION
+    fan_out_progress: None = field(default=None)
+
+
+@dataclass(frozen=True)
+class CheckpointSummary:
+    """Lightweight record-level metadata returned by
+    :meth:`Checkpointer.list` (spec §10.1).
+
+    Implementations MAY add backend-specific fields; the four declared
+    here are the spec-mandated minimum and form the cross-backend
+    portable subset callers can rely on.
+    """
+
+    invocation_id: str
+    correlation_id: str
+    last_saved_at: float
+    completed_node_count: int
+
+
+@dataclass(frozen=True)
+class CheckpointFilter:
+    """Predicate for :meth:`Checkpointer.list`. v1 ships two narrow
+    fields; richer query DSLs are deferred to follow-on work.
+
+    - ``correlation_id`` — match records whose ``correlation_id``
+      equals the supplied value. ``None`` matches every record
+      (the "list all" case).
+    """
+
+    correlation_id: str | None = None
+
+
+class Checkpointer(Protocol):
+    """Persistence seam for graph invocations (spec §10.1).
+
+    Implementations MUST be safe to share across concurrent
+    invocations of the same graph (the engine does not serialize
+    access). Each operation MUST be thread-safe (Python) /
+    task-coroutine-safe (asyncio); backends with synchronous I/O
+    typically wrap their work in ``asyncio.to_thread`` or equivalent.
+    """
+
+    async def save(self, invocation_id: str, record: CheckpointRecord) -> None:
+        """Persist ``record`` for ``invocation_id``. After return the
+        record MUST be durable across process crashes for backends
+        that document durability (in-memory backends are not durable
+        and MUST document this). Synchronous-by-contract: the engine
+        awaits this call before continuing to the next node so a
+        crash immediately after a ``completed`` event cannot have
+        lost the corresponding save."""
+        ...
+
+    async def load(self, invocation_id: str) -> CheckpointRecord | None:
+        """Return the most recent record for ``invocation_id`` or
+        ``None`` if no record exists. The returned record MUST be
+        structurally identical to what ``save`` last wrote for this
+        ``invocation_id`` (round-trip integrity)."""
+        ...
+
+    async def list(self, filter: CheckpointFilter | None = None) -> Iterable[CheckpointSummary]:
+        """Enumerate saved invocations. The ``filter`` shape is
+        backend-defined; this implementation ships ``list_all`` and
+        ``list_by_correlation_id`` predicates."""
+        ...
+
+    async def delete(self, invocation_id: str) -> None:
+        """Remove all records for ``invocation_id``. MUST be a no-op
+        when the invocation_id has no record (no error)."""
+        ...
+
+
+__all__ = [
+    "CHECKPOINT_SCHEMA_VERSION",
+    "CheckpointFilter",
+    "CheckpointRecord",
+    "CheckpointSummary",
+    "Checkpointer",
+    "NodePosition",
+]
