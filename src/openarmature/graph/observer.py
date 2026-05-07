@@ -182,6 +182,12 @@ class _InvocationContext:
     step_counter: list[int] = field(default_factory=lambda: [0])
     namespace_prefix: tuple[str, ...] = ()
     parent_states_prefix: tuple[State, ...] = ()
+    # Per pipeline-utilities §9 + graph-engine §6: nodes inside a
+    # fan-out instance fire events tagged with the instance's 0-based
+    # index. Set when descending into a fan-out instance, inherited
+    # unchanged through any further subgraph descents inside that
+    # instance, and absent (None) for nodes outside any fan-out.
+    fan_out_index: int | None = None
 
     def full_observers(self) -> tuple[SubscribedObserver, ...]:
         """Return the ordered observer list to deliver for events from
@@ -201,6 +207,8 @@ class _InvocationContext:
         numbering is monotonic across the boundary) but has an extended
         namespace prefix, parent-state stack, and graph-attached observer
         chain. Invocation-scoped observers carry through unchanged.
+        ``fan_out_index`` is inherited so a subgraph descent inside a
+        fan-out instance still tags inner events with the index.
         """
         return _InvocationContext(
             queue=self.queue,
@@ -209,6 +217,30 @@ class _InvocationContext:
             step_counter=self.step_counter,
             namespace_prefix=self.namespace_prefix + (subgraph_node_name,),
             parent_states_prefix=self.parent_states_prefix + (parent_state,),
+            fan_out_index=self.fan_out_index,
+        )
+
+    def descend_into_fan_out_instance(
+        self,
+        fan_out_node_name: str,
+        parent_state: State,
+        sub_attached: tuple[SubscribedObserver, ...],
+        fan_out_index: int,
+    ) -> _InvocationContext:
+        """Build the context for one fan-out instance's subgraph invocation.
+
+        Same shape as ``descend_into_subgraph`` but stamps the fan-out
+        index onto the new context so every inner-node event carries it.
+        Per spec §9 the index is the instance's 0-based position.
+        """
+        return _InvocationContext(
+            queue=self.queue,
+            graph_attached=self.graph_attached + sub_attached,
+            invocation_scoped=self.invocation_scoped,
+            step_counter=self.step_counter,
+            namespace_prefix=self.namespace_prefix + (fan_out_node_name,),
+            parent_states_prefix=self.parent_states_prefix + (parent_state,),
+            fan_out_index=fan_out_index,
         )
 
     def take_step(self) -> int:

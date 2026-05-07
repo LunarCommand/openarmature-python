@@ -50,20 +50,15 @@ CONFORMANCE_DIR = (
 )
 
 
-# Phase 2 lands middleware (proposal 0004). Fan-out (proposal 0005 PU
-# side) and checkpointing (proposal 0008) come in later phases; their
-# fixtures use directives we don't translate yet.
+# Phase 3 lands fan-out (proposal 0005 PU side). Checkpointing
+# (proposal 0008) comes in Phase 5; its fixtures use directives we
+# don't translate yet.
 _UNSUPPORTED_NODE_DIRECTIVES = frozenset(
     {
-        "fan_out",
-        "flaky_by_index",
         "flaky_per_index",
-        "flaky_instance_only",
         "flaky_resume_aware",
         "calls_llm",
-        "update_pure",
         "update_pure_from_state",
-        "update_from_field",
     }
 )
 
@@ -73,10 +68,9 @@ def _load(path: Path) -> dict[str, Any]:
         return yaml.safe_load(f)
 
 
-# Phase 2 target: middleware (proposal 0004) covers fixtures 001-016.
-# Later fixtures need fan-out (017-021) or checkpointing (022-031);
-# they're handled by Phases 3 and 5.
-_PHASE_2_LAST = 16
+# Phase 3 target: fan-out (proposal 0005 PU side) covers fixtures 017-023.
+# Phase 5 will pick up the checkpointing fixtures (024-031).
+_PHASE_3_LAST = 23
 
 
 def _fixture_paths() -> list[Path]:
@@ -87,7 +81,7 @@ def _fixture_paths() -> list[Path]:
             number = int(p.stem.split("-", 1)[0])
         except ValueError:
             continue
-        if number <= _PHASE_2_LAST:
+        if number <= _PHASE_3_LAST:
             out.append(p)
     return out
 
@@ -246,6 +240,33 @@ def _translate_middleware_block(
     return graph_mw, node_mw
 
 
+def _translate_fan_out_instance_middleware(
+    spec: Mapping[str, Any],
+    sinks: CaptureSinks,
+    clock: Callable[[], float] | None = None,
+) -> dict[str, list[Middleware]]:
+    """Walk ``spec.nodes`` for fan_out blocks with ``instance_middleware``
+    and translate each into a list of Middleware instances. Returned
+    map is keyed by fan-out node name and consumed by build_graph's
+    ``fan_out_instance_middleware`` kwarg.
+    """
+    out: dict[str, list[Middleware]] = {}
+    nodes = cast("dict[str, dict[str, Any]]", spec.get("nodes") or {})
+    for node_name, node_spec in nodes.items():
+        fan_out_cfg_raw = node_spec.get("fan_out")
+        if not isinstance(fan_out_cfg_raw, dict):
+            continue
+        fan_out_cfg = cast("dict[str, Any]", fan_out_cfg_raw)
+        entries = cast(
+            "list[dict[str, Any]]",
+            fan_out_cfg.get("instance_middleware") or [],
+        )
+        if not entries:
+            continue
+        out[node_name] = [_build_middleware(cfg, sinks, clock) for cfg in entries]
+    return out
+
+
 # ---------------------------------------------------------------------------
 # Clock stub — monkeypatch time.monotonic for deterministic timing fixtures.
 # ---------------------------------------------------------------------------
@@ -298,14 +319,20 @@ async def test_pipeline_utility_fixture(
 ) -> None:
     spec = _load(fixture_path)
 
-    # Cases-shape fixtures (014, 016): each case is a self-contained
-    # graph + middleware + expected block. Run each in sequence; failure
-    # in any case fails the fixture.
+    # Cases-shape fixtures (014, 016, 018-019, 021-023): each case is
+    # a self-contained graph + middleware + expected block. The outer
+    # fixture may define shared ``subgraph:`` / ``subgraph_with_idx:``
+    # blocks that every case references; merge them into each case
+    # before dispatching so the case sees them as if they were its own.
     if "cases" in spec:
+        shared_subgraph_blocks = {k: spec[k] for k in ("subgraph", "subgraph_with_idx") if k in spec}
         for case in spec["cases"]:
             case_name = case.get("name", "<unnamed>")
+            merged: dict[str, Any] = dict(case)
+            for k, v in shared_subgraph_blocks.items():
+                merged.setdefault(k, v)
             try:
-                await _run_one(case, monkeypatch)
+                await _run_one(merged, monkeypatch)
             except AssertionError as e:
                 raise AssertionError(f"case {case_name!r}: {e}") from e
         return
@@ -324,12 +351,18 @@ async def _run_one(spec: Mapping[str, Any], monkeypatch: pytest.MonkeyPatch) -> 
     sinks = CaptureSinks()
     clock = _build_clock_stub(spec["clock_stub"]) if "clock_stub" in spec else None
     graph_mw, node_mw = _translate_middleware_block(spec.get("middleware"), sinks, clock)
+    fan_out_inst_mw = _translate_fan_out_instance_middleware(spec, sinks, clock)
     del monkeypatch  # retained in signature for future stubs that need it
 
-    # Subgraph block — for fixture 010 (subgraph isolation).
+    # Subgraph blocks — fixture 010 uses singular `subgraph:`; fan-out
+    # fixtures 020-022 use one or two named subgraph blocks
+    # (``subgraph:``, ``subgraph_with_idx:``) at the top level so the
+    # fan-out config can pick which one to dispatch to per case.
     subgraphs: dict[str, Any] = {}
-    if "subgraph" in spec:
-        sub_spec = spec["subgraph"]
+    for sub_key in ("subgraph", "subgraph_with_idx"):
+        sub_spec = spec.get(sub_key)
+        if sub_spec is None:
+            continue
         sub_sinks = sinks  # same sinks; subgraph middleware shares the harness's lists
         sub_graph_mw, sub_node_mw = _translate_middleware_block(sub_spec.get("middleware"), sub_sinks, clock)
         sub_built = build_graph(
@@ -354,6 +387,7 @@ async def _run_one(spec: Mapping[str, Any], monkeypatch: pytest.MonkeyPatch) -> 
             subgraphs=subgraphs,
             graph_middleware=graph_mw,
             node_middleware=node_mw,
+            fan_out_instance_middleware=fan_out_inst_mw,
         )
         compiled = built.builder.compile()
         initial = built.initial_state(spec.get("initial_state", {}))
@@ -384,11 +418,17 @@ async def _run_one(spec: Mapping[str, Any], monkeypatch: pytest.MonkeyPatch) -> 
             if run_count == 1
             else _translate_middleware_block(spec.get("middleware"), run_sinks, clock)
         )
+        run_fan_out_inst_mw = (
+            fan_out_inst_mw
+            if run_count == 1
+            else _translate_fan_out_instance_middleware(spec, run_sinks, clock)
+        )
         run_built = build_graph(
             spec,
             subgraphs=subgraphs,
             graph_middleware=run_graph_mw,
             node_middleware=run_node_mw,
+            fan_out_instance_middleware=run_fan_out_inst_mw,
         )
         run_compiled = run_built.builder.compile()
         run_initial = run_built.initial_state(spec.get("initial_state", {}))

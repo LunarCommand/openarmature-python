@@ -11,17 +11,22 @@ a type-checked `state` parameter on every callback — without `cast(...)` calls
 """
 
 from collections.abc import Awaitable, Callable, Iterable, Mapping
-from typing import Any, Self, cast
+from types import GenericAlias, UnionType
+from typing import Any, Self, cast, get_args, get_origin
 
 from .compiled import CompiledGraph
 from .edges import ConditionalEdge, EndSentinel, StaticEdge
 from .errors import (
     ConflictingReducers,
     DanglingEdge,
+    FanOutCountModeAmbiguous,
+    FanOutFieldNotList,
+    MappingReferencesUndeclaredField,
     MultipleOutgoingEdges,
     NoDeclaredEntry,
     UnreachableNode,
 )
+from .fan_out import ConcurrencyResolver, CountResolver, FanOutConfig, FanOutNode
 from .middleware import Middleware
 from .nodes import FunctionNode, Node
 from .projection import FieldNameMatching, ProjectionStrategy
@@ -77,6 +82,156 @@ class GraphBuilder[StateT: State]:
             projection=proj,
             middleware=tuple(middleware) if middleware is not None else (),
         )
+        return self
+
+    def add_fan_out_node[ChildT: State](
+        self,
+        name: str,
+        *,
+        subgraph: CompiledGraph[ChildT],
+        collect_field: str,
+        target_field: str,
+        items_field: str | None = None,
+        item_field: str | None = None,
+        count: int | CountResolver | None = None,
+        concurrency: int | ConcurrencyResolver | None = 10,
+        error_policy: str = "fail_fast",
+        on_empty: str = "raise",
+        count_field: str | None = None,
+        inputs: Mapping[str, str] | None = None,
+        extra_outputs: Mapping[str, str] | None = None,
+        instance_middleware: Iterable[Middleware] | None = None,
+        errors_field: str | None = None,
+        middleware: Iterable[Middleware] | None = None,
+    ) -> Self:
+        """Register a fan-out node per pipeline-utilities §9.
+
+        Validates configuration at registration time:
+
+        - Exactly one of ``items_field`` or ``count`` MUST be specified
+          (``fan_out_count_mode_ambiguous`` otherwise).
+        - ``items_field`` MUST refer to a list-typed field on the parent
+          state schema (``fan_out_field_not_list`` otherwise).
+        - ``items_field`` mode requires ``item_field``; ``count`` mode
+          forbids ``item_field``.
+        - ``on_empty`` and ``error_policy`` MUST be one of the
+          spec-defined string literals.
+        - ``inputs`` / ``extra_outputs`` / ``count_field`` field
+          references go through the existing
+          ``mapping_references_undeclared_field`` rule.
+
+        See spec §9 for full field semantics.
+        """
+        if name in self._nodes:
+            raise ValueError(f"node {name!r} already declared")
+
+        # Mode validation: exactly one of items_field / count.
+        if (items_field is None) == (count is None):
+            raise FanOutCountModeAmbiguous(
+                node_name=name,
+                message=(
+                    "must specify exactly one of items_field or count "
+                    f"(got items_field={items_field!r}, count={count!r})"
+                ),
+            )
+        if items_field is not None and item_field is None:
+            raise FanOutCountModeAmbiguous(node_name=name, message="items_field mode requires item_field")
+        if count is not None and item_field is not None:
+            raise FanOutCountModeAmbiguous(node_name=name, message="count mode forbids item_field")
+
+        # items_field must be a list-typed parent field.
+        if items_field is not None:
+            parent_fields = self.state_cls.model_fields
+            if items_field not in parent_fields:
+                raise MappingReferencesUndeclaredField(
+                    direction="fan_out.items_field", side="parent", field_name=items_field
+                )
+            ann = parent_fields[items_field].annotation
+            if not _is_list_typed(ann):
+                raise FanOutFieldNotList(node_name=name, field_name=items_field)
+
+        # error_policy + on_empty literal validation.
+        if error_policy not in {"fail_fast", "collect"}:
+            raise ValueError(
+                f"fan-out node {name!r}: error_policy must be 'fail_fast' or 'collect', got {error_policy!r}"
+            )
+        if on_empty not in {"raise", "noop"}:
+            raise ValueError(f"fan-out node {name!r}: on_empty must be 'raise' or 'noop', got {on_empty!r}")
+
+        # *_field references must match declared fields.
+        parent_fields = self.state_cls.model_fields
+        sub_fields = subgraph.state_cls.model_fields
+        if target_field not in parent_fields:
+            raise MappingReferencesUndeclaredField(
+                direction="fan_out.target_field", side="parent", field_name=target_field
+            )
+        if collect_field not in sub_fields:
+            raise MappingReferencesUndeclaredField(
+                direction="fan_out.collect_field", side="subgraph", field_name=collect_field
+            )
+        # NOTE: item_field is intentionally NOT validated against declared
+        # subgraph fields. Per fixture 023, the spec allows item_field to
+        # name a field the subgraph doesn't declare (treated as a
+        # placeholder when the subgraph doesn't read the item). The
+        # runtime projection in fan_out._build_instance_states skips the
+        # assignment if the field isn't declared, so non-declared
+        # item_field values are effectively no-ops.
+        if count_field is not None and count_field not in parent_fields:
+            raise MappingReferencesUndeclaredField(
+                direction="fan_out.count_field", side="parent", field_name=count_field
+            )
+        if errors_field is not None and errors_field not in parent_fields:
+            raise MappingReferencesUndeclaredField(
+                direction="fan_out.errors_field", side="parent", field_name=errors_field
+            )
+        for sub_f, parent_f in (inputs or {}).items():
+            if sub_f not in sub_fields:
+                raise MappingReferencesUndeclaredField(
+                    direction="fan_out.inputs", side="subgraph", field_name=sub_f
+                )
+            if parent_f not in parent_fields:
+                raise MappingReferencesUndeclaredField(
+                    direction="fan_out.inputs", side="parent", field_name=parent_f
+                )
+        for parent_f, sub_f in (extra_outputs or {}).items():
+            if parent_f not in parent_fields:
+                raise MappingReferencesUndeclaredField(
+                    direction="fan_out.extra_outputs", side="parent", field_name=parent_f
+                )
+            if sub_f not in sub_fields:
+                raise MappingReferencesUndeclaredField(
+                    direction="fan_out.extra_outputs", side="subgraph", field_name=sub_f
+                )
+
+        cfg = FanOutConfig(
+            subgraph=subgraph,
+            collect_field=collect_field,
+            target_field=target_field,
+            items_field=items_field,
+            item_field=item_field,
+            count=count,
+            concurrency=concurrency,
+            error_policy=cast(Any, error_policy),
+            on_empty=cast(Any, on_empty),
+            count_field=count_field,
+            inputs=dict(inputs or {}),
+            extra_outputs=dict(extra_outputs or {}),
+            instance_middleware=tuple(instance_middleware or ()),
+            errors_field=errors_field,
+        )
+        # FanOutNode satisfies the Node[StateT] structural protocol (run
+        # returns a partial update; name and middleware are present),
+        # but pyright loses the StateT correspondence through the second
+        # type parameter — cast restores it for the dict assignment.
+        fan_out: Node[StateT] = cast(
+            "Node[StateT]",
+            FanOutNode[StateT, ChildT](
+                name=name,
+                config=cfg,
+                middleware=tuple(middleware) if middleware is not None else (),
+            ),
+        )
+        self._nodes[name] = fan_out
         return self
 
     def add_middleware(self, middleware: Middleware) -> Self:
@@ -195,3 +350,28 @@ class GraphBuilder[StateT: State]:
                     reachable.add(name)
                     frontier.append(name)
         return reachable
+
+
+def _is_list_typed(annotation: Any) -> bool:
+    """True if ``annotation`` resolves to a ``list[...]`` shape.
+
+    Used by ``add_fan_out_node`` to validate that ``items_field`` refers
+    to a list-typed parent field. Handles both bare ``list[X]`` and
+    ``Annotated[list[X], reducer]`` forms (the latter is how state
+    fields commonly attach an `append` reducer).
+    """
+    if annotation is list:
+        return True
+    origin = get_origin(annotation)
+    if origin is list:
+        return True
+    # Annotated[T, ...] — peel the metadata, recurse on the type.
+    if isinstance(annotation, GenericAlias):
+        return False
+    args = get_args(annotation)
+    if args and origin is None:
+        # Likely Annotated; first arg is the underlying type.
+        return _is_list_typed(args[0])
+    if isinstance(annotation, UnionType):
+        return any(_is_list_typed(a) for a in args)
+    return False

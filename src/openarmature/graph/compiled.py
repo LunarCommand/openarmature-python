@@ -38,6 +38,7 @@ from .errors import (
     StateValidationError,
 )
 from .events import NodeEvent
+from .fan_out import FanOutNode
 from .middleware import ChainCall, Middleware, compose_chain
 from .nodes import Node
 from .observer import (
@@ -257,7 +258,15 @@ class CompiledGraph[StateT: State]:
         while True:
             node = self.nodes[current]
 
-            if isinstance(node, SubgraphNode):
+            if isinstance(node, FanOutNode):
+                # Fan-out nodes are recognized as a distinct node type
+                # per pipeline-utilities §9. Dispatched through
+                # ``_step_fan_out_node`` which wraps the whole fan-out
+                # as one parent dispatch (per §9.6) — instance-level
+                # concurrency lives inside the FanOutNode itself.
+                fn_node = cast("FanOutNode[StateT, State]", node)
+                state = await self._step_fan_out_node(fn_node, current, state, context)
+            elif isinstance(node, SubgraphNode):
                 # Subgraph wrappers are transparent to the observer protocol
                 # (per fixture 013): no event is dispatched for the wrapper
                 # itself, the step counter does not advance for it, and any
@@ -457,6 +466,62 @@ class CompiledGraph[StateT: State]:
             raise NodeException(node_name=current, cause=e, recoverable_state=state) from e
         return _merge_partial(state, final_partial, self.reducers, current)
 
+    async def _step_fan_out_node(
+        self,
+        node: FanOutNode[StateT, State],
+        current: str,
+        state: StateT,
+        context: _InvocationContext,
+    ) -> StateT:
+        """Run one fan-out-as-node step through the parent's middleware chain.
+
+        Per pipeline-utilities §9.6: the parent's per-graph + per-node
+        middleware wraps the fan-out as a SINGLE dispatch — one started
+        event before the fan-out begins, one completed event after all
+        instances complete and fan-in is done. Per-instance events
+        come from the inner subgraph executions; their pre_state /
+        post_state shape is the inner subgraph's state, and they carry
+        ``fan_out_index`` populated.
+
+        Raw exceptions escaping the chain become NodeException per §4.
+        """
+        step = context.take_step()
+        namespace = context.namespace_prefix + (current,)
+
+        async def innermost(s: Any) -> Mapping[str, Any]:
+            self._dispatch_started(context, current, namespace, step, s)
+            try:
+                partial = await node.run_with_context(s, context)
+            except RuntimeGraphError as e:
+                self._dispatch_completed(context, current, namespace, step, s, error=e)
+                raise
+            except Exception as e:
+                wrapped = NodeException(node_name=current, cause=e, recoverable_state=s)
+                self._dispatch_completed(context, current, namespace, step, s, error=wrapped)
+                raise wrapped from e
+
+            try:
+                merged = _merge_partial(s, partial, self.reducers, current)
+            except (ReducerError, StateValidationError) as e:
+                self._dispatch_completed(context, current, namespace, step, s, error=e)
+                raise
+
+            self._dispatch_completed(context, current, namespace, step, s, post_state=merged)
+            return partial
+
+        chain: ChainCall = compose_chain(
+            list(self.middleware) + list(node.middleware),
+            innermost,
+        )
+
+        try:
+            final_partial = await chain(state)
+        except RuntimeGraphError:
+            raise
+        except Exception as e:
+            raise NodeException(node_name=current, cause=e, recoverable_state=state) from e
+        return _merge_partial(state, final_partial, self.reducers, current)
+
     @staticmethod
     def _dispatch_started(
         context: _InvocationContext,
@@ -479,6 +544,7 @@ class CompiledGraph[StateT: State]:
                 error=None,
                 parent_states=context.parent_states_prefix,
                 attempt_index=attempt_index,
+                fan_out_index=context.fan_out_index,
             ),
         )
 
@@ -506,5 +572,6 @@ class CompiledGraph[StateT: State]:
                 error=error,
                 parent_states=context.parent_states_prefix,
                 attempt_index=attempt_index,
+                fan_out_index=context.fan_out_index,
             ),
         )
