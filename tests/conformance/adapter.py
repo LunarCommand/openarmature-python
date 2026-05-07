@@ -303,17 +303,26 @@ def _make_flaky_fn(
     flaky: Mapping[str, Any],
     trace: list[str],
 ) -> Callable[[Any], Awaitable[Mapping[str, Any]]]:
-    """Build a flaky node body that fails per a configured failure_sequence
-    and finally returns a success_update.
+    """Build a flaky node body. Two shapes:
 
-    Per fixture 007's contract: `failure_sequence` is a list of failures
-    keyed to attempt index. Each entry has a `transient` flag, a
-    `category` (matched by the retry classifier), and a `message`. When
-    the sequence is exhausted, subsequent attempts return `success_update`.
+    - ``failure_sequence: [...]`` — per-attempt failures keyed to
+      attempt index. Used by fixture 007 + retry middleware tests.
+      When the sequence is exhausted, subsequent attempts return
+      ``success_update``.
+    - ``fail_first_invocation_only: true`` — fails on the first call,
+      then promotes itself; subsequent calls return
+      ``on_success``. Used by checkpoint resume fixtures (025, 029,
+      031): the engine's first invoke aborts on this node; the
+      resumed invoke succeeds. No retry middleware is wrapped around
+      these nodes (any wrapping would bypass the resume path), so
+      "fail-once-then-succeed" matches the spec contract directly.
     """
     sequence = list(flaky.get("failure_sequence", []))
     success_update = dict(flaky.get("success_update", {}))
     attempt_counter = [0]
+    fail_first_invocation_only = bool(flaky.get("fail_first_invocation_only"))
+    has_failed_once = [False]
+    on_success = dict(flaky.get("on_success", {}))
 
     async def fn(_state: Any) -> Mapping[str, Any]:
         idx = attempt_counter[0]
@@ -323,6 +332,18 @@ def _make_flaky_fn(
         # don't double-count the node.
         if idx == 0:
             trace.append(node_name)
+        if fail_first_invocation_only:
+            # Promote-on-first-failure model: the failure is what
+            # marks "first invocation has happened." Subsequent calls
+            # (which arrive only after a resume — the abort tore
+            # down the original invoke) return on_success.
+            if not has_failed_once[0]:
+                has_failed_once[0] = True
+                raise _CategorizedException(
+                    message=f"flaky({node_name}) first-invocation failure",
+                    category="node_exception",
+                )
+            return copy.deepcopy(on_success)
         if idx < len(sequence):
             entry = sequence[idx]
             if entry is None:

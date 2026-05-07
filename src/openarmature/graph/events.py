@@ -25,7 +25,12 @@ class NodeEvent:
     - `phase` is `"started"` (dispatched before the node runs) or
       `"completed"` (dispatched after the node returns or raises and the
       merge runs/fails). Each node attempt produces exactly one of each
-      in that order.
+      in that order. Per pipeline-utilities §10.8, the engine ALSO
+      dispatches a `"checkpoint_saved"` event on the same shape after
+      a successful Checkpointer.save call — observers MUST opt in
+      explicitly via `phases={"checkpoint_saved"}` to receive these
+      (default subscription is `{"started", "completed"}` only, so
+      legacy observers don't see them).
     - `node_name` is the name under which this node was registered in its
       immediate containing graph.
     - `namespace` is an ordered sequence of node names from the outermost
@@ -60,7 +65,7 @@ class NodeEvent:
     node_name: str
     namespace: tuple[str, ...]
     step: int
-    phase: Literal["started", "completed"]
+    phase: Literal["started", "completed", "checkpoint_saved"]
     pre_state: State
     post_state: State | None
     error: RuntimeGraphError | None

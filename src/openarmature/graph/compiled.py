@@ -22,11 +22,25 @@ subclass through to `invoke()`'s return type, so consumers don't need
 """
 
 import asyncio
+import time
+import uuid
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from typing import Any, cast
 
 from pydantic import ValidationError
+
+from openarmature.checkpoint.errors import (
+    CheckpointNotFound,
+    CheckpointRecordInvalid,
+    CheckpointSaveFailed,
+)
+from openarmature.checkpoint.protocol import (
+    CHECKPOINT_SCHEMA_VERSION,
+    Checkpointer,
+    CheckpointRecord,
+    NodePosition,
+)
 
 from .edges import END, ConditionalEdge, EndSentinel, StaticEdge
 from .errors import (
@@ -126,6 +140,10 @@ class CompiledGraph[StateT: State]:
     # auto-removes completed workers — long-running services that never call
     # drain() don't accumulate completed Task references indefinitely.
     _active_workers: set[asyncio.Task[None]] = field(default_factory=set[asyncio.Task[None]])
+    # Single-element list so the frozen-dataclass binding is stable but
+    # the user can swap the registered Checkpointer via
+    # ``attach_checkpointer``. ``None`` when no backend is registered.
+    _checkpointer_slot: list[Checkpointer | None] = field(default_factory=lambda: [None])
 
     # ------------------------------------------------------------------
     # Observer registration (spec v0.6.0 §6)
@@ -156,6 +174,33 @@ class CompiledGraph[StateT: State]:
         subscribed = _coerce_subscribed(observer, phases=phases)
         self._attached_observers.append(subscribed)
         return RemoveHandle(_observers=self._attached_observers, _observer=subscribed)
+
+    # ------------------------------------------------------------------
+    # Checkpointer registration (spec pipeline-utilities §10.1.1)
+    # ------------------------------------------------------------------
+
+    def attach_checkpointer(self, checkpointer: Checkpointer | None) -> None:
+        """Register a Checkpointer for this graph (spec §10.1.1).
+
+        Pass ``None`` to clear a previously-registered backend. Without
+        a registered Checkpointer the engine never calls ``save()`` and
+        ``invoke(resume_invocation=...)`` raises
+        ``checkpoint_not_found`` — the default-off behavior matches the
+        broader OA pattern of "the contract is normative; the
+        activation is an explicit choice."
+
+        At most one Checkpointer per graph (§10.1.1). Calling
+        ``attach_checkpointer`` again replaces the previously-registered
+        one; multi-backend fan-out is the user's responsibility (wrap
+        two underlying Checkpointers behind a custom protocol-conforming
+        implementation if needed).
+        """
+        self._checkpointer_slot[0] = checkpointer
+
+    @property
+    def checkpointer(self) -> Checkpointer | None:
+        """Currently-registered Checkpointer, or ``None``."""
+        return self._checkpointer_slot[0]
 
     async def drain(self) -> None:
         """Await delivery of every observer event produced by prior
@@ -194,6 +239,9 @@ class CompiledGraph[StateT: State]:
         self,
         initial_state: StateT,
         observers: Iterable[Observer | SubscribedObserver] | None = None,
+        *,
+        correlation_id: str | None = None,
+        resume_invocation: str | None = None,
     ) -> StateT:
         """Run the graph from `initial_state` to END and return the final state.
 
@@ -210,15 +258,103 @@ class CompiledGraph[StateT: State]:
         delivery queue has finished processing every dispatched event. Use
         `await compiled.drain()` if you need delivery-completion guarantees.
 
+        **Checkpointing (pipeline-utilities §10):**
+
+        - ``correlation_id`` is the per-invocation cross-backend join
+          key (see observability §3 in spec v0.7+). Caller-supplied or
+          auto-generated UUIDv4 when absent. Preserved unchanged across
+          ``resume_invocation``.
+        - ``resume_invocation`` names a prior invocation_id to resume
+          from. Requires a registered Checkpointer; raises
+          ``CheckpointNotFound`` when the backend has no record for
+          the supplied id, ``CheckpointRecordInvalid`` when the
+          loaded record's schema is incompatible. Resume mints a NEW
+          ``invocation_id`` per §10.4 — each attempt is its own
+          invocation in the observability sense; the
+          ``correlation_id`` is the cross-attempt join key.
+        - **Save-failure policy.** This implementation raises
+          ``CheckpointSaveFailed`` to the caller of ``invoke()``
+          immediately when ``Checkpointer.save`` raises; saves are
+          NOT retried by the engine. Wrap the Checkpointer in your
+          own retry logic if transient backend failures should be
+          reattempted.
+
         Raises one of the runtime error categories from spec §4 on failure.
         """
 
         invocation_scoped = tuple(_coerce_subscribed(o) for o in (observers or ()))
         queue: asyncio.Queue[_QueuedItem | None] = asyncio.Queue()
+
+        # Resolve the resume path BEFORE building the context so we can
+        # restore the correlation_id from the saved record (per §10.4
+        # step 3) and pre-populate the skip-set + completed_positions.
+        starting_state: StateT = initial_state
+        resolved_correlation_id = correlation_id or str(uuid.uuid4())
+        invocation_id = str(uuid.uuid4())
+        resume_skip_set: frozenset[tuple[str, ...]] = frozenset()
+        completed_positions: list[NodePosition] = []
+        pending_resume_states: dict[int, Any] = {}
+        if resume_invocation is not None:
+            checkpointer = self._checkpointer_slot[0]
+            if checkpointer is None:
+                # §10.1.1: resume against an unregistered backend
+                # surfaces as ``checkpoint_not_found`` — the user has
+                # misconfigured the run.
+                raise CheckpointNotFound(resume_invocation)
+            record = await checkpointer.load(resume_invocation)
+            if record is None:
+                raise CheckpointNotFound(resume_invocation)
+            if record.schema_version != CHECKPOINT_SCHEMA_VERSION:
+                raise CheckpointRecordInvalid(
+                    resume_invocation,
+                    f"persisted schema_version={record.schema_version!r} "
+                    f"does not match current {CHECKPOINT_SCHEMA_VERSION!r}",
+                )
+            # The saved record's ``state`` is post-merge state at the
+            # saving node's level (depth = len(parent_states)). For
+            # outer-level saves, parent_states is empty and ``state``
+            # IS the outermost state. For inner-node saves
+            # (parent_states populated), the OUTERMOST state lives in
+            # ``parent_states[0]`` and the deeper levels are
+            # parent_states[1:] + (state,) at depths 1..N. The descent
+            # path consumes the depth-keyed map to skip projection
+            # when re-entering an in-flight subgraph.
+            parent_states_chain: tuple[Any, ...] = record.parent_states
+            if parent_states_chain:
+                outer_raw = parent_states_chain[0]
+                # Inner depths 1..N: parent_states[1:] then state at depth N.
+                deeper_states = list(parent_states_chain[1:]) + [record.state]
+                for depth, st in enumerate(deeper_states, start=1):
+                    pending_resume_states[depth] = st
+            else:
+                outer_raw = record.state
+            # State coercion: if the record carries a Pydantic instance
+            # (in-memory backend), use it directly; if it's a dict (JSON-
+            # mode SQLite), re-validate against the declared state class.
+            if isinstance(outer_raw, dict):
+                starting_state = self.state_cls.model_validate(outer_raw)
+            else:
+                starting_state = cast("StateT", outer_raw)
+            # §10.4 step 3: keep the original correlation_id verbatim.
+            # Per spec resume MUST preserve the cross-backend join key.
+            resolved_correlation_id = record.correlation_id
+            completed_positions = list(record.completed_positions)
+            # Skip-set keys are the FULL identity tuple of a node:
+            # NodePosition.namespace + (NodePosition.node_name,). This
+            # matches what the engine looks up at run time
+            # (``context.namespace_prefix + (current,)``).
+            resume_skip_set = frozenset(p.namespace + (p.node_name,) for p in completed_positions)
+
         context = _InvocationContext(
             queue=queue,
             graph_attached=tuple(self._attached_observers),
             invocation_scoped=invocation_scoped,
+            invocation_id=invocation_id,
+            correlation_id=resolved_correlation_id,
+            checkpointer=self._checkpointer_slot[0],
+            completed_positions=completed_positions,
+            resume_skip_set=resume_skip_set,
+            pending_resume_states=pending_resume_states,
         )
         worker = asyncio.create_task(deliver_loop(queue))
         self._active_workers.add(worker)
@@ -227,7 +363,7 @@ class CompiledGraph[StateT: State]:
         # services don't leak Task references between drain() calls.
         worker.add_done_callback(self._active_workers.discard)
         try:
-            return await self._invoke(initial_state, context)
+            return await self._invoke(starting_state, context)
         finally:
             # Sentinel terminates the worker after it processes events
             # already on the queue (including any error event we just
@@ -257,6 +393,38 @@ class CompiledGraph[StateT: State]:
 
         while True:
             node = self.nodes[current]
+
+            # Resume gate (spec §10.4 step 5). When resume_invocation
+            # populated ``resume_skip_set``, any node whose namespace
+            # tuple matches a saved completed_position is skipped —
+            # the loaded ``state`` already reflects that node's
+            # contribution, so we just advance to its outgoing edge
+            # without re-running it. The skip applies uniformly to
+            # function nodes, subgraph wrappers, and fan-out nodes:
+            # a subgraph that fully completed in the prior run does
+            # not re-enter; a fan-out that fully completed does not
+            # re-fan-out. Partially-completed subgraphs have their
+            # wrapper-level position absent (the wrapper's save
+            # didn't fire), so the engine descends and the inner
+            # _invoke filters its own inner positions against the
+            # same skip-set.
+            current_namespace = context.namespace_prefix + (current,)
+            if current_namespace in context.resume_skip_set:
+                # Advance edge selection from loaded state.
+                edge = self.edges[current]
+                if isinstance(edge, StaticEdge):
+                    target: str | EndSentinel = edge.target
+                else:
+                    try:
+                        target = edge.fn(state)
+                    except Exception as e:
+                        raise EdgeException(source_node=current, cause=e, recoverable_state=state) from e
+                if target is END:
+                    return state
+                if not isinstance(target, str) or target not in self.nodes:
+                    raise RoutingError(source_node=current, returned=target, recoverable_state=state)
+                current = target
+                continue
 
             if isinstance(node, FanOutNode):
                 # Fan-out nodes are recognized as a distinct node type
@@ -336,10 +504,11 @@ class CompiledGraph[StateT: State]:
         step = context.take_step()
         namespace = context.namespace_prefix + (current,)
 
-        # The innermost layer dispatches the per-attempt event pair around a
-        # single call to ``node.run``. Each call to this inner increments
-        # the attempt counter; middleware composes around it.
-        attempt_counter = 0
+        # Mutable single-element list so innermost (a closure) can
+        # increment the counter while the outer function still reads
+        # the final value after ``chain`` returns — needed to record
+        # the final successful attempt_index in the checkpoint save.
+        attempt_counter: list[int] = [0]
 
         async def innermost(s: Any) -> Mapping[str, Any]:
             # Per pipeline-utilities §5 + graph-engine §6: per-attempt
@@ -349,9 +518,8 @@ class CompiledGraph[StateT: State]:
             # the original `category` attribute (timing's
             # exception_category, retry's classifier). The engine wraps
             # any exception that escapes the chain, OUTSIDE this layer.
-            nonlocal attempt_counter
-            attempt_index = attempt_counter
-            attempt_counter += 1
+            attempt_index = attempt_counter[0]
+            attempt_counter[0] += 1
 
             self._dispatch_started(context, current, namespace, step, s, attempt_index=attempt_index)
 
@@ -418,7 +586,20 @@ class CompiledGraph[StateT: State]:
         # per-attempt completed events showed the transformed merge for
         # observability, but the state advancing the graph loop is built
         # from the original.
-        return _merge_partial(state, final_partial, self.reducers, current)
+        merged_outer = _merge_partial(state, final_partial, self.reducers, current)
+        # Spec §10.3: save fires once the canonical merge succeeds —
+        # the LAST attempt's index is what gets recorded (retries
+        # don't multiply saves). attempt_counter[0] is one past the
+        # final attempt at this point, hence the -1.
+        await self._maybe_save_checkpoint(
+            context,
+            node_name=current,
+            namespace=namespace,
+            step=step,
+            attempt_index=attempt_counter[0] - 1,
+            post_state=merged_outer,
+        )
+        return merged_outer
 
     async def _step_subgraph_node(
         self,
@@ -520,7 +701,21 @@ class CompiledGraph[StateT: State]:
             raise
         except Exception as e:
             raise NodeException(node_name=current, cause=e, recoverable_state=state) from e
-        return _merge_partial(state, final_partial, self.reducers, current)
+        merged_outer = _merge_partial(state, final_partial, self.reducers, current)
+        # Spec §10.3 + §10.7: the fan-out's own completion DOES save —
+        # one record once the fan-out as a whole has finished and
+        # results have merged back. Per-instance internal saves are
+        # gated off by the fan-out instance descent setting
+        # ``checkpointer=None`` on the inner context.
+        await self._maybe_save_checkpoint(
+            context,
+            node_name=current,
+            namespace=namespace,
+            step=step,
+            attempt_index=0,
+            post_state=merged_outer,
+        )
+        return merged_outer
 
     @staticmethod
     def _dispatch_started(
@@ -573,5 +768,108 @@ class CompiledGraph[StateT: State]:
                 parent_states=context.parent_states_prefix,
                 attempt_index=attempt_index,
                 fan_out_index=context.fan_out_index,
+            ),
+        )
+
+    @staticmethod
+    async def _maybe_save_checkpoint(
+        context: _InvocationContext,
+        *,
+        node_name: str,
+        namespace: tuple[str, ...],
+        step: int,
+        attempt_index: int,
+        post_state: Any,
+    ) -> None:
+        """Fire a checkpoint save for the just-completed node, if a
+        backend is registered and we're not inside a fan-out instance.
+
+        Per spec pipeline-utilities §10.3:
+
+        - Save fires for outermost-graph nodes, subgraph-internal
+          nodes, AND the fan-out node's own completion (the parent
+          dispatch). All three have ``fan_out_index is None`` from
+          the context's perspective.
+        - Save does NOT fire for events from inside a fan-out
+          instance. The atomic-restart contract (§10.7) means
+          per-instance progress isn't recoverable in v1, so saving
+          inner-instance state is dead weight.
+
+        After ``Checkpointer.save`` returns, dispatch a
+        ``checkpoint_saved`` observer event (per §10.8 SHOULD-level
+        guidance) so observability backends — wired in Phase 6 — can
+        surface saves as spans.
+
+        Save failures raise ``CheckpointSaveFailed`` to the caller of
+        ``invoke()`` immediately; saves are NOT retried by the engine.
+        """
+        checkpointer = context.checkpointer
+        if checkpointer is None:
+            return
+        if context.fan_out_index is not None:
+            return
+        # Per spec §10.2: NodePosition.namespace is the containing-
+        # graph chain (outermost first), NOT including the node's
+        # own name — distinct from NodeEvent.namespace which
+        # includes it. The two are related by
+        # NodeEvent.namespace == NodePosition.namespace +
+        # (NodePosition.node_name,).
+        position = NodePosition(
+            namespace=context.namespace_prefix,
+            node_name=node_name,
+            step=step,
+            attempt_index=attempt_index,
+            fan_out_index=None,
+        )
+        context.completed_positions.append(position)
+        record = CheckpointRecord(
+            invocation_id=context.invocation_id,
+            correlation_id=context.correlation_id,
+            state=post_state,
+            completed_positions=tuple(context.completed_positions),
+            parent_states=context.parent_states_prefix,
+            # ``time.time()`` is wall-clock seconds, not strictly
+            # monotonic (NTP adjustments can regress it). Per spec
+            # §10.2 ``last_saved_at`` is "implementation-defined
+            # precision; SHOULD be monotonic per invocation" — we
+            # accept the wall-clock trade-off because save records
+            # are typically inspected hours/days later, where the
+            # absolute timestamp is more useful than a monotonic
+            # delta. Two saves within the same μs would tie; the
+            # ``step`` field on each NodePosition is the canonical
+            # within-invocation order.
+            last_saved_at=time.time(),
+            schema_version=CHECKPOINT_SCHEMA_VERSION,
+        )
+        try:
+            await checkpointer.save(context.invocation_id, record)
+        except Exception as exc:
+            raise CheckpointSaveFailed(context.invocation_id, exc) from exc
+        # §10.8: dispatch a ``checkpoint_saved`` observer event so
+        # observability mappings can surface saves as spans. Default
+        # observer subscriptions don't include this phase, so legacy
+        # observers don't see it without explicit opt-in.
+        #
+        # Convention for ``checkpoint_saved`` events: ``pre_state``
+        # carries the SAVED state (the post-merge state at the moment
+        # the save fired). ``post_state`` is None — there's no
+        # before/after distinction for a save like there is for a
+        # node attempt. The field is repurposed because a save
+        # event represents "the state was persisted" rather than
+        # "the state transitioned." Phase 6 OTel mapping reads
+        # ``pre_state`` as the save's state.
+        _dispatch(
+            context,
+            NodeEvent(
+                node_name=node_name,
+                namespace=namespace,
+                step=step,
+                phase="checkpoint_saved",
+                pre_state=post_state,
+                post_state=None,
+                error=None,
+                parent_states=context.parent_states_prefix,
+                attempt_index=attempt_index,
+                fan_out_index=None,
             ),
         )

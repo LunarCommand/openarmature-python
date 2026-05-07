@@ -14,6 +14,8 @@ from collections.abc import Awaitable, Callable, Iterable, Mapping
 from types import GenericAlias, UnionType
 from typing import Any, Self, cast, get_args, get_origin
 
+from openarmature.checkpoint.protocol import Checkpointer
+
 from .compiled import CompiledGraph
 from .edges import ConditionalEdge, EndSentinel, StaticEdge
 from .errors import (
@@ -46,6 +48,9 @@ class GraphBuilder[StateT: State]:
         # Per-graph middleware in registration order (outer-to-inner).
         # Composed OUTSIDE per-node middleware at runtime per spec §3.
         self._middleware: list[Middleware] = []
+        # Optional Checkpointer attached at compile time; ``None`` is
+        # the spec §10.1.1 default-off behavior.
+        self._checkpointer: Checkpointer | None = None
 
     def add_node(
         self,
@@ -234,6 +239,18 @@ class GraphBuilder[StateT: State]:
         self._nodes[name] = fan_out
         return self
 
+    def with_checkpointer(self, checkpointer: Checkpointer) -> Self:
+        """Register a Checkpointer for the compiled graph (spec §10.1.1).
+
+        At most one Checkpointer per graph; calling
+        ``with_checkpointer`` again replaces the previously-stored one.
+        Pass the result of :meth:`compile` to :meth:`CompiledGraph.invoke`
+        as usual; the engine fires saves at every ``completed`` event
+        for outermost-graph and subgraph-internal nodes per §10.3.
+        """
+        self._checkpointer = checkpointer
+        return self
+
     def add_middleware(self, middleware: Middleware) -> Self:
         """Register a per-graph middleware applied to every node in this graph.
 
@@ -319,7 +336,7 @@ class GraphBuilder[StateT: State]:
             if node_name not in reachable:
                 raise UnreachableNode(node_name)
 
-        return CompiledGraph[StateT](
+        compiled = CompiledGraph[StateT](
             state_cls=self.state_cls,
             entry=self._entry,
             nodes=dict(self._nodes),
@@ -327,6 +344,9 @@ class GraphBuilder[StateT: State]:
             reducers=resolved,
             middleware=tuple(self._middleware),
         )
+        if self._checkpointer is not None:
+            compiled.attach_checkpointer(self._checkpointer)
+        return compiled
 
     def _reachable_nodes(
         self,

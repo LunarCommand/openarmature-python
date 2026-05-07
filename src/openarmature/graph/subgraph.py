@@ -21,7 +21,7 @@ invisible at the outer graph's node dispatch site.
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from .middleware import Middleware
 from .projection import FieldNameMatching, ProjectionStrategy
@@ -67,7 +67,30 @@ class SubgraphNode[ParentT: State, ChildT: State]:
         state stack. Observer events from inner nodes bubble up to outer
         observers per spec v0.3.0 §6.
         """
-        sub_initial = self.projection.project_in(state, self.compiled.state_cls)
+        # Resume-with-saved-inner-state (spec pipeline-utilities §10.4):
+        # if the loaded record's latest save fired from inside this
+        # subgraph (or a deeper nested one we'll re-enter), the engine
+        # threads the saved inner state through ``pending_resume_states``
+        # keyed by descent depth. Consume the matching depth here
+        # before falling back to the normal projection — this is what
+        # makes "skip step_one, run step_two with its post-merge inner
+        # state" work without re-running step_one.
+        saved: Any = None
+        if context is not None:
+            # Descent depth of THIS subgraph's inner = current
+            # depth + 1. Outer is depth 0; first subgraph is depth 1.
+            target_depth = len(context.parent_states_prefix) + 1
+            saved = context.pending_resume_states.pop(target_depth, None)
+        if saved is not None:
+            # Coerce dict → typed instance if the backend stored JSON;
+            # in-memory backends preserve the live instance.
+            sub_initial: ChildT = (
+                self.compiled.state_cls.model_validate(saved)
+                if isinstance(saved, dict)
+                else cast("ChildT", saved)
+            )
+        else:
+            sub_initial = self.projection.project_in(state, self.compiled.state_cls)
         if context is None:
             sub_final = await self.compiled.invoke(sub_initial)
         else:
