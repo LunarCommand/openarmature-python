@@ -31,8 +31,8 @@ PROVIDER_INVALID_RESPONSE = "provider_invalid_response"
 PROVIDER_INVALID_REQUEST = "provider_invalid_request"
 
 
-# Per spec §7 "Retry classification": these four categories are
-# *transient* — a retry MAY succeed. The other three
+# Per spec §7 "Retry classification": these three categories are
+# *transient* — a retry MAY succeed. The other four
 # (`provider_authentication`, `provider_invalid_model`,
 # `provider_invalid_request`, `provider_invalid_response`) are
 # non-transient and MUST NOT be retried by the default classifier.

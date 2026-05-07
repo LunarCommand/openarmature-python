@@ -253,8 +253,16 @@ class OpenAIProvider:
             raise ProviderInvalidResponse(f"response missing required fields: {exc}") from exc
         finish_reason: str = finish_reason_raw if isinstance(finish_reason_raw, str) else "error"
 
-        # Map OpenAI's legacy `function_call` to `tool_calls`; map any
-        # unknown finish_reason to `error` per §8.2.
+        # Per §8.2 (and conformance fixture 005's
+        # `function_call_legacy_finish_reason_mapping` case): the
+        # legacy `finish_reason: "function_call"` value MUST be
+        # normalized to the spec's `"tool_calls"`. This is a
+        # finish_reason *value* rename only — the assistant message's
+        # `tool_calls` list is already populated by
+        # ``_wire_to_assistant_message`` from the `tool_calls` field
+        # on the wire. We do NOT translate the deprecated single
+        # `message.function_call` shape (no backend we target emits
+        # it). Any other unknown finish_reason maps to `error`.
         if finish_reason == "function_call":
             finish_reason = "tool_calls"
         if finish_reason not in {"stop", "length", "tool_calls", "content_filter", "error"}:
