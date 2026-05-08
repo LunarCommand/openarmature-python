@@ -94,6 +94,16 @@ def _read_spec_version() -> str:
     return __spec_version__
 
 
+def _empty_str_frozenset() -> frozenset[str]:
+    """Typed empty frozenset factory for ``detached_subgraphs`` /
+    ``detached_fan_outs`` defaults. ``default_factory=frozenset``
+    alone produces ``frozenset[Unknown]`` under pyright strict
+    mode; a named factory with the explicit return annotation
+    preserves the ``frozenset[str]`` typing without falling back to
+    a lambda."""
+    return frozenset()
+
+
 @dataclass
 class _OpenSpan:
     """An in-flight span paired with the OTel context token that pinned
@@ -148,13 +158,8 @@ class OTelObserver:
     """
 
     span_processor: SpanProcessor
-    # Lambda-wrapped factories give pyright the explicit
-    # ``frozenset[str]`` type — ``default_factory=frozenset``
-    # alone produces ``frozenset[Unknown]`` which the strict-mode
-    # config flags. The lambda overhead is negligible (one closure
-    # call per dataclass instance).
-    detached_subgraphs: frozenset[str] = field(default_factory=lambda: frozenset[str]())
-    detached_fan_outs: frozenset[str] = field(default_factory=lambda: frozenset[str]())
+    detached_subgraphs: frozenset[str] = field(default_factory=_empty_str_frozenset)
+    detached_fan_outs: frozenset[str] = field(default_factory=_empty_str_frozenset)
     disable_llm_spans: bool = False
     # Read from the package's ``__spec_version__`` (one of the three
     # places the spec version is pinned per CLAUDE.md). Bumping the
