@@ -277,8 +277,12 @@ def test_transient_categories_excludes_terminal_categories() -> None:
 
 
 def _make_provider() -> OpenAIProvider:
-    """Build a provider with a no-op transport — these tests don't
-    actually call the wire, only ``_classify_http_error``."""
+    """Build a provider for unit tests of ``_classify_http_error``.
+
+    The transport exists only to satisfy provider construction; these
+    tests pass explicit ``httpx.Response`` instances directly into
+    ``_classify_http_error`` and never perform wire calls.
+    """
     transport = httpx.MockTransport(lambda _req: httpx.Response(204))
     return OpenAIProvider(base_url="http://test", model="m", api_key="k", transport=transport)
 
@@ -388,8 +392,8 @@ def test_classify_504_to_unavailable() -> None:
 async def test_complete_does_not_mutate_messages_or_tools() -> None:
     """The input messages/tools list MUST NOT be mutated by complete().
     Snapshot the inputs (deep-copy via Pydantic round-trip), run a
-    happy-path call, and assert the input objects are byte-identical
-    after the call returns.
+    happy-path call, and assert the input objects remain equal to
+    their pre-call snapshots after the call returns.
     """
 
     def _ok(_req: httpx.Request) -> httpx.Response:
