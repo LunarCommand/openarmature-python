@@ -20,9 +20,14 @@ they live here under per-backend subpackages so the layering is
 established up front.
 """
 
-from .correlation import current_active_observers, current_correlation_id
+from .correlation import (
+    current_active_observers,
+    current_correlation_id,
+    current_dispatch,
+)
 
 __all__ = [
     "current_active_observers",
     "current_correlation_id",
+    "current_dispatch",
 ]

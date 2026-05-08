@@ -33,9 +33,16 @@ from typing import Any, cast
 import pytest
 import yaml
 
-from openarmature.observability.otel import OTelObserver
+# Skip the entire module if the ``otel`` extras aren't installed —
+# importing ``openarmature.observability.otel`` raises ImportError at
+# import time when the extras are missing, which would fail
+# collection rather than skipping cleanly. Mirrors the pattern in
+# ``tests/unit/test_observability_otel.py``.
+pytest.importorskip("opentelemetry.trace")
 
-from .adapter import build_graph
+from openarmature.observability.otel import OTelObserver  # noqa: E402
+
+from .adapter import build_graph  # noqa: E402
 
 CONFORMANCE_DIR = (
     Path(__file__).resolve().parents[2] / "openarmature-spec" / "spec" / "observability" / "conformance"

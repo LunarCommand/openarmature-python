@@ -162,6 +162,15 @@ class OTelObserver:
     _detached_roots: dict[tuple[str, ...], _OpenSpan] = field(
         init=False, repr=False, default_factory=dict[tuple[str, ...], _OpenSpan]
     )
+    # Subset of ``_detached_roots`` keys that represent per-instance
+    # fan-out roots — they're closed by ``_handle_completed`` on the
+    # fan-out node's own completion, NOT by ``_sync_subgraph_spans``.
+    # Using an explicit set rather than parsing the key (e.g.,
+    # checking ``prefix[-1].isdigit()``) so node names that happen
+    # to be pure digits don't get misclassified.
+    _fan_out_instance_root_prefixes: set[tuple[str, ...]] = field(
+        init=False, repr=False, default_factory=set[tuple[str, ...]]
+    )
 
     def __post_init__(self) -> None:
         # Private provider per spec §6 TracerProvider isolation —
@@ -199,12 +208,20 @@ class OTelObserver:
 
         # Lazily open the invocation span on the first event we see
         # for this invocation. Detect "first event" by matching the
-        # correlation_id; the invocation span lives until we see the
-        # outermost completed event (or until the engine teardown
-        # closes it via aclose).
+        # correlation_id; the invocation span lives until either
+        # ``shutdown()`` runs OR a new correlation_id arrives (i.e.,
+        # a new invocation starts on the same long-lived observer).
+        # The latter close path matters for shared observers reused
+        # across many invocations — without it the
+        # ``_invocation_span`` dict grows unbounded.
         correlation_id = current_correlation_id()
-        if correlation_id is not None and correlation_id not in self._invocation_span:
-            self._open_invocation_span(correlation_id, event)
+        if correlation_id is not None:
+            # New correlation_id → close prior invocation spans.
+            for prior_cid in list(self._invocation_span.keys()):
+                if prior_cid != correlation_id:
+                    self._close_invocation_span(prior_cid)
+            if correlation_id not in self._invocation_span:
+                self._open_invocation_span(correlation_id, event)
 
         # Synthesize subgraph dispatch spans for any ancestor namespace
         # prefix that doesn't have one yet (per observability §4.5).
@@ -378,9 +395,21 @@ class OTelObserver:
         """Return the OTel context to use as the parent for this
         event's span. Walks namespace ancestors finding the
         innermost-open subgraph or detached root span."""
-        # 1. Detached root at any matching prefix wins (highest
-        #    precedence — events inside a detached subtree always
-        #    parent under the detached root, never bleed up).
+        # 1a. Detached fan-out instance root — keyed by
+        #     ``namespace[:1] + (str(fan_out_index),)`` per
+        #     ``_open_detached_fan_out_instance_root``. Checked
+        #     explicitly before the generic prefix scan so the
+        #     parent attribution doesn't depend on the
+        #     attach-then-resolve ordering of the surrounding
+        #     ``_sync_subgraph_spans`` call.
+        if event.fan_out_index is not None and event.namespace:
+            instance_key = event.namespace[:1] + (str(event.fan_out_index),)
+            if instance_key in self._detached_roots:
+                root = self._detached_roots[instance_key]
+                return set_span_in_context(root.span)
+        # 1b. Detached subgraph root at any matching prefix wins
+        #     (highest precedence — events inside a detached subtree
+        #     always parent under the detached root, never bleed up).
         for prefix_len in range(len(event.namespace) - 1, -1, -1):
             prefix = event.namespace[:prefix_len]
             if prefix in self._detached_roots:
@@ -430,7 +459,9 @@ class OTelObserver:
             # Detached fan-out instance roots: keyed by namespace +
             # (str(fan_out_index),); leave those alone here, they're
             # closed when the fan-out parent dispatch completes.
-            if len(prefix) > 1 and prefix[-1].isdigit():
+            if prefix in self._fan_out_instance_root_prefixes:
+                # Closed by ``_handle_completed`` on the fan-out
+                # node's own completion, not here.
                 continue
             if not (len(prefix) < len(namespace) and namespace[: len(prefix)] == prefix):
                 self._close_detached_root(prefix)
@@ -494,6 +525,17 @@ class OTelObserver:
             return
         open_span.span.set_status(Status(StatusCode.OK))
         open_span.span.end()
+        # Mirror ``_close_detached_root``: the attach token MUST be
+        # detached or the OTel current-span context stays pinned to
+        # a closed span and corrupts parent/child for subsequent
+        # spans. The cross-context guard handles the case where the
+        # token was created in a different OTel context (e.g.,
+        # subgraph open/close straddles a detached descent).
+        if open_span.token is not None:
+            try:
+                detach(cast("Any", open_span.token))
+            except ValueError:
+                pass
 
     def _open_detached_subgraph_root(self, prefix: tuple[str, ...]) -> None:
         """Mint a fresh trace for a detached subgraph entry. The
@@ -602,11 +644,16 @@ class OTelObserver:
         )
         token = attach(set_span_in_context(instance_root))
         # Key by prefix + (str(fan_out_index),) so per-instance
-        # roots stay distinct.
+        # roots stay distinct. Track separately in
+        # ``_fan_out_instance_root_prefixes`` so
+        # ``_sync_subgraph_spans`` can identify them by membership
+        # (rather than by parsing the key shape).
         instance_key = prefix + (str(event.fan_out_index),)
         self._detached_roots[instance_key] = _OpenSpan(span=instance_root, token=token)
+        self._fan_out_instance_root_prefixes.add(instance_key)
 
     def _close_detached_root(self, prefix: tuple[str, ...]) -> None:
+        self._fan_out_instance_root_prefixes.discard(prefix)
         open_span = self._detached_roots.pop(prefix, None)
         if open_span is None:
             return
@@ -649,25 +696,46 @@ class OTelObserver:
     # Lifecycle
     # ------------------------------------------------------------------
 
+    def close_invocation(self, correlation_id: str) -> None:
+        """Public lifecycle hook: close the invocation span for
+        ``correlation_id``. Idempotent — calling twice (or for a
+        correlation_id with no open span) is a no-op.
+
+        Long-lived observers shared across many invocations
+        automatically close prior invocation spans on the first
+        event of a new invocation (see ``_handle_started``). This
+        method is for callers who want explicit control without
+        driving a follow-on invocation, e.g.::
+
+            await graph.invoke(state, correlation_id=cid)
+            await graph.drain()
+            otel_observer.close_invocation(cid)
+        """
+        self._close_invocation_span(correlation_id)
+
+    def _close_invocation_span(self, correlation_id: str) -> None:
+        """End and remove the invocation span for ``correlation_id``.
+
+        The OTel context token captured when the span opened was
+        created in the worker task's context — we don't try to
+        ``detach()`` it (cross-context detach raises ValueError;
+        the leaked context entry is cosmetic since the worker
+        eventually exits)."""
+        open_span = self._invocation_span.pop(correlation_id, None)
+        if open_span is None:
+            return
+        # Status defaults to OK for completed invocations; if the
+        # engine surfaced an error, the failing node's span
+        # already carries it and OTel propagates ERROR up the
+        # parent chain on its own.
+        open_span.span.set_status(Status(StatusCode.OK))
+        open_span.span.end()
+
     def shutdown(self) -> None:
         """Close any still-open invocation/detached spans and shut
-        down the underlying provider.
-
-        The OTel context tokens captured when the invocation spans
-        opened were created in the worker task's context — they
-        cannot be ``detach()``ed from a different async context (OTel
-        raises ``ValueError`` on cross-context detach). We end the
-        spans without detaching; the worker task is exiting so the
-        leaked context entries are cosmetic.
-        """
-        for open_span in list(self._invocation_span.values()):
-            # Status defaults to OK for completed invocations; if
-            # the engine surfaced an error, the failing node's span
-            # already carries it and OTel propagates ERROR up the
-            # parent chain on its own.
-            open_span.span.set_status(Status(StatusCode.OK))
-            open_span.span.end()
-        self._invocation_span.clear()
+        down the underlying provider."""
+        for cid in list(self._invocation_span.keys()):
+            self._close_invocation_span(cid)
         self._provider.shutdown()
 
 
