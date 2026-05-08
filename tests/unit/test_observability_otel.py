@@ -303,70 +303,174 @@ async def test_disable_llm_spans_skips_llm_provider_span() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_log_bridge_filter_injects_correlation_id() -> None:
+def test_log_record_factory_injects_correlation_id() -> None:
     """Spec §7: every log record emitted during an invocation MUST
-    carry ``openarmature.correlation_id``. The bridge's filter reads
-    the ContextVar and attaches it to the LogRecord."""
+    carry ``openarmature.correlation_id``. The bridge installs a
+    process-global :class:`logging.LogRecord` factory (rather than
+    a logger-level filter) so the attribute lands on every record
+    regardless of which logger originated it — Python's logging
+    propagates records up the logger tree's HANDLERS but skips
+    ancestor FILTERS, so a filter on root would miss any
+    child-logger emit.
+
+    Tests both null-cid (outside invocation) and live-cid paths."""
     from openarmature.observability.correlation import (
         _reset_correlation_id,
         _set_correlation_id,
     )
-    from openarmature.observability.otel.logs import _CorrelationIdFilter
-
-    flt = _CorrelationIdFilter()
-    record = logging.LogRecord(
-        name="test",
-        level=logging.INFO,
-        pathname="",
-        lineno=0,
-        msg="hello",
-        args=None,
-        exc_info=None,
+    from openarmature.observability.otel.logs import (
+        _install_correlation_id_factory,
     )
-    # Outside an invocation: no correlation_id attribute set.
-    assert flt.filter(record) is True
-    assert not hasattr(record, "openarmature.correlation_id")
 
-    # Inside an invocation: filter attaches the ContextVar value.
-    record2 = logging.LogRecord(
-        name="test",
-        level=logging.INFO,
-        pathname="",
-        lineno=0,
-        msg="hello",
-        args=None,
-        exc_info=None,
-    )
-    token = _set_correlation_id("my-cid-42")
+    prior_factory = logging.getLogRecordFactory()
     try:
-        flt.filter(record2)
+        _install_correlation_id_factory()
+        factory = logging.getLogRecordFactory()
+
+        # Outside an invocation: no correlation_id attribute set.
+        record = factory(
+            "any.child.logger",
+            logging.INFO,
+            "",
+            0,
+            "hello",
+            None,
+            None,
+        )
+        assert not hasattr(record, "openarmature.correlation_id")
+
+        # Inside an invocation: factory attaches the ContextVar
+        # value to every newly constructed record.
+        token = _set_correlation_id("my-cid-42")
+        try:
+            record2 = factory(
+                "any.child.logger",
+                logging.INFO,
+                "",
+                0,
+                "hello",
+                None,
+                None,
+            )
+        finally:
+            _reset_correlation_id(token)
+        assert getattr(record2, "openarmature.correlation_id") == "my-cid-42"
     finally:
-        _reset_correlation_id(token)
-    assert getattr(record2, "openarmature.correlation_id") == "my-cid-42"
+        # Restore the prior factory — process-global state.
+        logging.setLogRecordFactory(prior_factory)
 
 
 def test_install_log_bridge_is_idempotent() -> None:
     """Re-calling :func:`install_log_bridge` MUST NOT register a
-    duplicate handler — the bridge owns the only OA-flagged
-    LoggingHandler on the root logger."""
+    duplicate handler on the root logger AND MUST NOT stack a
+    second LogRecord factory wrapper on top of the
+    already-installed one.
+
+    Wrapped in ``warnings.catch_warnings("error")`` to lock in the
+    Phase 6.1 PR-B migration: this is the canonical surface where
+    the deprecated ``opentelemetry.sdk._logs.LoggingHandler`` used
+    to emit a ``DeprecationWarning``. Any future regression that
+    re-introduces the deprecated path fires here immediately."""
+    import warnings
+
     from opentelemetry.sdk._logs import LoggerProvider
 
     root = logging.getLogger()
     prior_handlers = list(root.handlers)
     prior_filters = list(root.filters)
+    prior_factory = logging.getLogRecordFactory()
     try:
-        provider = LoggerProvider()
-        install_log_bridge(provider)
-        handler_count_before = len(root.handlers)
-        install_log_bridge(provider)
-        handler_count_after = len(root.handlers)
-        assert handler_count_before == handler_count_after
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            provider = LoggerProvider()
+            install_log_bridge(provider)
+            handler_count_before = len(root.handlers)
+            factory_after_first = logging.getLogRecordFactory()
+            install_log_bridge(provider)
+            handler_count_after = len(root.handlers)
+            factory_after_second = logging.getLogRecordFactory()
+            assert handler_count_before == handler_count_after
+            # Factory identity is preserved across re-calls — no
+            # second wrapper stacked on top of the first.
+            assert factory_after_first is factory_after_second
     finally:
-        # install_log_bridge mutates the process-wide root logger;
-        # restore the prior handler + filter set so this test does
-        # not leak state into others.
+        # install_log_bridge mutates process-wide state; restore so
+        # this test does not leak into others.
         root.handlers[:] = prior_handlers
         root.filters[:] = prior_filters
+        logging.setLogRecordFactory(prior_factory)
+
+
+def test_log_bridge_exports_records_with_correlation_id() -> None:
+    """Spec §7 end-to-end: a log record emitted on a CHILD logger
+    under ``current_correlation_id`` flows through the bridge to
+    the OTel ``LoggerProvider``'s exporter with
+    ``openarmature.correlation_id`` populated. Child-logger emit
+    is the load-bearing case — Python's logging propagates child
+    records up to root's handlers but skips root's filters, so a
+    filter-on-root placement (the prior implementation) misses
+    every reasonable user's logger.
+
+    Wrapped in ``warnings.catch_warnings("error")`` so the PR-B
+    migration's "no more deprecation warning" guarantee is
+    asserted on the affirmative export path too."""
+    import warnings
+
+    from opentelemetry.sdk._logs import LoggerProvider
+    from opentelemetry.sdk._logs.export import (
+        InMemoryLogRecordExporter,
+        SimpleLogRecordProcessor,
+    )
+
+    from openarmature.observability.correlation import (
+        _reset_correlation_id,
+        _set_correlation_id,
+    )
+
+    root = logging.getLogger()
+    prior_handlers = list(root.handlers)
+    prior_filters = list(root.filters)
+    prior_factory = logging.getLogRecordFactory()
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            exporter = InMemoryLogRecordExporter()
+            provider = LoggerProvider()
+            provider.add_log_record_processor(SimpleLogRecordProcessor(exporter))
+            install_log_bridge(provider)
+
+            # Emit on a CHILD logger to verify the factory
+            # placement (which fires uniformly at record
+            # construction) actually delivers — a filter-on-root
+            # placement would not.
+            child_logger = logging.getLogger("openarmature.test_log_bridge.child")
+            token = _set_correlation_id("test-cid-export-1")
+            try:
+                child_logger.warning("hello from %s", "test")
+            finally:
+                _reset_correlation_id(token)
+
+            # SimpleLogRecordProcessor flushes synchronously, but
+            # force-flush as a belt-and-suspenders guard so any
+            # buffered emit lands in the exporter before assertions.
+            provider.force_flush()
+        records = exporter.get_finished_logs()
+        # Filter to the record(s) emitted on our test logger — the
+        # root may receive other records from concurrent test setup.
+        ours = [r for r in records if r.log_record.body == "hello from test"]
+        assert len(ours) == 1, (
+            f"expected exactly one exported record for our test logger; "
+            f"got {len(ours)} (full set: {[r.log_record.body for r in records]})"
+        )
+        attrs = dict(ours[0].log_record.attributes or {})
+        assert attrs.get("openarmature.correlation_id") == "test-cid-export-1", (
+            f"correlation_id MUST appear on the exported OTel LogRecord attributes; "
+            f"got {attrs.get('openarmature.correlation_id')!r}"
+        )
+    finally:
+        root.handlers[:] = prior_handlers
+        root.filters[:] = prior_filters
+        logging.setLogRecordFactory(prior_factory)
 
 
 # ---------------------------------------------------------------------------
