@@ -702,9 +702,14 @@ class OTelObserver:
         )
 
         # Find the fan-out node's already-open span in the parent
-        # trace and add a Link to the detached root.
-        fan_out_key = self._fan_out_node_span_key(prefix)
-        fan_out_open = inv_state.open_spans.get(fan_out_key)
+        # trace and add a Link to the detached root. Retry middleware
+        # wrapping the fan-out bumps its attempt_index, so the span
+        # sits at ``(prefix, N, None)`` for the in-flight attempt N
+        # — scan for any entry at ``prefix`` with
+        # ``fan_out_index is None`` rather than hardcoding the key.
+        # Only one such entry is open at a time (retry opens and
+        # closes within a single attempt's lifecycle).
+        fan_out_open = self._find_fan_out_node_span(inv_state, prefix)
         if fan_out_open is not None:
             fan_out_open.span.add_link(detached_sc)
 
@@ -747,12 +752,19 @@ class OTelObserver:
         open_span.span.set_status(Status(StatusCode.OK))
         open_span.span.end()
 
-    def _fan_out_node_span_key(self, prefix: tuple[str, ...]) -> _StackKey:
-        """Build the lookup key for a fan-out node's own span (the
-        parent dispatch span). Fan-out node has no attempt_index ≠ 0
-        and no fan_out_index — those fields belong to its inner
-        instances."""
-        return (prefix, 0, None)
+    def _find_fan_out_node_span(self, inv_state: _InvState, prefix: tuple[str, ...]) -> _OpenSpan | None:
+        """Find the currently-open fan-out node's parent dispatch
+        span at ``prefix`` regardless of ``attempt_index``. Under
+        retry middleware wrapping the fan-out, the in-flight
+        attempt's span lives at ``(prefix, attempt_index, None)``;
+        only one such entry is open at a time (retry opens and
+        closes within each attempt's lifecycle), so a scan finds it
+        unambiguously."""
+        for key, open_span in inv_state.open_spans.items():
+            ns, _attempt, fan_idx = key
+            if ns == prefix and fan_idx is None:
+                return open_span
+        return None
 
     def _node_attrs(self, event: NodeEvent, correlation_id: str | None) -> dict[str, Any]:
         """Build the §5 attribute set for a node span."""
@@ -773,20 +785,30 @@ class OTelObserver:
     # ------------------------------------------------------------------
 
     def close_invocation(self, invocation_id: str) -> None:
-        """Public lifecycle hook: close the invocation span for
-        ``invocation_id`` and drain the per-invocation state.
-        Idempotent — calling twice (or for an invocation_id with no
-        open span) is a no-op.
+        """Close the invocation span for ``invocation_id`` and drain
+        the per-invocation state. Idempotent — calling twice (or for
+        an invocation_id with no open span) is a no-op.
 
         Drains any still-open spans in the per-invocation state in
         child→parent order (LLM spans → leaf spans → detached roots
-        → subgraph dispatch → invocation). Useful for callers who
-        want explicit invocation-end control without driving a
-        follow-on invocation, e.g.::
+        → subgraph dispatch → invocation).
 
-            await graph.invoke(state, correlation_id=cid)
-            await graph.drain()
-            otel_observer.close_invocation(invocation_id)
+        **Sourcing the invocation_id.** ``CompiledGraph.invoke()``
+        does not currently return the invocation_id, and the
+        ``current_invocation_id`` ContextVar is reset before control
+        returns to the caller. The practical use case for this
+        method is test code that captures the invocation_id from
+        inside a node body (or middleware / observer callback),
+        debugging scenarios, and integration code that has the id
+        from a checkpoint record's ``invocation_id`` field.
+
+        For typical production lifecycle on long-lived observers,
+        prefer :meth:`shutdown` — it drains every in-flight
+        invocation in one call without needing to track ids
+        externally. A first-class engine-level signal that lets
+        observers auto-drain per-invocation state on completion is
+        tracked as Phase 6.1+ follow-up work in
+        ``openarmature-coord/docs/phase-6-1-conformance-fillin.md``.
         """
         inv_state = self._inv_states.pop(invocation_id, None)
         if inv_state is not None:

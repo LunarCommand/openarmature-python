@@ -587,7 +587,7 @@ class _LlmEventState(State):
     error_category: str | None = None
     # Calling-node identity captured at dispatch time. The OTel
     # observer reads these to look up the calling node's span in
-    # its (now-cid-scoped) ``_open_spans`` map without relying on
+    # its (now-invocation_id-scoped) ``_open_spans`` map without relying on
     # the OTel current-span context (which under concurrent fan-out
     # can yield a sibling instance's span).
     calling_namespace_prefix: tuple[str, ...] = ()
