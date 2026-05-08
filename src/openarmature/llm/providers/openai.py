@@ -44,6 +44,9 @@ from typing import Any, cast
 import httpx
 from pydantic import ValidationError
 
+from openarmature.graph.events import NodeEvent
+from openarmature.observability.correlation import current_dispatch
+
 from ..errors import (
     ProviderAuthentication,
     ProviderInvalidModel,
@@ -190,6 +193,41 @@ class OpenAIProvider:
         validate_tools(tools)
         body = self._build_request_body(messages, tools, config)
 
+        # Spec observability §5.5 LLM provider span: when an
+        # observability backend is active in the current invocation,
+        # emit a started/completed event pair around the wire call so
+        # the backend can build a span. Queue-mediated dispatch
+        # preserves spec §6 serial event ordering across all event
+        # sources within an invocation. ``current_dispatch()`` returns
+        # ``None`` outside an openarmature invocation (direct
+        # provider use in scripts/tests), in which case the call
+        # proceeds without span emission.
+        dispatch = current_dispatch()
+        if dispatch is not None:
+            dispatch(_make_llm_event("started", model=self.model))
+
+        try:
+            response = await self._do_complete(body)
+        except Exception as exc:
+            if dispatch is not None:
+                dispatch(_make_llm_event("completed", model=self.model, error=exc))
+            raise
+
+        if dispatch is not None:
+            dispatch(
+                _make_llm_event(
+                    "completed",
+                    model=self.model,
+                    finish_reason=response.finish_reason,
+                    usage=response.usage,
+                )
+            )
+        return response
+
+    async def _do_complete(self, body: dict[str, Any]) -> Response:
+        """Wire-call helper: separated from ``complete()`` so the
+        LLM-provider span hook in ``complete()`` can wrap success and
+        failure paths uniformly."""
         try:
             resp = await self._client.post("/v1/chat/completions", json=body)
         except httpx.HTTPError as exc:
@@ -479,6 +517,64 @@ def _looks_like_model_not_loaded(message: object) -> bool:
         return False
     lower = message.lower()
     return "not loaded" in lower or "loading" in lower
+
+
+# ---------------------------------------------------------------------------
+# Observability §5.5 LLM provider span event helpers
+# ---------------------------------------------------------------------------
+
+
+def _make_llm_event(
+    phase: str,
+    *,
+    model: str,
+    finish_reason: FinishReason | None = None,
+    usage: Usage | None = None,
+    error: BaseException | None = None,
+) -> NodeEvent:
+    """Build a NodeEvent-shaped record for the engine's delivery
+    queue. The OTel observer (or any backend mapping) recognises the
+    sentinel ``node_name`` and ``namespace`` and emits an LLM-specific
+    span instead of a node span. Backend-specific attribute extraction
+    reads ``model``, ``finish_reason``, and ``usage`` from
+    ``pre_state``'s ``llm_event`` payload.
+
+    The pre_state field is reused as the carrier for LLM event detail
+    because NodeEvent's shape is fixed (graph-engine §6) and adding
+    ad-hoc fields would break observers that pattern-match on the
+    existing shape. Backend mappings know to inspect
+    ``event.pre_state['llm_event']`` when the namespace is
+    ``("openarmature.llm.complete",)``.
+    """
+    payload: dict[str, Any] = {"model": model}
+    if finish_reason is not None:
+        payload["finish_reason"] = finish_reason
+    if usage is not None:
+        payload["prompt_tokens"] = usage.prompt_tokens
+        payload["completion_tokens"] = usage.completion_tokens
+        payload["total_tokens"] = usage.total_tokens
+    if error is not None:
+        # The engine's NodeEvent.error type is RuntimeGraphError, but
+        # llm-provider errors aren't graph-engine §4 categories. Carry
+        # the exception detail in the payload instead so backends can
+        # surface it without our needing to wrap as RuntimeGraphError.
+        payload["error_type"] = type(error).__name__
+        payload["error_message"] = str(error)
+        category = getattr(error, "category", None)
+        if isinstance(category, str):
+            payload["error_category"] = category
+    return NodeEvent(
+        node_name="openarmature.llm.complete",
+        namespace=("openarmature.llm.complete",),
+        step=-1,
+        phase=cast("Any", phase),
+        # ``pre_state`` is overloaded here as the LLM-event payload
+        # carrier — see the docstring above.
+        pre_state=cast("Any", {"llm_event": payload}),
+        post_state=None,
+        error=None,
+        parent_states=(),
+    )
 
 
 __all__ = [
