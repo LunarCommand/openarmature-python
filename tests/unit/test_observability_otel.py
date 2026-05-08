@@ -262,6 +262,8 @@ async def test_disable_llm_spans_skips_llm_provider_span() -> None:
     # LLM event through the observer's __call__ and assert no span was
     # produced. This isolates the disable_llm_spans branch from the
     # provider's own queue-dispatch wiring.
+    from openarmature.llm.providers.openai import _LlmEventState
+
     exporter = InMemorySpanExporter()
     observer = OTelObserver(
         span_processor=SimpleSpanProcessor(exporter),
@@ -272,7 +274,7 @@ async def test_disable_llm_spans_skips_llm_provider_span() -> None:
         namespace=("openarmature.llm.complete",),
         step=-1,
         phase="started",
-        pre_state={"llm_event": {"model": "test-m"}},  # type: ignore[arg-type]
+        pre_state=_LlmEventState(model="test-m"),
         post_state=None,
         error=None,
         parent_states=(),
@@ -282,12 +284,7 @@ async def test_disable_llm_spans_skips_llm_provider_span() -> None:
         namespace=("openarmature.llm.complete",),
         step=-1,
         phase="completed",
-        pre_state={  # type: ignore[arg-type]
-            "llm_event": {
-                "model": "test-m",
-                "finish_reason": "stop",
-            }
-        },
+        pre_state=_LlmEventState(model="test-m", finish_reason="stop"),
         post_state=None,
         error=None,
         parent_states=(),

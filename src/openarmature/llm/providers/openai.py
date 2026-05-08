@@ -45,6 +45,7 @@ import httpx
 from pydantic import ValidationError
 
 from openarmature.graph.events import NodeEvent
+from openarmature.graph.state import State
 from openarmature.observability.correlation import current_dispatch
 
 from ..errors import (
@@ -524,6 +525,36 @@ def _looks_like_model_not_loaded(message: object) -> bool:
 # ---------------------------------------------------------------------------
 
 
+class _LlmEventState(State):
+    """Typed payload for LLM-provider span events. Subclasses
+    :class:`openarmature.graph.state.State` so the
+    ``NodeEvent.pre_state: State`` contract holds — observers
+    calling ``event.pre_state.model_dump()`` (or any other
+    Pydantic-on-State method) work without the raw-dict overload
+    that previously violated the schema.
+
+    Backend mappings (the OTel observer in this repo, future
+    Langfuse / Datadog adapters) recognize the
+    ``("openarmature.llm.complete",)`` namespace sentinel and read
+    these fields directly via attribute access.
+    """
+
+    model: str
+    finish_reason: str | None = None
+    prompt_tokens: int | None = None
+    completion_tokens: int | None = None
+    total_tokens: int | None = None
+    # On error responses the provider caller doesn't have a
+    # graph-engine §4 ``RuntimeGraphError`` to put in
+    # ``NodeEvent.error``, so we surface the failure detail through
+    # these fields instead. ``error_category`` is the canonical §7
+    # llm-provider category (``provider_unavailable``, etc.) when
+    # the failed exception carries one.
+    error_type: str | None = None
+    error_message: str | None = None
+    error_category: str | None = None
+
+
 def _make_llm_event(
     phase: Literal["started", "completed"],
     *,
@@ -537,40 +568,33 @@ def _make_llm_event(
     sentinel ``node_name`` and ``namespace`` and emits an LLM-specific
     span instead of a node span. Backend-specific attribute extraction
     reads ``model``, ``finish_reason``, and ``usage`` from
-    ``pre_state``'s ``llm_event`` payload.
-
-    The pre_state field is reused as the carrier for LLM event detail
-    because NodeEvent's shape is fixed (graph-engine §6) and adding
-    ad-hoc fields would break observers that pattern-match on the
-    existing shape. Backend mappings know to inspect
-    ``event.pre_state['llm_event']`` when the namespace is
-    ``("openarmature.llm.complete",)``.
+    ``pre_state`` directly via attribute access.
     """
-    payload: dict[str, Any] = {"model": model}
-    if finish_reason is not None:
-        payload["finish_reason"] = finish_reason
-    if usage is not None:
-        payload["prompt_tokens"] = usage.prompt_tokens
-        payload["completion_tokens"] = usage.completion_tokens
-        payload["total_tokens"] = usage.total_tokens
+    error_type: str | None = None
+    error_message: str | None = None
+    error_category: str | None = None
     if error is not None:
-        # The engine's NodeEvent.error type is RuntimeGraphError, but
-        # llm-provider errors aren't graph-engine §4 categories. Carry
-        # the exception detail in the payload instead so backends can
-        # surface it without our needing to wrap as RuntimeGraphError.
-        payload["error_type"] = type(error).__name__
-        payload["error_message"] = str(error)
+        error_type = type(error).__name__
+        error_message = str(error)
         category = getattr(error, "category", None)
         if isinstance(category, str):
-            payload["error_category"] = category
+            error_category = category
+    payload = _LlmEventState(
+        model=model,
+        finish_reason=finish_reason,
+        prompt_tokens=usage.prompt_tokens if usage is not None else None,
+        completion_tokens=usage.completion_tokens if usage is not None else None,
+        total_tokens=usage.total_tokens if usage is not None else None,
+        error_type=error_type,
+        error_message=error_message,
+        error_category=error_category,
+    )
     return NodeEvent(
         node_name="openarmature.llm.complete",
         namespace=("openarmature.llm.complete",),
         step=-1,
         phase=phase,
-        # ``pre_state`` is overloaded here as the LLM-event payload
-        # carrier — see the docstring above.
-        pre_state=cast("Any", {"llm_event": payload}),
+        pre_state=payload,
         post_state=None,
         error=None,
         parent_states=(),

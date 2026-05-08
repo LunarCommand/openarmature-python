@@ -47,13 +47,25 @@ def install_log_bridge(
 ) -> None:
     """Wire the stdlib root logger to the supplied OTel
     :class:`LoggerProvider`. Adds a
-    :class:`opentelemetry.sdk._logs.LoggingHandler` and an
-    :class:`_CorrelationIdFilter` so every log record emitted from
-    anywhere within an invocation carries the active
-    ``trace_id``/``span_id`` + ``openarmature.correlation_id``.
+    :class:`opentelemetry.sdk._logs.LoggingHandler` for OTel-native
+    ``trace_id`` / ``span_id`` bridging, AND attaches an
+    :class:`_CorrelationIdFilter` directly to the ROOT LOGGER (not
+    the handler) so the ``openarmature.correlation_id`` attribute
+    lands on every log record emitted during an invocation —
+    including records consumed by pre-existing stdout / file /
+    third-party handlers the user already had configured.
 
-    Idempotent: re-calling with a previously-installed provider is
-    a no-op (we check for an existing OA handler before adding).
+    Filter-on-the-root-logger placement matters per spec §7:
+    "log records emitted from anywhere within an invocation MUST
+    carry ``openarmature.correlation_id``." A handler-level filter
+    would only modify records flowing through THAT handler, so a
+    user's existing stdout handler would see records without the
+    attribute. The root-logger filter applies to every record,
+    regardless of which handler eventually processes it.
+
+    Idempotent: re-calling is a no-op (we check for the existing
+    OA-tagged handler AND for an existing filter instance on the
+    root logger).
 
     The user retains responsibility for providing the
     :class:`LoggerProvider` (typically built with their preferred
@@ -63,17 +75,23 @@ def install_log_bridge(
     from opentelemetry.sdk._logs import LoggingHandler  # type: ignore[attr-defined]
 
     root = logging.getLogger()
-    # Idempotency check — don't double-install on repeated calls.
-    for handler in root.handlers:
-        if isinstance(handler, LoggingHandler) and getattr(handler, "_openarmature_installed", False):
-            return
-    handler = LoggingHandler(level=level, logger_provider=provider)
-    # Direct assignment isn't typed on LoggingHandler; route through
-    # ``setattr`` to avoid pyright's strict attribute-access check
-    # without losing the idempotency-marker behavior.
-    object.__setattr__(handler, "_openarmature_installed", True)
-    handler.addFilter(_CorrelationIdFilter())
-    root.addHandler(handler)
+    # Idempotency #1: don't double-add the OTel LoggingHandler.
+    handler_already_installed = any(
+        isinstance(h, LoggingHandler) and getattr(h, "_openarmature_installed", False) for h in root.handlers
+    )
+    if not handler_already_installed:
+        handler = LoggingHandler(level=level, logger_provider=provider)
+        # Direct assignment isn't typed on LoggingHandler; route
+        # through ``object.__setattr__`` to avoid pyright's strict
+        # attribute-access check without losing the idempotency-
+        # marker behavior.
+        object.__setattr__(handler, "_openarmature_installed", True)
+        root.addHandler(handler)
+    # Idempotency #2: don't double-add the correlation_id filter to
+    # the root logger.
+    filter_already_installed = any(isinstance(f, _CorrelationIdFilter) for f in root.filters)
+    if not filter_already_installed:
+        root.addFilter(_CorrelationIdFilter())
 
 
 __all__ = [

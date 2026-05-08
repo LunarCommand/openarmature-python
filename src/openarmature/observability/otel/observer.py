@@ -341,17 +341,24 @@ class OTelObserver:
     def _handle_llm_event(self, event: NodeEvent) -> None:
         """LLM provider span per spec §5.5 — parented to the node
         span that invoked the provider."""
-        # The LLM provider's pre_state carries the event payload
-        # (model, finish_reason, usage, error detail) since
-        # NodeEvent's shape is fixed. See
-        # ``openarmature.llm.providers.openai._make_llm_event``.
-        payload = cast(
-            "dict[str, Any]",
-            cast("dict[str, Any]", event.pre_state).get("llm_event", {}),
-        )
+        # ``pre_state`` is a typed ``_LlmEventState`` Pydantic
+        # subclass — see
+        # ``openarmature.llm.providers.openai._LlmEventState``. We
+        # read attributes directly rather than treating the State
+        # as a dict, preserving the ``NodeEvent.pre_state: State``
+        # contract for any other observers that consume the event.
+        # Lazy import to avoid the otel→llm package dependency at
+        # module load time.
+        from openarmature.llm.providers.openai import _LlmEventState
+
+        if not isinstance(event.pre_state, _LlmEventState):
+            # Defensive — callers other than the OpenAIProvider hook
+            # shouldn't dispatch through the LLM_NAMESPACE sentinel.
+            return
+        payload = event.pre_state
         if event.phase == "started":
             parent_ctx = self._current_span_context()
-            attrs: dict[str, Any] = {"openarmature.llm.model": payload["model"]}
+            attrs: dict[str, Any] = {"openarmature.llm.model": payload.model}
             from openarmature.observability.correlation import current_correlation_id
 
             cid = current_correlation_id()
@@ -370,27 +377,23 @@ class OTelObserver:
             if open_span is None:
                 return
             span = open_span.span
-            if "finish_reason" in payload:
-                span.set_attribute("openarmature.llm.finish_reason", payload["finish_reason"])
-            for usage_field in (
-                "prompt_tokens",
-                "completion_tokens",
-                "total_tokens",
-            ):
-                if payload.get(usage_field) is not None:
-                    span.set_attribute(
-                        f"openarmature.llm.usage.{usage_field}",
-                        payload[usage_field],
-                    )
-            if "error_type" in payload:
+            if payload.finish_reason is not None:
+                span.set_attribute("openarmature.llm.finish_reason", payload.finish_reason)
+            if payload.prompt_tokens is not None:
+                span.set_attribute("openarmature.llm.usage.prompt_tokens", payload.prompt_tokens)
+            if payload.completion_tokens is not None:
+                span.set_attribute("openarmature.llm.usage.completion_tokens", payload.completion_tokens)
+            if payload.total_tokens is not None:
+                span.set_attribute("openarmature.llm.usage.total_tokens", payload.total_tokens)
+            if payload.error_type is not None:
                 span.set_status(
                     Status(
                         StatusCode.ERROR,
-                        description=payload.get("error_category", payload["error_type"]),
+                        description=payload.error_category or payload.error_type,
                     )
                 )
-                if "error_category" in payload:
-                    span.set_attribute("openarmature.error.category", payload["error_category"])
+                if payload.error_category is not None:
+                    span.set_attribute("openarmature.error.category", payload.error_category)
             else:
                 span.set_status(Status(StatusCode.OK))
             span.end()
