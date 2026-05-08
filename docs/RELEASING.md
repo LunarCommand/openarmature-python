@@ -43,9 +43,9 @@ vim src/openarmature/__init__.py      # __version__ = "0.5.0rc1"
 vim tests/test_smoke.py               # match
 # uv.lock auto-updates via pre-commit when you stage pyproject.toml
 git add pyproject.toml src/openarmature/__init__.py tests/test_smoke.py uv.lock
-git commit -m "release: prep 0.5.0-rc1"
+git commit -m "release: prep 0.5.0rc1"
 git push origin <branch>
-gh pr create --title "release: prep 0.5.0-rc1" ...
+gh pr create --title "release: prep 0.5.0rc1" ...
 ```
 
 If this is the same release cycle as a previous RC, also bump the spec pins
@@ -55,6 +55,14 @@ on the same PR if Phase 6's spec target requires it (`spec_version` in
 Merge the PR.
 
 ### 2. Tag the RC
+
+Two version forms appear in this guide and they're not interchangeable
+in writing even though PEP 440 normalizes them: `pyproject.toml` /
+`__init__.py` use `0.5.0rc1` (no hyphen — the canonical PEP 440
+form); git tags + the release-workflow's tag-shape regex use
+`v0.5.0-rc1` (with hyphen). Mixing them in commit messages or PR
+titles muddies the audit trail; stick to the no-hyphen form for
+version-string fields and the hyphenated form for git tags.
 
 ```bash
 git checkout main && git pull --ff-only
