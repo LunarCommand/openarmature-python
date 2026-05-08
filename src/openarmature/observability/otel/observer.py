@@ -181,6 +181,16 @@ class OTelObserver:
     _invocation_span: dict[str, _OpenSpan] = field(
         init=False, repr=False, default_factory=dict[str, _OpenSpan]
     )
+    # Per-LLM-call span tracking, keyed by ``call_id`` (UUIDv4
+    # minted in ``OpenAIProvider.complete`` per call). Concurrent
+    # ``complete()`` calls under fan-out instances would collide on
+    # a constant ``_LLM_NAMESPACE`` key in ``_open_spans``; the
+    # call_id-keyed dict disambiguates them. The deeper
+    # parent-attribution issue under concurrency (calling node's
+    # context not threaded through) is Phase 6.1 work.
+    _open_llm_spans: dict[str, _OpenSpan] = field(
+        init=False, repr=False, default_factory=dict[str, _OpenSpan]
+    )
     # Synthetic subgraph dispatch spans: the engine wrapper for
     # ``add_subgraph_node`` is transparent (graph-engine fixture 013
     # — no started/completed events of its own), but observability
@@ -306,7 +316,19 @@ class OTelObserver:
         span.end()
         token = open_span.token
         if token is not None:
-            detach(cast("Any", token))
+            try:
+                detach(cast("Any", token))
+            except ValueError:
+                # Out-of-LIFO detach: under interleaved
+                # fan-out-instance events, ``completed`` for an
+                # earlier-started span can arrive while a
+                # later-started span's token is on top of the OTel
+                # context stack. The proper fix is Phase 6.1's
+                # "don't hold attach tokens across event
+                # boundaries"; the guard here keeps Phase 6.0
+                # robust to the interleave without corrupting
+                # subsequent span attribution.
+                pass
         # If this was a detached root, drop the root entry so a
         # subsequent re-entry mints a fresh trace.
         self._detached_roots.pop(event.namespace, None)
@@ -371,9 +393,9 @@ class OTelObserver:
                 attributes=attrs,
             )
             token = attach(set_span_in_context(span))
-            self._open_spans[self._llm_key()] = _OpenSpan(span=span, token=token)
+            self._open_llm_spans[payload.call_id] = _OpenSpan(span=span, token=token)
         elif event.phase == "completed":
-            open_span = self._open_spans.pop(self._llm_key(), None)
+            open_span = self._open_llm_spans.pop(payload.call_id, None)
             if open_span is None:
                 return
             span = open_span.span
@@ -397,7 +419,16 @@ class OTelObserver:
             else:
                 span.set_status(Status(StatusCode.OK))
             span.end()
-            detach(cast("Any", open_span.token))
+            try:
+                detach(cast("Any", open_span.token))
+            except ValueError:
+                # See ``_handle_completed`` for the rationale —
+                # out-of-LIFO detach under concurrent fan-out
+                # instance events is a known Phase 6.0 limitation;
+                # the proper fix is Phase 6.1's
+                # "don't hold attach tokens across event
+                # boundaries."
+                pass
 
     # ------------------------------------------------------------------
     # Helpers
@@ -431,11 +462,6 @@ class OTelObserver:
 
     def _key_for(self, event: NodeEvent) -> _StackKey:
         return (event.namespace, event.attempt_index, event.fan_out_index)
-
-    def _llm_key(self) -> _StackKey:
-        """LLM events are unique within a node body — only one LLM
-        call can be open at a time per active span scope."""
-        return (_LLM_NAMESPACE, 0, None)
 
     def _resolve_parent_context(self, event: NodeEvent) -> object:
         """Return the OTel context to use as the parent for this
@@ -718,6 +744,21 @@ class OTelObserver:
                 # context entry leaks cosmetically.
                 pass
 
+    @staticmethod
+    def _drain_open_span(open_span: _OpenSpan) -> None:
+        """Close an open span as an orphan during shutdown: OK
+        status, end, and try-detach the token. No paired completed
+        event will arrive, so we don't have an error category to
+        record. Cross-context detach is swallowed (the worker that
+        owns the context eventually unwinds)."""
+        open_span.span.set_status(Status(StatusCode.OK))
+        open_span.span.end()
+        if open_span.token is not None:
+            try:
+                detach(cast("Any", open_span.token))
+            except ValueError:
+                pass
+
     def _fan_out_node_span_key(self, prefix: tuple[str, ...]) -> _StackKey:
         """Build the lookup key for a fan-out node's own span (the
         parent dispatch span). Fan-out node has no attempt_index ≠ 0
@@ -782,8 +823,23 @@ class OTelObserver:
         open_span.span.end()
 
     def shutdown(self) -> None:
-        """Close any still-open invocation/detached spans and shut
-        down the underlying provider."""
+        """Close any still-open spans (leaf node spans, LLM spans,
+        detached roots, synthetic subgraph dispatch spans, invocation
+        spans) and shut down the underlying provider. Walks state
+        maps in child→parent order so OTel parent/child reporting
+        stays coherent. Idempotent."""
+        for key in list(self._open_spans.keys()):
+            open_span = self._open_spans.pop(key, None)
+            if open_span is not None:
+                self._drain_open_span(open_span)
+        for call_id in list(self._open_llm_spans.keys()):
+            open_span = self._open_llm_spans.pop(call_id, None)
+            if open_span is not None:
+                self._drain_open_span(open_span)
+        for prefix in list(self._detached_roots.keys()):
+            self._close_detached_root(prefix)
+        for prefix in list(self._subgraph_spans.keys()):
+            self._close_subgraph_span(prefix)
         for cid in list(self._invocation_span.keys()):
             self._close_invocation_span(cid)
         self._provider.shutdown()

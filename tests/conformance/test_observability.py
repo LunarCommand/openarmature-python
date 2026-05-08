@@ -38,7 +38,7 @@ import yaml
 # import time when the extras are missing, which would fail
 # collection rather than skipping cleanly. Mirrors the pattern in
 # ``tests/unit/test_observability_otel.py``.
-pytest.importorskip("opentelemetry.trace")
+pytest.importorskip("opentelemetry.sdk.trace")
 
 from openarmature.observability.otel import OTelObserver  # noqa: E402
 
