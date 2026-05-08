@@ -8,22 +8,42 @@ by ``(namespace, attempt_index, fan_out_index)``; on the matching
 ``completed`` event it pops the span, applies §4.2 status mapping,
 and closes it.
 
+**Per-invocation state isolation.** All internal span maps are
+outer-keyed by ``invocation_id`` (per spec §5.1: each invocation has
+a fresh framework-minted UUIDv4). A single observer can be safely
+shared across concurrent invocations (e.g., an ASGI service running
+``asyncio.gather([invoke(), invoke()])`` on one observer); each
+invocation's spans live in their own sub-dict, lazy-allocated on
+first event. The ``correlation_id`` is the cross-run join key (spec
+§3.1) and is set as the ``openarmature.correlation_id`` attribute on
+every span — it is *not* the state-scoping key, because resume runs
+preserve the correlation_id and would (incorrectly) cause the
+resumed run's spans to inherit the prior invocation's trace.
+
+**No cross-event OTel context tokens.** Parent spans are resolved from
+the observer's own internal maps within a single event handler's
+scope — never from ``opentelemetry.context.get_current()``. Spans are
+opened with ``context=set_span_in_context(parent_span)`` directly
+rather than ``attach()``-ing tokens that would have to be ``detach()``
+-ed on the matching completed event. This eliminates LIFO-violation
+hazards under interleaved fan-out events and makes the observer
+robust to dispatch ordering.
+
 Subtree isolation lives in dedicated dicts rather than the leaf-span
 key:
 
-- ``_subgraph_spans`` — synthetic subgraph dispatch spans (the
-  engine wrapper is transparent per fixture 013, but observability
-  §4.5 mandates a span). Keyed by namespace prefix. Open lazily on
-  the first deeper-namespace event, close when subsequent events
-  leave the prefix.
-- ``_detached_roots`` — root spans for detached subgraphs (§4.4)
-  and per-instance detached fan-out roots. Each lives in its own
-  fresh ``trace_id``; the parent's dispatch span carries an OTel
+- ``subgraph_spans`` — synthetic subgraph dispatch spans (the engine
+  wrapper is transparent per fixture 013, but observability §4.5
+  mandates a span). Keyed by namespace prefix. Open lazily on the
+  first deeper-namespace event, close when subsequent events leave
+  the prefix.
+- ``detached_roots`` — root spans for detached subgraphs (§4.4) and
+  per-instance detached fan-out roots. Each lives in its own fresh
+  ``trace_id``; the parent's dispatch span carries an OTel
   :class:`Link` to the detached trace.
 - ``_invocation_span`` — root invocation span keyed by
-  ``correlation_id``. Closed eagerly when a new correlation_id's
-  first event arrives (or explicitly via
-  :meth:`close_invocation` / :meth:`shutdown`).
+  ``invocation_id``. Closed via :meth:`close_invocation` /
+  :meth:`shutdown`.
 
 Spans are emitted through a **private** :class:`TracerProvider`
 constructed by this observer — never the OTel global. Per spec §6
@@ -35,11 +55,7 @@ to emit duplicate spans alongside ours.
 Detached trace mode (§4.4) is implemented by minting a fresh
 :class:`SpanContext` with a new ``trace_id`` when entering a
 configured-detached subgraph or fan-out; the parent's dispatch span
-carries an OTel :class:`Link` to the detached trace. Inner-event
-parent resolution checks the per-fan-out-instance key
-(``namespace[:1] + (str(fan_out_index),)``) before the generic
-prefix scan, so per-instance detached roots win without depending
-on attach-then-resolve ordering.
+carries an OTel :class:`Link` to the detached trace.
 """
 
 from __future__ import annotations
@@ -49,7 +65,6 @@ from typing import TYPE_CHECKING, Any, cast
 
 from opentelemetry import context as otel_context
 from opentelemetry import trace as otel_trace
-from opentelemetry.context import attach, detach
 from opentelemetry.sdk.trace import SpanProcessor, TracerProvider
 from opentelemetry.sdk.trace.id_generator import RandomIdGenerator
 from opentelemetry.trace import (
@@ -70,13 +85,7 @@ if TYPE_CHECKING:
 
 # Span-stack key shape: ``(namespace, attempt_index, fan_out_index)``
 # — these three fields uniquely identify any node attempt within an
-# invocation. Trace_id was previously included in the key but that
-# created a registration/lookup mismatch when the OTel current-span
-# context changed between a span's started and completed events
-# (e.g., detached fan-out instances opening detached roots in
-# between). Detached sub-tree spans live in ``_detached_roots`` /
-# ``_subgraph_spans`` separately, so the namespace alone doesn't
-# collide here.
+# invocation.
 _StackKey = tuple[tuple[str, ...], int, int | None]
 
 
@@ -96,22 +105,32 @@ def _read_spec_version() -> str:
 
 def _empty_str_frozenset() -> frozenset[str]:
     """Typed empty frozenset factory for ``detached_subgraphs`` /
-    ``detached_fan_outs`` defaults. ``default_factory=frozenset``
-    alone produces ``frozenset[Unknown]`` under pyright strict
-    mode; a named factory with the explicit return annotation
-    preserves the ``frozenset[str]`` typing without falling back to
-    a lambda."""
+    ``detached_fan_outs`` defaults."""
     return frozenset()
 
 
 @dataclass
 class _OpenSpan:
-    """An in-flight span paired with the OTel context token that pinned
-    its scope. The token is ``detach``ed when the span closes so the
-    OTel current-span context unwinds correctly."""
+    """An in-flight span. No OTel context token: the new architecture
+    resolves parents from the observer's internal maps within a
+    single event handler's scope, so no token needs to live across
+    events."""
 
     span: Span
-    token: object
+
+
+@dataclass
+class _InvState:
+    """Per-invocation span state. One instance per concurrent
+    invocation — the outer ``OTelObserver`` keys these by
+    ``invocation_id`` so concurrent invocations (and resumed runs of
+    the same correlation_id) don't collide."""
+
+    open_spans: dict[_StackKey, _OpenSpan] = field(default_factory=dict[_StackKey, _OpenSpan])
+    open_llm_spans: dict[str, _OpenSpan] = field(default_factory=dict[str, _OpenSpan])
+    subgraph_spans: dict[tuple[str, ...], _OpenSpan] = field(default_factory=dict[tuple[str, ...], _OpenSpan])
+    detached_roots: dict[tuple[str, ...], _OpenSpan] = field(default_factory=dict[tuple[str, ...], _OpenSpan])
+    fan_out_instance_root_prefixes: set[tuple[str, ...]] = field(default_factory=set[tuple[str, ...]])
 
 
 @dataclass
@@ -141,20 +160,10 @@ class OTelObserver:
     - ``spec_version`` — string surfaced as
       ``openarmature.graph.spec_version`` on the invocation span.
 
-    **Concurrency model.** A single ``OTelObserver`` instance is
-    SAFE for sequential invocations on the same graph (one
-    ``invoke()`` followed by another, with the observer reused
-    between). It is NOT safe to share an instance across CONCURRENT
-    invocations — the internal span state (``_open_spans``,
-    ``_subgraph_spans``, ``_detached_roots``, ``_invocation_span``)
-    is keyed without per-invocation scoping, so overlapping
-    namespaces collide and the close-prior-correlation_id logic in
-    ``_handle_started`` would close another in-flight invocation's
-    span. Recommended pattern: one observer per ``CompiledGraph``
-    instance for sequential workloads; for ASGI / batch / parallel
-    invocation services, attach a fresh observer per invocation
-    (via ``invoke(observers=[...])``) until the Phase 6.1
-    correlation_id-scoped state lands.
+    Safe to share across concurrent invocations and across
+    resumes of the same correlation_id — every internal span map is
+    outer-keyed by ``invocation_id``, and parent resolution stays
+    within a single event handler's scope.
     """
 
     span_processor: SpanProcessor
@@ -170,55 +179,15 @@ class OTelObserver:
     # Internal state, populated in __post_init__ and during invocation.
     _provider: TracerProvider = field(init=False, repr=False)
     _tracer: otel_trace.Tracer = field(init=False, repr=False)
-    _open_spans: dict[_StackKey, _OpenSpan] = field(
-        init=False, repr=False, default_factory=dict[_StackKey, _OpenSpan]
-    )
-    # The invocation root span, opened on the first event of an
-    # invocation and closed when the matching outermost completed
-    # event arrives (or, in practice, when the engine's queue drains
-    # — the invocation span has no started/completed pair of its
-    # own, so we open it lazily and close it on a sentinel).
+    # Per-invocation_id span state — concurrent invocations on a
+    # shared observer each get their own ``_InvState`` so internal
+    # maps never collide.
+    _inv_states: dict[str, _InvState] = field(init=False, repr=False, default_factory=dict[str, _InvState])
+    # Root invocation spans, keyed by invocation_id. Opened lazily on
+    # the first event for a new invocation_id; closed via
+    # ``close_invocation`` / ``shutdown``.
     _invocation_span: dict[str, _OpenSpan] = field(
         init=False, repr=False, default_factory=dict[str, _OpenSpan]
-    )
-    # Per-LLM-call span tracking, keyed by ``call_id`` (UUIDv4
-    # minted in ``OpenAIProvider.complete`` per call). Concurrent
-    # ``complete()`` calls under fan-out instances would collide on
-    # a constant ``_LLM_NAMESPACE`` key in ``_open_spans``; the
-    # call_id-keyed dict disambiguates them. The deeper
-    # parent-attribution issue under concurrency (calling node's
-    # context not threaded through) is Phase 6.1 work.
-    _open_llm_spans: dict[str, _OpenSpan] = field(
-        init=False, repr=False, default_factory=dict[str, _OpenSpan]
-    )
-    # Synthetic subgraph dispatch spans: the engine wrapper for
-    # ``add_subgraph_node`` is transparent (graph-engine fixture 013
-    # — no started/completed events of its own), but observability
-    # §4.5 mandates a subgraph span. The OTel observer synthesizes
-    # one by detecting deeper-namespace events and opening an
-    # ancestor span for each new prefix; closes when subsequent
-    # events leave that prefix.
-    _subgraph_spans: dict[tuple[str, ...], _OpenSpan] = field(
-        init=False, repr=False, default_factory=dict[tuple[str, ...], _OpenSpan]
-    )
-    # Per-namespace-prefix detached trace tracking. When a detached
-    # subgraph or fan-out instance enters, we mint a fresh trace and
-    # store the root span here so subsequent inner events at that
-    # prefix find the right parent. Keyed by namespace prefix
-    # (subgraph) or namespace_prefix + (str(fan_out_index),) (fan-out
-    # instance). The fan-out node's own span (in the parent trace)
-    # collects Links to each detached instance trace.
-    _detached_roots: dict[tuple[str, ...], _OpenSpan] = field(
-        init=False, repr=False, default_factory=dict[tuple[str, ...], _OpenSpan]
-    )
-    # Subset of ``_detached_roots`` keys that represent per-instance
-    # fan-out roots — they're closed by ``_handle_completed`` on the
-    # fan-out node's own completion, NOT by ``_sync_subgraph_spans``.
-    # Using an explicit set rather than parsing the key (e.g.,
-    # checking ``prefix[-1].isdigit()``) so node names that happen
-    # to be pure digits don't get misclassified.
-    _fan_out_instance_root_prefixes: set[tuple[str, ...]] = field(
-        init=False, repr=False, default_factory=set[tuple[str, ...]]
     )
 
     def __post_init__(self) -> None:
@@ -227,6 +196,18 @@ class OTelObserver:
         self._provider = TracerProvider()
         self._provider.add_span_processor(self.span_processor)
         self._tracer = self._provider.get_tracer("openarmature")
+
+    # ------------------------------------------------------------------
+    # Per-invocation state lookup
+    # ------------------------------------------------------------------
+
+    def _inv_state_for(self, invocation_id: str) -> _InvState:
+        """Get-or-create the state container for an invocation_id."""
+        state = self._inv_states.get(invocation_id)
+        if state is None:
+            state = _InvState()
+            self._inv_states[invocation_id] = state
+        return state
 
     # ------------------------------------------------------------------
     # Observer protocol — async callable accepting a NodeEvent
@@ -253,55 +234,60 @@ class OTelObserver:
 
     def _handle_started(self, event: NodeEvent) -> None:
         """Open a span for this attempt, push onto the in-flight map."""
-        from openarmature.observability.correlation import current_correlation_id
+        from openarmature.observability.correlation import (
+            current_correlation_id,
+            current_invocation_id,
+        )
+
+        invocation_id = current_invocation_id()
+        if invocation_id is None:
+            return
+        correlation_id = current_correlation_id()
+        inv_state = self._inv_state_for(invocation_id)
 
         # Lazily open the invocation span on the first event we see
-        # for this invocation. Detect "first event" by matching the
-        # correlation_id; the invocation span lives until either
-        # ``shutdown()`` runs OR a new correlation_id arrives (i.e.,
-        # a new invocation starts on the same long-lived observer).
-        # The latter close path matters for shared observers reused
-        # across many invocations — without it the
-        # ``_invocation_span`` dict grows unbounded.
-        correlation_id = current_correlation_id()
-        if correlation_id is not None:
-            # New correlation_id → close prior invocation spans.
-            for prior_cid in list(self._invocation_span.keys()):
-                if prior_cid != correlation_id:
-                    self._close_invocation_span(prior_cid)
-            if correlation_id not in self._invocation_span:
-                self._open_invocation_span(correlation_id, event)
+        # for this invocation_id. Per-invocation_id scoping means
+        # resumed runs of the same correlation_id (each with a fresh
+        # invocation_id per §5.1) get their own invocation span and
+        # therefore their own trace_id.
+        if invocation_id not in self._invocation_span:
+            self._open_invocation_span(invocation_id, correlation_id, event)
 
         # Synthesize subgraph dispatch spans for any ancestor namespace
         # prefix that doesn't have one yet (per observability §4.5).
         # Also closes subgraph spans we've left.
-        self._sync_subgraph_spans(event)
+        self._sync_subgraph_spans(inv_state, invocation_id, correlation_id, event)
 
-        parent_ctx = self._resolve_parent_context(event)
+        parent_ctx = self._resolve_parent_context(inv_state, invocation_id, event)
         span = self._tracer.start_span(
             name=event.node_name,
             context=cast("Any", parent_ctx),
             kind=SpanKind.INTERNAL,
-            attributes=self._node_attrs(event),
+            attributes=self._node_attrs(event, correlation_id),
         )
-        token = attach(set_span_in_context(span))
-        key = self._key_for(event)
-        self._open_spans[key] = _OpenSpan(span=span, token=token)
+        inv_state.open_spans[self._key_for(event)] = _OpenSpan(span=span)
 
     def _handle_completed(self, event: NodeEvent) -> None:
         """Close the matching span, applying §4.2 status mapping."""
+        from openarmature.observability.correlation import current_invocation_id
+
+        invocation_id = current_invocation_id()
+        if invocation_id is None:
+            return
+        inv_state = self._inv_states.get(invocation_id)
+        if inv_state is None:
+            return
+
         # If this is the fan-out node's own completion AND the
         # fan-out is configured detached, close all per-instance
         # detached roots that this fan-out spawned. Done BEFORE the
-        # regular pop so the OTel current-span context is restored
-        # to the fan-out span's parent (otherwise inner instance
-        # roots would still be attached).
+        # regular pop so the close ordering is parents-after-children.
         if event.fan_out_index is None and event.namespace and event.namespace[0] in self.detached_fan_outs:
-            for key in list(self._detached_roots.keys()):
+            for key in list(inv_state.detached_roots.keys()):
                 if len(key) > len(event.namespace) and key[: len(event.namespace)] == event.namespace:
-                    self._close_detached_root(key)
+                    self._close_detached_root(inv_state, key)
         key = self._key_for(event)
-        open_span = self._open_spans.pop(key, None)
+        open_span = inv_state.open_spans.pop(key, None)
         if open_span is None:
             # Started event was never delivered (e.g., observer was
             # attached mid-invocation). Nothing to close.
@@ -314,24 +300,9 @@ class OTelObserver:
         else:
             span.set_status(Status(StatusCode.OK))
         span.end()
-        token = open_span.token
-        if token is not None:
-            try:
-                detach(cast("Any", token))
-            except ValueError:
-                # Out-of-LIFO detach: under interleaved
-                # fan-out-instance events, ``completed`` for an
-                # earlier-started span can arrive while a
-                # later-started span's token is on top of the OTel
-                # context stack. The proper fix is Phase 6.1's
-                # "don't hold attach tokens across event
-                # boundaries"; the guard here keeps Phase 6.0
-                # robust to the interleave without corrupting
-                # subsequent span attribution.
-                pass
-        # If this was a detached root, drop the root entry so a
+        # If this was a detached root prefix, drop the root entry so a
         # subsequent re-entry mints a fresh trace.
-        self._detached_roots.pop(event.namespace, None)
+        inv_state.detached_roots.pop(event.namespace, None)
 
     # ------------------------------------------------------------------
     # Special-event paths
@@ -342,9 +313,18 @@ class OTelObserver:
         zero-duration ``openarmature.checkpoint.save`` span attached
         to the most-recently-opened node span (the node whose
         completed event triggered the save)."""
-        parent_ctx = self._resolve_parent_context(event)
-        from openarmature.observability.correlation import current_correlation_id
+        from openarmature.observability.correlation import (
+            current_correlation_id,
+            current_invocation_id,
+        )
 
+        invocation_id = current_invocation_id()
+        if invocation_id is None:
+            return
+        inv_state = self._inv_states.get(invocation_id)
+        if inv_state is None:
+            return
+        parent_ctx = self._resolve_parent_context(inv_state, invocation_id, event)
         attrs: dict[str, Any] = {
             "openarmature.checkpoint.save_node": event.node_name,
         }
@@ -361,28 +341,30 @@ class OTelObserver:
         span.end()
 
     def _handle_llm_event(self, event: NodeEvent) -> None:
-        """LLM provider span per spec §5.5 — parented to the node
-        span that invoked the provider."""
-        # ``pre_state`` is a typed ``_LlmEventState`` Pydantic
-        # subclass — see
-        # ``openarmature.llm.providers.openai._LlmEventState``. We
-        # read attributes directly rather than treating the State
-        # as a dict, preserving the ``NodeEvent.pre_state: State``
-        # contract for any other observers that consume the event.
-        # Lazy import to avoid the otel→llm package dependency at
-        # module load time.
+        """LLM provider span per spec §5.5 — parented to the calling
+        node's span via the calling-node identity carried on the
+        ``_LlmEventState`` payload (namespace_prefix + attempt_index
+        + fan_out_index). Lookup hits the per-invocation_id
+        ``open_spans`` so concurrent fan-out instances each find
+        their own calling node, not a sibling's."""
         from openarmature.llm.providers.openai import _LlmEventState
+        from openarmature.observability.correlation import (
+            current_correlation_id,
+            current_invocation_id,
+        )
 
         if not isinstance(event.pre_state, _LlmEventState):
             # Defensive — callers other than the OpenAIProvider hook
             # shouldn't dispatch through the LLM_NAMESPACE sentinel.
             return
+        invocation_id = current_invocation_id()
+        if invocation_id is None:
+            return
+        inv_state = self._inv_state_for(invocation_id)
         payload = event.pre_state
         if event.phase == "started":
-            parent_ctx = self._current_span_context()
+            parent_ctx = self._resolve_llm_parent(inv_state, invocation_id, payload)
             attrs: dict[str, Any] = {"openarmature.llm.model": payload.model}
-            from openarmature.observability.correlation import current_correlation_id
-
             cid = current_correlation_id()
             if cid is not None:
                 attrs["openarmature.correlation_id"] = cid
@@ -392,10 +374,9 @@ class OTelObserver:
                 kind=SpanKind.CLIENT,
                 attributes=attrs,
             )
-            token = attach(set_span_in_context(span))
-            self._open_llm_spans[payload.call_id] = _OpenSpan(span=span, token=token)
+            inv_state.open_llm_spans[payload.call_id] = _OpenSpan(span=span)
         elif event.phase == "completed":
-            open_span = self._open_llm_spans.pop(payload.call_id, None)
+            open_span = inv_state.open_llm_spans.pop(payload.call_id, None)
             if open_span is None:
                 return
             span = open_span.span
@@ -419,88 +400,121 @@ class OTelObserver:
             else:
                 span.set_status(Status(StatusCode.OK))
             span.end()
-            try:
-                detach(cast("Any", open_span.token))
-            except ValueError:
-                # See ``_handle_completed`` for the rationale —
-                # out-of-LIFO detach under concurrent fan-out
-                # instance events is a known Phase 6.0 limitation;
-                # the proper fix is Phase 6.1's
-                # "don't hold attach tokens across event
-                # boundaries."
-                pass
+
+    def _resolve_llm_parent(
+        self,
+        inv_state: _InvState,
+        invocation_id: str,
+        payload: Any,
+    ) -> object:
+        """Look up the calling node's span using the calling-node
+        identity carried on the LLM event payload, fall back through
+        subgraph dispatch / invocation span."""
+        # 1. Direct match on the calling node's ``_StackKey``.
+        calling_key: _StackKey = (
+            payload.calling_namespace_prefix,
+            payload.calling_attempt_index,
+            payload.calling_fan_out_index,
+        )
+        calling = inv_state.open_spans.get(calling_key)
+        if calling is not None:
+            return set_span_in_context(calling.span)
+        # 2. Walk up the calling namespace prefix for a synthetic
+        #    subgraph dispatch span at any ancestor — covers LLM
+        #    calls from inside subgraph wrapper middleware.
+        prefix = payload.calling_namespace_prefix
+        for plen in range(len(prefix), 0, -1):
+            ancestor = prefix[:plen]
+            sg = inv_state.subgraph_spans.get(ancestor)
+            if sg is not None:
+                return set_span_in_context(sg.span)
+            dr = inv_state.detached_roots.get(ancestor)
+            if dr is not None:
+                return set_span_in_context(dr.span)
+        # 3. Invocation span — ``complete()`` called outside any
+        #    node body but inside an ``invoke()``.
+        inv = self._invocation_span.get(invocation_id)
+        if inv is not None:
+            return set_span_in_context(inv.span)
+        # 4. No invocation in scope — return a fresh empty Context.
+        #    The span will live in its own trace.
+        return otel_context.Context()
 
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
 
-    def _open_invocation_span(self, correlation_id: str, event: NodeEvent) -> None:
+    def _open_invocation_span(
+        self,
+        invocation_id: str,
+        correlation_id: str | None,
+        event: NodeEvent,
+    ) -> None:
         """Open the root invocation span for a new invocation."""
-        from openarmature.observability.correlation import current_invocation_id
-
-        # The first event we receive carries the entry node's
-        # name; treat it as the invocation's entry_node attribute.
-        # ``invocation_id`` is set by the engine in ``invoke()`` via
-        # the ``current_invocation_id`` ContextVar; if the observer
-        # somehow runs outside an engine invocation (None) we omit
-        # the attribute rather than emitting a misleading sentinel.
         attrs: dict[str, Any] = {
             "openarmature.graph.entry_node": event.node_name,
             "openarmature.graph.spec_version": self.spec_version,
-            "openarmature.correlation_id": correlation_id,
+            "openarmature.invocation_id": invocation_id,
         }
-        invocation_id = current_invocation_id()
-        if invocation_id is not None:
-            attrs["openarmature.invocation_id"] = invocation_id
+        if correlation_id is not None:
+            attrs["openarmature.correlation_id"] = correlation_id
         span = self._tracer.start_span(
             name="openarmature.invocation",
             kind=SpanKind.INTERNAL,
             attributes=attrs,
         )
-        token = attach(set_span_in_context(span))
-        self._invocation_span[correlation_id] = _OpenSpan(span=span, token=token)
+        self._invocation_span[invocation_id] = _OpenSpan(span=span)
 
     def _key_for(self, event: NodeEvent) -> _StackKey:
         return (event.namespace, event.attempt_index, event.fan_out_index)
 
-    def _resolve_parent_context(self, event: NodeEvent) -> object:
+    def _resolve_parent_context(
+        self,
+        inv_state: _InvState,
+        invocation_id: str,
+        event: NodeEvent,
+    ) -> object:
         """Return the OTel context to use as the parent for this
         event's span. Walks namespace ancestors finding the
-        innermost-open subgraph or detached root span."""
+        innermost-open subgraph or detached root span; falls back to
+        the invocation span."""
         # 1a. Detached fan-out instance root — keyed by
         #     ``namespace[:1] + (str(fan_out_index),)`` per
         #     ``_open_detached_fan_out_instance_root``. Checked
-        #     explicitly before the generic prefix scan so the
-        #     parent attribution doesn't depend on the
-        #     attach-then-resolve ordering of the surrounding
-        #     ``_sync_subgraph_spans`` call.
+        #     explicitly before the generic prefix scan.
         if event.fan_out_index is not None and event.namespace:
             instance_key = event.namespace[:1] + (str(event.fan_out_index),)
-            if instance_key in self._detached_roots:
-                root = self._detached_roots[instance_key]
+            root = inv_state.detached_roots.get(instance_key)
+            if root is not None:
                 return set_span_in_context(root.span)
         # 1b. Detached subgraph root at any matching prefix wins
         #     (highest precedence — events inside a detached subtree
         #     always parent under the detached root, never bleed up).
         for prefix_len in range(len(event.namespace) - 1, -1, -1):
             prefix = event.namespace[:prefix_len]
-            if prefix in self._detached_roots:
-                root = self._detached_roots[prefix]
+            root = inv_state.detached_roots.get(prefix)
+            if root is not None:
                 return set_span_in_context(root.span)
         # 2. Innermost synthetic subgraph span at any prefix.
         for prefix_len in range(len(event.namespace) - 1, 0, -1):
             prefix = event.namespace[:prefix_len]
-            if prefix in self._subgraph_spans:
-                sg = self._subgraph_spans[prefix]
+            sg = inv_state.subgraph_spans.get(prefix)
+            if sg is not None:
                 return set_span_in_context(sg.span)
-        # 3. Otherwise, current OTel context (typically invocation span).
-        return self._current_span_context()
+        # 3. Otherwise, parent under the invocation span.
+        inv = self._invocation_span.get(invocation_id)
+        if inv is not None:
+            return set_span_in_context(inv.span)
+        # 4. No invocation in scope — fresh empty Context.
+        return otel_context.Context()
 
-    def _current_span_context(self) -> object:
-        """Return the current OTel context."""
-        return otel_context.get_current()
-
-    def _sync_subgraph_spans(self, event: NodeEvent) -> None:
+    def _sync_subgraph_spans(
+        self,
+        inv_state: _InvState,
+        invocation_id: str,
+        correlation_id: str | None,
+        event: NodeEvent,
+    ) -> None:
         """Open any synthetic subgraph dispatch spans we need (per
         observability §4.5: subgraph wrapper MUST emit a span); close
         any subgraph spans whose prefix is no longer an ancestor of
@@ -514,13 +528,13 @@ class OTelObserver:
         namespace = event.namespace
         # 1. Close any open subgraph spans that aren't ancestors of
         #    the current namespace — we've left those subgraphs.
-        for prefix in list(self._subgraph_spans.keys()):
+        for prefix in list(inv_state.subgraph_spans.keys()):
             if not (len(prefix) < len(namespace) and namespace[: len(prefix)] == prefix):
-                self._close_subgraph_span(prefix)
+                self._close_subgraph_span(inv_state, prefix)
         # 2. Same for detached subgraph roots — close ones we've
         #    left. (Detached fan-out instance roots are NOT closed
         #    here; they close on the fan-out's own completion.)
-        for prefix in list(self._detached_roots.keys()):
+        for prefix in list(inv_state.detached_roots.keys()):
             if (
                 len(prefix) < len(namespace)
                 and namespace[: len(prefix)] == prefix
@@ -531,101 +545,90 @@ class OTelObserver:
             # Detached fan-out instance roots: keyed by namespace +
             # (str(fan_out_index),); leave those alone here, they're
             # closed when the fan-out parent dispatch completes.
-            if prefix in self._fan_out_instance_root_prefixes:
-                # Closed by ``_handle_completed`` on the fan-out
-                # node's own completion, not here.
+            if prefix in inv_state.fan_out_instance_root_prefixes:
                 continue
             if not (len(prefix) < len(namespace) and namespace[: len(prefix)] == prefix):
-                self._close_detached_root(prefix)
+                self._close_detached_root(inv_state, prefix)
         # 3. Open ancestor subgraph spans for any prefix that doesn't
         #    have one yet.
         for depth in range(1, len(namespace)):
             prefix = namespace[:depth]
-            if prefix in self._subgraph_spans:
+            if prefix in inv_state.subgraph_spans:
                 continue
-            if prefix in self._detached_roots:
+            if prefix in inv_state.detached_roots:
                 continue
             # If this prefix's first segment is configured as a
             # detached subgraph, mint a fresh trace.
             if depth == 1 and prefix[0] in self.detached_subgraphs:
-                self._open_detached_subgraph_root(prefix)
+                self._open_detached_subgraph_root(inv_state, invocation_id, correlation_id, prefix)
                 continue
             # If this is a fan-out instance namespace (event.fan_out_index
             # populated, prefix == namespace[:1]), and the fan-out
             # node is detached, open a per-instance detached root.
             if depth == 1 and event.fan_out_index is not None and prefix[0] in self.detached_fan_outs:
-                self._open_detached_fan_out_instance_root(prefix, event)
+                self._open_detached_fan_out_instance_root(inv_state, correlation_id, prefix, event)
                 continue
-            self._open_subgraph_span(prefix)
+            self._open_subgraph_span(inv_state, invocation_id, correlation_id, prefix)
 
-    def _open_subgraph_span(self, prefix: tuple[str, ...]) -> None:
+    def _open_subgraph_span(
+        self,
+        inv_state: _InvState,
+        invocation_id: str,
+        correlation_id: str | None,
+        prefix: tuple[str, ...],
+    ) -> None:
         """Open a synthetic subgraph dispatch span for the given
         namespace prefix. Parent is the next-outer subgraph span (or
         the invocation span if depth-1)."""
-        from openarmature.observability.correlation import current_correlation_id
-
-        parent_ctx = self._current_span_context()
         # Walk up looking for the nearest enclosing subgraph or
         # detached root.
+        parent_ctx: object = otel_context.Context()
         for plen in range(len(prefix) - 1, 0, -1):
             outer = prefix[:plen]
-            if outer in self._subgraph_spans:
-                parent_ctx = set_span_in_context(self._subgraph_spans[outer].span)
+            sg = inv_state.subgraph_spans.get(outer)
+            if sg is not None:
+                parent_ctx = set_span_in_context(sg.span)
                 break
-            if outer in self._detached_roots:
-                parent_ctx = set_span_in_context(self._detached_roots[outer].span)
+            dr = inv_state.detached_roots.get(outer)
+            if dr is not None:
+                parent_ctx = set_span_in_context(dr.span)
                 break
+        else:
+            inv = self._invocation_span.get(invocation_id)
+            if inv is not None:
+                parent_ctx = set_span_in_context(inv.span)
         attrs: dict[str, Any] = {
             "openarmature.node.name": prefix[-1],
             "openarmature.subgraph.name": prefix[-1],
         }
-        cid = current_correlation_id()
-        if cid is not None:
-            attrs["openarmature.correlation_id"] = cid
+        if correlation_id is not None:
+            attrs["openarmature.correlation_id"] = correlation_id
         span = self._tracer.start_span(
             name=prefix[-1],
             context=cast("Any", parent_ctx),
             kind=SpanKind.INTERNAL,
             attributes=attrs,
         )
-        token = attach(set_span_in_context(span))
-        self._subgraph_spans[prefix] = _OpenSpan(span=span, token=token)
+        inv_state.subgraph_spans[prefix] = _OpenSpan(span=span)
 
-    def _close_subgraph_span(self, prefix: tuple[str, ...]) -> None:
-        open_span = self._subgraph_spans.pop(prefix, None)
+    def _close_subgraph_span(self, inv_state: _InvState, prefix: tuple[str, ...]) -> None:
+        open_span = inv_state.subgraph_spans.pop(prefix, None)
         if open_span is None:
             return
         open_span.span.set_status(Status(StatusCode.OK))
         open_span.span.end()
-        # Mirror ``_close_detached_root``: the attach token MUST be
-        # detached or the OTel current-span context stays pinned to
-        # a closed span and corrupts parent/child for subsequent
-        # spans. The cross-context guard handles the case where the
-        # token was created in a different OTel context (e.g.,
-        # subgraph open/close straddles a detached descent).
-        if open_span.token is not None:
-            try:
-                detach(cast("Any", open_span.token))
-            except ValueError:
-                # Token was created in a different OTel context —
-                # cross-context detach raises here. The span has
-                # ended; the leaked context entry is cosmetic and
-                # unwinds when the worker task exits.
-                pass
 
-    def _open_detached_subgraph_root(self, prefix: tuple[str, ...]) -> None:
+    def _open_detached_subgraph_root(
+        self,
+        inv_state: _InvState,
+        invocation_id: str,
+        correlation_id: str | None,
+        prefix: tuple[str, ...],
+    ) -> None:
         """Mint a fresh trace for a detached subgraph entry. The
         detached root span lives in the new trace; the parent trace's
         dispatch span (synthesized at the same prefix BUT in the
-        parent trace) carries an OTel Link to this root.
-
-        Implementation: we open BOTH a parent-trace dispatch span
-        (with the Link) AND a detached-trace root span (the actual
-        parent for inner events). The dispatch span ends at sync
-        time when we leave the prefix; the root span ends when its
-        children finish."""
-        from openarmature.observability.correlation import current_correlation_id
-
+        parent trace) carries an OTel Link to this root."""
         # 1. Mint the new trace_id + root span_id NOW so the
         #    parent's Link target matches the detached root's
         #    SpanContext exactly.
@@ -639,25 +642,27 @@ class OTelObserver:
             trace_flags=TraceFlags(TraceFlags.SAMPLED),
         )
 
-        # 2. Open the dispatch span in the parent trace. Carries a
-        #    Link pointing at the detached root's SpanContext.
-        cid = current_correlation_id()
+        # 2. Open the dispatch span in the parent trace. Parent of
+        #    the dispatch span is the invocation span (or whatever
+        #    was already in scope) per the per-invocation map.
+        parent_ctx_for_dispatch: object = otel_context.Context()
+        inv = self._invocation_span.get(invocation_id)
+        if inv is not None:
+            parent_ctx_for_dispatch = set_span_in_context(inv.span)
         attrs_parent: dict[str, Any] = {
             "openarmature.node.name": prefix[-1],
             "openarmature.subgraph.name": prefix[-1],
         }
-        if cid is not None:
-            attrs_parent["openarmature.correlation_id"] = cid
+        if correlation_id is not None:
+            attrs_parent["openarmature.correlation_id"] = correlation_id
         parent_dispatch = self._tracer.start_span(
             name=prefix[-1],
-            context=cast("Any", self._current_span_context()),
+            context=cast("Any", parent_ctx_for_dispatch),
             kind=SpanKind.INTERNAL,
             links=[Link(detached_sc)],
             attributes=attrs_parent,
         )
-        # Track in _subgraph_spans so the sync routine closes it on
-        # leaving the prefix.
-        self._subgraph_spans[prefix] = _OpenSpan(span=parent_dispatch, token=None)
+        inv_state.subgraph_spans[prefix] = _OpenSpan(span=parent_dispatch)
 
         # 3. Open the detached root span — parented to the synthetic
         #    detached SpanContext so OTel uses the new trace_id.
@@ -672,17 +677,20 @@ class OTelObserver:
             kind=SpanKind.INTERNAL,
             attributes=attrs_root,
         )
-        token = attach(set_span_in_context(detached_root))
-        self._detached_roots[prefix] = _OpenSpan(span=detached_root, token=token)
+        inv_state.detached_roots[prefix] = _OpenSpan(span=detached_root)
 
-    def _open_detached_fan_out_instance_root(self, prefix: tuple[str, ...], event: NodeEvent) -> None:
+    def _open_detached_fan_out_instance_root(
+        self,
+        inv_state: _InvState,
+        correlation_id: str | None,
+        prefix: tuple[str, ...],
+        event: NodeEvent,
+    ) -> None:
         """Per-instance detached root for a configured-detached
         fan-out. Each instance gets its own trace_id; the fan-out
         node's span (in the parent trace, already open via the
         engine's started event) accumulates Links — one per
         instance."""
-        from openarmature.observability.correlation import current_correlation_id
-
         gen = RandomIdGenerator()
         detached_trace_id = gen.generate_trace_id()
         detached_root_span_id = gen.generate_span_id()
@@ -694,9 +702,14 @@ class OTelObserver:
         )
 
         # Find the fan-out node's already-open span in the parent
-        # trace and add a Link to the detached root.
-        fan_out_key = self._fan_out_node_span_key(prefix)
-        fan_out_open = self._open_spans.get(fan_out_key)
+        # trace and add a Link to the detached root. Retry middleware
+        # wrapping the fan-out bumps its attempt_index, so the span
+        # sits at ``(prefix, N, None)`` for the in-flight attempt N
+        # — scan for any entry at ``prefix`` with
+        # ``fan_out_index is None`` rather than hardcoding the key.
+        # Only one such entry is open at a time (retry opens and
+        # closes within a single attempt's lifecycle).
+        fan_out_open = self._find_fan_out_node_span(inv_state, prefix)
         if fan_out_open is not None:
             fan_out_open.span.add_link(detached_sc)
 
@@ -704,75 +717,57 @@ class OTelObserver:
         detached_parent_ctx = otel_trace.set_span_in_context(
             NonRecordingSpan(detached_sc), otel_context.Context()
         )
-        cid = current_correlation_id()
         attrs: dict[str, Any] = {
             "openarmature.node.name": prefix[-1],
             "openarmature.fan_out.parent_node_name": prefix[-1],
             "openarmature.node.fan_out_index": event.fan_out_index,
         }
-        if cid is not None:
-            attrs["openarmature.correlation_id"] = cid
+        if correlation_id is not None:
+            attrs["openarmature.correlation_id"] = correlation_id
         instance_root = self._tracer.start_span(
             name=prefix[-1],
             context=cast("Any", detached_parent_ctx),
             kind=SpanKind.INTERNAL,
             attributes=attrs,
         )
-        token = attach(set_span_in_context(instance_root))
         # Key by prefix + (str(fan_out_index),) so per-instance
-        # roots stay distinct. Track separately in
-        # ``_fan_out_instance_root_prefixes`` so
-        # ``_sync_subgraph_spans`` can identify them by membership
-        # (rather than by parsing the key shape).
+        # roots stay distinct.
         instance_key = prefix + (str(event.fan_out_index),)
-        self._detached_roots[instance_key] = _OpenSpan(span=instance_root, token=token)
-        self._fan_out_instance_root_prefixes.add(instance_key)
+        inv_state.detached_roots[instance_key] = _OpenSpan(span=instance_root)
+        inv_state.fan_out_instance_root_prefixes.add(instance_key)
 
-    def _close_detached_root(self, prefix: tuple[str, ...]) -> None:
-        self._fan_out_instance_root_prefixes.discard(prefix)
-        open_span = self._detached_roots.pop(prefix, None)
+    def _close_detached_root(self, inv_state: _InvState, prefix: tuple[str, ...]) -> None:
+        inv_state.fan_out_instance_root_prefixes.discard(prefix)
+        open_span = inv_state.detached_roots.pop(prefix, None)
         if open_span is None:
             return
         open_span.span.set_status(Status(StatusCode.OK))
         open_span.span.end()
-        if open_span.token is not None:
-            try:
-                detach(cast("Any", open_span.token))
-            except ValueError:
-                # Cross-context detach (token created in a different
-                # OTel context) — ignore. The span has ended; the
-                # context entry leaks cosmetically.
-                pass
 
     @staticmethod
     def _drain_open_span(open_span: _OpenSpan) -> None:
         """Close an open span as an orphan during shutdown: OK
-        status, end, and try-detach the token. No paired completed
-        event will arrive, so we don't have an error category to
-        record. Cross-context detach is swallowed (the worker that
-        owns the context eventually unwinds)."""
+        status, end. No paired completed event will arrive, so we
+        don't have an error category to record."""
         open_span.span.set_status(Status(StatusCode.OK))
         open_span.span.end()
-        if open_span.token is not None:
-            try:
-                detach(cast("Any", open_span.token))
-            except ValueError:
-                # Cross-context detach during shutdown — token
-                # created in a different OTel context. Span has
-                # ended; ignore.
-                pass
 
-    def _fan_out_node_span_key(self, prefix: tuple[str, ...]) -> _StackKey:
-        """Build the lookup key for a fan-out node's own span (the
-        parent dispatch span). Fan-out node has no attempt_index ≠ 0
-        and no fan_out_index — those fields belong to its inner
-        instances."""
-        return (prefix, 0, None)
+    def _find_fan_out_node_span(self, inv_state: _InvState, prefix: tuple[str, ...]) -> _OpenSpan | None:
+        """Find the currently-open fan-out node's parent dispatch
+        span at ``prefix`` regardless of ``attempt_index``. Under
+        retry middleware wrapping the fan-out, the in-flight
+        attempt's span lives at ``(prefix, attempt_index, None)``;
+        only one such entry is open at a time (retry opens and
+        closes within each attempt's lifecycle), so a scan finds it
+        unambiguously."""
+        for key, open_span in inv_state.open_spans.items():
+            ns, _attempt, fan_idx = key
+            if ns == prefix and fan_idx is None:
+                return open_span
+        return None
 
-    def _node_attrs(self, event: NodeEvent) -> dict[str, Any]:
+    def _node_attrs(self, event: NodeEvent, correlation_id: str | None) -> dict[str, Any]:
         """Build the §5 attribute set for a node span."""
-        from openarmature.observability.correlation import current_correlation_id
-
         attrs: dict[str, Any] = {
             "openarmature.node.name": event.node_name,
             "openarmature.node.namespace": list(event.namespace),
@@ -781,41 +776,67 @@ class OTelObserver:
         }
         if event.fan_out_index is not None:
             attrs["openarmature.node.fan_out_index"] = event.fan_out_index
-        cid = current_correlation_id()
-        if cid is not None:
-            attrs["openarmature.correlation_id"] = cid
+        if correlation_id is not None:
+            attrs["openarmature.correlation_id"] = correlation_id
         return attrs
 
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
 
-    def close_invocation(self, correlation_id: str) -> None:
-        """Public lifecycle hook: close the invocation span for
-        ``correlation_id``. Idempotent — calling twice (or for a
-        correlation_id with no open span) is a no-op.
+    def close_invocation(self, invocation_id: str) -> None:
+        """Close the invocation span for ``invocation_id`` and drain
+        the per-invocation state. Idempotent — calling twice (or for
+        an invocation_id with no open span) is a no-op.
 
-        Long-lived observers shared across many invocations
-        automatically close prior invocation spans on the first
-        event of a new invocation (see ``_handle_started``). This
-        method is for callers who want explicit control without
-        driving a follow-on invocation, e.g.::
+        Drains any still-open spans in the per-invocation state in
+        child→parent order (LLM spans → leaf spans → detached roots
+        → subgraph dispatch → invocation).
 
-            await graph.invoke(state, correlation_id=cid)
-            await graph.drain()
-            otel_observer.close_invocation(cid)
+        **Sourcing the invocation_id.** ``CompiledGraph.invoke()``
+        does not currently return the invocation_id, and the
+        ``current_invocation_id`` ContextVar is reset before control
+        returns to the caller. The practical use case for this
+        method is test code that captures the invocation_id from
+        inside a node body (or middleware / observer callback),
+        debugging scenarios, and integration code that has the id
+        from a checkpoint record's ``invocation_id`` field.
+
+        For typical production lifecycle on long-lived observers,
+        prefer :meth:`shutdown` — it drains every in-flight
+        invocation in one call without needing to track ids
+        externally. A first-class engine-level signal that lets
+        observers auto-drain per-invocation state on completion is
+        tracked as Phase 6.1+ follow-up work in
+        ``openarmature-coord/docs/phase-6-1-conformance-fillin.md``.
         """
-        self._close_invocation_span(correlation_id)
+        inv_state = self._inv_states.pop(invocation_id, None)
+        if inv_state is not None:
+            self._drain_inv_state(inv_state)
+        self._close_invocation_span(invocation_id)
 
-    def _close_invocation_span(self, correlation_id: str) -> None:
-        """End and remove the invocation span for ``correlation_id``.
+    def _drain_inv_state(self, inv_state: _InvState) -> None:
+        """Close any still-open spans in a per-invocation state
+        container in child→parent order. LLM spans (deepest leaves)
+        → leaf node spans (sorted deepest-first by namespace) →
+        detached roots → subgraph dispatch spans. Matches the
+        ordering used in ``shutdown``."""
+        for call_id in list(inv_state.open_llm_spans.keys()):
+            open_span = inv_state.open_llm_spans.pop(call_id, None)
+            if open_span is not None:
+                self._drain_open_span(open_span)
+        for key in sorted(inv_state.open_spans.keys(), key=lambda k: -len(k[0])):
+            open_span = inv_state.open_spans.pop(key, None)
+            if open_span is not None:
+                self._drain_open_span(open_span)
+        for prefix in sorted(inv_state.detached_roots.keys(), key=lambda k: -len(k)):
+            self._close_detached_root(inv_state, prefix)
+        for prefix in sorted(inv_state.subgraph_spans.keys(), key=lambda k: -len(k)):
+            self._close_subgraph_span(inv_state, prefix)
 
-        The OTel context token captured when the span opened was
-        created in the worker task's context — we don't try to
-        ``detach()`` it (cross-context detach raises ValueError;
-        the leaked context entry is cosmetic since the worker
-        eventually exits)."""
-        open_span = self._invocation_span.pop(correlation_id, None)
+    def _close_invocation_span(self, invocation_id: str) -> None:
+        """End and remove the invocation span for ``invocation_id``."""
+        open_span = self._invocation_span.pop(invocation_id, None)
         if open_span is None:
             return
         # Status defaults to OK for completed invocations; if the
@@ -826,30 +847,16 @@ class OTelObserver:
         open_span.span.end()
 
     def shutdown(self) -> None:
-        """Close any still-open spans and shut down the underlying
-        provider. Walks state maps in child→parent order — LLM
-        spans (deepest leaves) before leaf node spans before
-        subgraph dispatch / detached roots before invocation spans
-        — and within each depth-bearing map sorts by namespace
-        depth (deepest first) so children end before their
-        parents. ``_open_llm_spans`` (call_id keys) and
-        ``_invocation_span`` (one entry per correlation_id) carry
-        no internal nesting and drain in insertion order.
-        Idempotent."""
-        for call_id in list(self._open_llm_spans.keys()):
-            open_span = self._open_llm_spans.pop(call_id, None)
-            if open_span is not None:
-                self._drain_open_span(open_span)
-        for key in sorted(self._open_spans.keys(), key=lambda k: -len(k[0])):
-            open_span = self._open_spans.pop(key, None)
-            if open_span is not None:
-                self._drain_open_span(open_span)
-        for prefix in sorted(self._detached_roots.keys(), key=lambda k: -len(k)):
-            self._close_detached_root(prefix)
-        for prefix in sorted(self._subgraph_spans.keys(), key=lambda k: -len(k)):
-            self._close_subgraph_span(prefix)
-        for cid in list(self._invocation_span.keys()):
-            self._close_invocation_span(cid)
+        """Close any still-open spans across all in-flight
+        invocations and shut down the underlying provider. Each
+        per-invocation state is drained in child→parent order (LLM
+        spans → leaf spans → detached roots → subgraph dispatch);
+        invocation spans drain last. Idempotent."""
+        for invocation_id in list(self._inv_states.keys()):
+            inv_state = self._inv_states.pop(invocation_id)
+            self._drain_inv_state(inv_state)
+        for invocation_id in list(self._invocation_span.keys()):
+            self._close_invocation_span(invocation_id)
         self._provider.shutdown()
 
 
