@@ -28,3 +28,23 @@ name: "openarmature-python CodeQL config"
 query-filters:
   - exclude:
       id: py/ineffectual-statement
+  # ``py/unused-import`` produces false positives on three patterns
+  # this codebase relies on:
+  #
+  # - Forward-reference casts: ``cast("FinishReason", x)`` /
+  #   ``cast("Checkpointer", capturing)``. CodeQL doesn't look
+  #   inside the string argument; pyright's strict mode does, AND
+  #   raises ``reportUndefinedVariable`` if the name isn't in scope
+  #   (verified empirically — removing ``FinishReason`` from
+  #   ``openai.py``'s import yields the pyright error).
+  # - Subscripted base classes: ``class _TracingFanOutNode(
+  #   FanOutNode[State, State]):``. The base class IS used; the
+  #   generic subscription happens at class-definition time.
+  # - Re-exports for the public API surface (some submodule
+  #   ``__init__`` files import names solely to re-expose).
+  #
+  # Pyright's ``reportUnusedImport`` (default in strict mode) catches
+  # the genuine unused-import cases without these false positives,
+  # so dropping the CodeQL rule doesn't lose signal.
+  - exclude:
+      id: py/unused-import
