@@ -36,7 +36,14 @@ jobs:
       # version developers run locally.
 
       - name: Sync deps
-        run: uv sync --frozen
+        # ``--all-extras`` installs every optional-dependency group
+        # (currently ``[otel]``) so pyright type-checks the
+        # OTel-using modules with real types and tests covering
+        # extras-gated code paths run end-to-end. Without this,
+        # ``opentelemetry.*`` symbols come back Unknown and pyright
+        # produces hundreds of false-positive errors on
+        # ``tests/unit/test_observability_otel.py``.
+        run: uv sync --frozen --all-extras
 
       - name: Lint (ruff check)
         run: uv run ruff check .

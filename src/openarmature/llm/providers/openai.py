@@ -39,10 +39,14 @@ from __future__ import annotations
 
 import json
 from collections.abc import Sequence
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 import httpx
 from pydantic import ValidationError
+
+from openarmature.graph.events import NodeEvent
+from openarmature.graph.state import State
+from openarmature.observability.correlation import current_dispatch
 
 from ..errors import (
     ProviderAuthentication,
@@ -190,6 +194,41 @@ class OpenAIProvider:
         validate_tools(tools)
         body = self._build_request_body(messages, tools, config)
 
+        # Spec observability §5.5 LLM provider span: when an
+        # observability backend is active in the current invocation,
+        # emit a started/completed event pair around the wire call so
+        # the backend can build a span. Queue-mediated dispatch
+        # preserves spec §6 serial event ordering across all event
+        # sources within an invocation. ``current_dispatch()`` returns
+        # ``None`` outside an openarmature invocation (direct
+        # provider use in scripts/tests), in which case the call
+        # proceeds without span emission.
+        dispatch = current_dispatch()
+        if dispatch is not None:
+            dispatch(_make_llm_event("started", model=self.model))
+
+        try:
+            response = await self._do_complete(body)
+        except Exception as exc:
+            if dispatch is not None:
+                dispatch(_make_llm_event("completed", model=self.model, error=exc))
+            raise
+
+        if dispatch is not None:
+            dispatch(
+                _make_llm_event(
+                    "completed",
+                    model=self.model,
+                    finish_reason=response.finish_reason,
+                    usage=response.usage,
+                )
+            )
+        return response
+
+    async def _do_complete(self, body: dict[str, Any]) -> Response:
+        """Wire-call helper: separated from ``complete()`` so the
+        LLM-provider span hook in ``complete()`` can wrap success and
+        failure paths uniformly."""
         try:
             resp = await self._client.post("/v1/chat/completions", json=body)
         except httpx.HTTPError as exc:
@@ -479,6 +518,87 @@ def _looks_like_model_not_loaded(message: object) -> bool:
         return False
     lower = message.lower()
     return "not loaded" in lower or "loading" in lower
+
+
+# ---------------------------------------------------------------------------
+# Observability §5.5 LLM provider span event helpers
+# ---------------------------------------------------------------------------
+
+
+class _LlmEventState(State):
+    """Typed payload for LLM-provider span events. Subclasses
+    :class:`openarmature.graph.state.State` so the
+    ``NodeEvent.pre_state: State`` contract holds — observers
+    calling ``event.pre_state.model_dump()`` (or any other
+    Pydantic-on-State method) work without the raw-dict overload
+    that previously violated the schema.
+
+    Backend mappings (the OTel observer in this repo, future
+    Langfuse / Datadog adapters) recognize the
+    ``("openarmature.llm.complete",)`` namespace sentinel and read
+    these fields directly via attribute access.
+    """
+
+    model: str
+    finish_reason: str | None = None
+    prompt_tokens: int | None = None
+    completion_tokens: int | None = None
+    total_tokens: int | None = None
+    # On error responses the provider caller doesn't have a
+    # graph-engine §4 ``RuntimeGraphError`` to put in
+    # ``NodeEvent.error``, so we surface the failure detail through
+    # these fields instead. ``error_category`` is the canonical §7
+    # llm-provider category (``provider_unavailable``, etc.) when
+    # the failed exception carries one.
+    error_type: str | None = None
+    error_message: str | None = None
+    error_category: str | None = None
+
+
+def _make_llm_event(
+    phase: Literal["started", "completed"],
+    *,
+    model: str,
+    finish_reason: FinishReason | None = None,
+    usage: Usage | None = None,
+    error: BaseException | None = None,
+) -> NodeEvent:
+    """Build a NodeEvent-shaped record for the engine's delivery
+    queue. The OTel observer (or any backend mapping) recognises the
+    sentinel ``node_name`` and ``namespace`` and emits an LLM-specific
+    span instead of a node span. Backend-specific attribute extraction
+    reads ``model``, ``finish_reason``, and ``usage`` from
+    ``pre_state`` directly via attribute access.
+    """
+    error_type: str | None = None
+    error_message: str | None = None
+    error_category: str | None = None
+    if error is not None:
+        error_type = type(error).__name__
+        error_message = str(error)
+        category = getattr(error, "category", None)
+        if isinstance(category, str):
+            error_category = category
+    payload = _LlmEventState(
+        model=model,
+        finish_reason=finish_reason,
+        prompt_tokens=usage.prompt_tokens if usage is not None else None,
+        completion_tokens=usage.completion_tokens if usage is not None else None,
+        total_tokens=usage.total_tokens if usage is not None else None,
+        error_type=error_type,
+        error_message=error_message,
+        error_category=error_category,
+    )
+    return NodeEvent(
+        node_name="openarmature.llm.complete",
+        namespace=("openarmature.llm.complete",),
+        step=-1,
+        phase=phase,
+        pre_state=payload,
+        post_state=None,
+        error=None,
+        parent_states=(),
+    )
 
 
 __all__ = [

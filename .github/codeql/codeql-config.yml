@@ -1,0 +1,50 @@
+name: "openarmature-python CodeQL config"
+
+# CodeQL's Python ``code-quality`` suite includes
+# ``py/ineffectual-statement``, which produces a fixed false-positive
+# stream against this codebase:
+#
+# - PEP 544 ``Protocol`` method bodies use ``...`` (the canonical
+#   Python idiom — never executed because Protocols are structural,
+#   not inheritance-based). Replacing with ``raise NotImplementedError``
+#   would imply ABC semantics that the protocol classes
+#   intentionally don't have. Cited sites:
+#     - ``llm/provider.py`` (Provider.ready / complete)
+#     - ``checkpoint/protocol.py`` (Checkpointer.save / load / list /
+#       delete)
+#     - ``graph/middleware/_core.py`` (Middleware.__call__ + chain
+#       callable)
+#     - ``graph/observer.py`` (Observer.__call__)
+# - ``await worker`` after a queue sentinel in
+#   ``tests/unit/test_observer.py`` is flagged as no-effect, but
+#   ``await`` on a Task waits for completion — the entire reason
+#   the line exists. CodeQL bug for async patterns.
+#
+# Each finding has been individually triaged across PR review rounds;
+# the rule has produced zero true positives. Suppressing the rule
+# repo-wide stops the regenerating noise without leaving real
+# unused-statement bugs un-caught (pyright's ``reportUnusedExpression``
+# already covers the genuine cases at type-check time).
+query-filters:
+  - exclude:
+      id: py/ineffectual-statement
+  # ``py/unused-import`` produces false positives on three patterns
+  # this codebase relies on:
+  #
+  # - Forward-reference casts: ``cast("FinishReason", x)`` /
+  #   ``cast("Checkpointer", capturing)``. CodeQL doesn't look
+  #   inside the string argument; pyright's strict mode does, AND
+  #   raises ``reportUndefinedVariable`` if the name isn't in scope
+  #   (verified empirically — removing ``FinishReason`` from
+  #   ``openai.py``'s import yields the pyright error).
+  # - Subscripted base classes: ``class _TracingFanOutNode(
+  #   FanOutNode[State, State]):``. The base class IS used; the
+  #   generic subscription happens at class-definition time.
+  # - Re-exports for the public API surface (some submodule
+  #   ``__init__`` files import names solely to re-expose).
+  #
+  # Pyright's ``reportUnusedImport`` (default in strict mode) catches
+  # the genuine unused-import cases without these false positives,
+  # so dropping the CodeQL rule doesn't lose signal.
+  - exclude:
+      id: py/unused-import

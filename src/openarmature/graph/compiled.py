@@ -41,6 +41,16 @@ from openarmature.checkpoint.protocol import (
     CheckpointRecord,
     NodePosition,
 )
+from openarmature.observability.correlation import (
+    _reset_active_dispatch,
+    _reset_active_observers,
+    _reset_correlation_id,
+    _reset_invocation_id,
+    _set_active_dispatch,
+    _set_active_observers,
+    _set_correlation_id,
+    _set_invocation_id,
+)
 
 from .edges import END, ConditionalEdge, EndSentinel, StaticEdge
 from .errors import (
@@ -369,6 +379,18 @@ class CompiledGraph[StateT: State]:
             pending_resume_states=pending_resume_states,
             resume_invocation=resume_invocation,
         )
+        # Spec observability §3.1: the correlation_id MUST be readable
+        # from anywhere within the invocation's async call tree via the
+        # language's idiomatic context primitive. Set the ContextVar
+        # BEFORE creating the delivery worker so the worker's captured
+        # context sees the correlation_id (asyncio.create_task snapshots
+        # the current Context at creation time). Reset on return so
+        # subsequent invocations get a fresh slate. Nested ``invoke()``
+        # calls (subgraph-as-node uses ``_invoke`` directly, not the
+        # public ``invoke``, so they don't re-set; see §3.1's
+        # "per-invocation is OUTERMOST invoke" wording).
+        correlation_token = _set_correlation_id(resolved_correlation_id)
+        invocation_token = _set_invocation_id(invocation_id)
         worker = asyncio.create_task(deliver_loop(queue))
         self._active_workers.add(worker)
         # Auto-prune: when the worker completes (after the sentinel is
@@ -378,6 +400,8 @@ class CompiledGraph[StateT: State]:
         try:
             return await self._invoke(starting_state, context)
         finally:
+            _reset_invocation_id(invocation_token)
+            _reset_correlation_id(correlation_token)
             # Sentinel terminates the worker after it processes events
             # already on the queue (including any error event we just
             # dispatched on the failure path). Drain semantics live on
@@ -585,14 +609,27 @@ class CompiledGraph[StateT: State]:
             innermost,
         )
 
+        # Spec observability §3 / Phase 6 LLM-span hook: capability
+        # backends emitting from inside a node body (the
+        # llm-provider span instrumentation in OpenAIProvider) need
+        # to find the observers active for THIS invocation. Set the
+        # ContextVar around the chain invocation; reset in
+        # ``try/finally`` so an exception escaping the chain still
+        # restores the prior value.
+        observers_token = _set_active_observers(context.full_observers())
+        dispatch_token = _set_active_dispatch(lambda event: _dispatch(context, event))
         try:
-            final_partial = await chain(state)
-        except RuntimeGraphError:
-            raise
-        except Exception as e:
-            # A raw exception (node-raised or middleware-raised) escaped
-            # the chain unrecovered. Wrap as NodeException per §4.
-            raise NodeException(node_name=current, cause=e, recoverable_state=state) from e
+            try:
+                final_partial = await chain(state)
+            except RuntimeGraphError:
+                raise
+            except Exception as e:
+                # A raw exception (node-raised or middleware-raised) escaped
+                # the chain unrecovered. Wrap as NodeException per §4.
+                raise NodeException(node_name=current, cause=e, recoverable_state=state) from e
+        finally:
+            _reset_active_dispatch(dispatch_token)
+            _reset_active_observers(observers_token)
         # Engine's canonical merge uses the ORIGINAL state per §2: "the
         # transformed state is passed to ``next``, NOT to the engine's
         # merge step." If middleware transformed state mid-chain, the
@@ -649,18 +686,29 @@ class CompiledGraph[StateT: State]:
             list(self.middleware) + list(node.middleware),
             innermost,
         )
+        # Same active-observers scope as _step_function_node — parent
+        # middleware running before the descent should see the parent's
+        # observer set; the inner _invoke (called via ``node.run``)
+        # descends into its own context and sets a new scope from
+        # there.
+        observers_token = _set_active_observers(context.full_observers())
+        dispatch_token = _set_active_dispatch(lambda event: _dispatch(context, event))
 
         try:
-            final_partial = await chain(state)
-        except RuntimeGraphError:
-            raise
-        except Exception as e:
-            # Same wrap as _step_function_node: a raw exception escaping
-            # the parent's middleware chain (e.g., a middleware bug or a
-            # projection error) becomes NodeException tagged with the
-            # SubgraphNode's wrapper name so §4 recoverable_state is
-            # preserved.
-            raise NodeException(node_name=current, cause=e, recoverable_state=state) from e
+            try:
+                final_partial = await chain(state)
+            except RuntimeGraphError:
+                raise
+            except Exception as e:
+                # Same wrap as _step_function_node: a raw exception escaping
+                # the parent's middleware chain (e.g., a middleware bug or a
+                # projection error) becomes NodeException tagged with the
+                # SubgraphNode's wrapper name so §4 recoverable_state is
+                # preserved.
+                raise NodeException(node_name=current, cause=e, recoverable_state=state) from e
+        finally:
+            _reset_active_dispatch(dispatch_token)
+            _reset_active_observers(observers_token)
         return _merge_partial(state, final_partial, self.reducers, current)
 
     async def _step_fan_out_node(
@@ -740,12 +788,23 @@ class CompiledGraph[StateT: State]:
             innermost,
         )
 
+        # Same observability §3 / LLM-span hook contract as
+        # _step_function_node: set the active observer set in scope
+        # around the chain invocation so capability backends emitting
+        # from inside the fan-out's parent dispatch (or any code
+        # running on its call stack) can find the observers.
+        observers_token = _set_active_observers(context.full_observers())
+        dispatch_token = _set_active_dispatch(lambda event: _dispatch(context, event))
         try:
-            final_partial = await chain(state)
-        except RuntimeGraphError:
-            raise
-        except Exception as e:
-            raise NodeException(node_name=current, cause=e, recoverable_state=state) from e
+            try:
+                final_partial = await chain(state)
+            except RuntimeGraphError:
+                raise
+            except Exception as e:
+                raise NodeException(node_name=current, cause=e, recoverable_state=state) from e
+        finally:
+            _reset_active_dispatch(dispatch_token)
+            _reset_active_observers(observers_token)
         merged_outer = _merge_partial(state, final_partial, self.reducers, current)
         # Spec §10.3 + §10.7: the fan-out's own completion DOES save —
         # one record once the fan-out as a whole has finished and
