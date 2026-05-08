@@ -28,8 +28,10 @@ import pytest
 # Skip the entire module if otel extras aren't installed.
 pytest.importorskip("opentelemetry.sdk.trace")
 
+from typing import cast
+
 from opentelemetry import trace as otel_trace
-from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace import ReadableSpan, TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import (
     InMemorySpanExporter,
@@ -365,3 +367,390 @@ def test_install_log_bridge_is_idempotent() -> None:
         # not leak state into others.
         root.handlers[:] = prior_handlers
         root.filters[:] = prior_filters
+
+
+# ---------------------------------------------------------------------------
+# Phase 6.1: concurrency-safe state scoping + §5.5 calling-node attribution
+# ---------------------------------------------------------------------------
+
+
+async def test_shared_observer_concurrent_invocations_dont_collide() -> None:
+    """A single observer shared across concurrent invocations MUST
+    keep their span trees isolated. Per spec §5.1 each invocation
+    has its own ``invocation_id`` and therefore its own
+    ``trace_id``; with shared internal state keyed by
+    ``invocation_id`` the observer no longer collides on overlapping
+    namespaces, no longer closes another in-flight invocation's span
+    on a new event, and produces N distinct trace_ids for N
+    concurrent invocations on the same compiled graph."""
+    import asyncio
+
+    exporter = InMemorySpanExporter()
+    observer = OTelObserver(span_processor=SimpleSpanProcessor(exporter))
+    g = (
+        GraphBuilder(_LinearState)
+        .add_node("node_a", _node_a)
+        .add_node("node_b", _node_b)
+        .add_edge("node_a", "node_b")
+        .add_edge("node_b", END)
+        .set_entry("node_a")
+        .compile()
+    )
+    g.attach_observer(observer)
+
+    n = 5
+    results = await asyncio.gather(*[g.invoke(_LinearState()) for _ in range(n)])
+    await g.drain()
+    observer.shutdown()
+    assert len(results) == n
+
+    spans = exporter.get_finished_spans()
+    invocation_spans = [s for s in spans if s.name == "openarmature.invocation"]
+    assert len(invocation_spans) == n, (
+        f"expected one invocation span per concurrent invocation; got {len(invocation_spans)}"
+    )
+    # Each invocation has its own trace_id.
+    trace_ids: set[int] = set()
+    for s in invocation_spans:
+        assert s.context is not None
+        trace_ids.add(s.context.trace_id)
+    assert len(trace_ids) == n, (
+        f"each concurrent invocation MUST have its own trace_id; got {len(trace_ids)} for {n} invocations"
+    )
+    # Every span in the export belongs to one of those trace_ids
+    # (no orphans pointing at a stale trace).
+    for s in spans:
+        assert s.context is not None
+        assert s.context.trace_id in trace_ids, (
+            f"span {s.name!r} carries unknown trace_id {s.context.trace_id}"
+        )
+    # Each trace has the expected node count: one invocation span +
+    # node_a + node_b = 3 spans.
+    by_trace: dict[int, list[str]] = {tid: [] for tid in trace_ids}
+    for s in spans:
+        assert s.context is not None
+        by_trace[s.context.trace_id].append(s.name)
+    for tid, names_list in by_trace.items():
+        names = sorted(names_list)
+        assert names == ["node_a", "node_b", "openarmature.invocation"], (
+            f"trace {tid:x} span set MUST be exactly the invocation + node_a + node_b; got {names}"
+        )
+
+
+async def test_concurrent_fan_out_no_lifo_violation() -> None:
+    """Regression check: under fan-out with multiple concurrent
+    instances, started/completed events for different instances
+    interleave on the observer's call queue. The Phase 6.0
+    architecture used cross-event ``opentelemetry.context.attach``
+    tokens that produced LIFO violations on out-of-order detach
+    (suppressed by try/except guards in round-4 / round-7). Phase
+    6.1 derives parents from internal maps within a single event
+    handler — no tokens cross event boundaries — so the underlying
+    hazard goes away. This test drives a fan-out with three
+    instances and asserts the run completes without the warnings
+    that the suppressed guards would have produced."""
+    import warnings
+
+    class _ParentState(State):
+        items: list[int] = []
+        results: list[int] = []
+
+    class _ChildState(State):
+        item: int = 0
+        out: int = 0
+
+    async def _double(s: _ChildState) -> dict[str, int]:
+        # Yield to give other instances a chance to interleave their
+        # started/completed events on the observer queue.
+        import asyncio
+
+        await asyncio.sleep(0)
+        return {"out": s.item * 2}
+
+    inner = (
+        GraphBuilder(_ChildState)
+        .add_node("double", _double)
+        .add_edge("double", END)
+        .set_entry("double")
+        .compile()
+    )
+    parent = (
+        GraphBuilder(_ParentState)
+        .add_fan_out_node(
+            "fan",
+            subgraph=inner,
+            collect_field="out",
+            target_field="results",
+            items_field="items",
+            item_field="item",
+            concurrency=3,
+        )
+        .add_edge("fan", END)
+        .set_entry("fan")
+    )
+    exporter = InMemorySpanExporter()
+    observer = OTelObserver(span_processor=SimpleSpanProcessor(exporter))
+    compiled = parent.compile()
+    compiled.attach_observer(observer)
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        result = await compiled.invoke(_ParentState(items=[1, 2, 3, 4, 5]))
+    await compiled.drain()
+    observer.shutdown()
+
+    assert result.results == [2, 4, 6, 8, 10]
+    # Sanity: per-instance node spans landed (one ``double`` span
+    # per item, all sharing the same trace_id since the fan-out is
+    # not configured detached).
+    spans = exporter.get_finished_spans()
+    double_spans = [s for s in spans if s.name == "double"]
+    assert len(double_spans) == 5, f"expected 5 per-instance node spans; got {len(double_spans)}"
+
+
+async def test_concurrent_fan_out_llm_spans_parent_under_calling_instance() -> None:
+    """Spec §5.5 under concurrent fan-out: each instance's
+    ``openarmature.llm.complete`` span MUST parent under that
+    instance's calling node, not a sibling instance's. The Phase 6.1
+    calling-node identity (namespace_prefix + attempt_index +
+    fan_out_index threaded via ContextVar onto the LLM event
+    payload) is what makes this attribution correct."""
+    import asyncio
+
+    import httpx
+
+    from openarmature.llm.messages import UserMessage
+    from openarmature.llm.providers.openai import OpenAIProvider
+
+    def _ok(_req: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "id": "x",
+                "object": "chat.completion",
+                "created": 0,
+                "model": "m",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "ok"},
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+            },
+        )
+
+    provider = OpenAIProvider(
+        base_url="http://test",
+        model="m",
+        api_key="k",
+        transport=httpx.MockTransport(_ok),
+    )
+
+    class _ParentState(State):
+        items: list[int] = []
+        outs: list[str] = []
+
+    class _ChildState(State):
+        item: int = 0
+        out: str = ""
+
+    async def _ask(s: _ChildState) -> dict[str, str]:
+        # Yield first so peer instances can interleave.
+        await asyncio.sleep(0)
+        resp = await provider.complete([UserMessage(content=str(s.item))])
+        return {"out": str(resp.message.content or "")}
+
+    inner = GraphBuilder(_ChildState).add_node("ask", _ask).add_edge("ask", END).set_entry("ask").compile()
+    parent = (
+        GraphBuilder(_ParentState)
+        .add_fan_out_node(
+            "fan",
+            subgraph=inner,
+            collect_field="out",
+            target_field="outs",
+            items_field="items",
+            item_field="item",
+            concurrency=4,
+        )
+        .add_edge("fan", END)
+        .set_entry("fan")
+    )
+    exporter = InMemorySpanExporter()
+    observer = OTelObserver(span_processor=SimpleSpanProcessor(exporter))
+    compiled = parent.compile()
+    compiled.attach_observer(observer)
+
+    n = 4
+    try:
+        await compiled.invoke(_ParentState(items=list(range(n))))
+        await compiled.drain()
+    finally:
+        await provider.aclose()
+    observer.shutdown()
+
+    spans = exporter.get_finished_spans()
+    by_id: dict[int, ReadableSpan] = {}
+    for s in spans:
+        assert s.context is not None
+        by_id[s.context.span_id] = s
+    llm_spans = [s for s in spans if s.name == "openarmature.llm.complete"]
+    ask_spans = [s for s in spans if s.name == "ask"]
+    assert len(llm_spans) == n, f"expected one LLM span per instance; got {len(llm_spans)}"
+    assert len(ask_spans) == n, f"expected one ``ask`` span per instance; got {len(ask_spans)}"
+
+    # Build a map from fan_out_index → ask span_id (each instance's
+    # node carries its own ``openarmature.node.fan_out_index`` attribute).
+    ask_by_index: dict[int, int] = {}
+    for s in ask_spans:
+        assert s.context is not None and s.attributes is not None
+        idx_attr = s.attributes["openarmature.node.fan_out_index"]
+        assert isinstance(idx_attr, int)
+        ask_by_index[idx_attr] = s.context.span_id
+    assert set(ask_by_index.keys()) == set(range(n))
+
+    # For each LLM span, confirm the parent span_id is one of the
+    # ``ask`` spans (calling instance's node), not a sibling
+    # fan-out instance's span.
+    parented_ask_ids: set[int] = set()
+    for llm in llm_spans:
+        assert llm.parent is not None, "LLM span MUST have a parent"
+        parent_span = by_id.get(llm.parent.span_id)
+        assert parent_span is not None, f"LLM span parent_id {llm.parent.span_id} not in exported set"
+        assert parent_span.name == "ask", (
+            f"LLM span MUST parent under ``ask`` (the calling node), got {parent_span.name!r}"
+        )
+        parented_ask_ids.add(llm.parent.span_id)
+
+    # Every LLM span parents under a UNIQUE ``ask`` span — i.e., no
+    # collision where two LLM calls attributed to the same instance.
+    assert len(parented_ask_ids) == n, (
+        f"each LLM call MUST parent under its own calling instance; "
+        f"got {len(parented_ask_ids)} distinct parents for {n} calls"
+    )
+
+
+async def test_llm_call_inside_retried_node_parents_per_attempt() -> None:
+    """Spec §5.5 under retry: when an LLM ``complete()`` call
+    happens inside a node body wrapped with retry middleware, each
+    attempt's LLM span MUST parent under THAT attempt's node span,
+    not a hardcoded ``attempt_index=0``. Phase 6.1's
+    ``current_attempt_index`` ContextVar (set inside the per-attempt
+    ``innermost`` scope) is what makes this work."""
+    import httpx
+
+    from openarmature.graph.middleware import RetryMiddleware
+    from openarmature.llm.errors import ProviderRateLimit
+    from openarmature.llm.messages import UserMessage
+    from openarmature.llm.providers.openai import OpenAIProvider
+
+    def _ok(_req: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "id": "x",
+                "object": "chat.completion",
+                "created": 0,
+                "model": "m",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "ok"},
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+            },
+        )
+
+    provider = OpenAIProvider(
+        base_url="http://test",
+        model="m",
+        api_key="k",
+        transport=httpx.MockTransport(_ok),
+    )
+
+    class _S(State):
+        attempts: int = 0
+
+    # Mutable counter so the node body can observe its own attempt
+    # index and decide whether to fail. Two failures + one success.
+    flaky_state = {"calls": 0}
+
+    async def _flaky(s: _S) -> dict[str, int]:
+        flaky_state["calls"] += 1
+        # Always issue an LLM call BEFORE the conditional raise so a
+        # span fires for every attempt, including the failing ones.
+        await provider.complete([UserMessage(content="hi")])
+        if flaky_state["calls"] < 3:
+            raise ProviderRateLimit("transient")
+        return {"attempts": flaky_state["calls"]}
+
+    g = (
+        GraphBuilder(_S)
+        .add_node("flaky", _flaky, middleware=[RetryMiddleware(max_attempts=3, backoff=lambda _i: 0.0)])
+        .add_edge("flaky", END)
+        .set_entry("flaky")
+        .compile()
+    )
+    exporter = InMemorySpanExporter()
+    observer = OTelObserver(span_processor=SimpleSpanProcessor(exporter))
+    g.attach_observer(observer)
+
+    try:
+        result = await g.invoke(_S())
+        await g.drain()
+    finally:
+        await provider.aclose()
+    observer.shutdown()
+
+    assert result.attempts == 3
+    spans = exporter.get_finished_spans()
+    by_id: dict[int, ReadableSpan] = {}
+    for s in spans:
+        assert s.context is not None
+        by_id[s.context.span_id] = s
+
+    # Three ``flaky`` spans (one per attempt), three LLM spans.
+    flaky_spans = [s for s in spans if s.name == "flaky"]
+    llm_spans = [s for s in spans if s.name == "openarmature.llm.complete"]
+    assert len(flaky_spans) == 3, f"expected 3 attempt spans; got {len(flaky_spans)}"
+    assert len(llm_spans) == 3, f"expected 3 LLM spans; got {len(llm_spans)}"
+
+    # Map attempt_index → flaky span_id.
+    flaky_by_attempt: dict[int, int] = {}
+    for s in flaky_spans:
+        assert s.context is not None and s.attributes is not None
+        idx = s.attributes["openarmature.node.attempt_index"]
+        assert isinstance(idx, int)
+        flaky_by_attempt[idx] = s.context.span_id
+    assert set(flaky_by_attempt.keys()) == {0, 1, 2}
+
+    # Every LLM span MUST parent under one of the ``flaky`` spans
+    # (NOT under the invocation span, which would mean
+    # attempt_index=0 was hardcoded and the lookup fell through).
+    flaky_span_ids = set(flaky_by_attempt.values())
+    parented_under: set[int] = set()
+    for llm in llm_spans:
+        assert llm.parent is not None, "LLM span MUST have a parent"
+        parented_under.add(llm.parent.span_id)
+    assert parented_under <= flaky_span_ids, (
+        f"every LLM span MUST parent under an attempt's ``flaky`` span; "
+        f"got LLM parents {parented_under} not all in flaky set {flaky_span_ids}"
+    )
+    # And the THREE LLM spans parent under THREE DISTINCT ``flaky``
+    # spans — one per attempt — proving the calling_attempt_index
+    # threading actually disambiguates per-attempt.
+    assert len(parented_under) == 3, (
+        f"each attempt's LLM call MUST parent under its OWN attempt's span; "
+        f"got {len(parented_under)} distinct parents for 3 LLM calls"
+    )
+    # Spot-check: every attempt is represented.
+    parented_attempts: set[int] = set()
+    for pid in parented_under:
+        attrs = by_id[pid].attributes
+        assert attrs is not None
+        idx = cast("int", attrs["openarmature.node.attempt_index"])
+        parented_attempts.add(idx)
+    assert parented_attempts == {0, 1, 2}

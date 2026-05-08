@@ -44,12 +44,18 @@ from openarmature.checkpoint.protocol import (
 from openarmature.observability.correlation import (
     _reset_active_dispatch,
     _reset_active_observers,
+    _reset_attempt_index,
     _reset_correlation_id,
+    _reset_fan_out_index,
     _reset_invocation_id,
+    _reset_namespace_prefix,
     _set_active_dispatch,
     _set_active_observers,
+    _set_attempt_index,
     _set_correlation_id,
+    _set_fan_out_index,
     _set_invocation_id,
+    _set_namespace_prefix,
 )
 
 from .edges import END, ConditionalEdge, EndSentinel, StaticEdge
@@ -558,51 +564,59 @@ class CompiledGraph[StateT: State]:
             attempt_index = attempt_counter[0]
             attempt_counter[0] += 1
 
-            self._dispatch_started(context, current, namespace, step, s, attempt_index=attempt_index)
-
+            # Calling-node identity for capability backends emitting
+            # from inside this attempt's scope (e.g., LLM provider's
+            # span hook). Per-attempt scope so retry middleware that
+            # re-enters innermost bumps the visible attempt_index.
+            attempt_token = _set_attempt_index(attempt_index)
             try:
-                partial = await node.run(s)
-            except Exception as e:
-                wrapped = NodeException(node_name=current, cause=e, recoverable_state=s)
+                self._dispatch_started(context, current, namespace, step, s, attempt_index=attempt_index)
+
+                try:
+                    partial = await node.run(s)
+                except Exception as e:
+                    wrapped = NodeException(node_name=current, cause=e, recoverable_state=s)
+                    self._dispatch_completed(
+                        context,
+                        current,
+                        namespace,
+                        step,
+                        s,
+                        error=wrapped,
+                        attempt_index=attempt_index,
+                    )
+                    raise
+
+                try:
+                    merged = _merge_partial(s, partial, self.reducers, current)
+                except (ReducerError, StateValidationError) as e:
+                    self._dispatch_completed(
+                        context,
+                        current,
+                        namespace,
+                        step,
+                        s,
+                        error=e,
+                        attempt_index=attempt_index,
+                    )
+                    raise
+
                 self._dispatch_completed(
                     context,
                     current,
                     namespace,
                     step,
                     s,
-                    error=wrapped,
+                    post_state=merged,
                     attempt_index=attempt_index,
                 )
-                raise
-
-            try:
-                merged = _merge_partial(s, partial, self.reducers, current)
-            except (ReducerError, StateValidationError) as e:
-                self._dispatch_completed(
-                    context,
-                    current,
-                    namespace,
-                    step,
-                    s,
-                    error=e,
-                    attempt_index=attempt_index,
-                )
-                raise
-
-            self._dispatch_completed(
-                context,
-                current,
-                namespace,
-                step,
-                s,
-                post_state=merged,
-                attempt_index=attempt_index,
-            )
-            # Return the partial (not the merged state) so middleware sees
-            # the partial-update shape per pipeline-utilities §2. The
-            # engine's canonical merge against the original state happens
-            # below, after the chain returns.
-            return partial
+                # Return the partial (not the merged state) so middleware sees
+                # the partial-update shape per pipeline-utilities §2. The
+                # engine's canonical merge against the original state happens
+                # below, after the chain returns.
+                return partial
+            finally:
+                _reset_attempt_index(attempt_token)
 
         chain: ChainCall = compose_chain(
             list(self.middleware) + list(node.middleware),
@@ -612,12 +626,17 @@ class CompiledGraph[StateT: State]:
         # Spec observability §3 / Phase 6 LLM-span hook: capability
         # backends emitting from inside a node body (the
         # llm-provider span instrumentation in OpenAIProvider) need
-        # to find the observers active for THIS invocation. Set the
-        # ContextVar around the chain invocation; reset in
-        # ``try/finally`` so an exception escaping the chain still
-        # restores the prior value.
+        # to find the observers active for THIS invocation, which
+        # node is calling, and which fan-out instance (if any) the
+        # call belongs to. ``namespace_prefix`` and ``fan_out_index``
+        # are set in this outer scope (per-node, not per-attempt);
+        # ``attempt_index`` is set inside ``innermost`` per attempt.
+        # All four reset in ``try/finally`` so an exception escaping
+        # the chain still restores the prior values.
         observers_token = _set_active_observers(context.full_observers())
         dispatch_token = _set_active_dispatch(lambda event: _dispatch(context, event))
+        namespace_token = _set_namespace_prefix(namespace)
+        fan_out_token = _set_fan_out_index(context.fan_out_index)
         try:
             try:
                 final_partial = await chain(state)
@@ -628,6 +647,8 @@ class CompiledGraph[StateT: State]:
                 # the chain unrecovered. Wrap as NodeException per §4.
                 raise NodeException(node_name=current, cause=e, recoverable_state=state) from e
         finally:
+            _reset_fan_out_index(fan_out_token)
+            _reset_namespace_prefix(namespace_token)
             _reset_active_dispatch(dispatch_token)
             _reset_active_observers(observers_token)
         # Engine's canonical merge uses the ORIGINAL state per §2: "the
@@ -686,13 +707,18 @@ class CompiledGraph[StateT: State]:
             list(self.middleware) + list(node.middleware),
             innermost,
         )
-        # Same active-observers scope as _step_function_node — parent
-        # middleware running before the descent should see the parent's
-        # observer set; the inner _invoke (called via ``node.run``)
-        # descends into its own context and sets a new scope from
-        # there.
+        # Same active-observers + calling-node scope as
+        # ``_step_function_node`` — parent middleware running before
+        # the descent should see the wrapper node's namespace +
+        # fan_out_index for any LLM-provider hook emissions.
+        # ``attempt_index`` defaults to 0 from the ContextVar; the
+        # subgraph wrapper has no engine-managed attempt counter
+        # (inner ``_step_function_node`` calls own their own).
+        namespace = context.namespace_prefix + (current,)
         observers_token = _set_active_observers(context.full_observers())
         dispatch_token = _set_active_dispatch(lambda event: _dispatch(context, event))
+        namespace_token = _set_namespace_prefix(namespace)
+        fan_out_token = _set_fan_out_index(context.fan_out_index)
 
         try:
             try:
@@ -707,6 +733,8 @@ class CompiledGraph[StateT: State]:
                 # preserved.
                 raise NodeException(node_name=current, cause=e, recoverable_state=state) from e
         finally:
+            _reset_fan_out_index(fan_out_token)
+            _reset_namespace_prefix(namespace_token)
             _reset_active_dispatch(dispatch_token)
             _reset_active_observers(observers_token)
         return _merge_partial(state, final_partial, self.reducers, current)
@@ -743,45 +771,49 @@ class CompiledGraph[StateT: State]:
         async def innermost(s: Any) -> Mapping[str, Any]:
             attempt_index = attempt_counter[0]
             attempt_counter[0] += 1
-            self._dispatch_started(context, current, namespace, step, s, attempt_index=attempt_index)
+            attempt_token = _set_attempt_index(attempt_index)
             try:
-                partial = await node.run_with_context(s, context)
-            except RuntimeGraphError as e:
-                self._dispatch_completed(
-                    context, current, namespace, step, s, error=e, attempt_index=attempt_index
-                )
-                raise
-            except Exception as e:
-                wrapped = NodeException(node_name=current, cause=e, recoverable_state=s)
+                self._dispatch_started(context, current, namespace, step, s, attempt_index=attempt_index)
+                try:
+                    partial = await node.run_with_context(s, context)
+                except RuntimeGraphError as e:
+                    self._dispatch_completed(
+                        context, current, namespace, step, s, error=e, attempt_index=attempt_index
+                    )
+                    raise
+                except Exception as e:
+                    wrapped = NodeException(node_name=current, cause=e, recoverable_state=s)
+                    self._dispatch_completed(
+                        context,
+                        current,
+                        namespace,
+                        step,
+                        s,
+                        error=wrapped,
+                        attempt_index=attempt_index,
+                    )
+                    raise wrapped from e
+
+                try:
+                    merged = _merge_partial(s, partial, self.reducers, current)
+                except (ReducerError, StateValidationError) as e:
+                    self._dispatch_completed(
+                        context, current, namespace, step, s, error=e, attempt_index=attempt_index
+                    )
+                    raise
+
                 self._dispatch_completed(
                     context,
                     current,
                     namespace,
                     step,
                     s,
-                    error=wrapped,
+                    post_state=merged,
                     attempt_index=attempt_index,
                 )
-                raise wrapped from e
-
-            try:
-                merged = _merge_partial(s, partial, self.reducers, current)
-            except (ReducerError, StateValidationError) as e:
-                self._dispatch_completed(
-                    context, current, namespace, step, s, error=e, attempt_index=attempt_index
-                )
-                raise
-
-            self._dispatch_completed(
-                context,
-                current,
-                namespace,
-                step,
-                s,
-                post_state=merged,
-                attempt_index=attempt_index,
-            )
-            return partial
+                return partial
+            finally:
+                _reset_attempt_index(attempt_token)
 
         chain: ChainCall = compose_chain(
             list(self.middleware) + list(node.middleware),
@@ -789,12 +821,18 @@ class CompiledGraph[StateT: State]:
         )
 
         # Same observability §3 / LLM-span hook contract as
-        # _step_function_node: set the active observer set in scope
-        # around the chain invocation so capability backends emitting
-        # from inside the fan-out's parent dispatch (or any code
-        # running on its call stack) can find the observers.
+        # _step_function_node: set the active observer set, calling
+        # node identity, and dispatch scope around the chain
+        # invocation so capability backends emitting from inside the
+        # fan-out's parent dispatch (or any code running on its call
+        # stack) can find them. ``fan_out_index`` here is the parent
+        # context's view (the fan-out node from outside); per-instance
+        # values get set when the inner subgraph descends with the
+        # instance's index in its own context.
         observers_token = _set_active_observers(context.full_observers())
         dispatch_token = _set_active_dispatch(lambda event: _dispatch(context, event))
+        namespace_token = _set_namespace_prefix(namespace)
+        fan_out_token = _set_fan_out_index(context.fan_out_index)
         try:
             try:
                 final_partial = await chain(state)
@@ -803,6 +841,8 @@ class CompiledGraph[StateT: State]:
             except Exception as e:
                 raise NodeException(node_name=current, cause=e, recoverable_state=state) from e
         finally:
+            _reset_fan_out_index(fan_out_token)
+            _reset_namespace_prefix(namespace_token)
             _reset_active_dispatch(dispatch_token)
             _reset_active_observers(observers_token)
         merged_outer = _merge_partial(state, final_partial, self.reducers, current)

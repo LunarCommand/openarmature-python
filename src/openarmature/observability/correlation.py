@@ -205,22 +205,116 @@ def _reset_active_dispatch(
     _active_dispatch_var.reset(token)
 
 
+# ---------------------------------------------------------------------------
+# Calling-node identity — for the OTel observer's §5.5 LLM-span parent
+# attribution under concurrent fan-out + retry. The engine sets these
+# ContextVars around node-body execution in ``_step_*_node``; capability
+# code emitting ``NodeEvent``s from inside a node body (the LLM provider
+# span hook) reads them to record which node the event originated from.
+#
+# Without these, the OTel observer falls back to ``opentelemetry.trace``'s
+# current-span context to resolve the parent, which under concurrent
+# fan-out can yield a sibling instance's span rather than the actual
+# calling node. The §5.5 contract states the *outcome* (LLM span parents
+# under the calling node); these ContextVars provide the *mechanism*.
+#
+# Defaults are baked into ContextVar construction so readers outside any
+# node body (e.g., LLM ``complete`` called from a top-level harness)
+# return the sentinel values directly without engine-side initialization.
+# ---------------------------------------------------------------------------
+
+
+_namespace_prefix_var: ContextVar[tuple[str, ...]] = ContextVar("openarmature.namespace_prefix", default=())
+
+
+def current_namespace_prefix() -> tuple[str, ...]:
+    """Return the namespace prefix of the node currently executing,
+    or the empty tuple outside any node body.
+
+    The empty-tuple default makes top-level (outside-invocation) and
+    between-nodes (e.g., middleware bodies) calls fall back to
+    invocation-level parenting cleanly.
+    """
+    return _namespace_prefix_var.get()
+
+
+def _set_namespace_prefix(value: tuple[str, ...]) -> Token[tuple[str, ...]]:
+    """Set the calling node's namespace prefix. Internal —
+    engine-only; called inside ``_step_*_node`` around node-body
+    execution."""
+    return _namespace_prefix_var.set(value)
+
+
+def _reset_namespace_prefix(token: Token[tuple[str, ...]]) -> None:
+    _namespace_prefix_var.reset(token)
+
+
+_fan_out_index_var: ContextVar[int | None] = ContextVar("openarmature.fan_out_index", default=None)
+
+
+def current_fan_out_index() -> int | None:
+    """Return the fan_out_index of the node currently executing, or
+    ``None`` outside any fan-out instance body (top-level nodes,
+    subgraph dispatch, between nodes).
+    """
+    return _fan_out_index_var.get()
+
+
+def _set_fan_out_index(value: int | None) -> Token[int | None]:
+    """Set the calling node's fan_out_index. Internal — engine-only."""
+    return _fan_out_index_var.set(value)
+
+
+def _reset_fan_out_index(token: Token[int | None]) -> None:
+    _fan_out_index_var.reset(token)
+
+
+_attempt_index_var: ContextVar[int] = ContextVar("openarmature.attempt_index", default=0)
+
+
+def current_attempt_index() -> int:
+    """Return the attempt_index of the node currently executing, or
+    ``0`` outside any node body. Retry middleware bumps this per
+    attempt; the OTel observer uses it to disambiguate per-attempt
+    spans when an LLM call happens inside a retried node body.
+    """
+    return _attempt_index_var.get()
+
+
+def _set_attempt_index(value: int) -> Token[int]:
+    """Set the calling node's attempt_index. Internal — engine-only."""
+    return _attempt_index_var.set(value)
+
+
+def _reset_attempt_index(token: Token[int]) -> None:
+    _attempt_index_var.reset(token)
+
+
 __all__ = [
     # Public surface — readable from anywhere within an invocation.
     "current_active_observers",
+    "current_attempt_index",
     "current_correlation_id",
     "current_dispatch",
+    "current_fan_out_index",
     "current_invocation_id",
+    "current_namespace_prefix",
     # Engine-internal lifecycle helpers — exported so the engine in
     # ``openarmature.graph.compiled`` can drive set/reset without
     # pyright's strict ``reportUnusedFunction`` flagging them as
     # dead. Underscore-prefixed; not part of the user-facing API.
     "_reset_active_dispatch",
     "_reset_active_observers",
+    "_reset_attempt_index",
     "_reset_correlation_id",
+    "_reset_fan_out_index",
     "_reset_invocation_id",
+    "_reset_namespace_prefix",
     "_set_active_dispatch",
     "_set_active_observers",
+    "_set_attempt_index",
     "_set_correlation_id",
+    "_set_fan_out_index",
     "_set_invocation_id",
+    "_set_namespace_prefix",
 ]

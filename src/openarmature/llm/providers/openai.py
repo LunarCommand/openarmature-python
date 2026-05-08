@@ -47,7 +47,12 @@ from pydantic import ValidationError
 
 from openarmature.graph.events import NodeEvent
 from openarmature.graph.state import State
-from openarmature.observability.correlation import current_dispatch
+from openarmature.observability.correlation import (
+    current_attempt_index,
+    current_dispatch,
+    current_fan_out_index,
+    current_namespace_prefix,
+)
 
 from ..errors import (
     ProviderAuthentication,
@@ -554,6 +559,15 @@ class _LlmEventState(State):
     LLM-span maps by it so concurrent ``complete()`` calls (e.g.,
     fan-out instances each calling the provider) don't collide on
     a single sentinel-namespace key.
+
+    ``calling_namespace_prefix``, ``calling_attempt_index``, and
+    ``calling_fan_out_index`` carry the calling node's identity so
+    the OTel observer can resolve the §5.5 "parent under calling
+    node" contract correctly under concurrent fan-out and retry.
+    Populated from the engine's ContextVars (set in
+    ``_step_*_node`` around node-body execution); fall back to
+    sentinel defaults (empty tuple, 0, ``None``) when the LLM
+    provider is called outside any node body.
     """
 
     call_id: str
@@ -571,6 +585,14 @@ class _LlmEventState(State):
     error_type: str | None = None
     error_message: str | None = None
     error_category: str | None = None
+    # Calling-node identity captured at dispatch time. The OTel
+    # observer reads these to look up the calling node's span in
+    # its (now-cid-scoped) ``_open_spans`` map without relying on
+    # the OTel current-span context (which under concurrent fan-out
+    # can yield a sibling instance's span).
+    calling_namespace_prefix: tuple[str, ...] = ()
+    calling_attempt_index: int = 0
+    calling_fan_out_index: int | None = None
 
 
 def _make_llm_event(
@@ -611,6 +633,9 @@ def _make_llm_event(
         error_type=error_type,
         error_message=error_message,
         error_category=error_category,
+        calling_namespace_prefix=current_namespace_prefix(),
+        calling_attempt_index=current_attempt_index(),
+        calling_fan_out_index=current_fan_out_index(),
     )
     return NodeEvent(
         node_name="openarmature.llm.complete",

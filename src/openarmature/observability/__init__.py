@@ -22,14 +22,20 @@ established up front.
 
 from .correlation import (
     current_active_observers,
+    current_attempt_index,
     current_correlation_id,
     current_dispatch,
+    current_fan_out_index,
     current_invocation_id,
+    current_namespace_prefix,
 )
 
 __all__ = [
     "current_active_observers",
+    "current_attempt_index",
     "current_correlation_id",
     "current_dispatch",
+    "current_fan_out_index",
     "current_invocation_id",
+    "current_namespace_prefix",
 ]
