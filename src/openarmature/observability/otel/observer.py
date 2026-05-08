@@ -3,10 +3,27 @@
 The observer subscribes to all three §6 phases (``started``,
 ``completed``, ``checkpoint_saved``) plus the LLM-provider events the
 ``OpenAIProvider`` enqueues from inside node bodies. On a ``started``
-event it opens a span and pushes it onto an in-flight map keyed by
-``(trace_id, namespace, attempt_index, fan_out_index)``; on the
-matching ``completed`` event it pops the span, applies §4.2 status
-mapping, and closes it.
+event it opens a leaf span and pushes it onto an in-flight map keyed
+by ``(namespace, attempt_index, fan_out_index)``; on the matching
+``completed`` event it pops the span, applies §4.2 status mapping,
+and closes it.
+
+Subtree isolation lives in dedicated dicts rather than the leaf-span
+key:
+
+- ``_subgraph_spans`` — synthetic subgraph dispatch spans (the
+  engine wrapper is transparent per fixture 013, but observability
+  §4.5 mandates a span). Keyed by namespace prefix. Open lazily on
+  the first deeper-namespace event, close when subsequent events
+  leave the prefix.
+- ``_detached_roots`` — root spans for detached subgraphs (§4.4)
+  and per-instance detached fan-out roots. Each lives in its own
+  fresh ``trace_id``; the parent's dispatch span carries an OTel
+  :class:`Link` to the detached trace.
+- ``_invocation_span`` — root invocation span keyed by
+  ``correlation_id``. Closed eagerly when a new correlation_id's
+  first event arrives (or explicitly via
+  :meth:`close_invocation` / :meth:`shutdown`).
 
 Spans are emitted through a **private** :class:`TracerProvider`
 constructed by this observer — never the OTel global. Per spec §6
@@ -18,9 +35,11 @@ to emit duplicate spans alongside ours.
 Detached trace mode (§4.4) is implemented by minting a fresh
 :class:`SpanContext` with a new ``trace_id`` when entering a
 configured-detached subgraph or fan-out; the parent's dispatch span
-carries an OTel :class:`Link` to the detached trace. The span-stack
-key includes ``trace_id`` so detached sub-trees and the parent trace
-maintain separate stacks naturally.
+carries an OTel :class:`Link` to the detached trace. Inner-event
+parent resolution checks the per-fan-out-instance key
+(``namespace[:1] + (str(fan_out_index),)``) before the generic
+prefix scan, so per-instance detached roots win without depending
+on attach-then-resolve ordering.
 """
 
 from __future__ import annotations
@@ -111,6 +130,21 @@ class OTelObserver:
       canonical source of LLM spans.
     - ``spec_version`` — string surfaced as
       ``openarmature.graph.spec_version`` on the invocation span.
+
+    **Concurrency model.** A single ``OTelObserver`` instance is
+    SAFE for sequential invocations on the same graph (one
+    ``invoke()`` followed by another, with the observer reused
+    between). It is NOT safe to share an instance across CONCURRENT
+    invocations — the internal span state (``_open_spans``,
+    ``_subgraph_spans``, ``_detached_roots``, ``_invocation_span``)
+    is keyed without per-invocation scoping, so overlapping
+    namespaces collide and the close-prior-correlation_id logic in
+    ``_handle_started`` would close another in-flight invocation's
+    span. Recommended pattern: one observer per ``CompiledGraph``
+    instance for sequential workloads; for ASGI / batch / parallel
+    invocation services, attach a fresh observer per invocation
+    (via ``invoke(observers=[...])``) until the Phase 6.1
+    correlation_id-scoped state lands.
     """
 
     span_processor: SpanProcessor
@@ -363,18 +397,22 @@ class OTelObserver:
 
     def _open_invocation_span(self, correlation_id: str, event: NodeEvent) -> None:
         """Open the root invocation span for a new invocation."""
+        from openarmature.observability.correlation import current_invocation_id
+
         # The first event we receive carries the entry node's
         # name; treat it as the invocation's entry_node attribute.
+        # ``invocation_id`` is set by the engine in ``invoke()`` via
+        # the ``current_invocation_id`` ContextVar; if the observer
+        # somehow runs outside an engine invocation (None) we omit
+        # the attribute rather than emitting a misleading sentinel.
         attrs: dict[str, Any] = {
-            "openarmature.invocation_id": "<unset>",  # set below from context
             "openarmature.graph.entry_node": event.node_name,
             "openarmature.graph.spec_version": self.spec_version,
             "openarmature.correlation_id": correlation_id,
         }
-        # We don't have the engine's invocation_id directly without
-        # threading it through. Phase 6 follow-up could surface it
-        # via the correlation module; for now leave it blank for
-        # the conformance fixtures that don't strictly need it.
+        invocation_id = current_invocation_id()
+        if invocation_id is not None:
+            attrs["openarmature.invocation_id"] = invocation_id
         span = self._tracer.start_span(
             name="openarmature.invocation",
             kind=SpanKind.INTERNAL,
@@ -535,6 +573,10 @@ class OTelObserver:
             try:
                 detach(cast("Any", open_span.token))
             except ValueError:
+                # Token was created in a different OTel context —
+                # cross-context detach raises here. The span has
+                # ended; the leaked context entry is cosmetic and
+                # unwinds when the worker task exits.
                 pass
 
     def _open_detached_subgraph_root(self, prefix: tuple[str, ...]) -> None:

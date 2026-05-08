@@ -45,9 +45,11 @@ from openarmature.observability.correlation import (
     _reset_active_dispatch,
     _reset_active_observers,
     _reset_correlation_id,
+    _reset_invocation_id,
     _set_active_dispatch,
     _set_active_observers,
     _set_correlation_id,
+    _set_invocation_id,
 )
 
 from .edges import END, ConditionalEdge, EndSentinel, StaticEdge
@@ -388,6 +390,7 @@ class CompiledGraph[StateT: State]:
         # public ``invoke``, so they don't re-set; see §3.1's
         # "per-invocation is OUTERMOST invoke" wording).
         correlation_token = _set_correlation_id(resolved_correlation_id)
+        invocation_token = _set_invocation_id(invocation_id)
         worker = asyncio.create_task(deliver_loop(queue))
         self._active_workers.add(worker)
         # Auto-prune: when the worker completes (after the sentinel is
@@ -397,6 +400,7 @@ class CompiledGraph[StateT: State]:
         try:
             return await self._invoke(starting_state, context)
         finally:
+            _reset_invocation_id(invocation_token)
             _reset_correlation_id(correlation_token)
             # Sentinel terminates the worker after it processes events
             # already on the queue (including any error event we just

@@ -77,6 +77,46 @@ def _reset_correlation_id(token: Token[str | None]) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Invocation ID — spec observability §5.1
+#
+# The framework-generated UUIDv4 that ties spans of one invocation
+# together within a single backend. Distinct from ``correlation_id``
+# (which is the cross-backend join key, caller-supplied or auto-
+# generated). Engine sets this ContextVar in ``invoke()`` BEFORE the
+# delivery worker is created so the worker's captured context sees
+# the right value.
+# ---------------------------------------------------------------------------
+
+
+_invocation_id_var: ContextVar[str | None] = ContextVar("openarmature.invocation_id", default=None)
+
+
+def current_invocation_id() -> str | None:
+    """Return the engine-minted invocation ID for the current
+    invocation, or ``None`` if no openarmature invocation is in
+    scope.
+
+    Per spec observability §5.1 every invocation produces a unique
+    UUIDv4 ``invocation_id``, framework-generated, surfaced as the
+    ``openarmature.invocation_id`` attribute on the invocation span
+    + on every per-backend record. This is the public reader for
+    backend mappings (OTel, future Langfuse) that need to populate
+    that attribute.
+    """
+    return _invocation_id_var.get()
+
+
+def _set_invocation_id(value: str) -> Token[str | None]:
+    """Set the invocation ID for the current invocation. Internal —
+    engine-only."""
+    return _invocation_id_var.set(value)
+
+
+def _reset_invocation_id(token: Token[str | None]) -> None:
+    _invocation_id_var.reset(token)
+
+
+# ---------------------------------------------------------------------------
 # Active observer set — for capability backends emitting from outside the
 # engine's per-step path (llm-provider span hook in Phase 6, future
 # Langfuse/Datadog backends, user-written instrumented capabilities).
@@ -170,6 +210,7 @@ __all__ = [
     "current_active_observers",
     "current_correlation_id",
     "current_dispatch",
+    "current_invocation_id",
     # Engine-internal lifecycle helpers — exported so the engine in
     # ``openarmature.graph.compiled`` can drive set/reset without
     # pyright's strict ``reportUnusedFunction`` flagging them as
@@ -177,7 +218,9 @@ __all__ = [
     "_reset_active_dispatch",
     "_reset_active_observers",
     "_reset_correlation_id",
+    "_reset_invocation_id",
     "_set_active_dispatch",
     "_set_active_observers",
     "_set_correlation_id",
+    "_set_invocation_id",
 ]

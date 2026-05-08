@@ -88,24 +88,51 @@ async def test_correlation_id_isolated_across_concurrent_invocations() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_correlation_id_and_invocation_id_are_structurally_distinct() -> None:
-    """Spec §3.2: ``correlation_id`` and ``invocation_id`` serve
-    different purposes and MUST be distinct fields. Verify the
-    framework never auto-derives one from the other (the auto-
-    generation paths produce independent UUIDs)."""
-    # Both are auto-generated when not supplied. Run a dozen
-    # invocations and confirm correlation_id never equals invocation_id
-    # accidentally.
-    import uuid
+async def test_correlation_id_and_invocation_id_are_structurally_distinct() -> None:
+    """Spec observability §3.2: ``correlation_id`` and
+    ``invocation_id`` serve different purposes and MUST NOT be
+    conflated. Drive a real invocation with a checkpointer and read
+    both ids from the saved record (deterministic) — plus an in-body
+    cross-check via the public ContextVar readers — to verify the
+    framework treats them as independent fields."""
+    from openarmature.checkpoint import InMemoryCheckpointer
+    from openarmature.observability import current_invocation_id
 
-    # The framework's auto-generation uses uuid.uuid4() for both.
-    # Verify by sampling — two independent uuid4() calls collide with
-    # probability ~1/2^122, so this is a structural check that they
-    # are NOT derived from a shared seed/source.
-    for _ in range(50):
-        a = str(uuid.uuid4())
-        b = str(uuid.uuid4())
-        assert a != b
+    captured: dict[str, str | None] = {}
+
+    async def read_both(_s: _S) -> dict[str, str]:
+        captured["correlation_id"] = current_correlation_id()
+        captured["invocation_id"] = current_invocation_id()
+        return {"captured": captured.get("invocation_id") or ""}
+
+    cp = InMemoryCheckpointer()
+    g = (
+        GraphBuilder(_S)
+        .add_node("read", read_both)
+        .add_edge("read", END)
+        .set_entry("read")
+        .with_checkpointer(cp)
+        .compile()
+    )
+    await g.invoke(_S(), correlation_id="user-supplied-cid")
+
+    # In-body cross-check: the two ContextVars MUST return distinct
+    # strings. ``correlation_id`` is the caller-supplied value;
+    # ``invocation_id`` is framework-minted.
+    body_corr = captured["correlation_id"]
+    body_inv = captured["invocation_id"]
+    assert body_corr == "user-supplied-cid"
+    assert body_inv is not None and body_inv != body_corr
+
+    # Saved-record cross-check: the framework persists both fields
+    # independently and they MUST differ.
+    summaries = list(await cp.list())
+    assert len(summaries) == 1
+    record = await cp.load(summaries[0].invocation_id)
+    assert record is not None
+    assert record.correlation_id == "user-supplied-cid"
+    assert record.invocation_id != record.correlation_id
+    assert record.invocation_id == body_inv
 
 
 # ---------------------------------------------------------------------------

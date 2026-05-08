@@ -39,7 +39,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Sequence
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 import httpx
 from pydantic import ValidationError
@@ -525,7 +525,7 @@ def _looks_like_model_not_loaded(message: object) -> bool:
 
 
 def _make_llm_event(
-    phase: str,
+    phase: Literal["started", "completed"],
     *,
     model: str,
     finish_reason: FinishReason | None = None,
@@ -567,7 +567,7 @@ def _make_llm_event(
         node_name="openarmature.llm.complete",
         namespace=("openarmature.llm.complete",),
         step=-1,
-        phase=cast("Any", phase),
+        phase=phase,
         # ``pre_state`` is overloaded here as the LLM-event payload
         # carrier — see the docstring above.
         pre_state=cast("Any", {"llm_event": payload}),

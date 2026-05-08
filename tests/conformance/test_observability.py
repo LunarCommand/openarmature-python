@@ -335,54 +335,56 @@ async def _run_fixture_005_case(case: Mapping[str, Any]) -> None:
     )
 
     # Optional second exporter on the OTel global provider — sub-case 3.
+    # Save the prior global provider so we can restore it after the
+    # case (otherwise the global state leaks to subsequent tests).
     global_exporter: InMemorySpanExporter | None = None
+    prior_global = otel_trace.get_tracer_provider() if caller_global_active else None
     if caller_global_active:
         global_exporter = InMemorySpanExporter()
         global_provider = TracerProvider()
         global_provider.add_span_processor(SimpleSpanProcessor(global_exporter))
         otel_trace.set_tracer_provider(global_provider)
 
-    private_exporter = InMemorySpanExporter()
-    observer = OTelObserver(
-        span_processor=SimpleSpanProcessor(private_exporter),
-        disable_llm_spans=disable_llm_spans,
-    )
-
-    # Build a graph whose entry node calls a mock LLM provider.
-    graph, _ = _build_graph_with_mock_llm(case)
-    graph.attach_observer(observer)
-
-    # Drive the graph. The ``calls_llm`` node body reads the mock
-    # responses set up in ``_build_graph_with_mock_llm`` (httpx
-    # MockTransport keyed off the response queue).
-    initial_state_cls = graph.state_cls
-    final = await graph.invoke(initial_state_cls())
-    await graph.drain()
-    observer.shutdown()
-    private_spans = private_exporter.get_finished_spans()
-
-    # Sub-case 3: external span emitted by the harness through the
-    # global tracer (simulating auto-instrumentation).
-    if caller_global_active:
-        global_tracer = otel_trace.get_tracer("external-instrumentation")
-        with global_tracer.start_as_current_span("external.llm.call"):
-            pass
-        assert global_exporter is not None
-        global_spans = global_exporter.get_finished_spans()
-        assert len(global_spans) == 1, (
-            f"global exporter MUST see exactly one external span; got {len(global_spans)}"
+    try:
+        private_exporter = InMemorySpanExporter()
+        observer = OTelObserver(
+            span_processor=SimpleSpanProcessor(private_exporter),
+            disable_llm_spans=disable_llm_spans,
         )
-        assert global_spans[0].name == "external.llm.call"
-        # The load-bearing isolation check.
-        for s in global_spans:
-            assert not s.name.startswith("openarmature."), (
-                f"openarmature spans MUST NOT leak to the global provider; got {s.name!r}"
+
+        # Build a graph whose entry node calls a mock LLM provider.
+        graph, _ = _build_graph_with_mock_llm(case)
+        graph.attach_observer(observer)
+
+        # Drive the graph. The ``calls_llm`` node body reads the mock
+        # responses set up in ``_build_graph_with_mock_llm`` (httpx
+        # MockTransport keyed off the response queue).
+        initial_state_cls = graph.state_cls
+        final = await graph.invoke(initial_state_cls())
+        await graph.drain()
+        observer.shutdown()
+        private_spans = private_exporter.get_finished_spans()
+
+        # Sub-case 3: external span emitted by the harness through the
+        # global tracer (simulating auto-instrumentation).
+        if caller_global_active:
+            global_tracer = otel_trace.get_tracer("external-instrumentation")
+            with global_tracer.start_as_current_span("external.llm.call"):
+                pass
+            assert global_exporter is not None
+            global_spans = global_exporter.get_finished_spans()
+            assert len(global_spans) == 1, (
+                f"global exporter MUST see exactly one external span; got {len(global_spans)}"
             )
-        # Reset the global provider so the next test in the file
-        # doesn't see a stale state. The OTel SDK doesn't expose a
-        # public reset; ``set_tracer_provider`` with a fresh empty
-        # provider is the closest equivalent.
-        otel_trace.set_tracer_provider(TracerProvider())
+            assert global_spans[0].name == "external.llm.call"
+            # The load-bearing isolation check.
+            for s in global_spans:
+                assert not s.name.startswith("openarmature."), (
+                    f"openarmature spans MUST NOT leak to the global provider; got {s.name!r}"
+                )
+    finally:
+        if caller_global_active and prior_global is not None:
+            otel_trace.set_tracer_provider(prior_global)
 
     # Common assertions: the LLM span presence/absence + (when
     # present) attributes + parent-child to the calling node.

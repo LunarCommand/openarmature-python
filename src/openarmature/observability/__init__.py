@@ -24,10 +24,12 @@ from .correlation import (
     current_active_observers,
     current_correlation_id,
     current_dispatch,
+    current_invocation_id,
 )
 
 __all__ = [
     "current_active_observers",
     "current_correlation_id",
     "current_dispatch",
+    "current_invocation_id",
 ]

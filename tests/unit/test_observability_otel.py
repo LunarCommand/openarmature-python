@@ -96,26 +96,32 @@ async def test_observer_uses_private_provider_not_global() -> None:
     PRIVATE TracerProvider; spans MUST NOT appear on the OTel global
     provider's exporter (this is the load-bearing guarantee against
     duplicate spans from external auto-instrumentation libraries)."""
+    # Save the prior global provider so we can restore it after the
+    # test — pytest fixture-scoping doesn't cover OTel global state.
+    prior_global = otel_trace.get_tracer_provider()
     # Install a separate exporter on the OTel global provider.
     global_exporter = InMemorySpanExporter()
     global_provider = TracerProvider()
     global_provider.add_span_processor(SimpleSpanProcessor(global_exporter))
     otel_trace.set_tracer_provider(global_provider)
 
-    # Drive a graph through OTelObserver.
-    private_exporter = InMemorySpanExporter()
-    observer = OTelObserver(span_processor=SimpleSpanProcessor(private_exporter))
-    g, _ = _build_linear_graph(observer)
-    await g.invoke(_LinearState())  # type: ignore[attr-defined]
-    await g.drain()  # type: ignore[attr-defined]
-    observer.shutdown()
+    try:
+        # Drive a graph through OTelObserver.
+        private_exporter = InMemorySpanExporter()
+        observer = OTelObserver(span_processor=SimpleSpanProcessor(private_exporter))
+        g, _ = _build_linear_graph(observer)
+        await g.invoke(_LinearState())  # type: ignore[attr-defined]
+        await g.drain()  # type: ignore[attr-defined]
+        observer.shutdown()
 
-    private_spans = private_exporter.get_finished_spans()
-    global_spans = global_exporter.get_finished_spans()
-    assert len(private_spans) > 0, "private provider must have received spans"
-    assert len(global_spans) == 0, (
-        f"global provider MUST NOT receive openarmature spans; got {[s.name for s in global_spans]}"
-    )
+        private_spans = private_exporter.get_finished_spans()
+        global_spans = global_exporter.get_finished_spans()
+        assert len(private_spans) > 0, "private provider must have received spans"
+        assert len(global_spans) == 0, (
+            f"global provider MUST NOT receive openarmature spans; got {[s.name for s in global_spans]}"
+        )
+    finally:
+        otel_trace.set_tracer_provider(prior_global)
 
 
 # ---------------------------------------------------------------------------
