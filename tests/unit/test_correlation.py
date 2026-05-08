@@ -156,7 +156,7 @@ async def test_resume_preserves_correlation_id_visible_to_user_code() -> None:
     # a ``pre`` node whose successful save arms the resume.
     pre = (
         GraphBuilder(_ResumeState)
-        .add_node("pre", lambda s: _pre(s))  # type: ignore[arg-type,return-value]
+        .add_node("pre", _pre)
         .add_node("a", maybe_fail)
         .add_edge("pre", "a")
         .add_edge("a", END)

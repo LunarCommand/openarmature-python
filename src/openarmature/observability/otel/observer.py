@@ -114,6 +114,11 @@ class OTelObserver:
     """
 
     span_processor: SpanProcessor
+    # Lambda-wrapped factories give pyright the explicit
+    # ``frozenset[str]`` type — ``default_factory=frozenset``
+    # alone produces ``frozenset[Unknown]`` which the strict-mode
+    # config flags. The lambda overhead is negligible (one closure
+    # call per dataclass instance).
     detached_subgraphs: frozenset[str] = field(default_factory=lambda: frozenset[str]())
     detached_fan_outs: frozenset[str] = field(default_factory=lambda: frozenset[str]())
     disable_llm_spans: bool = False
@@ -121,7 +126,7 @@ class OTelObserver:
     # places the spec version is pinned per CLAUDE.md). Bumping the
     # spec submodule + the two version fields automatically updates
     # the value reported on every invocation span.
-    spec_version: str = field(default_factory=lambda: _read_spec_version())
+    spec_version: str = field(default_factory=_read_spec_version)
 
     # Internal state, populated in __post_init__ and during invocation.
     _provider: TracerProvider = field(init=False, repr=False)
