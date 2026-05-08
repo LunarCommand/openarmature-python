@@ -2,7 +2,7 @@
 
 Python reference implementation of [OpenArmature](https://github.com/LunarCommand/openarmature-spec) — a workflow framework for LLM pipelines and tool-calling agents.
 
-**Status:** alpha. The graph engine module is implemented against spec v0.3.1; the other modules in the charter are not yet built.
+**Status:** alpha. Implemented against spec v0.8.2.
 
 ## Install
 
