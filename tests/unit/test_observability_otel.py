@@ -26,7 +26,7 @@ import logging
 import pytest
 
 # Skip the entire module if otel extras aren't installed.
-pytest.importorskip("opentelemetry.trace")
+pytest.importorskip("opentelemetry.sdk.trace")
 
 from opentelemetry import trace as otel_trace
 from opentelemetry.sdk.trace import TracerProvider
@@ -274,7 +274,7 @@ async def test_disable_llm_spans_skips_llm_provider_span() -> None:
         namespace=("openarmature.llm.complete",),
         step=-1,
         phase="started",
-        pre_state=_LlmEventState(model="test-m"),
+        pre_state=_LlmEventState(call_id="test-call-1", model="test-m"),
         post_state=None,
         error=None,
         parent_states=(),
@@ -284,7 +284,7 @@ async def test_disable_llm_spans_skips_llm_provider_span() -> None:
         namespace=("openarmature.llm.complete",),
         step=-1,
         phase="completed",
-        pre_state=_LlmEventState(model="test-m", finish_reason="stop"),
+        pre_state=_LlmEventState(call_id="test-call-1", model="test-m", finish_reason="stop"),
         post_state=None,
         error=None,
         parent_states=(),
@@ -349,9 +349,19 @@ def test_install_log_bridge_is_idempotent() -> None:
     LoggingHandler on the root logger."""
     from opentelemetry.sdk._logs import LoggerProvider
 
-    provider = LoggerProvider()
-    install_log_bridge(provider)
-    handler_count_before = len(logging.getLogger().handlers)
-    install_log_bridge(provider)
-    handler_count_after = len(logging.getLogger().handlers)
-    assert handler_count_before == handler_count_after
+    root = logging.getLogger()
+    prior_handlers = list(root.handlers)
+    prior_filters = list(root.filters)
+    try:
+        provider = LoggerProvider()
+        install_log_bridge(provider)
+        handler_count_before = len(root.handlers)
+        install_log_bridge(provider)
+        handler_count_after = len(root.handlers)
+        assert handler_count_before == handler_count_after
+    finally:
+        # install_log_bridge mutates the process-wide root logger;
+        # restore the prior handler + filter set so this test does
+        # not leak state into others.
+        root.handlers[:] = prior_handlers
+        root.filters[:] = prior_filters

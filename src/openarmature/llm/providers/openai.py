@@ -38,6 +38,7 @@ silently treating "model in catalog" as "model loaded."
 from __future__ import annotations
 
 import json
+import uuid
 from collections.abc import Sequence
 from typing import Any, Literal, cast
 
@@ -203,21 +204,30 @@ class OpenAIProvider:
         # ``None`` outside an openarmature invocation (direct
         # provider use in scripts/tests), in which case the call
         # proceeds without span emission.
+        #
+        # ``call_id`` is minted once per ``complete()`` call and
+        # threaded through both events of the pair. Backend
+        # observers key their in-flight LLM-span maps by it so
+        # concurrent ``complete()`` calls (e.g., fan-out instances
+        # each calling this provider) don't collide on the
+        # constant ``("openarmature.llm.complete",)`` sentinel.
         dispatch = current_dispatch()
+        call_id = str(uuid.uuid4())
         if dispatch is not None:
-            dispatch(_make_llm_event("started", model=self.model))
+            dispatch(_make_llm_event("started", call_id=call_id, model=self.model))
 
         try:
             response = await self._do_complete(body)
         except Exception as exc:
             if dispatch is not None:
-                dispatch(_make_llm_event("completed", model=self.model, error=exc))
+                dispatch(_make_llm_event("completed", call_id=call_id, model=self.model, error=exc))
             raise
 
         if dispatch is not None:
             dispatch(
                 _make_llm_event(
                     "completed",
+                    call_id=call_id,
                     model=self.model,
                     finish_reason=response.finish_reason,
                     usage=response.usage,
@@ -537,8 +547,16 @@ class _LlmEventState(State):
     Langfuse / Datadog adapters) recognize the
     ``("openarmature.llm.complete",)`` namespace sentinel and read
     these fields directly via attribute access.
+
+    ``call_id`` is the per-call disambiguator: a UUIDv4 minted in
+    ``OpenAIProvider.complete`` and shared between the started /
+    completed event pair. Backend observers key their in-flight
+    LLM-span maps by it so concurrent ``complete()`` calls (e.g.,
+    fan-out instances each calling the provider) don't collide on
+    a single sentinel-namespace key.
     """
 
+    call_id: str
     model: str
     finish_reason: str | None = None
     prompt_tokens: int | None = None
@@ -558,6 +576,7 @@ class _LlmEventState(State):
 def _make_llm_event(
     phase: Literal["started", "completed"],
     *,
+    call_id: str,
     model: str,
     finish_reason: FinishReason | None = None,
     usage: Usage | None = None,
@@ -569,6 +588,9 @@ def _make_llm_event(
     span instead of a node span. Backend-specific attribute extraction
     reads ``model``, ``finish_reason``, and ``usage`` from
     ``pre_state`` directly via attribute access.
+
+    ``call_id`` MUST be the same string on the started/completed
+    pair so the observer can match them under concurrency.
     """
     error_type: str | None = None
     error_message: str | None = None
@@ -580,6 +602,7 @@ def _make_llm_event(
         if isinstance(category, str):
             error_category = category
     payload = _LlmEventState(
+        call_id=call_id,
         model=model,
         finish_reason=finish_reason,
         prompt_tokens=usage.prompt_tokens if usage is not None else None,
