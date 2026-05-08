@@ -22,13 +22,13 @@ dependencies = [
 # dependencies. Plan to lift into a sibling ``openarmature-otel``
 # package at v1.0 launch alongside ``openarmature-eval``.
 otel = [
-    # Upper bound guards against the SDK 2.x release that removes
-    # ``opentelemetry.sdk._logs.LoggingHandler`` (currently emits a
-    # DeprecationWarning). Migration to
-    # ``opentelemetry-instrumentation-logging`` lands in Phase 6.1
-    # before bumping the upper bound.
-    "opentelemetry-api>=1.27,<2",
-    "opentelemetry-sdk>=1.27,<2",
+    "opentelemetry-api>=1.27,<3",
+    "opentelemetry-sdk>=1.27,<3",
+    # Provides ``LoggingHandler`` after the SDK's deprecation
+    # of ``opentelemetry.sdk._logs.LoggingHandler``. No upper
+    # bound — the contrib repo cycles fast on minor releases
+    # below 1.0; revisit when 1.0 lands.
+    "opentelemetry-instrumentation-logging>=0.62.0b1",
 ]
 
 [project.urls]

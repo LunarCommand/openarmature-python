@@ -8,36 +8,67 @@ every log record emitted within an invocation carries the active
 Opt-in by design: users may have their own logging configuration we
 shouldn't override silently. Calling ``install_log_bridge(provider)``
 explicitly attaches an OTel ``LoggingHandler`` to the root logger
-and registers a filter that injects the correlation_id from the
-ContextVar.
+and installs a process-global ``LogRecord`` factory that injects
+the correlation_id from the ContextVar.
 """
 
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from opentelemetry.sdk._logs import LoggerProvider
 
 
-class _CorrelationIdFilter(logging.Filter):
-    """Logging filter that reads the openarmature correlation_id
-    ContextVar and attaches it to every log record as the
-    ``openarmature.correlation_id`` attribute. Per spec §7 the
-    attribute MUST appear on every log record emitted during an
-    invocation."""
+# Marker attribute used to detect "this is the OA-installed
+# LogRecord factory" so re-calling ``install_log_bridge`` doesn't
+# stack a second wrapper on top of the already-installed one.
+_FACTORY_MARKER = "_openarmature_correlation_factory"
 
-    def filter(self, record: logging.LogRecord) -> bool:
-        from openarmature.observability.correlation import current_correlation_id
 
+def _install_correlation_id_factory() -> None:
+    """Install a process-global :class:`logging.LogRecord` factory
+    that reads the openarmature correlation_id ContextVar and
+    attaches it to every constructed record as the
+    ``openarmature.correlation_id`` attribute.
+
+    Why a factory instead of a logger filter: filters added to the
+    ROOT logger only fire for records originating directly on the
+    root logger — Python's logging propagation walks ancestors'
+    HANDLERS but not their filters. A filter on root therefore
+    misses every record from a child logger (the normal case;
+    every reasonable user does ``logger = logging.getLogger("module")``).
+    Spec §7 mandates the attribute appear on records emitted from
+    "anywhere within an invocation" — the factory hooks at record
+    construction, fires uniformly for every emit regardless of
+    which logger originated the record, and chains over any
+    user-installed factory rather than replacing it.
+
+    Idempotent: re-calling skips installation if the current
+    factory is already the OA-installed one.
+    """
+    from openarmature.observability.correlation import current_correlation_id
+
+    current_factory = logging.getLogRecordFactory()
+    if getattr(current_factory, _FACTORY_MARKER, False):
+        # Already installed — re-calling is a no-op.
+        return
+
+    prior_factory = current_factory
+
+    def _correlation_id_factory(*args: Any, **kwargs: Any) -> logging.LogRecord:
+        record = prior_factory(*args, **kwargs)
         cid = current_correlation_id()
         if cid is not None:
             # Stored on the log record so any formatter/handler that
             # reads ``record.__dict__`` (including the OTel
             # LoggingHandler) sees it.
             setattr(record, "openarmature.correlation_id", cid)
-        return True
+        return record
+
+    setattr(_correlation_id_factory, _FACTORY_MARKER, True)
+    logging.setLogRecordFactory(_correlation_id_factory)
 
 
 def install_log_bridge(
@@ -47,32 +78,31 @@ def install_log_bridge(
 ) -> None:
     """Wire the stdlib root logger to the supplied OTel
     :class:`LoggerProvider`. Adds a
-    :class:`opentelemetry.sdk._logs.LoggingHandler` for OTel-native
-    ``trace_id`` / ``span_id`` bridging, AND attaches an
-    :class:`_CorrelationIdFilter` directly to the ROOT LOGGER (not
-    the handler) so the ``openarmature.correlation_id`` attribute
-    lands on every log record emitted during an invocation —
-    including records consumed by pre-existing stdout / file /
-    third-party handlers the user already had configured.
+    :class:`opentelemetry.instrumentation.logging.handler.LoggingHandler`
+    for OTel-native ``trace_id`` / ``span_id`` bridging, AND
+    installs a process-global :class:`logging.LogRecord` factory
+    that injects ``openarmature.correlation_id`` on every record.
 
-    Filter-on-the-root-logger placement matters per spec §7:
-    "log records emitted from anywhere within an invocation MUST
-    carry ``openarmature.correlation_id``." A handler-level filter
-    would only modify records flowing through THAT handler, so a
-    user's existing stdout handler would see records without the
-    attribute. The root-logger filter applies to every record,
-    regardless of which handler eventually processes it.
+    The factory placement matters per spec §7: "log records
+    emitted from anywhere within an invocation MUST carry
+    ``openarmature.correlation_id``." Filters added to the root
+    logger fire only for records originating on root — Python's
+    propagation walks ancestor handlers but not ancestor filters
+    — so a root-logger filter misses every child-logger record.
+    The factory hook fires at record construction time, before any
+    logger or handler dispatch, so every record gets the
+    attribute regardless of which logger originated it.
 
     Idempotent: re-calling is a no-op (we check for the existing
-    OA-tagged handler AND for an existing filter instance on the
-    root logger).
+    OA-tagged handler on the root logger AND for the OA-installed
+    factory marker on the current global factory).
 
     The user retains responsibility for providing the
     :class:`LoggerProvider` (typically built with their preferred
-    exporter — :class:`InMemoryLogExporter` for tests,
+    exporter — :class:`InMemoryLogRecordExporter` for tests,
     :class:`OTLPLogExporter` for production).
     """
-    from opentelemetry.sdk._logs import LoggingHandler  # type: ignore[attr-defined]
+    from opentelemetry.instrumentation.logging.handler import LoggingHandler
 
     root = logging.getLogger()
     # Idempotency #1: don't double-add the OTel LoggingHandler.
@@ -87,11 +117,8 @@ def install_log_bridge(
         # marker behavior.
         object.__setattr__(handler, "_openarmature_installed", True)
         root.addHandler(handler)
-    # Idempotency #2: don't double-add the correlation_id filter to
-    # the root logger.
-    filter_already_installed = any(isinstance(f, _CorrelationIdFilter) for f in root.filters)
-    if not filter_already_installed:
-        root.addFilter(_CorrelationIdFilter())
+    # Idempotency #2: don't stack the LogRecord factory.
+    _install_correlation_id_factory()
 
 
 __all__ = [
