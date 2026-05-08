@@ -294,7 +294,7 @@ async def test_timing_records_failure_with_category() -> None:
     assert abs(rec.duration_ms - 10.0) < 0.01
 
 
-# ===== Reentrant next: middleware can call next more than twice =====
+# ===== Reentrant next: middleware can call next more than once =====
 
 
 async def test_middleware_can_call_next_repeatedly() -> None:
@@ -302,7 +302,7 @@ async def test_middleware_can_call_next_repeatedly() -> None:
     exercises this with N=2-3 attempts; this test pins the contract
     independently by calling ``next`` 5 times in a loop and asserting the
     inner runs exactly that many times."""
-    inner_calls = [0]
+    inner_calls = 0
 
     async def call_five_times(state: Any, next_: NextCall) -> Mapping[str, Any]:
         last: Mapping[str, Any] = {}
@@ -311,13 +311,14 @@ async def test_middleware_can_call_next_repeatedly() -> None:
         return last
 
     async def innermost(_state: Any) -> Mapping[str, Any]:
-        inner_calls[0] += 1
-        return {"trace": [f"call-{inner_calls[0]}"]}
+        nonlocal inner_calls
+        inner_calls += 1
+        return {"trace": [f"call-{inner_calls}"]}
 
     chain = compose_chain([call_five_times], innermost)
     result = await chain(TraceState())
 
-    assert inner_calls[0] == 5
+    assert inner_calls == 5
     # Final result is the partial returned from the LAST call to next.
     assert result == {"trace": ["call-5"]}
 
