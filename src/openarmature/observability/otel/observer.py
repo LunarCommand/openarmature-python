@@ -757,6 +757,9 @@ class OTelObserver:
             try:
                 detach(cast("Any", open_span.token))
             except ValueError:
+                # Cross-context detach during shutdown — token
+                # created in a different OTel context. Span has
+                # ended; ignore.
                 pass
 
     def _fan_out_node_span_key(self, prefix: tuple[str, ...]) -> _StackKey:
@@ -823,22 +826,27 @@ class OTelObserver:
         open_span.span.end()
 
     def shutdown(self) -> None:
-        """Close any still-open spans (leaf node spans, LLM spans,
-        detached roots, synthetic subgraph dispatch spans, invocation
-        spans) and shut down the underlying provider. Walks state
-        maps in child→parent order so OTel parent/child reporting
-        stays coherent. Idempotent."""
-        for key in list(self._open_spans.keys()):
-            open_span = self._open_spans.pop(key, None)
-            if open_span is not None:
-                self._drain_open_span(open_span)
+        """Close any still-open spans and shut down the underlying
+        provider. Walks state maps in child→parent order — LLM
+        spans (deepest leaves) before leaf node spans before
+        subgraph dispatch / detached roots before invocation spans
+        — and within each depth-bearing map sorts by namespace
+        depth (deepest first) so children end before their
+        parents. ``_open_llm_spans`` (call_id keys) and
+        ``_invocation_span`` (one entry per correlation_id) carry
+        no internal nesting and drain in insertion order.
+        Idempotent."""
         for call_id in list(self._open_llm_spans.keys()):
             open_span = self._open_llm_spans.pop(call_id, None)
             if open_span is not None:
                 self._drain_open_span(open_span)
-        for prefix in list(self._detached_roots.keys()):
+        for key in sorted(self._open_spans.keys(), key=lambda k: -len(k[0])):
+            open_span = self._open_spans.pop(key, None)
+            if open_span is not None:
+                self._drain_open_span(open_span)
+        for prefix in sorted(self._detached_roots.keys(), key=lambda k: -len(k)):
             self._close_detached_root(prefix)
-        for prefix in list(self._subgraph_spans.keys()):
+        for prefix in sorted(self._subgraph_spans.keys(), key=lambda k: -len(k)):
             self._close_subgraph_span(prefix)
         for cid in list(self._invocation_span.keys()):
             self._close_invocation_span(cid)
