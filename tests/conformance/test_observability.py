@@ -318,8 +318,10 @@ async def _run_fixture_003(spec: Mapping[str, Any]) -> None:
     with the canonical category in the description, an exception
     event recorded, and the ``openarmature.error.category``
     attribute. Sibling spans before the failure stay OK; the
-    invocation span propagates ERROR via OTel's parent-status-from-
-    failed-children semantics."""
+    invocation span ends ERROR (OTel doesn't auto-propagate child
+    status to parents, so the OTelObserver explicitly sets ERROR
+    on the invocation span when any child errors per
+    ``_handle_completed``)."""
     from opentelemetry.trace import StatusCode
 
     from openarmature.graph import RuntimeGraphError
@@ -359,6 +361,16 @@ async def _run_fixture_003(spec: Mapping[str, Any]) -> None:
     event_names = [e.name for e in fail_node.events]
     assert len(exception_events) >= 1, (
         f"fail_node MUST have at least one 'exception' event recorded; got {event_names}"
+    )
+
+    # Invocation span ends ERROR when any child errors per spec
+    # §4.2 / fixture 003. The OTelObserver sets ERROR explicitly in
+    # ``_handle_completed`` (OTel doesn't auto-propagate child status
+    # to parents).
+    inv = by_name.get("openarmature.invocation")
+    assert inv is not None
+    assert inv.status.status_code == StatusCode.ERROR, (
+        f"invocation span status MUST be ERROR when a child errored; got {inv.status.status_code}"
     )
 
 
@@ -523,10 +535,15 @@ _DETERMINISM_IGNORED_ATTRS: frozenset[str] = frozenset(
 
 
 async def _run_fixture_011(spec: Mapping[str, Any]) -> None:
-    """Spec §8: deterministic span content (hierarchy, span names,
-    span status, attributes minus the non-deterministic-by-design
-    ignore list) is identical across two invocations of the same
-    graph with the same input."""
+    """Spec §8: deterministic span content is identical across two
+    invocations of the same graph with the same input. The
+    signature compared per-span:
+    ``(name, status_code, parent_name, attrs ∖ ignored_set)``.
+    Parent linkage is encoded as the parent span's NAME rather
+    than its span_id (span_ids are non-deterministic per OTel SDK's
+    default RandomIdGenerator); a hierarchy regression where a
+    node reparented to a different ancestor surfaces as a
+    parent_name divergence."""
     cases = cast("list[dict[str, Any]]", spec["cases"])
     for case in cases:
         case_name = cast("str", case["name"])
@@ -539,14 +556,16 @@ async def _run_fixture_011(spec: Mapping[str, Any]) -> None:
 async def _run_fixture_011_case(case: Mapping[str, Any]) -> None:
     # Translate the fixture's ``when:`` conditional-edge syntax
     # (``when: {field: counter, gt: 0}``) into the adapter's
-    # ``condition: {if_field, equals, then, else}`` shape via a
-    # closure-based equality predicate. This case's ``gt: 0``
-    # against an int field is equivalent to ``equals: True`` once
-    # we project the gt-comparison into a state-derived bool — the
+    # ``condition: {if_field, equals, then, else}`` shape. The
     # adapter doesn't have a ``gt`` builder, but the deterministic
-    # input here means the same branch always fires, so the
-    # determinism comparison doesn't depend on which adapter
-    # construct represents the edge.
+    # input means ``counter == 1`` always — so ``gt: 0`` is
+    # functionally equivalent to ``equals: 1`` for this fixture's
+    # flow. The determinism comparison itself doesn't depend on
+    # which adapter construct represents the edge; the same
+    # branch always fires under identical inputs. (Generic
+    # ``gt``/``lt``/etc. edge-condition support is tracked under
+    # the Harness backlog in
+    # ``openarmature-coord/docs/phase-6-1-conformance-fillin.md``.)
     case_for_build = _translate_011_when_edges(case)
 
     invocations = int(case.get("invocations", 2))
@@ -569,23 +588,43 @@ async def _run_fixture_011_case(case: Mapping[str, Any]) -> None:
         f"deterministic input MUST produce equal span counts; got {len(runs[0])} vs {len(runs[1])}"
     )
 
-    # Compare structurally. Group each run's spans by name, then
-    # within each name-bucket compare deterministic attributes +
-    # status + parent-by-name (parent span_ids are
-    # non-deterministic, so we walk by name).
-    def _signature(span: Any) -> tuple[str, str, tuple[tuple[str, Any], ...]]:
+    # Compare each span's structural signature across runs. Span
+    # span_ids are non-deterministic, so we encode the parent
+    # linkage by looking up parent.span_id in the same run's
+    # by-id map and including the parent's NAME in the signature.
+    # That way a hierarchy regression (e.g., a node reparented
+    # from invocation to a sibling) shows up as a signature
+    # difference even though both spans' own attributes are
+    # unchanged.
+    def _signature(
+        span: Any, by_id: Mapping[int, Any]
+    ) -> tuple[str, str, str | None, tuple[tuple[str, Any], ...]]:
         attrs = dict(span.attributes or {})
         deterministic_items = sorted(
             (k, _normalize_attr_value(v)) for k, v in attrs.items() if k not in _DETERMINISM_IGNORED_ATTRS
         )
+        parent_name: str | None = None
+        if span.parent is not None:
+            parent_span = by_id.get(span.parent.span_id)
+            if parent_span is not None:
+                parent_name = cast("str", parent_span.name)
         return (
             cast("str", span.name),
             str(span.status.status_code),
+            parent_name,
             tuple(deterministic_items),
         )
 
-    sig_run_0 = sorted(_signature(s) for s in runs[0])
-    sig_run_1 = sorted(_signature(s) for s in runs[1])
+    by_id_run_0: dict[int, Any] = {}
+    for s in runs[0]:
+        if s.context is not None:
+            by_id_run_0[s.context.span_id] = s
+    by_id_run_1: dict[int, Any] = {}
+    for s in runs[1]:
+        if s.context is not None:
+            by_id_run_1[s.context.span_id] = s
+    sig_run_0 = sorted(_signature(s, by_id_run_0) for s in runs[0])
+    sig_run_1 = sorted(_signature(s, by_id_run_1) for s in runs[1])
     assert sig_run_0 == sig_run_1, (
         f"deterministic span content MUST match across runs; "
         f"first divergence: run_0={sig_run_0!r} vs run_1={sig_run_1!r}"
