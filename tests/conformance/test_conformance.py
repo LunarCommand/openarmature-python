@@ -7,6 +7,7 @@ expands to one parametrized case per entry in its `cases:` block.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, cast
 
@@ -14,12 +15,18 @@ import pytest
 import yaml
 
 from openarmature.graph import (
+    END,
     CompileError,
+    EdgeException,
+    EndSentinel,
+    GraphBuilder,
     NodeException,
     RoutingError,
     RuntimeGraphError,
+    State,
     SubscribedObserver,
 )
+from openarmature.graph.events import NodeEvent
 from openarmature.graph.observer import Observer
 
 from .adapter import (
@@ -71,7 +78,7 @@ _UNSUPPORTED_NODE_DIRECTIVES = frozenset(
 )
 
 
-def _unsupported_directive(spec: dict[str, Any]) -> str | None:
+def _unsupported_directive(spec: Mapping[str, Any]) -> str | None:
     """Return the first node directive the legacy adapter can't translate,
     or None if every node uses one of the directives it handles. Walks
     both the top-level graph and an optional inner ``subgraph`` block."""
@@ -162,11 +169,34 @@ def _compile_subgraphs_map(
 async def test_runtime_fixture(fixture_path: Path) -> None:
     spec = _load(fixture_path)
 
+    # ``cases:`` form (e.g., 020-observer-edge-error-events): each entry
+    # is a self-contained per-case spec. Iterate; treat each case as a
+    # standalone fixture body. Wrapping AssertionError with the case
+    # name keeps failure messages locatable.
+    # Fixture 020 uses edge-condition `callable:` directives
+    # (`state_field_read`, `edge_raises`) that are unique to this fixture
+    # and don't fit the generic adapter DSL. Custom driver below.
+    if fixture_path.stem == "020-observer-edge-error-events":
+        await _run_fixture_020(spec)
+        return
+
+    if "cases" in spec:
+        for case in cast("list[dict[str, Any]]", spec["cases"]):
+            try:
+                await _run_runtime_case(case, fixture_path.stem)
+            except AssertionError as e:
+                raise AssertionError(f"case {case.get('name')!r}: {e}") from e
+        return
+
+    await _run_runtime_case(spec, fixture_path.stem)
+
+
+async def _run_runtime_case(spec: Mapping[str, Any], fixture_id: str) -> None:
     # Skip fixtures whose nodes use directives the legacy adapter doesn't
     # translate (fan_out, flaky variants, calls_llm, etc.). Each directive
     # is gated to the phase that lands its runtime support.
     if (hit := _unsupported_directive(spec)) is not None:
-        pytest.skip(f"{fixture_path.stem}: unsupported node directive {hit}")
+        pytest.skip(f"{fixture_id}: unsupported node directive {hit}")
 
     # Subgraph fixtures (006, 011, 013) declare an inner subgraph via the
     # singular `subgraph:` key. Fixture 019 introduces the plural `subgraphs:`
@@ -290,6 +320,117 @@ async def test_runtime_fixture(fixture_path: Path) -> None:
                 ),
                 phases=frozenset(),
             )
+
+
+# ---------------------------------------------------------------------------
+# Fixture 020 — observer edge-error events (proposal 0012 / spec v0.9.0)
+#
+# Two sub-cases verifying §3 step 3 (revised) + §6 (revised): edge-resolution
+# failures (routing_error, edge_exception) land on the preceding node's
+# completed event with `error` populated, sharing the started/completed pair
+# rather than producing a separate event pair.
+#
+# Custom driver (rather than the generic harness) because fixture 020's
+# edge-condition `callable:` directives (`state_field_read`, `edge_raises`)
+# don't match the adapter DSL's `if_field/equals/then/else` shape — these
+# directives are spec-defined just for this fixture's two sub-cases. The
+# semantic intent is captured directly here.
+# ---------------------------------------------------------------------------
+
+
+async def _run_fixture_020(spec: Mapping[str, Any]) -> None:
+    cases = cast("list[dict[str, Any]]", spec["cases"])
+    for case in cases:
+        case_name = cast("str", case["name"])
+        try:
+            await _run_fixture_020_case(case)
+        except AssertionError as e:
+            raise AssertionError(f"case {case_name!r}: {e}") from e
+
+
+async def _run_fixture_020_case(case: Mapping[str, Any]) -> None:
+    """Build a two-node graph (a → b) with the case's edge-condition
+    directive translated to a Python edge function, then assert the
+    proposal-0012 contract on the captured observer events."""
+
+    class FixtureState(State):
+        x: int = 0
+
+    received: list[NodeEvent] = []
+
+    async def observer(event: NodeEvent) -> None:
+        received.append(event)
+
+    async def node_a(_state: Any) -> dict[str, Any]:
+        return {"x": 1}
+
+    async def node_b(_state: Any) -> dict[str, Any]:
+        return {"x": 2}
+
+    cond = cast("dict[str, Any]", case["edges"][0]["condition"])
+    callable_name = cast("str", cond["callable"])
+    if callable_name == "state_field_read":
+        # Per spec proposal 0012 fixture 020: the edge function returns
+        # the value from initial_state's named field. The fixture's case
+        # initial_state populates that field with a string that is NOT a
+        # declared node name in the graph, so the engine raises
+        # ``RoutingError``. We reproduce the semantic via a closure
+        # over the initial_state value.
+        initial_state_dict = cast("dict[str, Any]", case.get("initial_state", {}))
+        field_name = cast("str", cond["field"])
+        target_value = cast("str", initial_state_dict[field_name])
+
+        def edge_fn(_state: Any) -> str | EndSentinel:
+            return target_value
+    elif callable_name == "edge_raises":
+        message = cast("str", cond.get("message", "edge raised"))
+
+        def edge_fn(_state: Any) -> str | EndSentinel:
+            raise RuntimeError(message)
+    else:
+        raise AssertionError(f"fixture 020: unknown condition callable {callable_name!r}")
+
+    g = (
+        GraphBuilder(FixtureState)
+        .add_node("a", node_a)
+        .add_node("b", node_b)
+        .add_conditional_edge("a", edge_fn)
+        .add_edge("b", END)
+        .set_entry("a")
+        .compile()
+    )
+    g.attach_observer(observer)
+
+    expected_error = cast("dict[str, Any]", case["expected_error"])
+    expected_category = cast("str", expected_error["category"])
+
+    with pytest.raises(RuntimeGraphError) as excinfo:
+        await g.invoke(FixtureState())
+    await g.drain()
+
+    err = excinfo.value
+    assert err.category == expected_category
+    if expected_category == "routing_error":
+        assert isinstance(err, RoutingError)
+    elif expected_category == "edge_exception":
+        assert isinstance(err, EdgeException)
+
+    # Per the revised §6 contract: edge-resolution failures share the
+    # preceding node's started/completed pair. Node a fires exactly one
+    # started + one completed event; node b never fires.
+    a_events = [e for e in received if e.node_name == "a"]
+    b_events = [e for e in received if e.node_name == "b"]
+    assert len(a_events) == 2, f"expected 2 events for node a; got {len(a_events)}"
+    assert b_events == [], f"node b MUST never fire events on edge-resolution failure; got {b_events}"
+
+    started, completed = a_events
+    assert started.phase == "started"
+    assert completed.phase == "completed"
+    assert completed.post_state is None, (
+        "completed event MUST have post_state absent when edge resolution fails"
+    )
+    assert completed.error is not None
+    assert completed.error.category == expected_category
 
 
 # ---------------------------------------------------------------------------
