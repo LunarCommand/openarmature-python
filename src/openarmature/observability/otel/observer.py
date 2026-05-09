@@ -297,6 +297,17 @@ class OTelObserver:
             span.set_status(Status(StatusCode.ERROR, description=event.error.category))
             span.record_exception(event.error)
             span.set_attribute("openarmature.error.category", event.error.category)
+            # Per spec §4.2 / fixture 003: the invocation span MUST
+            # end with ERROR status when any child node errors. OTel
+            # doesn't auto-propagate child status to parents — we set
+            # it explicitly here. The OTel SDK's status-precedence
+            # rule preserves ERROR through any subsequent
+            # ``set_status(OK)`` calls (only UNSET → OK transitions
+            # are honoured), so the close path's UNSET-leave still
+            # works for clean invocations.
+            inv_open = self._invocation_span.get(invocation_id)
+            if inv_open is not None:
+                inv_open.span.set_status(Status(StatusCode.ERROR, description=event.error.category))
         else:
             span.set_status(Status(StatusCode.OK))
         span.end()
@@ -839,11 +850,18 @@ class OTelObserver:
         open_span = self._invocation_span.pop(invocation_id, None)
         if open_span is None:
             return
-        # Status defaults to OK for completed invocations; if the
-        # engine surfaced an error, the failing node's span
-        # already carries it and OTel propagates ERROR up the
-        # parent chain on its own.
-        open_span.span.set_status(Status(StatusCode.OK))
+        # Don't unconditionally call ``set_status(OK)`` here. OTel
+        # doesn't auto-propagate child span status to parents, so
+        # the spec §4.2 / fixture 003 contract ("invocation span
+        # ends ERROR when a child errored") is satisfied by
+        # ``_handle_completed`` setting ERROR on this span when an
+        # error event fires. Calling ``set_status(OK)`` here would
+        # be a no-op when ERROR was already set (OTel SDK
+        # status-precedence preserves ERROR), but it's clearer to
+        # leave the status UNSET in the clean-completion path —
+        # exporters map UNSET to OK by convention, and the explicit
+        # ERROR-set in ``_handle_completed`` handles the failure
+        # path.
         open_span.span.end()
 
     def shutdown(self) -> None:
