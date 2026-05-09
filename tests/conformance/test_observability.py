@@ -70,6 +70,7 @@ _SUPPORTED_FIXTURES = frozenset(
         "001-otel-basic-trace",
         "002-otel-subgraph-hierarchy",
         "003-otel-error-status",
+        "004-otel-routing-error-attribution",
         "005-otel-llm-provider-span-nested",
         "007-otel-retry-attempt-spans",
         "008-otel-detached-trace-mode",
@@ -80,11 +81,6 @@ _SUPPORTED_FIXTURES = frozenset(
 
 
 _DEFERRED_FIXTURES: dict[str, str] = {
-    "004-otel-routing-error-attribution": (
-        "Awaiting proposal 0012 — routing-error attribution requires the §3/§6 "
-        "ordering swap (completed dispatch after edge eval) so RoutingError lands "
-        "on the preceding node's completed event. Lands in PR-C.1 once v0.9.0 ships."
-    ),
     "006-otel-fan-out-instance-attribution": (
         "Needs non-detached fan-out per-instance dispatch span synthesis + "
         "FanOutConfig metadata surfacing per spec §5.4 (current observer opens one "
@@ -139,6 +135,8 @@ async def test_observability_fixture(fixture_path: Path) -> None:
         await _run_fixture_002(spec)
     elif fixture_id == "003-otel-error-status":
         await _run_fixture_003(spec)
+    elif fixture_id == "004-otel-routing-error-attribution":
+        await _run_fixture_004(spec)
     elif fixture_id == "005-otel-llm-provider-span-nested":
         await _run_fixture_005(spec)
     elif fixture_id == "007-otel-retry-attempt-spans":
@@ -371,6 +369,84 @@ async def _run_fixture_003(spec: Mapping[str, Any]) -> None:
     assert inv is not None
     assert inv.status.status_code == StatusCode.ERROR, (
         f"invocation span status MUST be ERROR when a child errored; got {inv.status.status_code}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Fixture 004 — routing-error attribution (proposal 0012 / spec v0.9.0)
+# ---------------------------------------------------------------------------
+
+
+async def _run_fixture_004(spec: Mapping[str, Any]) -> None:
+    """Spec §4.2 + spec v0.9.0 / proposal 0012: routing errors land on
+    the preceding node's ``completed`` event with ``error`` populated
+    (sharing the started/completed pair rather than producing a
+    separate one). The OTel observer's existing
+    ``_handle_completed`` ERROR-mapping path picks this up
+    automatically — no observer-side change needed for the swap.
+
+    Driver verifies: the ``pick`` node's span ends ERROR with
+    ``status_description == "routing_error"``, an ``exception``
+    event recorded, and the ``openarmature.error.category``
+    attribute. No span for the edge function (no ``edge_spans``)
+    per §4.2's "edge logic folded into the preceding node span"
+    framing."""
+    from opentelemetry.trace import StatusCode
+
+    from openarmature.graph import RuntimeGraphError
+
+    observer, exporter = _build_observer()
+    trace_log: list[str] = []
+    built = build_graph(spec, trace=trace_log)
+    compiled = built.builder.compile()
+    compiled.attach_observer(observer)
+    initial_state = built.initial_state(spec.get("initial_state", {}))
+    with pytest.raises(RuntimeGraphError) as excinfo:
+        await compiled.invoke(initial_state)
+    assert excinfo.value.category == "routing_error"
+    await compiled.drain()
+    observer.shutdown()
+    spans = exporter.get_finished_spans()
+
+    by_name = {s.name: s for s in spans}
+
+    pick = by_name.get("pick")
+    assert pick is not None
+    assert pick.status.status_code == StatusCode.ERROR, (
+        f"preceding node 'pick' span MUST be ERROR; got {pick.status.status_code}"
+    )
+    assert pick.status.description == "routing_error", (
+        f"preceding node 'pick' span status_description MUST be 'routing_error'; "
+        f"got {pick.status.description!r}"
+    )
+    pick_attrs = dict(pick.attributes or {})
+    assert pick_attrs.get("openarmature.error.category") == "routing_error"
+    # Exception event recorded on the span via record_exception.
+    exception_events = [e for e in pick.events if e.name == "exception"]
+    event_names = [e.name for e in pick.events]
+    assert len(exception_events) >= 1, (
+        f"'pick' MUST have at least one 'exception' event recorded; got {event_names}"
+    )
+
+    # Per fixture 004's "no_edge_spans: true" — the edge function
+    # itself does not produce a separate span; the routing error is
+    # folded into the preceding node's span.
+    edge_span_names = {"edge", "openarmature.edge", "edge_function"}
+    edge_spans = [s for s in spans if s.name in edge_span_names]
+    assert edge_spans == [], (
+        f"there MUST be no separate edge-function spans per §4.2; got {[s.name for s in edge_spans]}"
+    )
+
+    # Unreachable nodes never fire spans (they were unreached).
+    for unreachable in ("unreachable_a", "unreachable_b"):
+        assert unreachable not in by_name, f"{unreachable!r} MUST not produce a span — never reached"
+
+    # Invocation span ends ERROR per the §4.2 invocation-status
+    # propagation contract (PR-C review fix).
+    inv = by_name.get("openarmature.invocation")
+    assert inv is not None
+    assert inv.status.status_code == StatusCode.ERROR, (
+        f"invocation span MUST end ERROR when a child errors; got {inv.status.status_code}"
     )
 
 

@@ -24,7 +24,7 @@ subclass through to `invoke()`'s return type, so consumers don't need
 import asyncio
 import time
 import uuid
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from typing import Any, cast
 
@@ -128,6 +128,55 @@ def _merge_partial[StateT: State](
             fields=offending,
             cause=e,
         ) from e
+
+
+@dataclass(frozen=True)
+class _StepResult[StateT: State]:
+    """Return shape of the per-step dispatchers
+    (``_step_function_node`` / ``_step_subgraph_node`` /
+    ``_step_fan_out_node``) under the proposal-0012 v0.9.0 swap.
+
+    Spec graph-engine §3 step 3 (revised) requires the
+    ``completed`` event for the just-completed node to fire AFTER
+    edge evaluation completes — so that edge-resolution failures
+    (``routing_error``, ``edge_exception``) land on the preceding
+    node's completed event with ``error`` populated, sharing the
+    started/completed pair rather than producing a separate event
+    pair (§6 revised).
+
+    The step dispatchers can't call ``_dispatch_completed`` for
+    the success path themselves anymore, because the outcome
+    isn't knowable until edge eval (which lives in ``_invoke``)
+    runs. Failure-path dispatches (``node_exception`` /
+    ``reducer_error`` / ``state_validation_error``) still fire
+    inline inside ``innermost`` — those errors short-circuit
+    before edge eval can run, and the step function raises out.
+
+    For the success path, the step dispatcher returns the
+    finalized state plus a closure ``finalize_completed`` that
+    ``_invoke`` calls AFTER edge eval, passing either ``None``
+    (edge eval succeeded → dispatch completed with
+    ``post_state``) or the edge error (dispatch completed with
+    ``error`` populated).
+
+    For ``_step_subgraph_node``, the wrapper is transparent per
+    fixture 013 (no started/completed pair); ``finalize_completed``
+    is a no-op closure so edge errors after a subgraph wrapper
+    propagate silently per proposal 0012's "preceding unit's
+    pair" framing applied to a unit that never had one. Same for
+    middleware that short-circuits without invoking ``next``.
+    """
+
+    state: StateT
+    finalize_completed: Callable[[RuntimeGraphError | None], None]
+
+
+def _no_op_finalize(_edge_error: RuntimeGraphError | None) -> None:
+    """Default ``finalize_completed`` for cases where the step
+    didn't dispatch a started/completed pair — subgraph wrappers
+    (transparent per fixture 013) and middleware that short-
+    circuits without invoking ``next``. Edge errors propagate
+    silently per proposal 0012 + fixture 013."""
 
 
 @dataclass(frozen=True)
@@ -455,18 +504,19 @@ class CompiledGraph[StateT: State]:
             if current_namespace in context.resume_skip_set:
                 # Advance edge selection from loaded state.
                 edge = self.edges[current]
+                skip_target: str | EndSentinel
                 if isinstance(edge, StaticEdge):
-                    target: str | EndSentinel = edge.target
+                    skip_target = edge.target
                 else:
                     try:
-                        target = edge.fn(state)
+                        skip_target = edge.fn(state)
                     except Exception as e:
                         raise EdgeException(source_node=current, cause=e, recoverable_state=state) from e
-                if target is END:
+                if skip_target is END:
                     return state
-                if not isinstance(target, str) or target not in self.nodes:
-                    raise RoutingError(source_node=current, returned=target, recoverable_state=state)
-                current = target
+                if not isinstance(skip_target, str) or skip_target not in self.nodes:
+                    raise RoutingError(source_node=current, returned=skip_target, recoverable_state=state)
+                current = skip_target
                 continue
 
             if isinstance(node, FanOutNode):
@@ -476,7 +526,7 @@ class CompiledGraph[StateT: State]:
                 # as one parent dispatch (per §9.6) — instance-level
                 # concurrency lives inside the FanOutNode itself.
                 fn_node = cast("FanOutNode[StateT, State]", node)
-                state = await self._step_fan_out_node(fn_node, current, state, context)
+                step_result = await self._step_fan_out_node(fn_node, current, state, context)
             elif isinstance(node, SubgraphNode):
                 # Subgraph wrappers are transparent to the observer protocol
                 # (per fixture 013): no event is dispatched for the wrapper
@@ -497,26 +547,55 @@ class CompiledGraph[StateT: State]:
                 # and pass the parent's chain — the inner state class
                 # lives on the subgraph's own CompiledGraph.
                 sub = cast("SubgraphNode[StateT, State]", node)
-                state = await self._step_subgraph_node(sub, current, state, context)
+                step_result = await self._step_subgraph_node(sub, current, state, context)
             else:
-                state = await self._step_function_node(node, current, state, context)
+                step_result = await self._step_function_node(node, current, state, context)
+            state = step_result.state
 
+            # Per spec graph-engine §3 step 3 (revised in proposal
+            # 0012 / v0.9.0): the engine MUST dispatch the
+            # ``completed`` event AFTER edge evaluation completes.
+            # Edge-resolution failures (``routing_error`` /
+            # ``edge_exception``) populate the ``error`` field of
+            # the just-completed node's ``completed`` event,
+            # sharing the started/completed pair rather than
+            # producing a separate one (§6 revised). The step
+            # function deferred its success-case dispatch via
+            # ``finalize_completed``; we call it below with the
+            # edge outcome.
             edge = self.edges[current]
+            edge_error: RuntimeGraphError | None = None
+            target: str | EndSentinel | None = None
             if isinstance(edge, StaticEdge):
-                target: str | EndSentinel = edge.target
+                target = edge.target
             else:
                 try:
                     target = edge.fn(state)
                 except Exception as e:
-                    raise EdgeException(source_node=current, cause=e, recoverable_state=state) from e
+                    edge_error = EdgeException(source_node=current, cause=e, recoverable_state=state)
+            if edge_error is None:
+                # Validate the conditional edge's return — undeclared
+                # target is a ``routing_error``.
+                if target is not END and not (isinstance(target, str) and target in self.nodes):
+                    edge_error = RoutingError(source_node=current, returned=target, recoverable_state=state)
+
+            # Dispatch the deferred completed event with the edge
+            # outcome. For function and fan-out nodes this is the
+            # success/failure dispatch the proposal pinned to
+            # post-edge-eval timing. For subgraph wrappers (no
+            # event pair) this is a no-op closure per
+            # ``_step_subgraph_node``'s `_no_op_finalize` —
+            # silent propagation per proposal 0012 + fixture 013.
+            step_result.finalize_completed(edge_error)
+            if edge_error is not None:
+                raise edge_error
 
             if target is END:
                 return state
-
-            if not isinstance(target, str) or target not in self.nodes:
-                raise RoutingError(source_node=current, returned=target, recoverable_state=state)
-
-            current = target
+            # Non-END targets are validated above; mypy/pyright
+            # don't narrow through the ``edge_error`` path, so
+            # cast for the assignment.
+            current = cast("str", target)
 
     async def _step_function_node(
         self,
@@ -524,7 +603,7 @@ class CompiledGraph[StateT: State]:
         current: str,
         state: StateT,
         context: _InvocationContext,
-    ) -> StateT:
+    ) -> _StepResult[StateT]:
         """Run one function-node step through the middleware chain.
 
         Per pipeline-utilities §3, the runtime chain composes:
@@ -538,11 +617,22 @@ class CompiledGraph[StateT: State]:
         multiple started/completed event pairs from the engine, each
         tagged with an incrementing ``attempt_index`` (graph-engine §6).
 
-        The chain is built fresh per dispatch so each step has its own
-        attempt counter. Subgraph isolation per pipeline-utilities §4 is
-        achieved by NOT including the parent's per-graph middleware when
-        the subgraph's own ``_step_function_node`` runs — each
-        CompiledGraph carries its own ``middleware`` tuple.
+        Per proposal-0012 v0.9.0: the success-case ``completed`` event
+        for the FINAL successful attempt fires AFTER edge eval, not
+        inside ``innermost``. Failure-case dispatches
+        (``node_exception`` / ``reducer_error`` /
+        ``state_validation_error``) stay inline in ``innermost`` —
+        those errors short-circuit before edge eval can run, so the
+        spec's "before the failure propagates" MUST is preserved by
+        the inline dispatch.
+
+        Returns a :class:`_StepResult` carrying the merged state +
+        a ``finalize_completed`` closure that ``_invoke`` invokes
+        after edge eval, passing either ``None`` (edge succeeded) or
+        the edge error (``RoutingError`` / ``EdgeException``). The
+        closure dispatches the deferred completed event with the
+        right shape: ``post_state=merged`` on success, ``error``
+        populated on edge-resolution failure.
         """
         step = context.take_step()
         namespace = context.namespace_prefix + (current,)
@@ -552,6 +642,15 @@ class CompiledGraph[StateT: State]:
         # the final value after ``chain`` returns — needed to record
         # the final successful attempt_index in the checkpoint save.
         attempt_counter: list[int] = [0]
+
+        # Cell holding the FINAL successful attempt's
+        # (attempt_index, pre_state, merged) — populated by
+        # ``innermost`` on each successful invocation, overwritten
+        # if retry middleware re-enters. Stays ``None`` if the chain
+        # never reached a successful attempt (e.g., middleware
+        # short-circuited without invoking ``next``, or every
+        # attempt failed and the chain raised).
+        deferred_info: list[tuple[int, StateT, StateT] | None] = [None]
 
         async def innermost(s: Any) -> Mapping[str, Any]:
             # Per pipeline-utilities §5 + graph-engine §6: per-attempt
@@ -601,15 +700,10 @@ class CompiledGraph[StateT: State]:
                     )
                     raise
 
-                self._dispatch_completed(
-                    context,
-                    current,
-                    namespace,
-                    step,
-                    s,
-                    post_state=merged,
-                    attempt_index=attempt_index,
-                )
+                # Defer the success-case completed dispatch to
+                # ``finalize_completed`` per proposal-0012; just
+                # record the info for the outer scope.
+                deferred_info[0] = (attempt_index, cast("StateT", s), cast("StateT", merged))
                 # Return the partial (not the merged state) so middleware sees
                 # the partial-update shape per pipeline-utilities §2. The
                 # engine's canonical merge against the original state happens
@@ -673,7 +767,41 @@ class CompiledGraph[StateT: State]:
             attempt_index=max(0, attempt_counter[0] - 1),
             post_state=merged_outer,
         )
-        return merged_outer
+
+        # Build the deferred-dispatch closure for the success-case
+        # completed event. ``_invoke`` calls this after edge eval.
+        info = deferred_info[0]
+        if info is None:
+            # Middleware short-circuited without invoking ``next`` —
+            # no started/completed pair fired. Edge errors after this
+            # node propagate silently per proposal-0012 + fixture-013
+            # framing (preceding unit emitted no pair to share).
+            return _StepResult(state=merged_outer, finalize_completed=_no_op_finalize)
+        final_attempt_index, final_pre_state, final_merged = info
+
+        def finalize_completed(edge_error: RuntimeGraphError | None) -> None:
+            if edge_error is None:
+                self._dispatch_completed(
+                    context,
+                    current,
+                    namespace,
+                    step,
+                    final_pre_state,
+                    post_state=final_merged,
+                    attempt_index=final_attempt_index,
+                )
+            else:
+                self._dispatch_completed(
+                    context,
+                    current,
+                    namespace,
+                    step,
+                    final_pre_state,
+                    error=edge_error,
+                    attempt_index=final_attempt_index,
+                )
+
+        return _StepResult(state=merged_outer, finalize_completed=finalize_completed)
 
     async def _step_subgraph_node(
         self,
@@ -681,7 +809,7 @@ class CompiledGraph[StateT: State]:
         current: str,
         state: StateT,
         context: _InvocationContext,
-    ) -> StateT:
+    ) -> _StepResult[StateT]:
         """Run one subgraph-as-node step through the parent's middleware chain.
 
         Per pipeline-utilities §4: the parent's per-graph middleware plus
@@ -693,6 +821,16 @@ class CompiledGraph[StateT: State]:
         No started/completed events fire for the wrapper itself; the
         events come from the subgraph's internal node executions (per
         fixture 013).
+
+        Per proposal-0012 v0.9.0 + spec coordination: edge errors
+        AFTER a transparent subgraph wrapper propagate to the caller
+        as ``RuntimeGraphError`` per §4 WITHOUT an associated
+        completed event — the wrapper has no started/completed pair
+        to share, and proposal 0012's "preceding node's pair" MUST
+        is vacuous (not violated) when the preceding unit emitted
+        no pair. The :class:`_StepResult` returned here uses
+        :func:`_no_op_finalize` so the outer ``_invoke`` call to
+        ``finalize_completed(edge_error)`` is a no-op.
         """
 
         async def innermost(s: Any) -> Mapping[str, Any]:
@@ -737,7 +875,8 @@ class CompiledGraph[StateT: State]:
             _reset_namespace_prefix(namespace_token)
             _reset_active_dispatch(dispatch_token)
             _reset_active_observers(observers_token)
-        return _merge_partial(state, final_partial, self.reducers, current)
+        merged = _merge_partial(state, final_partial, self.reducers, current)
+        return _StepResult(state=merged, finalize_completed=_no_op_finalize)
 
     async def _step_fan_out_node(
         self,
@@ -745,7 +884,7 @@ class CompiledGraph[StateT: State]:
         current: str,
         state: StateT,
         context: _InvocationContext,
-    ) -> StateT:
+    ) -> _StepResult[StateT]:
         """Run one fan-out-as-node step through the parent's middleware chain.
 
         Per pipeline-utilities §9.6: the parent's per-graph + per-node
@@ -757,6 +896,12 @@ class CompiledGraph[StateT: State]:
         ``fan_out_index`` populated.
 
         Raw exceptions escaping the chain become NodeException per §4.
+
+        Per proposal-0012 v0.9.0: the fan-out's success-case
+        completed event fires AFTER edge eval (mirrors
+        ``_step_function_node``). Failure-path dispatches stay
+        inline; the success-case is deferred via the returned
+        :class:`_StepResult`.
         """
         step = context.take_step()
         namespace = context.namespace_prefix + (current,)
@@ -767,6 +912,11 @@ class CompiledGraph[StateT: State]:
         # records the final successful attempt's index rather than a
         # hardcoded 0.
         attempt_counter: list[int] = [0]
+
+        # Cell holding the FINAL successful attempt's
+        # (attempt_index, pre_state, merged); see same comment in
+        # ``_step_function_node``.
+        deferred_info: list[tuple[int, StateT, StateT] | None] = [None]
 
         async def innermost(s: Any) -> Mapping[str, Any]:
             attempt_index = attempt_counter[0]
@@ -802,15 +952,9 @@ class CompiledGraph[StateT: State]:
                     )
                     raise
 
-                self._dispatch_completed(
-                    context,
-                    current,
-                    namespace,
-                    step,
-                    s,
-                    post_state=merged,
-                    attempt_index=attempt_index,
-                )
+                # Defer the success-case completed dispatch per
+                # proposal-0012; record the info for the outer scope.
+                deferred_info[0] = (attempt_index, cast("StateT", s), cast("StateT", merged))
                 return partial
             finally:
                 _reset_attempt_index(attempt_token)
@@ -861,7 +1005,35 @@ class CompiledGraph[StateT: State]:
             attempt_index=max(0, attempt_counter[0] - 1),
             post_state=merged_outer,
         )
-        return merged_outer
+
+        info = deferred_info[0]
+        if info is None:
+            return _StepResult(state=merged_outer, finalize_completed=_no_op_finalize)
+        final_attempt_index, final_pre_state, final_merged = info
+
+        def finalize_completed(edge_error: RuntimeGraphError | None) -> None:
+            if edge_error is None:
+                self._dispatch_completed(
+                    context,
+                    current,
+                    namespace,
+                    step,
+                    final_pre_state,
+                    post_state=final_merged,
+                    attempt_index=final_attempt_index,
+                )
+            else:
+                self._dispatch_completed(
+                    context,
+                    current,
+                    namespace,
+                    step,
+                    final_pre_state,
+                    error=edge_error,
+                    attempt_index=final_attempt_index,
+                )
+
+        return _StepResult(state=merged_outer, finalize_completed=finalize_completed)
 
     @staticmethod
     def _dispatch_started(

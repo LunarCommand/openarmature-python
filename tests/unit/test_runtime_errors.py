@@ -149,3 +149,114 @@ async def test_subgraph_projection_error_wrapped_as_node_exception() -> None:
     assert err.node_name == "sub"
     assert isinstance(err.__cause__, RuntimeError)
     assert str(err.__cause__) == "project_in boom"
+
+
+# ---------------------------------------------------------------------------
+# Spec graph-engine v0.9.0 (proposal 0012): edge-resolution failures land on
+# the preceding node's `completed` event with `error` populated, sharing the
+# started/completed pair rather than producing a separate event pair.
+# ---------------------------------------------------------------------------
+
+
+async def test_routing_error_lands_on_preceding_node_completed_event() -> None:
+    """Per §3 step 3 (revised) + §6 (revised): a `routing_error` from a
+    conditional edge that returns an undeclared target lands on the
+    preceding node's `completed` event with `error` populated, NOT in a
+    separate event pair. The downstream node never fires events."""
+    from openarmature.graph import RoutingError
+    from openarmature.graph.events import NodeEvent
+
+    received: list[NodeEvent] = []
+
+    async def observer(event: NodeEvent) -> None:
+        received.append(event)
+
+    async def node_a(_state: Any) -> dict[str, Any]:
+        return {"score": 1}
+
+    async def node_b(_state: Any) -> dict[str, Any]:
+        return {"score": 99}
+
+    def routing_to_nowhere(_state: Any) -> str | EndSentinel:
+        # 'nonexistent_node' is not declared — engine raises RoutingError.
+        return "nonexistent_node"
+
+    g = (
+        GraphBuilder(S)
+        .add_node("a", node_a)
+        .add_node("b", node_b)
+        .add_conditional_edge("a", routing_to_nowhere)
+        .add_edge("b", END)
+        .set_entry("a")
+        .compile()
+    )
+    g.attach_observer(observer)
+
+    with pytest.raises(RoutingError):
+        await g.invoke(S())
+    await g.drain()
+
+    # Exactly one started + one completed pair for node a; no events for b.
+    a_events = [e for e in received if e.node_name == "a"]
+    b_events = [e for e in received if e.node_name == "b"]
+    assert len(a_events) == 2, f"expected 2 events for node a (started + completed); got {len(a_events)}"
+    assert b_events == [], f"node b MUST never fire events on routing error; got {b_events}"
+
+    started, completed = a_events
+    assert started.phase == "started"
+    assert completed.phase == "completed"
+    # Completed event carries the routing error, not a success post_state.
+    assert completed.post_state is None, (
+        "completed event MUST have post_state absent when edge resolution fails"
+    )
+    assert completed.error is not None
+    assert completed.error.category == "routing_error"
+
+
+async def test_edge_exception_lands_on_preceding_node_completed_event() -> None:
+    """Per §3 step 3 (revised) + §6 (revised): an `edge_exception` from a
+    conditional edge function raising lands on the preceding node's
+    `completed` event with `error` populated, NOT in a separate event
+    pair. The downstream node never fires events."""
+    from openarmature.graph.events import NodeEvent
+
+    received: list[NodeEvent] = []
+
+    async def observer(event: NodeEvent) -> None:
+        received.append(event)
+
+    async def node_a(_state: Any) -> dict[str, Any]:
+        return {"score": 1}
+
+    async def node_b(_state: Any) -> dict[str, Any]:
+        return {"score": 99}
+
+    def raising_edge(_state: Any) -> str | EndSentinel:
+        raise RuntimeError("edge boom")
+
+    g = (
+        GraphBuilder(S)
+        .add_node("a", node_a)
+        .add_node("b", node_b)
+        .add_conditional_edge("a", raising_edge)
+        .add_edge("b", END)
+        .set_entry("a")
+        .compile()
+    )
+    g.attach_observer(observer)
+
+    with pytest.raises(EdgeException):
+        await g.invoke(S())
+    await g.drain()
+
+    a_events = [e for e in received if e.node_name == "a"]
+    b_events = [e for e in received if e.node_name == "b"]
+    assert len(a_events) == 2
+    assert b_events == []
+
+    started, completed = a_events
+    assert started.phase == "started"
+    assert completed.phase == "completed"
+    assert completed.post_state is None
+    assert completed.error is not None
+    assert completed.error.category == "edge_exception"

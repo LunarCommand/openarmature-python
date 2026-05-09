@@ -48,6 +48,9 @@ class GraphEngineExpected(_ForbidExtras):
     observer_events: Any = None
     delivery_order: list[dict[str, Any]] | None = None
     observer_event_invariants: dict[str, Any] | None = None
+    # 020 — proposal-0012 fixture: assertions about edge-resolution
+    # failure event shapes. Permissive dict until Phase 1.
+    invariants: dict[str, Any] | None = None
     # 015 — invoke() returns normally; obs_raiser's exceptions surface to
     # warnings rather than propagate.
     no_propagated_error: bool | None = None
