@@ -33,8 +33,13 @@ jobs:
         with:
           enable-cache: true
 
+      # ``--all-extras`` matches ``ci.yml`` so the OTel-gated tests'
+      # imports resolve at type-check time. Without it pyright sees
+      # ``Unknown`` for every OTel-typed expression in
+      # ``tests/{conformance,unit}/test_observability*.py`` and the
+      # whole job fails (pyright doesn't honor pytest.importorskip).
       - name: Sync deps
-        run: uv sync --frozen
+        run: uv sync --frozen --all-extras
 
       # Fail fast if pyproject.toml's version doesn't match the pushed
       # tag. Both sides go through `packaging.version.Version` so PEP 440
