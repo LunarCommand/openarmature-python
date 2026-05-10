@@ -28,6 +28,7 @@ This module defines:
 from __future__ import annotations
 
 import asyncio
+import inspect
 import warnings
 from collections.abc import Iterable
 from dataclasses import dataclass, field
@@ -397,10 +398,38 @@ def _dispatch(context: _InvocationContext, event: NodeEvent) -> None:
             if prepare_sync is None:
                 continue
             try:
-                prepare_sync(event)
+                result = prepare_sync(event)
             except Exception as e:
                 warnings.warn(
                     f"observer prepare_sync raised {type(e).__name__}: {e}",
+                    stacklevel=2,
+                )
+                continue
+            if inspect.isawaitable(result):
+                # ``prepare_sync`` is opt-in via ``hasattr`` (not a
+                # Protocol method) so pyright can't catch a user's
+                # ``async def prepare_sync`` signature drift up front.
+                # The call here would silently return an unawaited
+                # coroutine — the prep work wouldn't run AND Python
+                # would emit a delayed "coroutine was never awaited"
+                # warning at GC time. Close the awaitable to suppress
+                # that secondary noise and surface the misconfiguration
+                # via our own explicit warn so it fails loudly at the
+                # call site. ``getattr`` rather than ``hasattr``+method
+                # access keeps pyright's strict-mode happy on the
+                # ``Awaitable`` type (``.close`` lives on
+                # ``Coroutine``, not the broader ``Awaitable``).
+                close_method = getattr(result, "close", None)
+                if close_method is not None:
+                    try:
+                        close_method()
+                    except Exception:
+                        pass
+                warnings.warn(
+                    "observer prepare_sync returned an awaitable; "
+                    "prepare_sync MUST be sync (define as `def`, not "
+                    "`async def`). The synchronous prep work did NOT "
+                    "run; log correlation will miss this node's span.",
                     stacklevel=2,
                 )
     context.queue.put_nowait(_QueuedItem(event=event, observers=observers))
