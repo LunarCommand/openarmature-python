@@ -29,7 +29,7 @@ from pydantic import Field
 # Skip the entire module if otel extras aren't installed.
 pytest.importorskip("opentelemetry.sdk.trace")
 
-from typing import cast
+from typing import Any, cast
 
 from opentelemetry import trace as otel_trace
 from opentelemetry.sdk.trace import ReadableSpan, TracerProvider
@@ -862,3 +862,106 @@ async def test_llm_call_inside_retried_node_parents_per_attempt() -> None:
         idx = cast("int", attrs["openarmature.node.attempt_index"])
         parented_attempts.add(idx)
     assert parented_attempts == {0, 1, 2}
+
+
+async def test_log_on_first_line_of_node_body_carries_node_span() -> None:
+    """The load-bearing case ``prepare_sync`` exists to fix.
+
+    Without ``prepare_sync``, the engine queues the started event for
+    async dispatch, then enters the node body — by the time the OTel
+    observer's ``__call__`` opens the span on the worker task, the
+    node body has already executed (or is mid-await). A log emitted
+    on the FIRST line of the body, before any ``await``, would not
+    see the observer's span via OTel ``get_current()``.
+
+    With ``prepare_sync``, the observer creates the span synchronously
+    in the engine task BEFORE queueing, publishes it via
+    ``current_active_observer_span``, and the engine attaches it to
+    the OTel context around the node body. The first-line log picks
+    up the right ``trace_id``/``span_id``.
+
+    This test exists in unit/ (not just buried in the conformance
+    fixture 010 driver) so a failure here jumps straight to
+    ``prepare_sync``-related changes during a regression hunt.
+    """
+    from opentelemetry.sdk._logs import LoggerProvider
+    from opentelemetry.sdk._logs.export import (
+        InMemoryLogRecordExporter,
+        SimpleLogRecordProcessor,
+    )
+
+    test_logger = logging.getLogger("openarmature.test.first_line_log")
+
+    class _S(State):
+        x: int = 0
+
+    async def first_line_log_node(_s: _S) -> dict[str, Any]:
+        # FIRST line, before any ``await`` — without ``prepare_sync``
+        # in the engine task, OTel ``get_current()`` would return an
+        # invalid span here and the log would have ``trace_id=0`` /
+        # ``span_id=0``.
+        test_logger.info("emitted before any await")
+        return {"x": 1}
+
+    span_exporter = InMemorySpanExporter()
+    observer = OTelObserver(span_processor=SimpleSpanProcessor(span_exporter))
+    log_exporter = InMemoryLogRecordExporter()
+    log_provider = LoggerProvider()
+    log_provider.add_log_record_processor(SimpleLogRecordProcessor(log_exporter))
+
+    # Snapshot prior log state so this test doesn't bleed into others
+    # — install_log_bridge mutates process-global ``logging`` state.
+    root = logging.getLogger()
+    prior_handlers = list(root.handlers)
+    prior_filters = list(root.filters)
+    prior_factory = logging.getLogRecordFactory()
+    prior_test_level = test_logger.level
+    test_logger.setLevel(logging.INFO)
+
+    try:
+        install_log_bridge(log_provider)
+        g = (
+            GraphBuilder(_S)
+            .add_node("node_a", first_line_log_node)
+            .add_edge("node_a", END)
+            .set_entry("node_a")
+            .compile()
+        )
+        g.attach_observer(observer)
+        await g.invoke(_S(), correlation_id="first-line-test")
+        await g.drain()
+        observer.shutdown()
+        log_provider.force_flush()
+
+        records = log_exporter.get_finished_logs()
+        ours = [r for r in records if str(r.log_record.body) == "emitted before any await"]
+        assert len(ours) == 1, (
+            f"expected exactly one log record; got {len(ours)}: {[str(r.log_record.body) for r in records]}"
+        )
+        log_record = ours[0].log_record
+
+        spans = span_exporter.get_finished_spans()
+        node_a_spans = [s for s in spans if s.name == "node_a"]
+        assert len(node_a_spans) == 1, f"expected one node_a span; got {len(node_a_spans)}"
+        node_a_span = node_a_spans[0]
+        assert node_a_span.context is not None
+        node_span_id = node_a_span.context.span_id
+        node_trace_id = node_a_span.context.trace_id
+
+        # Load-bearing: the prepare_sync hook attached the observer
+        # span synchronously so the first-line log saw it via OTel
+        # ``get_current()``.
+        assert log_record.span_id == node_span_id, (
+            f"first-line log MUST carry node_a span's span_id "
+            f"(prepare_sync attaches the span synchronously in the engine task); "
+            f"got log span_id={log_record.span_id}, node span_id={node_span_id}"
+        )
+        assert log_record.trace_id == node_trace_id, (
+            f"first-line log MUST carry node_a span's trace_id; "
+            f"got log trace_id={log_record.trace_id}, node trace_id={node_trace_id}"
+        )
+    finally:
+        root.handlers[:] = prior_handlers
+        root.filters[:] = prior_filters
+        logging.setLogRecordFactory(prior_factory)
+        test_logger.setLevel(prior_test_level)
