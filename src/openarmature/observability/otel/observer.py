@@ -243,7 +243,12 @@ class OTelObserver:
             self._emit_checkpoint_save_span(event)
             return
         if event.phase == "started":
-            self._handle_started(event)
+            # Idempotent — short-circuits inside ``_open_started_span``
+            # if ``prepare_sync`` already opened the span synchronously
+            # in the engine task. Falls through (and opens the span)
+            # for observers attached after the engine started, or for
+            # test paths that bypass ``prepare_sync``.
+            self._open_started_span(event)
         elif event.phase == "completed":
             self._handle_completed(event)
 
@@ -251,8 +256,54 @@ class OTelObserver:
     # Started / completed pairing
     # ------------------------------------------------------------------
 
-    def _handle_started(self, event: NodeEvent) -> None:
-        """Open a span for this attempt, push onto the in-flight map."""
+    def prepare_sync(self, event: NodeEvent) -> None:
+        """Synchronous engine-task entry point: open the span for this
+        attempt AND publish it via ``current_active_observer_span`` so
+        the engine's ``innermost`` can attach it into the OTel context
+        before the node body runs.
+
+        Called by ``_dispatch`` BEFORE ``queue.put_nowait`` for
+        ``"started"``-phase events. The async ``__call__`` later sees
+        the span already in ``inv_state.open_spans`` and short-circuits.
+
+        Skipped for non-``"started"`` phases and for the LLM sentinel
+        namespace — only graph-node started events participate in the
+        engine-side attach. Errors don't leak: ``_dispatch`` wraps this
+        call in try/except + ``warnings.warn`` matching the async path.
+        """
+        if event.phase != "started" or event.namespace == _LLM_NAMESPACE:
+            return
+        from openarmature.observability.correlation import (
+            _set_active_observer_span,
+            current_invocation_id,
+        )
+
+        self._open_started_span(event)
+        invocation_id = current_invocation_id()
+        if invocation_id is None:
+            return
+        inv_state = self._inv_states.get(invocation_id)
+        if inv_state is None:
+            return
+        open_span = inv_state.open_spans.get(self._key_for(event))
+        if open_span is None:
+            return
+        # Publish the span to the engine via the ContextVar. Discard
+        # the Token — last-writer-wins is the documented contract
+        # (next ``prepare_sync`` overwrites; task-local context dies
+        # with the invocation task).
+        _set_active_observer_span(open_span.span)
+
+    def _open_started_span(self, event: NodeEvent) -> None:
+        """Sync core: create the span + mutate ``inv_state.open_spans``.
+
+        Idempotent — short-circuits if a span already exists for this
+        event's ``_StackKey``. That covers the common case where
+        ``prepare_sync`` opened the span synchronously in the engine
+        task and the async ``__call__`` later re-fires for the same
+        event; the second call becomes a true no-op rather than
+        opening a duplicate span.
+        """
         from openarmature.observability.correlation import (
             current_correlation_id,
             current_invocation_id,
@@ -261,8 +312,13 @@ class OTelObserver:
         invocation_id = current_invocation_id()
         if invocation_id is None:
             return
-        correlation_id = current_correlation_id()
         inv_state = self._inv_state_for(invocation_id)
+        # Idempotency: a span already exists for this attempt — likely
+        # opened by ``prepare_sync`` in the engine task. No-op to avoid
+        # duplicates.
+        if self._key_for(event) in inv_state.open_spans:
+            return
+        correlation_id = current_correlation_id()
 
         # Lazily open the invocation span on the first event we see
         # for this invocation_id. Per-invocation_id scoping means
@@ -579,8 +635,8 @@ class OTelObserver:
         any subgraph spans whose prefix is no longer an ancestor of
         the current event's namespace.
 
-        Called from ``_handle_started`` BEFORE opening the leaf node
-        span. Detached-mode entries (subgraph or fan-out instance)
+        Called from ``_open_started_span`` BEFORE opening the leaf
+        node span. Detached-mode entries (subgraph or fan-out instance)
         are registered as detached roots so their inner spans live
         in a fresh trace.
         """
