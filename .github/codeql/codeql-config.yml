@@ -48,3 +48,23 @@ query-filters:
   # so dropping the CodeQL rule doesn't lose signal.
   - exclude:
       id: py/unused-import
+  # ``py/unsafe-cyclic-import`` flags the textual import shape
+  # without honoring ``if TYPE_CHECKING:`` gates. The two cases
+  # in this codebase are mutual-typing pairs:
+  #
+  # - ``graph/compiled.py`` and ``graph/fan_out.py`` reference
+  #   each other's types only via TYPE_CHECKING blocks
+  #   (``compiled`` imports ``FanOutNode`` for type annotations;
+  #   ``fan_out`` imports ``CompiledGraph`` for the
+  #   ``FanOutConfig.subgraph`` field annotation). Both sides use
+  #   ``from __future__ import annotations`` so annotations are
+  #   strings; no runtime cycle exists.
+  #
+  # The canonical Python workaround for typed-module pairs is
+  # exactly this TYPE_CHECKING gating. Removing either side
+  # breaks pyright's type resolution for generics across the
+  # boundary. Pyright's ``reportImportCycles`` already covers the
+  # genuine runtime-cycle cases at type-check time, so dropping
+  # the CodeQL rule doesn't lose signal.
+  - exclude:
+      id: py/unsafe-cyclic-import
