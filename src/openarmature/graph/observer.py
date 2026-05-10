@@ -363,12 +363,46 @@ class _InvocationContext:
 def _dispatch(context: _InvocationContext, event: NodeEvent) -> None:
     """Enqueue a node event for the delivery worker.
 
+    For ``"started"``-phase events, also call any subscribed observer's
+    optional ``prepare_sync(event)`` synchronously — in the engine task,
+    BEFORE queueing — so observers that need to publish per-event state
+    the engine itself reads in the same engine-task scope (e.g., the
+    OTel observer setting ``current_active_observer_span`` for the
+    engine to attach into the OTel context) can do so before the node
+    body runs.
+
+    Phase-gated forwarding: ``prepare_sync`` only fires when ``"started"``
+    is in the subscribed observer's ``phases`` set, mirroring how the
+    async ``deliver_loop`` filters dispatch. A user who explicitly
+    subscribes only to ``{"completed"}`` doesn't get the synchronous
+    prep — the wrapper acts as a uniform phase shield across both
+    sync prep and async dispatch.
+
+    Errors from ``prepare_sync`` follow the same isolation contract as
+    the async path per spec §6: don't propagate, don't break siblings,
+    don't block the queueing or subsequent events. Reported via
+    ``warnings.warn``.
+
     No-op when no observers exist for this depth — avoids paying the queue
     overhead for graphs that don't observe anything.
     """
     observers = context.full_observers()
     if not observers:
         return
+    if event.phase == "started":
+        for subscribed in observers:
+            if "started" not in subscribed.phases:
+                continue
+            prepare_sync = getattr(subscribed.observer, "prepare_sync", None)
+            if prepare_sync is None:
+                continue
+            try:
+                prepare_sync(event)
+            except Exception as e:
+                warnings.warn(
+                    f"observer prepare_sync raised {type(e).__name__}: {e}",
+                    stacklevel=2,
+                )
     context.queue.put_nowait(_QueuedItem(event=event, observers=observers))
 
 
