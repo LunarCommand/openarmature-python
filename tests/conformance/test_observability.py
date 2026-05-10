@@ -488,12 +488,6 @@ async def _run_fixture_006_case(case: Mapping[str, Any], subgraphs: Mapping[str,
     observer.shutdown()
     spans = exporter.get_finished_spans()
 
-    # Build a span_id → span map for parent-by-id navigation.
-    by_id: dict[int, Any] = {}
-    for s in spans:
-        if s.context is not None:
-            by_id[s.context.span_id] = s
-
     # Span-tree shape per fixture:
     #   invocation
     #   └─ process (fan-out NODE) — item_count=3, concurrency=2, error_policy="collect"

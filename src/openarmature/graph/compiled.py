@@ -21,12 +21,26 @@ subclass through to `invoke()`'s return type, so consumers don't need
 `cast(MyState, ...)` at the call site.
 """
 
+from __future__ import annotations
+
 import asyncio
 import time
 import uuid
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
+
+if TYPE_CHECKING:
+    # ``FanOutNode`` lives in ``.fan_out`` which has a TYPE_CHECKING
+    # back-reference to ``CompiledGraph`` here. Importing at module
+    # top would create a textual cycle CodeQL's
+    # ``py/cyclic-import`` rule flags (no runtime issue —
+    # ``fan_out``'s ``compiled`` import is itself TYPE_CHECKING-gated
+    # — but the static analyzer doesn't see that). Type annotations
+    # use the string form via ``from __future__ import annotations``;
+    # runtime use (the ``isinstance`` check in ``_invoke``) imports
+    # lazily inside the function.
+    from .fan_out import FanOutNode
 
 from pydantic import ValidationError
 
@@ -68,7 +82,6 @@ from .errors import (
     StateValidationError,
 )
 from .events import FanOutEventConfig, NodeEvent
-from .fan_out import FanOutNode, _resolve_concurrency, _resolve_count
 from .middleware import ChainCall, Middleware, compose_chain
 from .nodes import Node
 from .observer import (
@@ -519,6 +532,12 @@ class CompiledGraph[StateT: State]:
                 current = skip_target
                 continue
 
+            # Lazy import: keeps the textual cycle off the module
+            # graph (``fan_out`` has a TYPE_CHECKING back-reference
+            # to this module). Function-scope import is cheap once
+            # cached; this branch fires once per fan-out step.
+            from .fan_out import FanOutNode  # noqa: PLC0415
+
             if isinstance(node, FanOutNode):
                 # Fan-out nodes are recognized as a distinct node type
                 # per pipeline-utilities §9. Dispatched through
@@ -922,6 +941,14 @@ class CompiledGraph[StateT: State]:
         # is pure regardless. Repeating these inside
         # ``FanOutNode.run_with_context`` is cheap and matches the
         # values surfaced here.
+        # Lazy import: function-scope to avoid a module-top
+        # textual cycle CodeQL flags. ``fan_out`` has a
+        # TYPE_CHECKING back-reference to this module, so the
+        # static-analyzer view of an importable cycle goes away
+        # when the engine doesn't reach into ``fan_out`` at module
+        # load time. Fires once per fan-out step.
+        from .fan_out import _resolve_concurrency, _resolve_count  # noqa: PLC0415
+
         if node.config.items_field is not None:
             items_attr: Any = getattr(state, node.config.items_field, [])
             item_count = len(cast("list[Any]", items_attr)) if isinstance(items_attr, list) else 0

@@ -985,12 +985,30 @@ class OTelObserver:
             open_span = inv_state.open_llm_spans.pop(call_id, None)
             if open_span is not None:
                 self._drain_open_span(open_span)
-        for key in sorted(inv_state.open_spans.keys(), key=lambda k: -len(k[0])):
+        # Inner-node spans (depth >= 2) drain first — these include
+        # the inner-node bodies inside fan-out instances, which are
+        # children of the per-instance dispatch spans.
+        for key in sorted(
+            (k for k in inv_state.open_spans if len(k[0]) >= 2),
+            key=lambda k: -len(k[0]),
+        ):
             open_span = inv_state.open_spans.pop(key, None)
             if open_span is not None:
                 self._drain_open_span(open_span)
+        # Per-instance dispatch spans (children of the fan-out NODE
+        # span) drain BEFORE depth-1 entries of ``open_spans`` —
+        # otherwise the fan-out NODE span (depth 1) would end
+        # before its per-instance children, violating
+        # children-before-parents close ordering.
         for key in sorted(inv_state.fan_out_instance_spans.keys(), key=lambda k: -len(k)):
             self._close_fan_out_instance_dispatch_span(inv_state, key)
+        # Remaining depth-1 entries in ``open_spans`` drain last —
+        # these are the fan-out NODE span itself + any sibling
+        # depth-1 leaf nodes still open.
+        for key in list(inv_state.open_spans.keys()):
+            open_span = inv_state.open_spans.pop(key, None)
+            if open_span is not None:
+                self._drain_open_span(open_span)
         for prefix in sorted(inv_state.detached_roots.keys(), key=lambda k: -len(k)):
             self._close_detached_root(inv_state, prefix)
         for prefix in sorted(inv_state.subgraph_spans.keys(), key=lambda k: -len(k)):
