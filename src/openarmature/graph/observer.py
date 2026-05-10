@@ -28,6 +28,7 @@ This module defines:
 from __future__ import annotations
 
 import asyncio
+import inspect
 import warnings
 from collections.abc import Iterable
 from dataclasses import dataclass, field
@@ -60,6 +61,25 @@ class Observer(Protocol):
     The event parameter is positional-only (`event, /`) so structural
     conformance doesn't pin you to that name — any of `event`, `_event`,
     `e`, etc. matches.
+
+    Optional ``prepare_sync`` extension
+    -----------------------------------
+    An observer MAY additionally define a synchronous method::
+
+        def prepare_sync(self, event: NodeEvent, /) -> None: ...
+
+    that the engine calls IN THE ENGINE TASK, BEFORE queueing the
+    event for the async ``__call__``. This exists for observers that
+    need to set up state — e.g., open a span and stash a handle in
+    a ContextVar — that the engine itself must read synchronously
+    before running the node body (otherwise logs emitted on the
+    first line of the body wouldn't see the right span).
+
+    ``prepare_sync`` is **opt-in via ``hasattr``** — no subclass or
+    Protocol method required. Observers that don't define it skip
+    the synchronous prep entirely; observers that do define it run
+    only for ``"started"``-phase events, errors warned not propagated
+    (same isolation contract as the async path per spec §6).
     """
 
     async def __call__(self, event: NodeEvent, /) -> None: ...
@@ -344,12 +364,85 @@ class _InvocationContext:
 def _dispatch(context: _InvocationContext, event: NodeEvent) -> None:
     """Enqueue a node event for the delivery worker.
 
+    For ``"started"``-phase events, also call any subscribed observer's
+    optional ``prepare_sync(event)`` synchronously — in the engine task,
+    BEFORE queueing — so observers that need to publish per-event state
+    the engine itself reads in the same engine-task scope (e.g., the
+    OTel observer setting ``current_active_observer_span`` for the
+    engine to attach into the OTel context) can do so before the node
+    body runs.
+
+    Phase-gated forwarding: ``prepare_sync`` only fires when ``"started"``
+    is in the subscribed observer's ``phases`` set, mirroring how the
+    async ``deliver_loop`` filters dispatch. A user who explicitly
+    subscribes only to ``{"completed"}`` doesn't get the synchronous
+    prep — the wrapper acts as a uniform phase shield across both
+    sync prep and async dispatch.
+
+    Errors from ``prepare_sync`` follow the same isolation contract as
+    the async path per spec §6: don't propagate, don't break siblings,
+    don't block the queueing or subsequent events. Reported via
+    ``warnings.warn``.
+
     No-op when no observers exist for this depth — avoids paying the queue
     overhead for graphs that don't observe anything.
     """
     observers = context.full_observers()
     if not observers:
         return
+    if event.phase == "started":
+        for subscribed in observers:
+            if "started" not in subscribed.phases:
+                continue
+            prepare_sync = getattr(subscribed.observer, "prepare_sync", None)
+            if prepare_sync is None:
+                continue
+            try:
+                result = prepare_sync(event)
+            except Exception as e:
+                warnings.warn(
+                    f"observer prepare_sync raised {type(e).__name__}: {e}",
+                    stacklevel=2,
+                )
+                continue
+            if inspect.isawaitable(result):
+                # ``prepare_sync`` is opt-in via ``hasattr`` (not a
+                # Protocol method) so pyright can't catch a user's
+                # ``async def prepare_sync`` signature drift up front.
+                # The call here would silently return an unawaited
+                # coroutine — the prep work wouldn't run AND Python
+                # would emit a delayed "coroutine was never awaited"
+                # warning at GC time. Close the awaitable to suppress
+                # that secondary noise and surface the misconfiguration
+                # via our own explicit warn so it fails loudly at the
+                # call site. ``getattr`` rather than ``hasattr``+method
+                # access keeps pyright's strict-mode happy on the
+                # ``Awaitable`` type (``.close`` lives on
+                # ``Coroutine``, not the broader ``Awaitable``).
+                close_method = getattr(result, "close", None)
+                if close_method is not None:
+                    try:
+                        close_method()
+                    except Exception as close_error:
+                        # Cleanup is best-effort: a raise here MUST NOT
+                        # propagate or block sibling observers. Surface
+                        # via ``warnings.warn`` so the swallow is at
+                        # least observable if it ever fires (CodeQL
+                        # py/empty-except clears on this surface too).
+                        warnings.warn(
+                            f"observer prepare_sync close cleanup raised "
+                            f"{type(close_error).__name__}: {close_error}",
+                            stacklevel=2,
+                        )
+                warnings.warn(
+                    f"observer prepare_sync returned an awaitable "
+                    f"({type(result).__name__}); prepare_sync MUST be sync "
+                    f"(define as `def`, not `async def`). The returned "
+                    f"awaitable will not be awaited and is NOT guaranteed "
+                    f"to complete before the node body starts; log "
+                    f"correlation may miss this node's span.",
+                    stacklevel=2,
+                )
     context.queue.put_nowait(_QueuedItem(event=event, observers=observers))
 
 

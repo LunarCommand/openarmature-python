@@ -64,12 +64,14 @@ from openarmature.observability.correlation import (
     _reset_invocation_id,
     _reset_namespace_prefix,
     _set_active_dispatch,
+    _set_active_observer_span,
     _set_active_observers,
     _set_attempt_index,
     _set_correlation_id,
     _set_fan_out_index,
     _set_invocation_id,
     _set_namespace_prefix,
+    current_active_observer_span,
 )
 
 from .edges import END, ConditionalEdge, EndSentinel, StaticEdge
@@ -98,6 +100,54 @@ from .observer import (
 from .reducers import Reducer
 from .state import State
 from .subgraph import SubgraphNode
+
+# Try-import OpenTelemetry attach primitives so the engine can splice an
+# observer-published span into the OTel context for the duration of a
+# node body. The engine treats the span value opaquely (writes by an
+# observer's ``prepare_sync``, reads via ``current_active_observer_span``)
+# and only touches OTel when both: (a) the extras are installed, and
+# (b) an observer actually published a span. Installs without ``[otel]``
+# get a no-op attach/detach pair; the observer ContextVar stays
+# ``None`` and nothing changes.
+#
+# The names are bound to ``None`` in the except branch so pyright
+# narrows correctly at call sites (``if _otel_attach is None: ...``)
+# rather than flagging "possibly unbound."
+try:
+    from opentelemetry.context import attach as _otel_attach
+    from opentelemetry.context import detach as _otel_detach
+    from opentelemetry.trace.propagation import set_span_in_context as _otel_set_span_in_context
+except ImportError:  # pragma: no cover — exercised only in non-otel installs
+    _otel_attach = None  # type: ignore[assignment]
+    _otel_detach = None  # type: ignore[assignment]
+    _otel_set_span_in_context = None  # type: ignore[assignment]
+
+
+def _attach_active_observer_span() -> object | None:
+    """Read ``current_active_observer_span``; if an observer published
+    one and OTel is installed, attach the span into the OTel context
+    so that any logs emitted from the next user-code scope (a node
+    body) pick up the right ``trace_id``/``span_id`` via OTel's
+    ``LoggingHandler``.
+
+    Returns the OTel context token to hand back to
+    :func:`_detach_active_observer_span` in ``finally``, or ``None``
+    if no attach happened (no observer, no OTel, or both).
+    """
+    if _otel_attach is None or _otel_set_span_in_context is None:
+        return None
+    span = current_active_observer_span()
+    if span is None:
+        return None
+    return _otel_attach(_otel_set_span_in_context(cast("Any", span)))
+
+
+def _detach_active_observer_span(token: object | None) -> None:
+    """Pair to :func:`_attach_active_observer_span`. No-op when no
+    attach was performed (token is ``None``)."""
+    if token is None or _otel_detach is None:
+        return
+    _otel_detach(cast("Any", token))
 
 
 def _merge_partial[StateT: State](
@@ -690,20 +740,35 @@ class CompiledGraph[StateT: State]:
             try:
                 self._dispatch_started(context, current, namespace, step, s, attempt_index=attempt_index)
 
+                # Splice the observer-published span (if any) into the
+                # OTel context so logs emitted from the FIRST line of
+                # the node body — before any ``await`` — pick up the
+                # right trace_id/span_id via OTel's LoggingHandler.
+                # Detach in ``finally`` so retries / merge / completed
+                # dispatch don't run with the span still active, and
+                # clear ``current_active_observer_span`` to ``None`` so
+                # the next dispatch that raises or early-returns from
+                # ``prepare_sync`` can't reveal this node's span as a
+                # stale value to the engine's read.
+                otel_token = _attach_active_observer_span()
                 try:
-                    partial = await node.run(s)
-                except Exception as e:
-                    wrapped = NodeException(node_name=current, cause=e, recoverable_state=s)
-                    self._dispatch_completed(
-                        context,
-                        current,
-                        namespace,
-                        step,
-                        s,
-                        error=wrapped,
-                        attempt_index=attempt_index,
-                    )
-                    raise
+                    try:
+                        partial = await node.run(s)
+                    except Exception as e:
+                        wrapped = NodeException(node_name=current, cause=e, recoverable_state=s)
+                        self._dispatch_completed(
+                            context,
+                            current,
+                            namespace,
+                            step,
+                            s,
+                            error=wrapped,
+                            attempt_index=attempt_index,
+                        )
+                        raise
+                finally:
+                    _detach_active_observer_span(otel_token)
+                    _set_active_observer_span(None)
 
                 try:
                     merged = _merge_partial(s, partial, self.reducers, current)
@@ -1045,38 +1110,55 @@ class CompiledGraph[StateT: State]:
                     attempt_index=attempt_index,
                     fan_out_config=fan_out_event_config,
                 )
+                # Same OTel attach pattern as ``_step_function_node``'s
+                # ``innermost`` — splice the observer-published span
+                # into the OTel context so logs emitted from inside
+                # the fan-out node's own scope (middleware bodies,
+                # the dispatch machinery) carry the right
+                # trace_id/span_id. Per-instance bodies get their own
+                # attach inside their ``_step_function_node``
+                # innermost when the recursive invocation hits leaf
+                # nodes. ``finally`` clears the ContextVar so a later
+                # dispatch whose ``prepare_sync`` raises or early-
+                # returns can't reveal this fan-out's span as a stale
+                # value to the engine's read.
+                otel_token = _attach_active_observer_span()
                 try:
-                    partial = await node.run_with_context(
-                        s,
-                        context,
-                        pre_resolved_count=item_count,
-                        pre_resolved_concurrency=(concurrency_resolved,),
-                    )
-                except RuntimeGraphError as e:
-                    self._dispatch_completed(
-                        context,
-                        current,
-                        namespace,
-                        step,
-                        s,
-                        error=e,
-                        attempt_index=attempt_index,
-                        fan_out_config=fan_out_event_config,
-                    )
-                    raise
-                except Exception as e:
-                    wrapped = NodeException(node_name=current, cause=e, recoverable_state=s)
-                    self._dispatch_completed(
-                        context,
-                        current,
-                        namespace,
-                        step,
-                        s,
-                        error=wrapped,
-                        attempt_index=attempt_index,
-                        fan_out_config=fan_out_event_config,
-                    )
-                    raise wrapped from e
+                    try:
+                        partial = await node.run_with_context(
+                            s,
+                            context,
+                            pre_resolved_count=item_count,
+                            pre_resolved_concurrency=(concurrency_resolved,),
+                        )
+                    except RuntimeGraphError as e:
+                        self._dispatch_completed(
+                            context,
+                            current,
+                            namespace,
+                            step,
+                            s,
+                            error=e,
+                            attempt_index=attempt_index,
+                            fan_out_config=fan_out_event_config,
+                        )
+                        raise
+                    except Exception as e:
+                        wrapped = NodeException(node_name=current, cause=e, recoverable_state=s)
+                        self._dispatch_completed(
+                            context,
+                            current,
+                            namespace,
+                            step,
+                            s,
+                            error=wrapped,
+                            attempt_index=attempt_index,
+                            fan_out_config=fan_out_event_config,
+                        )
+                        raise wrapped from e
+                finally:
+                    _detach_active_observer_span(otel_token)
+                    _set_active_observer_span(None)
 
                 try:
                     merged = _merge_partial(s, partial, self.reducers, current)

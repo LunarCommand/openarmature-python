@@ -290,8 +290,75 @@ def _reset_attempt_index(token: Token[int]) -> None:
     _attempt_index_var.reset(token)
 
 
+# ---------------------------------------------------------------------------
+# Active observer span — for engine-side OTel context attach inside
+# ``innermost``. Populated synchronously by an observer's ``prepare_sync``
+# hook BEFORE the engine queues the started event; read by ``innermost``
+# AFTER ``_dispatch_started`` returns to attach the span into the OTel
+# context for the duration of the node-body chain.
+#
+# Inverted directionality vs. the engine→observer ContextVars above:
+# this one flows observer→engine. The producer (an opt-in observer's
+# ``prepare_sync``) and the consumer (``innermost``) both run in the
+# engine task, so the same-task ContextVar contract holds — last-writer-
+# wins is fine in practice (charter §6 says "one OTelObserver per
+# private provider," so multi-OTelObserver attach is rare).
+#
+# Typed as ``object | None`` rather than ``Span | None`` so the base
+# package stays free of an OpenTelemetry import. The OTel observer
+# writes ``Span`` instances; the engine treats the value opaquely and
+# delegates the actual attach to a try-imported OTel helper.
+# ---------------------------------------------------------------------------
+
+
+_active_observer_span_var: ContextVar[object | None] = ContextVar(
+    "openarmature.active_observer_span", default=None
+)
+
+
+def current_active_observer_span() -> object | None:
+    """Return the active observer-side span for the current node body,
+    or ``None`` if no observer published one (no opt-in observer with
+    ``prepare_sync`` is attached, or this is being called outside a
+    node-body scope).
+
+    Engine-readable handle to the span an opt-in observer's
+    ``prepare_sync`` created synchronously during dispatch. The engine's
+    ``innermost`` reads this AFTER ``_dispatch_started`` returns and
+    attaches the span into the OTel context (via a try-imported OTel
+    helper) so that any logs emitted FROM INSIDE the node body — even
+    on the first line, before any ``await`` — pick up the span's
+    trace_id/span_id via OTel's ``LoggingHandler``.
+
+    Lifecycle: the value is ``None`` outside a node-body scope (between
+    dispatches, during merge, during completed-event dispatch). The
+    engine's ``innermost`` clears it to ``None`` in its ``finally``
+    block right after the OTel detach — so a subsequent
+    ``prepare_sync`` that raises or early-returns can't reveal a stale
+    span from a previous node when the engine reads.
+
+    Backend coupling note: typed as ``object | None`` so this primitive
+    works in installs without the ``[otel]`` extras. OTel observers
+    write OpenTelemetry ``Span`` instances; the engine treats the
+    value opaquely.
+    """
+    return _active_observer_span_var.get()
+
+
+def _set_active_observer_span(value: object | None) -> Token[object | None]:
+    """Set the active observer span. Internal — observers' ``prepare_sync``
+    implementations call this synchronously before returning so the
+    engine's ``innermost`` reads the right value when it attaches."""
+    return _active_observer_span_var.set(value)
+
+
+def _reset_active_observer_span(token: Token[object | None]) -> None:
+    _active_observer_span_var.reset(token)
+
+
 __all__ = [
     # Public surface — readable from anywhere within an invocation.
+    "current_active_observer_span",
     "current_active_observers",
     "current_attempt_index",
     "current_correlation_id",
@@ -304,6 +371,7 @@ __all__ = [
     # pyright's strict ``reportUnusedFunction`` flagging them as
     # dead. Underscore-prefixed; not part of the user-facing API.
     "_reset_active_dispatch",
+    "_reset_active_observer_span",
     "_reset_active_observers",
     "_reset_attempt_index",
     "_reset_correlation_id",
@@ -311,6 +379,7 @@ __all__ = [
     "_reset_invocation_id",
     "_reset_namespace_prefix",
     "_set_active_dispatch",
+    "_set_active_observer_span",
     "_set_active_observers",
     "_set_attempt_index",
     "_set_correlation_id",
