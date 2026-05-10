@@ -105,7 +105,7 @@ async def test_subgraph_projection_error_wrapped_as_node_exception() -> None:
     NodeException tagged with the subgraph wrapper's name so callers see
     a uniform error contract."""
 
-    from openarmature.graph import NodeException, ProjectionStrategy
+    from openarmature.graph import NodeException
 
     class Inner(State):
         x: int = 0
@@ -115,8 +115,9 @@ async def test_subgraph_projection_error_wrapped_as_node_exception() -> None:
 
     inner_g = GraphBuilder(Inner).add_node("i", _inner_node).add_edge("i", END).set_entry("i").compile()
 
-    # Parameter names match the ProjectionStrategy Protocol exactly so
-    # pyright's strict structural conformance check passes.
+    # Parameter names match the ProjectionStrategy Protocol exactly so the
+    # call-site ``projection=BoomProjection()`` below passes pyright's strict
+    # structural conformance check.
     class BoomProjection:
         def project_in(self, parent_state: S, subgraph_state_cls: type[Inner]) -> Inner:
             raise RuntimeError("project_in boom")
@@ -128,8 +129,6 @@ async def test_subgraph_projection_error_wrapped_as_node_exception() -> None:
             subgraph_state_cls: type[Inner],
         ) -> dict[str, Any]:
             return {}
-
-    _: ProjectionStrategy[S, Inner] = BoomProjection()
 
     g = (
         GraphBuilder(S)
