@@ -949,18 +949,82 @@ class CompiledGraph[StateT: State]:
         # load time. Fires once per fan-out step.
         from .fan_out import _resolve_concurrency, _resolve_count  # noqa: PLC0415
 
-        if node.config.items_field is not None:
-            items_attr: Any = getattr(state, node.config.items_field, [])
-            item_count = len(cast("list[Any]", items_attr)) if isinstance(items_attr, list) else 0
-        else:
-            item_count = _resolve_count(current, node.config, state)
-        concurrency_resolved: int | None = _resolve_concurrency(current, node.config, state)
-        fan_out_event_config = FanOutEventConfig(
-            item_count=item_count,
-            concurrency=concurrency_resolved,
-            error_policy=node.config.error_policy,
-            parent_node_name=current,
-        )
+        # Resolver failures (callable count/concurrency raising,
+        # ``getattr`` on a malformed state, etc.) used to land inside
+        # ``innermost``'s ``except Exception → NodeException`` block
+        # below and produce a started/completed event pair via the
+        # surrounding dispatches. Hoisting resolution out of
+        # ``run_with_context`` for the eager ``FanOutEventConfig``
+        # build moved them past that scope, so re-establish the
+        # contract here: surface a started/completed pair with
+        # ``fan_out_config=None`` (we never built one) and raise as
+        # ``NodeException``.
+        try:
+            if node.config.items_field is not None:
+                items_attr: Any = getattr(state, node.config.items_field, [])
+                if not isinstance(items_attr, list):
+                    raise NodeException(
+                        node_name=current,
+                        cause=TypeError(f"items_field {node.config.items_field!r} is not a list at runtime"),
+                        recoverable_state=state,
+                    )
+                item_count = len(cast("list[Any]", items_attr))
+            else:
+                item_count = _resolve_count(current, node.config, state)
+            concurrency_resolved: int | None = _resolve_concurrency(current, node.config, state)
+            fan_out_event_config = FanOutEventConfig(
+                item_count=item_count,
+                concurrency=concurrency_resolved,
+                error_policy=node.config.error_policy,
+                parent_node_name=current,
+            )
+        except NodeException as resolution_error:
+            self._dispatch_started(
+                context,
+                current,
+                namespace,
+                step,
+                state,
+                attempt_index=0,
+                fan_out_config=None,
+            )
+            self._dispatch_completed(
+                context,
+                current,
+                namespace,
+                step,
+                state,
+                error=resolution_error,
+                attempt_index=0,
+                fan_out_config=None,
+            )
+            raise
+        except Exception as resolution_error:
+            wrapped = NodeException(
+                node_name=current,
+                cause=resolution_error,
+                recoverable_state=state,
+            )
+            self._dispatch_started(
+                context,
+                current,
+                namespace,
+                step,
+                state,
+                attempt_index=0,
+                fan_out_config=None,
+            )
+            self._dispatch_completed(
+                context,
+                current,
+                namespace,
+                step,
+                state,
+                error=wrapped,
+                attempt_index=0,
+                fan_out_config=None,
+            )
+            raise wrapped from resolution_error
 
         # Cell holding the FINAL successful attempt's
         # (attempt_index, pre_state, merged); see same comment in
