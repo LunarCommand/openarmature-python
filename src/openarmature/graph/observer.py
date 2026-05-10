@@ -60,6 +60,25 @@ class Observer(Protocol):
     The event parameter is positional-only (`event, /`) so structural
     conformance doesn't pin you to that name — any of `event`, `_event`,
     `e`, etc. matches.
+
+    Optional ``prepare_sync`` extension
+    -----------------------------------
+    An observer MAY additionally define a synchronous method::
+
+        def prepare_sync(self, event: NodeEvent, /) -> None: ...
+
+    that the engine calls IN THE ENGINE TASK, BEFORE queueing the
+    event for the async ``__call__``. This exists for observers that
+    need to set up state — e.g., open a span and stash a handle in
+    a ContextVar — that the engine itself must read synchronously
+    before running the node body (otherwise logs emitted on the
+    first line of the body wouldn't see the right span).
+
+    ``prepare_sync`` is **opt-in via ``hasattr``** — no subclass or
+    Protocol method required. Observers that don't define it skip
+    the synchronous prep entirely; observers that do define it run
+    only for ``"started"``-phase events, errors warned not propagated
+    (same isolation contract as the async path per spec §6).
     """
 
     async def __call__(self, event: NodeEvent, /) -> None: ...
