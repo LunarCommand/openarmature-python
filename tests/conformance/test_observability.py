@@ -72,6 +72,7 @@ _SUPPORTED_FIXTURES = frozenset(
         "003-otel-error-status",
         "004-otel-routing-error-attribution",
         "005-otel-llm-provider-span-nested",
+        "006-otel-fan-out-instance-attribution",
         "007-otel-retry-attempt-spans",
         "008-otel-detached-trace-mode",
         "009-otel-correlation-id-cross-cutting",
@@ -81,11 +82,6 @@ _SUPPORTED_FIXTURES = frozenset(
 
 
 _DEFERRED_FIXTURES: dict[str, str] = {
-    "006-otel-fan-out-instance-attribution": (
-        "Needs non-detached fan-out per-instance dispatch span synthesis + "
-        "FanOutConfig metadata surfacing per spec §5.4 (current observer opens one "
-        "shared synthetic span at the namespace prefix, not per-instance). Lands in PR-C.2."
-    ),
     "010-otel-log-correlation": (
         "Needs synchronous observer prep hook (prepare_sync) so the engine task can "
         "attach the observer's span to OTel context for the duration of node-body "
@@ -139,6 +135,8 @@ async def test_observability_fixture(fixture_path: Path) -> None:
         await _run_fixture_004(spec)
     elif fixture_id == "005-otel-llm-provider-span-nested":
         await _run_fixture_005(spec)
+    elif fixture_id == "006-otel-fan-out-instance-attribution":
+        await _run_fixture_006(spec)
     elif fixture_id == "007-otel-retry-attempt-spans":
         await _run_fixture_007(spec)
     elif fixture_id == "008-otel-detached-trace-mode":
@@ -453,6 +451,109 @@ async def _run_fixture_004(spec: Mapping[str, Any]) -> None:
 # ---------------------------------------------------------------------------
 # Fixture 007 — retry attempt spans
 # ---------------------------------------------------------------------------
+
+
+async def _run_fixture_006(spec: Mapping[str, Any]) -> None:
+    """Spec §5.4 + proposal 0013 (v0.10.0): non-detached fan-out
+    instances synthesize per-instance dispatch spans nested between
+    the fan-out node span and the inner-node spans. The fan-out node
+    span carries ``item_count`` / ``concurrency`` / ``error_policy``
+    from ``NodeEvent.fan_out_config``; per-instance spans carry
+    ``fan_out_index`` and ``parent_node_name``."""
+    # Subgraphs declared at the spec level (outside ``cases:``) — the
+    # ``worker`` subgraph used by every case in this fixture lives
+    # there. Compile once and reuse across cases.
+    _patch_unsupported_directives(spec)
+    subgraphs = _compile_subgraphs(spec)
+    cases = cast("list[dict[str, Any]]", spec["cases"])
+    for case in cases:
+        case_name = cast("str", case["name"])
+        try:
+            await _run_fixture_006_case(case, subgraphs)
+        except AssertionError as e:
+            raise AssertionError(f"case {case_name!r}: {e}") from e
+
+
+async def _run_fixture_006_case(case: Mapping[str, Any], subgraphs: Mapping[str, Any]) -> None:
+    _patch_unsupported_directives(case)
+
+    observer, exporter = _build_observer()
+    trace_log: list[str] = []
+    built = build_graph(case, subgraphs=dict(subgraphs), trace=trace_log)
+    compiled = built.builder.compile()
+    compiled.attach_observer(observer)
+    initial_state = built.initial_state(case.get("initial_state", {}))
+    await compiled.invoke(initial_state)
+    await compiled.drain()
+    observer.shutdown()
+    spans = exporter.get_finished_spans()
+
+    # Build a span_id → span map for parent-by-id navigation.
+    by_id: dict[int, Any] = {}
+    for s in spans:
+        if s.context is not None:
+            by_id[s.context.span_id] = s
+
+    # Span-tree shape per fixture:
+    #   invocation
+    #   └─ process (fan-out NODE) — item_count=3, concurrency=2, error_policy="collect"
+    #      ├─ process (instance, fan_out_index=0) — parent_node_name="process"
+    #      │  └─ compute
+    #      ├─ process (instance, fan_out_index=1) — parent_node_name="process"
+    #      │  └─ compute
+    #      └─ process (instance, fan_out_index=2) — parent_node_name="process"
+    #         └─ compute
+    process_spans = [s for s in spans if s.name == "process"]
+    # Expect 4: 1 fan-out node + 3 per-instance dispatch spans.
+    assert len(process_spans) == 4, (
+        f"expected 4 'process' spans (1 fan-out node + 3 per-instance dispatch); got {len(process_spans)}"
+    )
+    # Fan-out node span carries the three §5.4 attributes.
+    fan_out_node_spans = [
+        s
+        for s in process_spans
+        if dict(s.attributes or {}).get("openarmature.fan_out.item_count") is not None
+    ]
+    assert len(fan_out_node_spans) == 1, (
+        f"expected exactly 1 fan-out NODE span (with item_count attribute); got {len(fan_out_node_spans)}"
+    )
+    fan_out_node_span = fan_out_node_spans[0]
+    fan_out_attrs = dict(fan_out_node_span.attributes or {})
+    assert fan_out_attrs.get("openarmature.fan_out.item_count") == 3
+    assert fan_out_attrs.get("openarmature.fan_out.concurrency") == 2
+    assert fan_out_attrs.get("openarmature.fan_out.error_policy") == "collect"
+
+    # Per-instance dispatch spans: 3 of them, each with
+    # fan_out_index 0..2 and parent_node_name "process".
+    per_instance_spans = [s for s in process_spans if s != fan_out_node_span]
+    assert len(per_instance_spans) == 3
+    fan_out_indices: set[int] = set()
+    for s in per_instance_spans:
+        attrs = dict(s.attributes or {})
+        idx = attrs.get("openarmature.node.fan_out_index")
+        assert isinstance(idx, int), f"per-instance span MUST carry fan_out_index; got attrs={attrs}"
+        fan_out_indices.add(idx)
+        assert attrs.get("openarmature.fan_out.parent_node_name") == "process", (
+            f"per-instance span MUST carry parent_node_name='process'; got {attrs}"
+        )
+        # Each per-instance dispatch span parents under the fan-out
+        # node span (proposal 0013 + §5.4 nesting).
+        assert s.parent is not None and s.parent.span_id == fan_out_node_span.context.span_id, (
+            "per-instance dispatch span MUST parent under the fan-out node span"
+        )
+    assert fan_out_indices == {0, 1, 2}, (
+        f"per-instance fan_out_index range MUST be 0..2; got {sorted(fan_out_indices)}"
+    )
+
+    # Each per-instance dispatch span has a 'compute' child (the
+    # inner-node work).
+    per_instance_ids = {s.context.span_id for s in per_instance_spans}
+    compute_spans = [s for s in spans if s.name == "compute"]
+    assert len(compute_spans) == 3, f"expected 3 compute spans; got {len(compute_spans)}"
+    for cs in compute_spans:
+        assert cs.parent is not None and cs.parent.span_id in per_instance_ids, (
+            "compute span MUST parent under a per-instance dispatch span"
+        )
 
 
 async def _run_fixture_007(spec: Mapping[str, Any]) -> None:

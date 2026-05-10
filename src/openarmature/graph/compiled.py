@@ -67,8 +67,8 @@ from .errors import (
     RuntimeGraphError,
     StateValidationError,
 )
-from .events import NodeEvent
-from .fan_out import FanOutNode
+from .events import FanOutEventConfig, NodeEvent
+from .fan_out import FanOutNode, _resolve_concurrency, _resolve_count
 from .middleware import ChainCall, Middleware, compose_chain
 from .nodes import Node
 from .observer import (
@@ -913,6 +913,28 @@ class CompiledGraph[StateT: State]:
         # hardcoded 0.
         attempt_counter: list[int] = [0]
 
+        # Resolve the fan-out config eagerly so the resolved values
+        # ride on every fan-out node event (per spec proposal 0013,
+        # v0.10.0: ``fan_out_config`` is populated on fan-out node
+        # events including retried attempts). For ``items_field``
+        # mode the count is ``len(parent_state.<items_field>)``; for
+        # ``count`` mode it's ``_resolve_count``. ``_resolve_concurrency``
+        # is pure regardless. Repeating these inside
+        # ``FanOutNode.run_with_context`` is cheap and matches the
+        # values surfaced here.
+        if node.config.items_field is not None:
+            items_attr: Any = getattr(state, node.config.items_field, [])
+            item_count = len(cast("list[Any]", items_attr)) if isinstance(items_attr, list) else 0
+        else:
+            item_count = _resolve_count(current, node.config, state)
+        concurrency_resolved: int | None = _resolve_concurrency(current, node.config, state)
+        fan_out_event_config = FanOutEventConfig(
+            item_count=item_count,
+            concurrency=concurrency_resolved,
+            error_policy=node.config.error_policy,
+            parent_node_name=current,
+        )
+
         # Cell holding the FINAL successful attempt's
         # (attempt_index, pre_state, merged); see same comment in
         # ``_step_function_node``.
@@ -923,12 +945,32 @@ class CompiledGraph[StateT: State]:
             attempt_counter[0] += 1
             attempt_token = _set_attempt_index(attempt_index)
             try:
-                self._dispatch_started(context, current, namespace, step, s, attempt_index=attempt_index)
+                self._dispatch_started(
+                    context,
+                    current,
+                    namespace,
+                    step,
+                    s,
+                    attempt_index=attempt_index,
+                    fan_out_config=fan_out_event_config,
+                )
                 try:
-                    partial = await node.run_with_context(s, context)
+                    partial = await node.run_with_context(
+                        s,
+                        context,
+                        pre_resolved_count=item_count,
+                        pre_resolved_concurrency=(concurrency_resolved,),
+                    )
                 except RuntimeGraphError as e:
                     self._dispatch_completed(
-                        context, current, namespace, step, s, error=e, attempt_index=attempt_index
+                        context,
+                        current,
+                        namespace,
+                        step,
+                        s,
+                        error=e,
+                        attempt_index=attempt_index,
+                        fan_out_config=fan_out_event_config,
                     )
                     raise
                 except Exception as e:
@@ -941,6 +983,7 @@ class CompiledGraph[StateT: State]:
                         s,
                         error=wrapped,
                         attempt_index=attempt_index,
+                        fan_out_config=fan_out_event_config,
                     )
                     raise wrapped from e
 
@@ -948,7 +991,14 @@ class CompiledGraph[StateT: State]:
                     merged = _merge_partial(s, partial, self.reducers, current)
                 except (ReducerError, StateValidationError) as e:
                     self._dispatch_completed(
-                        context, current, namespace, step, s, error=e, attempt_index=attempt_index
+                        context,
+                        current,
+                        namespace,
+                        step,
+                        s,
+                        error=e,
+                        attempt_index=attempt_index,
+                        fan_out_config=fan_out_event_config,
                     )
                     raise
 
@@ -1021,6 +1071,7 @@ class CompiledGraph[StateT: State]:
                     final_pre_state,
                     post_state=final_merged,
                     attempt_index=final_attempt_index,
+                    fan_out_config=fan_out_event_config,
                 )
             else:
                 self._dispatch_completed(
@@ -1031,6 +1082,7 @@ class CompiledGraph[StateT: State]:
                     final_pre_state,
                     error=edge_error,
                     attempt_index=final_attempt_index,
+                    fan_out_config=fan_out_event_config,
                 )
 
         return _StepResult(state=merged_outer, finalize_completed=finalize_completed)
@@ -1044,6 +1096,7 @@ class CompiledGraph[StateT: State]:
         pre_state: State,
         *,
         attempt_index: int = 0,
+        fan_out_config: FanOutEventConfig | None = None,
     ) -> None:
         _dispatch(
             context,
@@ -1058,6 +1111,7 @@ class CompiledGraph[StateT: State]:
                 parent_states=context.parent_states_prefix,
                 attempt_index=attempt_index,
                 fan_out_index=context.fan_out_index,
+                fan_out_config=fan_out_config,
             ),
         )
 
@@ -1072,6 +1126,7 @@ class CompiledGraph[StateT: State]:
         post_state: State | None = None,
         error: RuntimeGraphError | None = None,
         attempt_index: int = 0,
+        fan_out_config: FanOutEventConfig | None = None,
     ) -> None:
         _dispatch(
             context,
@@ -1086,6 +1141,7 @@ class CompiledGraph[StateT: State]:
                 parent_states=context.parent_states_prefix,
                 attempt_index=attempt_index,
                 fan_out_index=context.fan_out_index,
+                fan_out_config=fan_out_config,
             ),
         )
 
