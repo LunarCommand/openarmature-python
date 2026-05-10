@@ -17,6 +17,52 @@ from .state import State
 
 
 @dataclass(frozen=True)
+class FanOutEventConfig:
+    """Spec §6 + §5.4 (per spec proposal 0013, v0.10.0):
+    fan-out node events carry the resolved configuration so backend
+    observers can attribute the fan-out node span (``item_count`` /
+    ``concurrency`` / ``error_policy``) and synthesize per-instance
+    spans with the right ``parent_node_name``.
+
+    Populated ONLY on ``started`` and ``completed`` events for a
+    fan-out node itself (partition by node type, not event category —
+    INCLUDES retried attempts of a fan-out node when retry middleware
+    wraps it). All other events leave ``NodeEvent.fan_out_config``
+    null.
+
+    Field shapes:
+
+    - ``item_count`` — non-negative int. The resolved instance count
+      per pipeline-utilities §9 (matches ``count_field`` value when
+      configured; matches ``len(items_field)`` in items_field mode).
+    - ``concurrency`` — positive int OR ``None`` (unbounded). Per
+      pipeline-utilities §9.2: zero or negative is rejected at config
+      resolution time as ``fan_out_invalid_concurrency``. Backend
+      mappings translate ``None`` to a sentinel at the attribute layer
+      (e.g., ``openarmature.fan_out.concurrency = 0`` per
+      observability §5.4) — that translation is observer-internal,
+      not engine-internal.
+    - ``error_policy`` — one of ``"fail_fast"`` or ``"collect"`` per
+      pipeline-utilities §9.4.
+    - ``parent_node_name`` — the fan-out node's name in the parent
+      graph. Carried here for caching by backend observers when
+      attributing per-instance spans (§5.4 mandates
+      ``openarmature.fan_out.parent_node_name`` on per-instance spans;
+      the engine surfaces the name once on the fan-out node's started
+      event, the observer caches and applies on every per-instance
+      span it synthesizes).
+
+    All four fields MUST be present when ``fan_out_config`` is
+    populated. Only ``concurrency`` is nullable.
+    """
+
+    item_count: int
+    concurrency: int | None
+    error_policy: str
+    parent_node_name: str
+
+
+@dataclass(frozen=True)
 class NodeEvent:
     """A single node-boundary event delivered to observers.
 
@@ -55,6 +101,9 @@ class NodeEvent:
       retries. `0` for nodes not wrapped by retry middleware.
     - `fan_out_index` is the 0-based index of this fan-out instance among
       its siblings. `None` for nodes not inside a fan-out.
+    - `fan_out_config` carries resolved fan-out configuration on events
+      from a fan-out NODE itself (per spec proposal 0013, v0.10.0). See
+      :class:`FanOutEventConfig`. ``None`` on every other event.
 
     Invariants:
     - On `started` events, `post_state` and `error` MUST both be None.
@@ -72,6 +121,7 @@ class NodeEvent:
     parent_states: tuple[State, ...]
     attempt_index: int = 0
     fan_out_index: int | None = None
+    fan_out_config: FanOutEventConfig | None = None
 
 
-__all__ = ["NodeEvent"]
+__all__ = ["FanOutEventConfig", "NodeEvent"]

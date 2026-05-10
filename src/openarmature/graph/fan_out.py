@@ -107,6 +107,9 @@ class FanOutNode[ParentT: State, ChildT: State]:
         self,
         state: ParentT,
         context: _InvocationContext,
+        *,
+        pre_resolved_count: int | None = None,
+        pre_resolved_concurrency: tuple[int | None] | None = None,
     ) -> Mapping[str, Any]:
         """Execute the fan-out and return the merged partial update.
 
@@ -114,9 +117,18 @@ class FanOutNode[ParentT: State, ChildT: State]:
         build per-instance states, run concurrently with the configured
         error policy, fan-in collected/extra fields, write count_field
         and errors_field if configured.
+
+        ``pre_resolved_count`` / ``pre_resolved_concurrency`` are the
+        proposal-0013 v0.10.0 hooks: when the engine has already
+        resolved the config eagerly to populate
+        ``NodeEvent.fan_out_config`` for the fan-out node's events,
+        it passes the resolved values in so callable resolvers
+        aren't invoked twice. ``pre_resolved_concurrency`` is wrapped
+        in a 1-tuple to disambiguate "caller passed ``None``
+        (unbounded)" from "caller didn't pass anything."
         """
         cfg = self.config
-        instance_states = _build_instance_states(self.name, cfg, state)
+        instance_states = _build_instance_states(self.name, cfg, state, pre_resolved_count=pre_resolved_count)
         instance_count = len(instance_states)
 
         if instance_count == 0:
@@ -127,7 +139,10 @@ class FanOutNode[ParentT: State, ChildT: State]:
             # reducer absorbs as a no-op).
             return _empty_fan_out_partial(cfg)
 
-        max_concurrency = _resolve_concurrency(self.name, cfg, state)
+        if pre_resolved_concurrency is not None:
+            max_concurrency = pre_resolved_concurrency[0]
+        else:
+            max_concurrency = _resolve_concurrency(self.name, cfg, state)
 
         # Per-instance task: build the instance_middleware chain, run
         # the subgraph against it, and return the per-instance partial
@@ -187,6 +202,8 @@ def _build_instance_states(
     node_name: str,
     cfg: FanOutConfig,
     parent_state: Any,
+    *,
+    pre_resolved_count: int | None = None,
 ) -> list[Any]:
     """Project parent state to per-instance subgraph states.
 
@@ -194,6 +211,13 @@ def _build_instance_states(
     - items_field mode: one instance per item, item_field gets the item
     - count mode: ``count`` instances, item_field absent
     - both modes: inputs map parent fields onto subgraph state fields
+
+    ``pre_resolved_count`` (proposal-0013 hook): if the engine has
+    already resolved ``cfg.count`` to populate
+    ``NodeEvent.fan_out_config.item_count``, the resolved value is
+    passed in here so the callable resolver isn't invoked twice.
+    Only consulted in ``count`` mode; ``items_field`` mode reads
+    from the state field unchanged.
     """
     sub_state_cls = cfg.subgraph.state_cls
     parent_dump = parent_state.model_dump()
@@ -226,7 +250,10 @@ def _build_instance_states(
         return instances
 
     # count mode
-    resolved_count = _resolve_count(node_name, cfg, parent_state)
+    if pre_resolved_count is not None:
+        resolved_count = pre_resolved_count
+    else:
+        resolved_count = _resolve_count(node_name, cfg, parent_state)
     instances = []
     for _idx in range(resolved_count):
         init = {}

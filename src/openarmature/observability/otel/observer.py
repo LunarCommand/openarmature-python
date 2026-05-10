@@ -131,6 +131,25 @@ class _InvState:
     subgraph_spans: dict[tuple[str, ...], _OpenSpan] = field(default_factory=dict[tuple[str, ...], _OpenSpan])
     detached_roots: dict[tuple[str, ...], _OpenSpan] = field(default_factory=dict[tuple[str, ...], _OpenSpan])
     fan_out_instance_root_prefixes: set[tuple[str, ...]] = field(default_factory=set[tuple[str, ...]])
+    # Per spec §5.4 + proposal 0013 (v0.10.0): non-detached fan-outs
+    # synthesize per-instance dispatch spans nested between the fan-out
+    # node span and the inner-node spans. Keyed by ``prefix +
+    # (str(fan_out_index),)`` mirroring the detached path's keying in
+    # ``detached_roots``. Lives in the parent trace (not a fresh
+    # trace_id, unlike detached). Closed when the fan-out node's
+    # ``completed`` event fires.
+    fan_out_instance_spans: dict[tuple[str, ...], _OpenSpan] = field(
+        default_factory=dict[tuple[str, ...], _OpenSpan]
+    )
+    # ``parent_node_name`` cache (per spec proposal 0013 correction #4):
+    # the fan-out node's name surfaces on its own ``started`` event via
+    # ``NodeEvent.fan_out_config.parent_node_name``. The observer caches
+    # it keyed by the fan-out node's namespace prefix so when
+    # ``_open_fan_out_instance_dispatch_span`` synthesizes a per-instance
+    # dispatch span, it can attach
+    # ``openarmature.fan_out.parent_node_name`` even though the inner
+    # event itself doesn't carry ``fan_out_config``.
+    fan_out_parent_node_name: dict[tuple[str, ...], str] = field(default_factory=dict[tuple[str, ...], str])
 
 
 @dataclass
@@ -253,6 +272,15 @@ class OTelObserver:
         if invocation_id not in self._invocation_span:
             self._open_invocation_span(invocation_id, correlation_id, event)
 
+        # Per spec proposal 0013 (v0.10.0): cache the fan-out node's
+        # ``parent_node_name`` from its ``started`` event so
+        # ``_open_fan_out_instance_dispatch_span`` can attach
+        # ``openarmature.fan_out.parent_node_name`` to per-instance
+        # spans. Inner events from inside the fan-out's instances
+        # don't carry ``fan_out_config`` themselves; the cache bridges.
+        if event.fan_out_config is not None and event.fan_out_index is None:
+            inv_state.fan_out_parent_node_name[event.namespace] = event.fan_out_config.parent_node_name
+
         # Synthesize subgraph dispatch spans for any ancestor namespace
         # prefix that doesn't have one yet (per observability §4.5).
         # Also closes subgraph spans we've left.
@@ -286,6 +314,16 @@ class OTelObserver:
             for key in list(inv_state.detached_roots.keys()):
                 if len(key) > len(event.namespace) and key[: len(event.namespace)] == event.namespace:
                     self._close_detached_root(inv_state, key)
+        # Per spec proposal 0013 (v0.10.0): if this is the fan-out
+        # node's own completion (non-detached path), close all
+        # per-instance dispatch spans synthesized for this fan-out.
+        # Children-before-parents close ordering: per-instance
+        # dispatch spans before the fan-out node's own span.
+        if event.fan_out_index is None and event.fan_out_config is not None:
+            for key in list(inv_state.fan_out_instance_spans.keys()):
+                if len(key) > len(event.namespace) and key[: len(event.namespace)] == event.namespace:
+                    self._close_fan_out_instance_dispatch_span(inv_state, key)
+            inv_state.fan_out_parent_node_name.pop(event.namespace, None)
         key = self._key_for(event)
         open_span = inv_state.open_spans.pop(key, None)
         if open_span is None:
@@ -498,6 +536,16 @@ class OTelObserver:
             root = inv_state.detached_roots.get(instance_key)
             if root is not None:
                 return set_span_in_context(root.span)
+            # 1a'. Non-detached per-instance dispatch span (proposal
+            #      0013, v0.10.0). Same keying as the detached path
+            #      but lives in the parent trace under the fan-out
+            #      node's span. Inner-node events from inside a
+            #      non-detached fan-out instance parent under THIS
+            #      per-instance dispatch span (not the shared fan-out
+            #      node span at ``namespace[:1]``).
+            instance_dispatch = inv_state.fan_out_instance_spans.get(instance_key)
+            if instance_dispatch is not None:
+                return set_span_in_context(instance_dispatch.span)
         # 1b. Detached subgraph root at any matching prefix wins
         #     (highest precedence — events inside a detached subtree
         #     always parent under the detached root, never bleed up).
@@ -568,6 +616,21 @@ class OTelObserver:
                 continue
             if prefix in inv_state.detached_roots:
                 continue
+            # Per spec proposal 0013 (v0.10.0): for non-detached
+            # fan-out instances, the per-instance dispatch span lives
+            # at ``prefix + (str(fan_out_index),)`` in
+            # ``fan_out_instance_spans``. If the per-instance dispatch
+            # span for THIS event's instance is already open, the
+            # fan-out node span at ``prefix`` is already open too
+            # (synthesized as part of the fan-out node's started
+            # event), so we don't open a new subgraph span at
+            # ``prefix``.
+            if (
+                depth == 1
+                and event.fan_out_index is not None
+                and (prefix + (str(event.fan_out_index),)) in inv_state.fan_out_instance_spans
+            ):
+                continue
             # If this prefix's first segment is configured as a
             # detached subgraph, mint a fresh trace.
             if depth == 1 and prefix[0] in self.detached_subgraphs:
@@ -578,6 +641,22 @@ class OTelObserver:
             # node is detached, open a per-instance detached root.
             if depth == 1 and event.fan_out_index is not None and prefix[0] in self.detached_fan_outs:
                 self._open_detached_fan_out_instance_root(inv_state, correlation_id, prefix, event)
+                continue
+            # Per spec §5.4 + proposal 0013: non-detached fan-out
+            # instances get a synthetic per-instance dispatch span
+            # under the fan-out node span. Triggered by an event
+            # from inside a fan-out instance (event.fan_out_index
+            # populated) at depth 1 (the fan-out node's namespace
+            # prefix), where the parent_node_name cache has an
+            # entry — i.e., the fan-out node's started event has
+            # been seen.
+            if (
+                depth == 1
+                and event.fan_out_index is not None
+                and prefix[0] not in self.detached_fan_outs
+                and prefix in inv_state.fan_out_parent_node_name
+            ):
+                self._open_fan_out_instance_dispatch_span(inv_state, correlation_id, prefix, event)
                 continue
             self._open_subgraph_span(inv_state, invocation_id, correlation_id, prefix)
 
@@ -747,6 +826,63 @@ class OTelObserver:
         inv_state.detached_roots[instance_key] = _OpenSpan(span=instance_root)
         inv_state.fan_out_instance_root_prefixes.add(instance_key)
 
+    def _open_fan_out_instance_dispatch_span(
+        self,
+        inv_state: _InvState,
+        correlation_id: str | None,
+        prefix: tuple[str, ...],
+        event: NodeEvent,
+    ) -> None:
+        """Per-instance dispatch span for a non-detached fan-out
+        (per spec §5.4 + proposal 0013, v0.10.0). Mirror of
+        ``_open_detached_fan_out_instance_root`` but lives in the
+        parent trace (no fresh trace_id).
+
+        Parents under the fan-out node span at ``prefix``. Span name
+        is the fan-out node's name; attributes are
+        ``openarmature.fan_out.parent_node_name`` (looked up from the
+        cache populated when the fan-out node's ``started`` event
+        landed), ``openarmature.node.fan_out_index`` (from
+        ``event.fan_out_index``), and the correlation_id if set.
+
+        Stored in ``inv_state.fan_out_instance_spans`` keyed by
+        ``prefix + (str(fan_out_index),)``. Closed when the fan-out
+        node's own ``completed`` event fires (children-before-parents
+        ordering).
+        """
+        # Find the fan-out node's open span (latest attempt under
+        # retry) to use as parent.
+        fan_out_open = self._find_fan_out_node_span(inv_state, prefix)
+        parent_ctx: object
+        if fan_out_open is not None:
+            parent_ctx = set_span_in_context(fan_out_open.span)
+        else:
+            parent_ctx = otel_context.Context()
+
+        parent_node_name = inv_state.fan_out_parent_node_name.get(prefix, prefix[-1])
+        attrs: dict[str, Any] = {
+            "openarmature.node.name": prefix[-1],
+            "openarmature.fan_out.parent_node_name": parent_node_name,
+            "openarmature.node.fan_out_index": event.fan_out_index,
+        }
+        if correlation_id is not None:
+            attrs["openarmature.correlation_id"] = correlation_id
+        instance_span = self._tracer.start_span(
+            name=prefix[-1],
+            context=cast("Any", parent_ctx),
+            kind=SpanKind.INTERNAL,
+            attributes=attrs,
+        )
+        instance_key = prefix + (str(event.fan_out_index),)
+        inv_state.fan_out_instance_spans[instance_key] = _OpenSpan(span=instance_span)
+
+    def _close_fan_out_instance_dispatch_span(self, inv_state: _InvState, key: tuple[str, ...]) -> None:
+        open_span = inv_state.fan_out_instance_spans.pop(key, None)
+        if open_span is None:
+            return
+        open_span.span.set_status(Status(StatusCode.OK))
+        open_span.span.end()
+
     def _close_detached_root(self, inv_state: _InvState, prefix: tuple[str, ...]) -> None:
         inv_state.fan_out_instance_root_prefixes.discard(prefix)
         open_span = inv_state.detached_roots.pop(prefix, None)
@@ -789,6 +925,18 @@ class OTelObserver:
             attrs["openarmature.node.fan_out_index"] = event.fan_out_index
         if correlation_id is not None:
             attrs["openarmature.correlation_id"] = correlation_id
+        # Per spec §5.4 + proposal 0013 (v0.10.0): fan-out node spans
+        # carry item_count / concurrency / error_policy. ``concurrency``
+        # is ``int | None`` on the event payload (spec §9.2 canonical
+        # type); the §5.4 attribute is a bare int with ``0`` as the
+        # "unbounded" sentinel (OTel attribute primitives can't carry
+        # null cleanly), so this is the OTel-attribute-layer
+        # translation.
+        if event.fan_out_config is not None:
+            cfg = event.fan_out_config
+            attrs["openarmature.fan_out.item_count"] = cfg.item_count
+            attrs["openarmature.fan_out.concurrency"] = 0 if cfg.concurrency is None else cfg.concurrency
+            attrs["openarmature.fan_out.error_policy"] = cfg.error_policy
         return attrs
 
     # ------------------------------------------------------------------
@@ -830,13 +978,34 @@ class OTelObserver:
         """Close any still-open spans in a per-invocation state
         container in child→parent order. LLM spans (deepest leaves)
         → leaf node spans (sorted deepest-first by namespace) →
-        detached roots → subgraph dispatch spans. Matches the
-        ordering used in ``shutdown``."""
+        non-detached fan-out per-instance dispatch spans → detached
+        roots → subgraph dispatch spans. Matches the ordering used in
+        ``shutdown``."""
         for call_id in list(inv_state.open_llm_spans.keys()):
             open_span = inv_state.open_llm_spans.pop(call_id, None)
             if open_span is not None:
                 self._drain_open_span(open_span)
-        for key in sorted(inv_state.open_spans.keys(), key=lambda k: -len(k[0])):
+        # Inner-node spans (depth >= 2) drain first — these include
+        # the inner-node bodies inside fan-out instances, which are
+        # children of the per-instance dispatch spans.
+        for key in sorted(
+            (k for k in inv_state.open_spans if len(k[0]) >= 2),
+            key=lambda k: -len(k[0]),
+        ):
+            open_span = inv_state.open_spans.pop(key, None)
+            if open_span is not None:
+                self._drain_open_span(open_span)
+        # Per-instance dispatch spans (children of the fan-out NODE
+        # span) drain BEFORE depth-1 entries of ``open_spans`` —
+        # otherwise the fan-out NODE span (depth 1) would end
+        # before its per-instance children, violating
+        # children-before-parents close ordering.
+        for key in sorted(inv_state.fan_out_instance_spans.keys(), key=lambda k: -len(k)):
+            self._close_fan_out_instance_dispatch_span(inv_state, key)
+        # Remaining depth-1 entries in ``open_spans`` drain last —
+        # these are the fan-out NODE span itself + any sibling
+        # depth-1 leaf nodes still open.
+        for key in list(inv_state.open_spans.keys()):
             open_span = inv_state.open_spans.pop(key, None)
             if open_span is not None:
                 self._drain_open_span(open_span)

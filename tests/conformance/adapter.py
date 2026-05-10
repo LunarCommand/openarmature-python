@@ -370,9 +370,17 @@ class _TracingFanOutNode(FanOutNode[State, State]):
         self,
         state: State,
         context: _InvocationContext,
+        *,
+        pre_resolved_count: int | None = None,
+        pre_resolved_concurrency: tuple[int | None] | None = None,
     ) -> Mapping[str, Any]:
         self.trace_list.append(self.name)
-        return await super().run_with_context(state, context)
+        return await super().run_with_context(
+            state,
+            context,
+            pre_resolved_count=pre_resolved_count,
+            pre_resolved_concurrency=pre_resolved_concurrency,
+        )
 
 
 @dataclass(frozen=True)

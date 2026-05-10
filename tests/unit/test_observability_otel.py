@@ -24,6 +24,7 @@ from __future__ import annotations
 import logging
 
 import pytest
+from pydantic import Field
 
 # Skip the entire module if otel extras aren't installed.
 pytest.importorskip("opentelemetry.sdk.trace")
@@ -271,6 +272,9 @@ async def test_disable_llm_spans_skips_llm_provider_span() -> None:
         span_processor=SimpleSpanProcessor(exporter),
         disable_llm_spans=True,
     )
+    # ``step=-1`` mirrors the synthetic value ``OpenAIProvider._llm_event``
+    # mints (openai.py:643) — LLM-provider events aren't tied to graph step
+    # sequencing.
     started = NodeEvent(
         node_name="openarmature.llm.complete",
         namespace=("openarmature.llm.complete",),
@@ -556,8 +560,8 @@ async def test_concurrent_fan_out_no_lifo_violation() -> None:
     import warnings
 
     class _ParentState(State):
-        items: list[int] = []
-        results: list[int] = []
+        items: list[int] = Field(default_factory=list[int])
+        results: list[int] = Field(default_factory=list[int])
 
     class _ChildState(State):
         item: int = 0
