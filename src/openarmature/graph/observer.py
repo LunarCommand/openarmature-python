@@ -423,8 +423,17 @@ def _dispatch(context: _InvocationContext, event: NodeEvent) -> None:
                 if close_method is not None:
                     try:
                         close_method()
-                    except Exception:
-                        pass
+                    except Exception as close_error:
+                        # Cleanup is best-effort: a raise here MUST NOT
+                        # propagate or block sibling observers. Surface
+                        # via ``warnings.warn`` so the swallow is at
+                        # least observable if it ever fires (CodeQL
+                        # py/empty-except clears on this surface too).
+                        warnings.warn(
+                            f"observer prepare_sync close cleanup raised "
+                            f"{type(close_error).__name__}: {close_error}",
+                            stacklevel=2,
+                        )
                 warnings.warn(
                     "observer prepare_sync returned an awaitable; "
                     "prepare_sync MUST be sync (define as `def`, not "
