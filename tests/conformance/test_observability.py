@@ -16,23 +16,14 @@ Driven fixtures:
 - **009-correlation-id-cross-cutting** (Phase 6.0) — every span
   carries ``openarmature.correlation_id``; back-to-back
   invocations get distinct UUIDv4s.
+- **010-log-correlation** (PR-C.3) — log records emitted from
+  inside node bodies pick up the active node span's
+  ``trace_id``/``span_id`` via the engine-side
+  ``prepare_sync`` → OTel context attach pipeline; both nested
+  and detached-trace cases.
 - **011-determinism** (PR-C) — deterministic span content
   (hierarchy, names, status, attributes minus the canonical
   non-deterministic-by-design list) is identical across runs.
-
-Deferred:
-
-- **004-routing-error-attribution** — needs the proposal-0012
-  ordering swap (completed dispatch after edge eval) so the
-  preceding node's ``completed`` event carries the routing-error
-  status. Lands in PR-C.1 once v0.9.0 ships.
-- **006-fan-out-instance-attribution** — needs non-detached
-  fan-out per-instance dispatch span synthesis + ``FanOutConfig``
-  metadata surfacing. Lands in PR-C.2.
-- **010-log-correlation** — needs the synchronous observer prep
-  hook (``prepare_sync``) so the engine task can attach the
-  observer's span to OTel context for the duration of node-body
-  execution. Lands in PR-C.3.
 
 Per-fixture wiring notes live in
 ``docs/phase-6-1-conformance-fillin.md``.
@@ -76,19 +67,13 @@ _SUPPORTED_FIXTURES = frozenset(
         "007-otel-retry-attempt-spans",
         "008-otel-detached-trace-mode",
         "009-otel-correlation-id-cross-cutting",
+        "010-otel-log-correlation",
         "011-otel-determinism",
     }
 )
 
 
-_DEFERRED_FIXTURES: dict[str, str] = {
-    "010-otel-log-correlation": (
-        "Needs synchronous observer prep hook (prepare_sync) so the engine task can "
-        "attach the observer's span to OTel context for the duration of node-body "
-        "execution — observer span creation runs on the worker task today and isn't "
-        "available synchronously after _dispatch_started. Lands in PR-C.3."
-    ),
-}
+_DEFERRED_FIXTURES: dict[str, str] = {}
 
 
 # UUIDv4 canonical form: xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx (where y in {8,9,a,b}).
@@ -143,6 +128,8 @@ async def test_observability_fixture(fixture_path: Path) -> None:
         await _run_fixture_008(spec)
     elif fixture_id == "009-otel-correlation-id-cross-cutting":
         await _run_fixture_009(spec)
+    elif fixture_id == "010-otel-log-correlation":
+        await _run_fixture_010(spec)
     elif fixture_id == "011-otel-determinism":
         await _run_fixture_011(spec)
     else:
@@ -1427,3 +1414,313 @@ async def _run_fixture_031_case(case: Mapping[str, Any]) -> None:
         f"original and resumed runs MUST produce DIFFERENT trace_ids "
         f"(per §10.4 step 4 + §5.1); got {len(trace_ids)} distinct trace_ids"
     )
+
+
+# ---------------------------------------------------------------------------
+# Fixture 010 — log correlation (PR-C.3)
+#
+# Two sub-cases. Both build the graph by hand rather than going through the
+# adapter — fixture 010's ``emits_log:`` directive isn't an adapter primitive
+# (the adapter recognizes ``update_pure``, ``subgraph``, etc., and silently
+# ignores anything else), and the sub-cases are small enough that hand-built
+# python is clearer than threading a new directive through the adapter.
+# ---------------------------------------------------------------------------
+
+
+def _setup_isolated_log_bridge() -> tuple[Any, Any, Any]:
+    """Spin up an OTel ``LoggerProvider`` + ``InMemoryLogRecordExporter`` and
+    install the log bridge against the root logger, snapshotting the prior
+    log state so the caller can restore it in ``finally`` (the bridge mutates
+    process-global ``logging`` state — handlers, factory).
+
+    Returns ``(exporter, provider, restore_state)`` where ``restore_state``
+    is a snapshot to pass to :func:`_restore_log_state`.
+    """
+    import logging as _logging  # noqa: PLC0415
+
+    from opentelemetry.sdk._logs import LoggerProvider  # noqa: PLC0415
+    from opentelemetry.sdk._logs.export import (  # noqa: PLC0415
+        InMemoryLogRecordExporter,
+        SimpleLogRecordProcessor,
+    )
+
+    from openarmature.observability.otel import install_log_bridge  # noqa: PLC0415
+
+    root = _logging.getLogger()
+    snapshot = (list(root.handlers), list(root.filters), _logging.getLogRecordFactory())
+
+    exporter = InMemoryLogRecordExporter()
+    provider = LoggerProvider()
+    provider.add_log_record_processor(SimpleLogRecordProcessor(exporter))
+    install_log_bridge(provider)
+    return exporter, provider, snapshot
+
+
+def _restore_log_state(snapshot: Any) -> None:
+    """Pair to :func:`_setup_isolated_log_bridge` — restores the root logger's
+    handler list, filters, and ``LogRecord`` factory to the snapshot taken
+    before ``install_log_bridge`` ran."""
+    import logging as _logging  # noqa: PLC0415
+
+    handlers, filters, factory = snapshot
+    root = _logging.getLogger()
+    root.handlers[:] = handlers
+    root.filters[:] = filters
+    _logging.setLogRecordFactory(factory)
+
+
+def _enable_test_logger_at_info() -> tuple[Any, int]:
+    """Bring the fixture-010 test logger up to ``INFO`` so YAML's
+    ``level: INFO`` records actually flow through Python's logger-level
+    filter to the bridge handler. Returns ``(logger, prior_level)`` to
+    pair with a restore in ``finally``."""
+    import logging as _logging  # noqa: PLC0415
+
+    test_logger = _logging.getLogger("openarmature.test.fixture_010")
+    prior_level = test_logger.level
+    test_logger.setLevel(_logging.INFO)
+    return test_logger, prior_level
+
+
+async def _run_fixture_010(spec: Mapping[str, Any]) -> None:
+    """Two sub-cases: nested-trace log correlation (single graph, all logs
+    share the parent trace_id) and detached-subgraph log correlation
+    (logs across the detached boundary carry distinct trace_ids but the
+    same correlation_id)."""
+    cases = cast("list[dict[str, Any]]", spec["cases"])
+    for case in cases:
+        case_name = cast("str", case["name"])
+        try:
+            await _run_fixture_010_case(case)
+        except AssertionError as e:
+            raise AssertionError(f"case {case_name!r}: {e}") from e
+
+
+async def _run_fixture_010_case(case: Mapping[str, Any]) -> None:
+    case_name = cast("str", case["name"])
+    if case_name == "log_records_carry_trace_span_correlation_ids":
+        await _run_fixture_010_nested_trace(case)
+    elif case_name == "detached_subgraph_log_uses_detached_trace_id_keeps_correlation_id":
+        await _run_fixture_010_detached(case)
+    else:
+        raise AssertionError(f"unknown fixture 010 sub-case: {case_name!r}")
+
+
+async def _run_fixture_010_nested_trace(case: Mapping[str, Any]) -> None:
+    """Sub-case 1: 2 nodes ``a`` → ``b``, both emit logs from the FIRST line
+    of their body. The log bridge MUST report all logs in the parent
+    trace_id, with each log's span_id matching the active node span at
+    emission, and all carrying the invocation's correlation_id."""
+    from openarmature.graph import END, GraphBuilder, State  # noqa: PLC0415
+
+    nodes_spec = cast("dict[str, Any]", case["nodes"])
+    correlation_id = cast("str", case["caller_correlation_id"])
+
+    class _S(State):
+        x: int = 0
+
+    test_logger, prior_level = _enable_test_logger_at_info()
+
+    def _make_body(node_name: str) -> Any:
+        spec = cast("dict[str, Any]", nodes_spec[node_name])
+        emit_msg = cast("str", spec["emits_log"]["message"])
+        update = cast("dict[str, Any]", spec["update_pure"])
+
+        async def body(_s: _S) -> dict[str, Any]:
+            # FIRST line, before any await — the load-bearing case
+            # the engine attach via ``prepare_sync`` exists to cover.
+            test_logger.info(emit_msg)
+            return dict(update)
+
+        return body
+
+    builder = GraphBuilder(_S)
+    for node_name in nodes_spec:
+        builder.add_node(node_name, _make_body(node_name))
+    for edge in cast("list[dict[str, Any]]", case["edges"]):
+        from_node = cast("str", edge["from"])
+        to = edge["to"]
+        builder.add_edge(from_node, END if to == "END" else cast("str", to))
+    builder.set_entry(cast("str", case["entry"]))
+    compiled = builder.compile()
+
+    observer, span_exporter = _build_observer()
+    log_exporter, log_provider, snapshot = _setup_isolated_log_bridge()
+    try:
+        compiled.attach_observer(observer)
+        await compiled.invoke(_S(), correlation_id=correlation_id)
+        await compiled.drain()
+        observer.shutdown()
+        log_provider.force_flush()
+
+        records = log_exporter.get_finished_logs()
+        # Filter to OUR test logger so concurrent test setup noise
+        # doesn't contaminate the assertions.
+        ours = [r for r in records if str(r.log_record.body) in {"node a executing", "node b executing"}]
+        assert len(ours) == 2, (
+            f"expected 2 log records (one per node body); got {len(ours)}: "
+            f"{[str(r.log_record.body) for r in ours]}"
+        )
+
+        # Group by body for predictable lookup.
+        by_body = {str(r.log_record.body): r for r in ours}
+        a_log = by_body["node a executing"]
+        b_log = by_body["node b executing"]
+
+        # Invariant: all_logs_same_trace_id.
+        trace_ids = {a_log.log_record.trace_id, b_log.log_record.trace_id}
+        assert len(trace_ids) == 1, f"all logs MUST share a trace_id (single nested trace); got {trace_ids}"
+
+        # Invariant: log_span_ids_match_active_span_at_emission.
+        spans = span_exporter.get_finished_spans()
+        node_span_ids: dict[str, int] = {}
+        for s in spans:
+            if s.name in {"a", "b"}:
+                node_span_ids[s.name] = s.context.span_id
+        assert a_log.log_record.span_id == node_span_ids["a"], (
+            f"node-a log MUST carry node-a span's span_id; "
+            f"got log span_id={a_log.log_record.span_id}, span={node_span_ids['a']}"
+        )
+        assert b_log.log_record.span_id == node_span_ids["b"], (
+            f"node-b log MUST carry node-b span's span_id; "
+            f"got log span_id={b_log.log_record.span_id}, span={node_span_ids['b']}"
+        )
+
+        # Invariant: all_logs_carry_correlation_id.
+        for r in ours:
+            attrs = dict(r.log_record.attributes or {})
+            assert attrs.get("openarmature.correlation_id") == correlation_id, (
+                f"every log MUST carry openarmature.correlation_id={correlation_id!r}; "
+                f"got {attrs.get('openarmature.correlation_id')!r}"
+            )
+    finally:
+        test_logger.setLevel(prior_level)
+        _restore_log_state(snapshot)
+
+
+async def _run_fixture_010_detached(case: Mapping[str, Any]) -> None:
+    """Sub-case 2: outer invocation has a detached subgraph. Logs emitted
+    inside the detached subgraph carry the DETACHED trace's trace_id —
+    NOT the parent's — while the correlation_id flows unchanged across
+    the boundary."""
+    from openarmature.graph import END, GraphBuilder, State  # noqa: PLC0415
+
+    correlation_id = cast("str", case["caller_correlation_id"])
+    sub_specs = cast("dict[str, Any]", case["subgraphs"])
+    inner_spec = cast("dict[str, Any]", sub_specs["detached_inner"])
+    outer_nodes = cast("dict[str, Any]", case["nodes"])
+
+    # Detached subgraph identity → wrapper-node-name translation, same
+    # convention as fixture 008. The fixture YAML lists subgraph identities
+    # in ``detached_subgraphs:``; OTelObserver keys on the wrapper node's
+    # name in the parent graph.
+    detached_identities = set(cast("list[str]", case.get("detached_subgraphs") or []))
+    wrapper_names: set[str] = set()
+    for wrapper_name, node_spec in outer_nodes.items():
+        sub_id = cast("dict[str, Any]", node_spec).get("subgraph")
+        if isinstance(sub_id, str) and sub_id in detached_identities:
+            wrapper_names.add(wrapper_name)
+    detached_subgraphs = frozenset(wrapper_names)
+
+    test_logger, prior_level = _enable_test_logger_at_info()
+
+    # Inner subgraph (detached_inner): 1 node ``inner`` with
+    # ``update_pure: {y: 1}`` + ``emits_log: "inside detached subgraph"``.
+    class _Inner(State):
+        y: int = 0
+
+    inner_node_spec = cast("dict[str, Any]", inner_spec["nodes"]["inner"])
+    inner_emit = cast("str", inner_node_spec["emits_log"]["message"])
+    inner_update = cast("dict[str, Any]", inner_node_spec["update_pure"])
+
+    async def _inner_body(_s: _Inner) -> dict[str, Any]:
+        test_logger.info(inner_emit)
+        return dict(inner_update)
+
+    inner_compiled = (
+        GraphBuilder(_Inner)
+        .add_node("inner", _inner_body)
+        .add_edge("inner", END)
+        .set_entry("inner")
+        .compile()
+    )
+
+    # Outer graph: ``outer_dispatch`` is a SubgraphNode wrapper around
+    # ``inner_compiled`` AND emits a log "before subgraph dispatch".
+    # SubgraphNode wrappers don't get ``prepare_sync`` per spec — the
+    # outer log is emitted via per-node middleware that fires inside
+    # the wrapper's chain. Without an attached span at wrapper scope,
+    # the outer log's trace_id is OTel's "no active span" sentinel
+    # (0); the inner log's trace_id is the detached trace's. The
+    # invariant ``log_trace_ids_differ_when_detached`` holds either
+    # way.
+    class _Outer(State):
+        z: int = 0
+
+    outer_node_spec = cast("dict[str, Any]", outer_nodes["outer_dispatch"])
+    outer_emit = cast("str", outer_node_spec["emits_log"]["message"])
+
+    async def _outer_log_middleware(s: Any, next_call: Any) -> Mapping[str, Any]:
+        test_logger.info(outer_emit)
+        return cast("Mapping[str, Any]", await next_call(s))
+
+    outer_compiled = (
+        GraphBuilder(_Outer)
+        .add_subgraph_node("outer_dispatch", inner_compiled, middleware=[_outer_log_middleware])
+        .add_edge("outer_dispatch", END)
+        .set_entry("outer_dispatch")
+        .compile()
+    )
+
+    observer, _span_exporter = _build_observer_with_detached(detached_subgraphs)
+    log_exporter, log_provider, snapshot = _setup_isolated_log_bridge()
+    try:
+        outer_compiled.attach_observer(observer)
+        await outer_compiled.invoke(_Outer(), correlation_id=correlation_id)
+        await outer_compiled.drain()
+        observer.shutdown()
+        log_provider.force_flush()
+
+        records = log_exporter.get_finished_logs()
+        ours = [r for r in records if str(r.log_record.body) in {outer_emit, inner_emit}]
+        assert len(ours) == 2, (
+            f"expected 2 log records (outer + inner); got {len(ours)}: "
+            f"{[str(r.log_record.body) for r in ours]}"
+        )
+
+        by_body = {str(r.log_record.body): r for r in ours}
+        outer_log = by_body[outer_emit]
+        inner_log = by_body[inner_emit]
+
+        # Invariant: log_trace_ids_differ_when_detached.
+        assert outer_log.log_record.trace_id != inner_log.log_record.trace_id, (
+            f"detached-subgraph log MUST carry the detached trace's trace_id, "
+            f"DIFFERENT from the parent log; both got {outer_log.log_record.trace_id}"
+        )
+
+        # Invariant: all_logs_carry_correlation_id.
+        for r in ours:
+            attrs = dict(r.log_record.attributes or {})
+            assert attrs.get("openarmature.correlation_id") == correlation_id, (
+                f"every log MUST carry openarmature.correlation_id={correlation_id!r}; "
+                f"got {attrs.get('openarmature.correlation_id')!r}"
+            )
+    finally:
+        test_logger.setLevel(prior_level)
+        _restore_log_state(snapshot)
+
+
+def _build_observer_with_detached(detached_subgraphs: frozenset[str]) -> tuple[OTelObserver, Any]:
+    """Variant of :func:`_build_observer` that takes a detached_subgraphs
+    set — needed for fixture 010 sub-case 2."""
+    from opentelemetry.sdk.trace.export import SimpleSpanProcessor  # noqa: PLC0415
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import (  # noqa: PLC0415
+        InMemorySpanExporter,
+    )
+
+    exporter = InMemorySpanExporter()
+    observer = OTelObserver(
+        span_processor=SimpleSpanProcessor(exporter),
+        detached_subgraphs=detached_subgraphs,
+    )
+    return observer, exporter
