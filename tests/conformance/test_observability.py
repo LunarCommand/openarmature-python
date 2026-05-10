@@ -1515,6 +1515,13 @@ async def _run_fixture_010_nested_trace(case: Mapping[str, Any]) -> None:
 
     nodes_spec = cast("dict[str, Any]", case["nodes"])
     correlation_id = cast("str", case["caller_correlation_id"])
+    # Spec YAML is the single source of truth for the log bodies; derive
+    # them up front rather than hard-coding so a fixture rename doesn't
+    # silently break the driver's record filtering.
+    node_emit_messages: dict[str, str] = {
+        name: cast("str", cast("dict[str, Any]", nodes_spec[name])["emits_log"]["message"])
+        for name in nodes_spec
+    }
 
     class _S(State):
         x: int = 0
@@ -1554,18 +1561,21 @@ async def _run_fixture_010_nested_trace(case: Mapping[str, Any]) -> None:
         log_provider.force_flush()
 
         records = log_exporter.get_finished_logs()
-        # Filter to OUR test logger so concurrent test setup noise
-        # doesn't contaminate the assertions.
-        ours = [r for r in records if str(r.log_record.body) in {"node a executing", "node b executing"}]
+        # Filter to OUR test loggers so concurrent test setup noise
+        # doesn't contaminate the assertions. Expected message set
+        # comes from the spec YAML, not hard-coded strings.
+        expected_messages = set(node_emit_messages.values())
+        ours = [r for r in records if str(r.log_record.body) in expected_messages]
         assert len(ours) == 2, (
             f"expected 2 log records (one per node body); got {len(ours)}: "
             f"{[str(r.log_record.body) for r in ours]}"
         )
 
-        # Group by body for predictable lookup.
+        # Group by body for predictable lookup, indexing by the spec's
+        # emit-message values.
         by_body = {str(r.log_record.body): r for r in ours}
-        a_log = by_body["node a executing"]
-        b_log = by_body["node b executing"]
+        a_log = by_body[node_emit_messages["a"]]
+        b_log = by_body[node_emit_messages["b"]]
 
         # Invariant: all_logs_same_trace_id.
         trace_ids = {a_log.log_record.trace_id, b_log.log_record.trace_id}

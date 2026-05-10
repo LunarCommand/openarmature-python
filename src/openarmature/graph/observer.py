@@ -435,10 +435,12 @@ def _dispatch(context: _InvocationContext, event: NodeEvent) -> None:
                             stacklevel=2,
                         )
                 warnings.warn(
-                    "observer prepare_sync returned an awaitable; "
-                    "prepare_sync MUST be sync (define as `def`, not "
-                    "`async def`). The synchronous prep work did NOT "
-                    "run; log correlation will miss this node's span.",
+                    f"observer prepare_sync returned an awaitable "
+                    f"({type(result).__name__}); prepare_sync MUST be sync "
+                    f"(define as `def`, not `async def`). The returned "
+                    f"awaitable will not be awaited and is NOT guaranteed "
+                    f"to complete before the node body starts; log "
+                    f"correlation may miss this node's span.",
                     stacklevel=2,
                 )
     context.queue.put_nowait(_QueuedItem(event=event, observers=observers))
