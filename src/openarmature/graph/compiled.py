@@ -64,6 +64,7 @@ from openarmature.observability.correlation import (
     _reset_invocation_id,
     _reset_namespace_prefix,
     _set_active_dispatch,
+    _set_active_observer_span,
     _set_active_observers,
     _set_attempt_index,
     _set_correlation_id,
@@ -744,7 +745,11 @@ class CompiledGraph[StateT: State]:
                 # the node body — before any ``await`` — pick up the
                 # right trace_id/span_id via OTel's LoggingHandler.
                 # Detach in ``finally`` so retries / merge / completed
-                # dispatch don't run with the span still active.
+                # dispatch don't run with the span still active, and
+                # clear ``current_active_observer_span`` to ``None`` so
+                # the next dispatch that raises or early-returns from
+                # ``prepare_sync`` can't reveal this node's span as a
+                # stale value to the engine's read.
                 otel_token = _attach_active_observer_span()
                 try:
                     try:
@@ -763,6 +768,7 @@ class CompiledGraph[StateT: State]:
                         raise
                 finally:
                     _detach_active_observer_span(otel_token)
+                    _set_active_observer_span(None)
 
                 try:
                     merged = _merge_partial(s, partial, self.reducers, current)
@@ -1112,7 +1118,10 @@ class CompiledGraph[StateT: State]:
                 # trace_id/span_id. Per-instance bodies get their own
                 # attach inside their ``_step_function_node``
                 # innermost when the recursive invocation hits leaf
-                # nodes.
+                # nodes. ``finally`` clears the ContextVar so a later
+                # dispatch whose ``prepare_sync`` raises or early-
+                # returns can't reveal this fan-out's span as a stale
+                # value to the engine's read.
                 otel_token = _attach_active_observer_span()
                 try:
                     try:
@@ -1149,6 +1158,7 @@ class CompiledGraph[StateT: State]:
                         raise wrapped from e
                 finally:
                     _detach_active_observer_span(otel_token)
+                    _set_active_observer_span(None)
 
                 try:
                     merged = _merge_partial(s, partial, self.reducers, current)

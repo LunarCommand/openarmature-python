@@ -330,6 +330,13 @@ def current_active_observer_span() -> object | None:
     on the first line, before any ``await`` — pick up the span's
     trace_id/span_id via OTel's ``LoggingHandler``.
 
+    Lifecycle: the value is ``None`` outside a node-body scope (between
+    dispatches, during merge, during completed-event dispatch). The
+    engine's ``innermost`` clears it to ``None`` in its ``finally``
+    block right after the OTel detach — so a subsequent
+    ``prepare_sync`` that raises or early-returns can't reveal a stale
+    span from a previous node when the engine reads.
+
     Backend coupling note: typed as ``object | None`` so this primitive
     works in installs without the ``[otel]`` extras. OTel observers
     write OpenTelemetry ``Span`` instances; the engine treats the
