@@ -6,7 +6,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). The
 
 ## [Unreleased]
 
-## [0.5.0] — UNRELEASED
+## [0.5.0] — 2026-05-10
 
 First release on real PyPI. Catches the implementation up from spec v0.5.x to v0.10.0 across six phases — the spec accepted eight proposals while the python lib was at v0.3.1, and v0.5.0 lands all of them in one curated drop.
 
