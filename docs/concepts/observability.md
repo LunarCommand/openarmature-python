@@ -94,8 +94,9 @@ A walk-through:
   Checkpointer is attached, the engine emits one per successful save
   (post-`completed`, immediately after the save resolves).
   **Default observer subscriptions don't include `checkpoint_saved`**;
-  opt in via `phases={"checkpoint_saved"}` (or `"all"`) when
-  registering.
+  opt in via `phases={"checkpoint_saved"}` when registering (or
+  `phases=KNOWN_PHASES`, exported from `openarmature.graph`, to
+  subscribe to every phase including `checkpoint_saved`).
 
 - **`node_name`** — the node's local name in its immediate containing
   graph. For nested subgraphs, the inner name, NOT a qualified path.
