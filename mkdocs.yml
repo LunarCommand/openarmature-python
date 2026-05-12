@@ -84,7 +84,12 @@ nav:
     - Quickstart: getting-started/index.md
     - Authoring a Provider: getting-started/provider-authoring.md
   - Concepts: concepts/index.md
-  - Reference: reference/index.md
+  - Reference:
+    - reference/index.md
+    - openarmature.graph: reference/graph.md
+    - openarmature.llm: reference/llm.md
+    - openarmature.checkpoint: reference/checkpoint.md
+    - openarmature.observability: reference/observability.md
   - Contributing: contributing/index.md
 
 extra:
