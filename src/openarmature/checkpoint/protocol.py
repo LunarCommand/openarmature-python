@@ -1,10 +1,11 @@
 # Spec mapping (pipeline-utilities):
 # - Module realizes §10.1 (Checkpointer Protocol) + §10.2 (record types:
 #   CheckpointRecord, NodePosition, CheckpointSummary).
-# - Save fires per §10.3 (outermost-graph + subgraph-internal completed
-#   events).
-# - Fan-out internal events do NOT save in v1 per §10.7 (atomic-restart
-#   contract); proposal 0009 specifies the future per-instance variant.
+# - Save fires per §10.3 (outermost-graph + subgraph-internal + fan-out
+#   completed events).
+# - Fan-out instance-internal events do NOT save in v1 per §10.7
+#   (atomic-restart contract); proposal 0009 specifies the future
+#   per-instance variant.
 
 """Checkpointer Protocol + record types.
 

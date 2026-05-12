@@ -70,8 +70,9 @@ class FanOutEventConfig:
 
 # Spec: realizes graph-engine §6 NodeEvent (started/completed pair
 # model from proposal 0005, v0.6.0). The ``checkpoint_saved`` phase
-# is added by pipeline-utilities §10.8. ``fan_out_config`` is the
-# observability §5.4 / proposal 0013 (v0.10.0) addition.
+# is the Python shape for §10.8 save events (§10.8 SHOULDs an event
+# emit but leaves the shape implementation-defined). ``fan_out_config``
+# is the observability §5.4 / proposal 0013 (v0.10.0) addition.
 @dataclass(frozen=True)
 class NodeEvent:
     """A single node-boundary event delivered to observers.

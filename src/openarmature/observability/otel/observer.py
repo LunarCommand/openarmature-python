@@ -1,8 +1,12 @@
 # Spec mapping (observability):
 # - Observer-driven span lifecycle realizes §6 (RECOMMENDED path).
 # - Span status comes from §4.2 error-category mapping.
-# - Per-invocation state isolation uses ``invocation_id`` per §5.1.
-# - Subgraph dispatch spans implement §4.5; detached trace mode §4.4.
+# - Internal span maps are keyed by ``invocation_id``, which is also
+#   surfaced as the ``openarmature.invocation_id`` span attribute per
+#   §5.1.
+# - Subgraph dispatch span names come from §4.5 (parent graph's
+#   SubgraphNode name); hierarchy from §4.1/§4.3; detached trace mode
+#   from §4.4.
 # - ``correlation_id`` cross-run join key surfaces as the
 #   ``openarmature.correlation_id`` span attribute (§3.1).
 # - Private TracerProvider per §6 isolation requirement (prevents

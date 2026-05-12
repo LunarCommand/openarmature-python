@@ -1,7 +1,8 @@
 # Spec: realizes graph-engine §2 (compile-time errors) and §4
 # (runtime errors). The four runtime categories other than
 # ``state_validation_error`` carry a ``recoverable_state`` attribute
-# per §4. Fan-out-specific compile errors mirror pipeline-utilities §9.
+# per §4. Fan-out-specific error categories (both compile and runtime)
+# mirror pipeline-utilities §9.
 
 """Errors raised by the graph engine.
 

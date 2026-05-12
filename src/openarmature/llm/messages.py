@@ -1,6 +1,6 @@
-# Spec: realizes llm-provider §3 (Message + Tool typed surface) and §4
-# (validation timing). Tool-call ids preserved verbatim — no rewrite
-# or normalization, per spec §3.
+# Spec: realizes llm-provider §3 (Message + ToolCall typed surface +
+# validation timing) and §4 (Tool definition). Tool-call ids preserved
+# verbatim — no rewrite or normalization, per spec §3.
 
 """Message, Tool, ToolCall — the typed conversation surface.
 

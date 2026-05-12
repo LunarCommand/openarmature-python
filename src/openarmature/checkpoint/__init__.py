@@ -3,7 +3,7 @@
 # - Public surface satisfies §10.1 (Checkpointer Protocol),
 #   §10.2 (record types), §10.10 (error categories).
 # - Save fires at completed events for outermost-graph + subgraph-
-#   internal nodes per §10.3.
+#   internal + fan-out nodes per §10.3.
 # - Resume via ``invoke(resume_invocation=...)`` restores per §10.4.
 
 """openarmature.checkpoint — checkpointing capability.
