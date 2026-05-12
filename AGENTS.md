@@ -105,7 +105,7 @@ Commit subjects follow the 50/72 rule — subject ≤ 50 chars (hard cap
 ## Docs
 
 User-facing docs live in `docs/` and build via MkDocs Material; the
-deployed site is at `docs.openarmature.ai`. CI build + deploy is in
+deployed site is at `openarmature.ai`. CI build + deploy is in
 `.github/workflows/docs.yml`. Local preview: `uv run mkdocs serve`.
 
 ## Engine design notes that are easy to miss
