@@ -59,6 +59,18 @@ plugins:
             show_signature_annotations: true
             signature_crossrefs: true
   - glightbox
+  # /llms.txt + /llms-full.txt for AI coding assistants. Plain-text
+  # versions of the docs that assistants can ingest in one shot —
+  # matches the charter's "agent-friendly" framing.
+  - llmstxt:
+      full_output: llms-full.txt
+      sections:
+        Getting Started:
+          - getting-started/*.md
+        Concepts:
+          - concepts/*.md
+        Reference:
+          - reference/*.md
 
 markdown_extensions:
   - tables
@@ -95,6 +107,11 @@ nav:
 extra:
   # Hide the "Made with Material for MkDocs" footer.
   generator: false
+  # Versioned docs via mike. The dropdown shows once at least one
+  # version has been published (``mike deploy <version>``); pre-1.0
+  # it stays hidden because nothing's deployed.
+  version:
+    provider: mike
   social:
     - icon: fontawesome/brands/github
       link: https://github.com/LunarCommand/openarmature-python
