@@ -58,6 +58,7 @@ from openarmature.observability.correlation import (
 )
 
 from ..errors import (
+    LlmProviderError,
     ProviderAuthentication,
     ProviderInvalidModel,
     ProviderInvalidRequest,
@@ -463,7 +464,7 @@ def _wire_to_assistant_message(wire: dict[str, Any], *, lenient_args: bool) -> A
     )
 
 
-def classify_http_error(resp: httpx.Response) -> Exception:
+def classify_http_error(resp: httpx.Response) -> LlmProviderError:
     """Map a non-200 ``httpx.Response`` from an OpenAI-shape API to
     the right canonical error category.
 
