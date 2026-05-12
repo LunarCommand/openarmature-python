@@ -108,8 +108,11 @@ class MyProvider:
             message=AssistantMessage(content=wire_msg.get("content") or ""),
             finish_reason=choice["finish_reason"],
             usage=Usage(
-                input_tokens=usage.get("prompt_tokens", 0),
-                output_tokens=usage.get("completion_tokens", 0),
+                # All three fields are required; pass ``None`` when the
+                # provider doesn't report usage (spec §6 explicit).
+                prompt_tokens=usage.get("prompt_tokens"),
+                completion_tokens=usage.get("completion_tokens"),
+                total_tokens=usage.get("total_tokens"),
             ),
             raw=payload,
         )
@@ -151,8 +154,10 @@ When you ship a Provider, the following MUST hold (spec §3, §5, §7):
 **Boundary validation.**
 
 - [ ] Call `validate_message_list(messages)` to enforce spec §3
-      list-level invariants (non-empty, system-first-only, last must be
-      user-or-tool, tool_call_id resolution).
+      list-level invariants (non-empty list; `system` is optional but,
+      when present, must be the first message; last must be `user` or
+      `tool`; every `tool_call_id` matches an earlier assistant
+      `ToolCall.id`).
 - [ ] Call `validate_tools(tools)` if tools are accepted (duplicate-name
       check).
 
