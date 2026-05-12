@@ -47,7 +47,7 @@ from .messages import (
     UserMessage,
 )
 from .provider import Provider, validate_message_list, validate_tools
-from .providers import OpenAIProvider
+from .providers import OpenAIProvider, classify_http_error, parse_retry_after
 from .response import FinishReason, Response, RuntimeConfig, Usage
 
 __all__ = [
@@ -80,6 +80,8 @@ __all__ = [
     "ToolMessage",
     "Usage",
     "UserMessage",
+    "classify_http_error",
+    "parse_retry_after",
     "validate_message_list",
     "validate_tools",
 ]

@@ -6,7 +6,7 @@ fixtures. These unit tests fill gaps the conformance suite doesn't
 exercise directly: per-role construction errors that fixtures only
 hit through the boundary, the tool-call-id verbatim guarantee,
 the canonical category-string contract, and the
-``_classify_http_error`` mapping table.
+``classify_http_error`` mapping table.
 """
 
 from __future__ import annotations
@@ -40,6 +40,7 @@ from openarmature.llm import (
     ToolMessage,
     Usage,
     UserMessage,
+    classify_http_error,
     validate_message_list,
     validate_tools,
 )
@@ -272,19 +273,8 @@ def test_transient_categories_excludes_terminal_categories() -> None:
 
 
 # ---------------------------------------------------------------------------
-# _classify_http_error — wire-mapping table (spec §8.3)
+# classify_http_error — wire-mapping table (spec §8.3)
 # ---------------------------------------------------------------------------
-
-
-def _make_provider() -> OpenAIProvider:
-    """Build a provider for unit tests of ``_classify_http_error``.
-
-    The transport exists only to satisfy provider construction; these
-    tests pass explicit ``httpx.Response`` instances directly into
-    ``_classify_http_error`` and never perform wire calls.
-    """
-    transport = httpx.MockTransport(lambda _req: httpx.Response(204))
-    return OpenAIProvider(base_url="http://test", model="m", api_key="k", transport=transport)
 
 
 def _wire_response(
@@ -299,26 +289,22 @@ def _wire_response(
 
 
 def test_classify_401_to_authentication() -> None:
-    p = _make_provider()
-    err = p._classify_http_error(_wire_response(401))
+    err = classify_http_error(_wire_response(401))
     assert isinstance(err, ProviderAuthentication)
 
 
 def test_classify_403_to_authentication() -> None:
-    p = _make_provider()
-    err = p._classify_http_error(_wire_response(403))
+    err = classify_http_error(_wire_response(403))
     assert isinstance(err, ProviderAuthentication)
 
 
 def test_classify_400_to_invalid_request() -> None:
-    p = _make_provider()
-    err = p._classify_http_error(_wire_response(400))
+    err = classify_http_error(_wire_response(400))
     assert isinstance(err, ProviderInvalidRequest)
 
 
 def test_classify_404_with_model_not_found_to_invalid_model() -> None:
-    p = _make_provider()
-    err = p._classify_http_error(
+    err = classify_http_error(
         _wire_response(
             404,
             {"error": {"code": "model_not_found", "message": "no such model"}},
@@ -328,30 +314,24 @@ def test_classify_404_with_model_not_found_to_invalid_model() -> None:
 
 
 def test_classify_404_without_model_marker_to_unavailable() -> None:
-    p = _make_provider()
-    err = p._classify_http_error(_wire_response(404))
+    err = classify_http_error(_wire_response(404))
     assert isinstance(err, ProviderUnavailable)
 
 
 def test_classify_429_with_retry_after_to_rate_limit() -> None:
-    p = _make_provider()
-    err = p._classify_http_error(
-        _wire_response(429, {"error": {"message": "slow down"}}, {"Retry-After": "30"})
-    )
+    err = classify_http_error(_wire_response(429, {"error": {"message": "slow down"}}, {"Retry-After": "30"}))
     assert isinstance(err, ProviderRateLimit)
     assert err.retry_after == 30.0
 
 
 def test_classify_429_without_retry_after_to_rate_limit_no_value() -> None:
-    p = _make_provider()
-    err = p._classify_http_error(_wire_response(429))
+    err = classify_http_error(_wire_response(429))
     assert isinstance(err, ProviderRateLimit)
     assert err.retry_after is None
 
 
 def test_classify_503_with_model_not_loaded_to_model_not_loaded() -> None:
-    p = _make_provider()
-    err = p._classify_http_error(
+    err = classify_http_error(
         _wire_response(
             503,
             {"error": {"type": "model_not_loaded", "message": "loading"}},
@@ -361,26 +341,22 @@ def test_classify_503_with_model_not_loaded_to_model_not_loaded() -> None:
 
 
 def test_classify_503_without_marker_to_unavailable() -> None:
-    p = _make_provider()
-    err = p._classify_http_error(_wire_response(503))
+    err = classify_http_error(_wire_response(503))
     assert isinstance(err, ProviderUnavailable)
 
 
 def test_classify_500_to_unavailable() -> None:
-    p = _make_provider()
-    err = p._classify_http_error(_wire_response(500))
+    err = classify_http_error(_wire_response(500))
     assert isinstance(err, ProviderUnavailable)
 
 
 def test_classify_502_to_unavailable() -> None:
-    p = _make_provider()
-    err = p._classify_http_error(_wire_response(502))
+    err = classify_http_error(_wire_response(502))
     assert isinstance(err, ProviderUnavailable)
 
 
 def test_classify_504_to_unavailable() -> None:
-    p = _make_provider()
-    err = p._classify_http_error(_wire_response(504))
+    err = classify_http_error(_wire_response(504))
     assert isinstance(err, ProviderUnavailable)
 
 

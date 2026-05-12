@@ -250,7 +250,7 @@ class OpenAIProvider:
             raise ProviderUnavailable(str(exc)) from exc
 
         if resp.status_code != 200:
-            raise self._classify_http_error(resp)
+            raise classify_http_error(resp)
 
         try:
             payload_raw = resp.json()
@@ -361,51 +361,6 @@ class OpenAIProvider:
             raw=payload,
         )
 
-    # ------------------------------------------------------------------
-    # Error classification (spec §8.3)
-    # ------------------------------------------------------------------
-
-    def _classify_http_error(self, resp: httpx.Response) -> Exception:
-        """Map a non-200 ``httpx.Response`` to the right §7 category.
-        Returns the exception (not raises) so the caller can ``raise``
-        with consistent traceback context."""
-        status = resp.status_code
-        try:
-            body_raw = resp.json()
-        except ValueError:
-            body_raw = {}
-        body: dict[str, Any] = cast("dict[str, Any]", body_raw) if isinstance(body_raw, dict) else {}
-        error_block_raw = body.get("error")
-        error_block: dict[str, Any] = (
-            cast("dict[str, Any]", error_block_raw) if isinstance(error_block_raw, dict) else {}
-        )
-        error_type = error_block.get("type")
-        error_code = error_block.get("code")
-        message_raw = error_block.get("message")
-        message = message_raw if isinstance(message_raw, str) else None
-
-        if status in (401, 403):
-            return ProviderAuthentication(message or f"HTTP {status}")
-        if status == 400:
-            return ProviderInvalidRequest(message or "HTTP 400")
-        if status == 404:
-            # 404 with model-not-found body → invalid_model.
-            if error_code == "model_not_found" or _looks_like_model_not_found(error_type):
-                return ProviderInvalidModel(message or "model not found")
-            return ProviderUnavailable(message or "HTTP 404")
-        if status == 429:
-            retry_after = _parse_retry_after(resp.headers.get("Retry-After"))
-            return ProviderRateLimit(message or "HTTP 429", retry_after=retry_after)
-        if status == 503:
-            # 503 with model-loading body → not_loaded; otherwise
-            # generic unavailability.
-            if error_type == "model_not_loaded" or _looks_like_model_not_loaded(message):
-                return ProviderModelNotLoaded(message or "model not loaded")
-            return ProviderUnavailable(message or "HTTP 503")
-        if 500 <= status < 600:
-            return ProviderUnavailable(message or f"HTTP {status}")
-        return ProviderUnavailable(message or f"HTTP {status}")
-
 
 # ---------------------------------------------------------------------------
 # Wire-format helpers
@@ -505,11 +460,66 @@ def _wire_to_assistant_message(wire: dict[str, Any], *, lenient_args: bool) -> A
     )
 
 
-def _parse_retry_after(value: str | None) -> float | None:
+def classify_http_error(resp: httpx.Response) -> Exception:
+    """Map a non-200 ``httpx.Response`` from an OpenAI-shape API to
+    the right spec §7 error category.
+
+    Returns the exception (does not raise) so the caller can ``raise``
+    with consistent traceback context.
+
+    Reusable by third-party Provider implementations targeting any
+    OpenAI-compatible endpoint (vLLM, LM Studio, llama.cpp server,
+    etc.) — the wire shape is stable across these and the helper
+    saves implementers from reimplementing the spec §7 mapping table.
+    """
+    status = resp.status_code
+    try:
+        body_raw = resp.json()
+    except ValueError:
+        body_raw = {}
+    body: dict[str, Any] = cast("dict[str, Any]", body_raw) if isinstance(body_raw, dict) else {}
+    error_block_raw = body.get("error")
+    error_block: dict[str, Any] = (
+        cast("dict[str, Any]", error_block_raw) if isinstance(error_block_raw, dict) else {}
+    )
+    error_type = error_block.get("type")
+    error_code = error_block.get("code")
+    message_raw = error_block.get("message")
+    message = message_raw if isinstance(message_raw, str) else None
+
+    if status in (401, 403):
+        return ProviderAuthentication(message or f"HTTP {status}")
+    if status == 400:
+        return ProviderInvalidRequest(message or "HTTP 400")
+    if status == 404:
+        # 404 with model-not-found body → invalid_model.
+        if error_code == "model_not_found" or _looks_like_model_not_found(error_type):
+            return ProviderInvalidModel(message or "model not found")
+        return ProviderUnavailable(message or "HTTP 404")
+    if status == 429:
+        retry_after = parse_retry_after(resp.headers.get("Retry-After"))
+        return ProviderRateLimit(message or "HTTP 429", retry_after=retry_after)
+    if status == 503:
+        # 503 with model-loading body → not_loaded; otherwise
+        # generic unavailability.
+        if error_type == "model_not_loaded" or _looks_like_model_not_loaded(message):
+            return ProviderModelNotLoaded(message or "model not loaded")
+        return ProviderUnavailable(message or "HTTP 503")
+    if 500 <= status < 600:
+        return ProviderUnavailable(message or f"HTTP {status}")
+    return ProviderUnavailable(message or f"HTTP {status}")
+
+
+def parse_retry_after(value: str | None) -> float | None:
     """Parse a ``Retry-After`` header value to a float seconds count.
+
     HTTP allows seconds-int OR HTTP-date; this implementation handles
     the seconds-int form (the OpenAI/vendor norm) and ignores
-    HTTP-date."""
+    HTTP-date.
+
+    Reusable by third-party Provider implementations that need to
+    surface ``Retry-After`` to spec §7's ``retry_after`` field.
+    """
     if value is None:
         return None
     try:
@@ -651,4 +661,6 @@ def _make_llm_event(
 
 __all__ = [
     "OpenAIProvider",
+    "classify_http_error",
+    "parse_retry_after",
 ]

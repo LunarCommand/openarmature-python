@@ -14,6 +14,10 @@ This subpackage exists to keep the provider catalog grouped and to
 mirror the ``openarmature.graph.middleware`` layout.
 """
 
-from .openai import OpenAIProvider
+from .openai import OpenAIProvider, classify_http_error, parse_retry_after
 
-__all__ = ["OpenAIProvider"]
+__all__ = [
+    "OpenAIProvider",
+    "classify_http_error",
+    "parse_retry_after",
+]
