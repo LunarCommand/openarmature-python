@@ -121,8 +121,7 @@ resolves to 0):
 
 The fan-out node's own `started` / `completed` events carry a
 `fan_out_config` payload populated from the resolved
-`item_count` / `concurrency` / `error_policy` / `parent_node_name`
-(spec proposal 0013, v0.10.0).
+`item_count` / `concurrency` / `error_policy` / `parent_node_name`.
 
 Per-instance events have `fan_out_index = N` (0-based) and a
 namespace whose final element is the fan-out node's name — instances
@@ -134,14 +133,12 @@ namespace.
 
 A fan-out node's `completed` event triggers a save like any other
 outermost-graph or subgraph-internal node. **Per-instance internal
-events do NOT save in v1** — spec pipeline-utilities §10.7 documents
-the v1 atomic-restart contract: on resume, the fan-out re-runs
-end-to-end if it hadn't completed.
+events do NOT save** in the shipping version — on resume, the
+fan-out re-runs end-to-end if it hadn't completed (atomic restart).
 
-A v2 per-instance fan-out resume mode is the subject of an open
-spec proposal ([0009](https://github.com/LunarCommand/openarmature-spec/blob/main/proposals/0009-pipeline-utilities-per-instance-fan-out-resume.md)).
+A per-instance fan-out resume mode is planned but not yet shipped.
 The `fan_out_progress` field on `CheckpointRecord` is reserved for
-its eventual contents. Until it accepts, atomic restart is the
+its eventual contents. Until it lands, atomic restart is the
 shipping behavior.
 
 ## When to reach for fan-out

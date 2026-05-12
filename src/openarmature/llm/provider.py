@@ -1,24 +1,27 @@
-"""Provider Protocol + list-level message validation (spec §3, §5).
+# Spec: realizes llm-provider §3 (Message + validation timing),
+# §5 (Provider Protocol operations), §7 (canonical error categories).
+
+"""Provider Protocol + list-level message validation.
 
 A ``Provider`` is stateless — every call carries the full message
 list. It does not loop on tool calls (the caller is responsible for
 executing tools and making a follow-on ``complete()`` with results)
 and it does not retry on transient errors (that's middleware's job).
 
-Per spec §5 a provider MUST expose two operations:
+A provider MUST expose two operations:
 
 - ``async ready() -> None`` — verifies the bound model is reachable.
   A successful return implies the next ``complete()`` would not
-  raise §7 categories that surface mismatched configuration or
-  unloaded state.
+  raise errors that surface mismatched configuration or unloaded
+  state.
 - ``async complete(messages, tools=None, config=None) -> Response``
   — performs a single completion. Stateless, reentrant, MUST NOT
   mutate its inputs.
 
-This module also exports :func:`validate_message_list`: a list-
-level invariant check (per spec §3 "Validation timing") that
-complements per-message Pydantic validation. A single ``Message``
-can't see the rest of the list, so the boundary check enforces:
+This module also exports :func:`validate_message_list`: a list-level
+invariant check that complements per-message Pydantic validation. A
+single ``Message`` can't see the rest of the list, so the boundary
+check enforces:
 
 - The list is non-empty.
 - The first message MAY be ``system``; otherwise the list begins
@@ -27,7 +30,7 @@ can't see the rest of the list, so the boundary check enforces:
 - Every ``tool`` message's ``tool_call_id`` matches the ``id`` of an
   earlier assistant ``ToolCall``.
 
-Violations raise ``provider_invalid_request`` per §7.
+Violations raise ``provider_invalid_request``.
 """
 
 from __future__ import annotations
@@ -78,7 +81,7 @@ class Provider(Protocol):
 
 
 def validate_message_list(messages: Sequence[Message]) -> None:
-    """Validate list-level invariants per spec §3 + §5.
+    """Validate list-level invariants.
 
     Per-message constraints (system/user need non-empty content,
     assistant content-or-tool_calls, etc.) are enforced by Pydantic
@@ -141,8 +144,8 @@ def validate_message_list(messages: Sequence[Message]) -> None:
 
 
 def validate_tools(tools: Sequence[Tool] | None) -> None:
-    """Validate spec §4 tool-list invariants. Tool names MUST be
-    unique within a single ``complete()`` call."""
+    """Validate tool-list invariants. Tool names MUST be unique
+    within a single ``complete()`` call."""
     if not tools:
         return
     seen: set[str] = set()

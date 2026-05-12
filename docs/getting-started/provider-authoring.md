@@ -11,11 +11,11 @@ contract a Provider has to satisfy.
 
 ## What you implement
 
-The `Provider` Protocol is two async methods (spec §5):
+The `Provider` Protocol is two async methods:
 
 - `async ready() -> None` — verifies the bound model is reachable. A
-  successful return means the next `complete()` shouldn't raise §7
-  categories that surface mismatched configuration or unloaded state.
+  successful return means the next `complete()` shouldn't raise
+  errors that surface mismatched configuration or unloaded state.
 - `async complete(messages, tools=None, config=None) -> Response` —
   performs a single completion. **Stateless** (no per-call state held
   across invocations), **reentrant** (safe to call concurrently), and
@@ -108,8 +108,8 @@ class MyProvider:
             message=AssistantMessage(content=wire_msg.get("content") or ""),
             finish_reason=choice["finish_reason"],
             usage=Usage(
-                # All three fields are required; pass ``None`` when the
-                # provider doesn't report usage (spec §6 explicit).
+                # All three fields are required; pass ``None`` when
+                # the provider doesn't report usage.
                 prompt_tokens=usage.get("prompt_tokens"),
                 completion_tokens=usage.get("completion_tokens"),
                 total_tokens=usage.get("total_tokens"),
@@ -136,7 +136,7 @@ def _msg_to_wire(msg: Message) -> dict[str, Any]:
 
 ## Contract checklist
 
-When you ship a Provider, the following MUST hold (spec §3, §5, §7):
+When you ship a Provider, the following must hold:
 
 **Statelessness + reentrancy.**
 
@@ -153,15 +153,15 @@ When you ship a Provider, the following MUST hold (spec §3, §5, §7):
 
 **Boundary validation.**
 
-- [ ] Call `validate_message_list(messages)` to enforce spec §3
-      list-level invariants (non-empty list; `system` is optional but,
-      when present, must be the first message; last must be `user` or
-      `tool`; every `tool_call_id` matches an earlier assistant
-      `ToolCall.id`).
+- [ ] Call `validate_message_list(messages)` to enforce the
+      list-level invariants (non-empty list; `system` is optional
+      but, when present, must be the first message; last must be
+      `user` or `tool`; every `tool_call_id` matches an earlier
+      assistant `ToolCall.id`).
 - [ ] Call `validate_tools(tools)` if tools are accepted (duplicate-name
       check).
 
-**Error mapping (spec §7).**
+**Error mapping.**
 
 - [ ] Network failures (connection errors, timeouts) → `ProviderUnavailable`.
 - [ ] HTTP 401/403 → `ProviderAuthentication`.
@@ -172,13 +172,13 @@ When you ship a Provider, the following MUST hold (spec §3, §5, §7):
 - [ ] HTTP 503 with model-loading → `ProviderModelNotLoaded`; otherwise →
       `ProviderUnavailable`.
 - [ ] HTTP 5xx (other) → `ProviderUnavailable`.
-- [ ] 200 OK that fails to parse into spec §6 shape →
+- [ ] 200 OK that fails to parse into the expected response shape →
       `ProviderInvalidResponse`.
 
 For OpenAI-compatible endpoints, `classify_http_error` does the whole
 non-200 mapping table for you; the skeleton above just delegates.
 
-**Finish reasons (spec §6).**
+**Finish reasons.**
 
 - [ ] Return one of: `"stop"`, `"length"`, `"tool_calls"`,
       `"content_filter"`, `"error"`. Map the wire format's finish-reason
@@ -193,8 +193,7 @@ The skeleton omits things real providers usually need. Reach for
   `AssistantMessage` to the provider's expected shape, parsing tool
   results back from `ToolMessage`s.
 - **Observability spans** — opt-in `started`/`completed` events around
-  the wire call so the OTel observer can build LLM spans (spec
-  observability §5.5).
+  the wire call so the OTel observer can build LLM spans.
 - **Lenient response parsing** under `finish_reason="error"` — degraded
   responses surface what they can; tool-call arguments that fail to
   parse populate `arguments=None` instead of raising.
@@ -205,9 +204,7 @@ The skeleton omits things real providers usually need. Reach for
   `openarmature.llm`) to populate the `retry_after` field of
   `ProviderRateLimit` from the response header.
 
-When in doubt, the openarmature spec at
-[`openarmature-spec`](https://github.com/LunarCommand/openarmature-spec) is
-the source of truth. The Python conformance fixtures under
+The conformance fixtures under
 `tests/conformance/test_llm_provider.py` exercise the wire mapping
-end-to-end against the spec; a custom Provider passing those fixtures is
-correctly implementing the contract.
+end-to-end; a custom Provider that passes those fixtures matches the
+contract.

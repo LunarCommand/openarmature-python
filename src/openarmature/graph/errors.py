@@ -1,9 +1,14 @@
+# Spec: realizes graph-engine §2 (compile-time errors) and §4
+# (runtime errors). The four runtime categories other than
+# ``state_validation_error`` carry a ``recoverable_state`` attribute
+# per §4. Fan-out-specific compile errors mirror pipeline-utilities §9.
+
 """Errors raised by the graph engine.
 
-Each error class carries a `category` class attribute matching the canonical
-identifier mandated by spec §2 (compile-time) and §4 (runtime). Per spec §4,
-the four runtime categories other than state_validation_error MUST carry a
-recoverable_state attribute.
+Each error class carries a ``category`` class attribute matching the
+canonical category identifier. The four runtime categories other
+than ``state_validation_error`` carry a ``recoverable_state``
+attribute.
 """
 
 from typing import Any
@@ -13,7 +18,7 @@ class GraphError(Exception):
     """Base for all graph-engine errors."""
 
 
-# ===== Compile-time errors (spec §2) =====
+# ===== Compile-time errors =====
 
 
 class CompileError(GraphError):
@@ -63,8 +68,9 @@ class ConflictingReducers(CompileError):
 
 
 class MappingReferencesUndeclaredField(CompileError):
-    """Per spec v0.2.0 §2: a subgraph-as-node `inputs` or `outputs` mapping
-    names a field that is not declared in the relevant state schema."""
+    """Raised when a subgraph-as-node ``inputs`` or ``outputs``
+    mapping names a field that is not declared in the relevant state
+    schema."""
 
     category = "mapping_references_undeclared_field"
 
@@ -76,9 +82,8 @@ class MappingReferencesUndeclaredField(CompileError):
 
 
 class FanOutCountModeAmbiguous(CompileError):
-    """Per spec v0.4.0 §9: a fan-out node MUST specify exactly one of
-    ``items_field`` or ``count``. Specifying both or neither is a
-    compile error."""
+    """Raised when a fan-out node specifies both ``items_field`` and
+    ``count``, or neither. Exactly one is required."""
 
     category = "fan_out_count_mode_ambiguous"
 
@@ -88,8 +93,8 @@ class FanOutCountModeAmbiguous(CompileError):
 
 
 class FanOutFieldNotList(CompileError):
-    """Per spec v0.4.0 §9: a fan-out node's ``items_field`` MUST refer
-    to a declared list-typed field on the parent state schema."""
+    """Raised when a fan-out node's ``items_field`` does not refer to
+    a declared list-typed field on the parent state schema."""
 
     category = "fan_out_field_not_list"
 
@@ -99,12 +104,12 @@ class FanOutFieldNotList(CompileError):
         self.field_name = field_name
 
 
-# ===== Runtime errors (spec §4) =====
+# ===== Runtime errors =====
 
 
 class RuntimeGraphError(GraphError):
     """Base for runtime errors. The four non-validation categories carry a
-    `recoverable_state` attribute per spec §4."""
+    ``recoverable_state`` attribute."""
 
     category: str
 
@@ -177,14 +182,13 @@ class RoutingError(RuntimeGraphError):
 
 
 class FanOutEmpty(NodeException):
-    """Per spec v0.4.0 §9.1: a fan-out node resolved to zero instances
-    while its ``on_empty`` config was ``"raise"`` (the default).
+    """Raised when a fan-out node resolves to zero instances while
+    its ``on_empty`` config is ``"raise"`` (the default).
 
-    Per fixture 023's expected shape, this surfaces as a regular §4
-    ``node_exception`` (so it integrates with the existing error
-    propagation and recoverable-state machinery) but exposes an
-    additional ``fan_out_category`` attribute so callers can
-    distinguish empty-fan-out from generic node failures.
+    Surfaces as a regular ``node_exception`` (so it integrates with
+    the existing error propagation and recoverable-state machinery)
+    but exposes an additional ``fan_out_category`` attribute so
+    callers can distinguish empty-fan-out from generic node failures.
     """
 
     fan_out_category = "fan_out_empty"
@@ -201,9 +205,10 @@ class FanOutEmpty(NodeException):
 
 
 class FanOutInvalidCount(NodeException):
-    """Per spec v0.4.0 §9.1: a fan-out node's ``count`` callable returned
-    a negative integer at runtime. Same node_exception shape as
-    FanOutEmpty, with ``fan_out_category = "fan_out_invalid_count"``."""
+    """Raised when a fan-out node's ``count`` callable returns a
+    negative integer at runtime. Same node-exception shape as
+    :class:`FanOutEmpty`, with
+    ``fan_out_category = "fan_out_invalid_count"``."""
 
     fan_out_category = "fan_out_invalid_count"
 
@@ -214,9 +219,9 @@ class FanOutInvalidCount(NodeException):
 
 
 class FanOutInvalidConcurrency(NodeException):
-    """Per spec v0.4.0 §9.2: a fan-out node's ``concurrency`` callable
-    returned zero or a negative integer at runtime. Same node_exception
-    shape as FanOutEmpty."""
+    """Raised when a fan-out node's ``concurrency`` callable returns
+    zero or a negative integer at runtime. Same node-exception shape
+    as :class:`FanOutEmpty`."""
 
     fan_out_category = "fan_out_invalid_concurrency"
 
@@ -232,8 +237,9 @@ class FanOutInvalidConcurrency(NodeException):
 class StateValidationError(RuntimeGraphError):
     """State failed schema validation at a graph boundary.
 
-    Per spec §4 this category does NOT carry recoverable_state — at entry there
-    is no prior state to recover; at exit the failing state IS the final state.
+    Unlike the other runtime errors, this category does NOT carry
+    ``recoverable_state`` — at entry there is no prior state to
+    recover; at exit the failing state IS the final state.
     """
 
     category = "state_validation_error"

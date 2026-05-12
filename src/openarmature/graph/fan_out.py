@@ -1,8 +1,10 @@
+# Spec: realizes pipeline-utilities §9 (fan-out node).
+
 """Fan-out node — parallel per-item / per-count subgraph dispatch.
 
-Per spec pipeline-utilities §9: a fan-out node executes a compiled
-subgraph (or async callable) once per item in a designated parent
-state field, with instances running concurrently up to a configurable
+A fan-out node executes a compiled subgraph (or async callable) once
+per item in a designated parent state field, with instances running
+concurrently up to a configurable
 bound, and collects per-instance results back into a parent collection
 field.
 
@@ -57,9 +59,9 @@ ConcurrencyResolver = Callable[[Any], int | None]
 class FanOutConfig:
     """Frozen configuration for a :class:`FanOutNode`.
 
-    See spec §9 for field semantics. Validation happens at builder
-    compile time (see ``GraphBuilder.add_fan_out_node``); construction
-    here is unchecked beyond the obvious type-level constraints.
+    Validation happens at builder compile time (see
+    ``GraphBuilder.add_fan_out_node``); construction here is
+    unchecked beyond the obvious type-level constraints.
     """
 
     subgraph: CompiledGraph[Any]
@@ -113,10 +115,10 @@ class FanOutNode[ParentT: State, ChildT: State]:
     ) -> Mapping[str, Any]:
         """Execute the fan-out and return the merged partial update.
 
-        Per spec §9.1–§9.5: snapshot, resolve count + concurrency,
-        build per-instance states, run concurrently with the configured
-        error policy, fan-in collected/extra fields, write count_field
-        and errors_field if configured.
+        Snapshot, resolve count + concurrency, build per-instance
+        states, run concurrently with the configured error policy,
+        fan-in collected/extra fields, write count_field and
+        errors_field if configured.
 
         ``pre_resolved_count`` / ``pre_resolved_concurrency`` are the
         proposal-0013 v0.10.0 hooks: when the engine has already

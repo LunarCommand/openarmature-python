@@ -1,9 +1,11 @@
-"""OTel Logs Bridge integration (spec observability §7).
+# Spec: realizes observability §7 (logs correlation contract).
+
+"""OTel Logs Bridge integration.
 
 Provides :func:`install_log_bridge` — an opt-in helper that wires
 the stdlib :mod:`logging` root logger through the OTel Logs SDK so
 every log record emitted within an invocation carries the active
-``trace_id``/``span_id`` plus ``openarmature.correlation_id``.
+``trace_id`` / ``span_id`` plus ``openarmature.correlation_id``.
 
 Opt-in by design: users may have their own logging configuration we
 shouldn't override silently. Calling ``install_log_bridge(provider)``
@@ -37,16 +39,16 @@ def _install_correlation_id_factory() -> None:
     ROOT logger only fire for records originating directly on the
     root logger — Python's logging propagation walks ancestors'
     HANDLERS but not their filters. A filter on root therefore
-    misses every record from a child logger (the normal case;
-    every reasonable user does ``logger = logging.getLogger("module")``).
-    Spec §7 mandates the attribute appear on records emitted from
-    "anywhere within an invocation" — the factory hooks at record
-    construction, fires uniformly for every emit regardless of
-    which logger originated the record, and chains over any
-    user-installed factory rather than replacing it.
+    misses every record from a child logger (the normal case; every
+    reasonable user does ``logger = logging.getLogger("module")``).
+    The attribute MUST appear on records emitted from anywhere
+    within an invocation — the factory hooks at record construction,
+    fires uniformly for every emit regardless of which logger
+    originated the record, and chains over any user-installed
+    factory rather than replacing it.
 
-    Idempotent: re-calling skips installation if the current
-    factory is already the OA-installed one.
+    Idempotent: re-calling skips installation if the current factory
+    is already the OA-installed one.
     """
     from openarmature.observability.correlation import current_correlation_id
 
@@ -83,15 +85,15 @@ def install_log_bridge(
     installs a process-global :class:`logging.LogRecord` factory
     that injects ``openarmature.correlation_id`` on every record.
 
-    The factory placement matters per spec §7: "log records
-    emitted from anywhere within an invocation MUST carry
-    ``openarmature.correlation_id``." Filters added to the root
+    The factory placement matters: log records emitted from
+    anywhere within an invocation MUST carry
+    ``openarmature.correlation_id``. Filters added to the root
     logger fire only for records originating on root — Python's
-    propagation walks ancestor handlers but not ancestor filters
-    — so a root-logger filter misses every child-logger record.
-    The factory hook fires at record construction time, before any
-    logger or handler dispatch, so every record gets the
-    attribute regardless of which logger originated it.
+    propagation walks ancestor handlers but not ancestor filters —
+    so a root-logger filter misses every child-logger record. The
+    factory hook fires at record construction time, before any
+    logger or handler dispatch, so every record gets the attribute
+    regardless of which logger originated it.
 
     Idempotent: re-calling is a no-op (we check for the existing
     OA-tagged handler on the root logger AND for the OA-installed

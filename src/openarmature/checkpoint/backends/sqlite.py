@@ -1,4 +1,6 @@
-"""SQLite-backed Checkpointer (spec §10.11).
+# Spec: one of the reference backends listed in pipeline-utilities §10.11.
+
+"""SQLite-backed Checkpointer.
 
 Persists records to a SQLite database with WAL mode enabled. Durable
 across process crashes within a single host. One row per

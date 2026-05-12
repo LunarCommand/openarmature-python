@@ -1,25 +1,25 @@
 """Middleware infrastructure: protocol, chain composition, registration.
 
-Per spec pipeline-utilities §2 Concepts: a middleware is an async callable
-with the shape ``(state, next) -> partial_update``. The middleware chain
-composes outer-to-inner — the first middleware in the list runs first,
+A middleware is an async callable with the shape
+``(state, next) -> partial_update``. The middleware chain composes
+outer-to-inner — the first middleware in the list runs first,
 calls ``next(state)`` to invoke the next layer, and so on with the
 wrapped node at the inner end. Code before ``await next(...)`` is the
 pre-node phase (running on the way IN); code after is the post-node
 phase (running on the way OUT).
 
-Per §3 Registration: per-graph middleware composes OUTSIDE per-node
-middleware — the runtime chain is
+Per-graph middleware composes OUTSIDE per-node middleware — the
+runtime chain is
 ``[per_graph_outer_to_inner...] → [per_node_outer_to_inner...] → node``.
 
-Per §4: middleware does NOT cross the subgraph boundary. The parent's
+Middleware does NOT cross the subgraph boundary. The parent's
 middleware wraps the SubgraphNode dispatch as a single atomic call;
 the subgraph's own middleware wraps its internal nodes independently.
 
-Per §5: errors raised inside the chain (from the node or from inner
-middleware) propagate through ``await next(...)``. Middleware may catch
-and recover (returning a partial update) or re-raise. Uncaught exceptions
-become a graph-engine §4 ``node_exception`` once they reach the engine.
+Errors raised inside the chain (from the node or from inner
+middleware) propagate through ``await next(...)``. Middleware may
+catch and recover (returning a partial update) or re-raise. Uncaught
+exceptions become a ``node_exception`` once they reach the engine.
 """
 
 from __future__ import annotations
@@ -33,13 +33,13 @@ from ..state import State
 class NextCall(Protocol):
     """The ``next`` callable a middleware receives.
 
-    Calling it with a state invokes the next layer of the chain (or the
-    wrapped node, at the inner end) and returns the partial update from
-    that layer. Middleware MAY transform the state passed to ``next`` —
-    the transformed state flows down the chain but does NOT replace the
-    engine's pre-merge state at the outermost level (per §2: "the
-    transformed state is passed to ``next``, NOT to the engine's merge
-    step").
+    Calling it with a state invokes the next layer of the chain (or
+    the wrapped node, at the inner end) and returns the partial
+    update from that layer. Middleware MAY transform the state passed
+    to ``next`` — the transformed state flows down the chain but does
+    NOT replace the engine's pre-merge state at the outermost level
+    (the transformed state is passed to ``next``, NOT to the engine's
+    merge step).
     """
 
     async def __call__(self, state: Any, /) -> Mapping[str, Any]:
@@ -50,9 +50,9 @@ class NextCall(Protocol):
 class Middleware(Protocol):
     """An async callable that wraps the dispatch of a single node.
 
-    Per spec v0.4.0 pipeline-utilities §2: the shape is
-    ``(state, next) -> partial_update``. The middleware MUST return a
-    mapping of field names to values — same shape a node returns. It may:
+    The shape is ``(state, next) -> partial_update``. The middleware
+    MUST return a mapping of field names to values — same shape a
+    node returns. It may:
 
     - Inspect or transform ``state`` before calling ``next(state)``.
     - Inspect or transform the partial update returned from ``next``.

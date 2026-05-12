@@ -27,14 +27,14 @@ graph = (
 
 The engine writes a record at every `completed` event for outermost-
 graph nodes and subgraph-internal nodes. **Fan-out instance internal
-events do NOT save** in the shipping version (per spec
-pipeline-utilities §10.3 + §10.7 atomic-restart).
+events do NOT save** in the shipping version — atomic-restart is the
+fan-out contract.
 
 ## Saves are synchronous-by-contract
 
 The engine **awaits** every `Checkpointer.save` before continuing to
-the next node. This is mandatory per spec §10.3 and the load-bearing
-property that makes checkpointing useful at all: a crash immediately
+the next node. This is the load-bearing property that makes
+checkpointing useful at all: a crash immediately
 after a `completed` event cannot have lost the corresponding save,
 because the save resolves before the next node runs.
 
@@ -58,9 +58,9 @@ final = await graph.invoke(initial_state, resume_invocation="<id>")
   internal resumes), reconstructs the completed-node set from
   `record.completed_positions`, and continues from the first not-yet-
   completed node.
-- **If no record exists, the engine raises `CheckpointNotFound`** —
-  per spec §10.4 step 1. It does NOT silently start a fresh run; the
-  user must explicitly handle the not-found case (typically: drop the
+- **If no record exists, the engine raises `CheckpointNotFound`.**
+  It does NOT silently start a fresh run; the user must explicitly
+  handle the not-found case (typically: drop the
   `resume_invocation=` and re-invoke without it for a fresh start).
 
 `CheckpointRecordInvalid` surfaces when a record's `schema_version`
@@ -103,9 +103,9 @@ Field framing worth getting right:
   Outermost first; empty for an outer-level save. Inner-node saves
   populate it so resume can re-enter a subgraph from the right
   depth without re-projecting.
-- **`fan_out_progress: None` is reserved** for the v2 per-instance
-  fan-out resume mode (spec proposal 0009, currently Draft). In v1
-  it's always `None`.
+- **`fan_out_progress: None` is reserved** for a future per-instance
+  fan-out resume mode (planned, not yet shipped). In the shipping
+  version it's always `None`.
 
 ## The Checkpointer Protocol
 

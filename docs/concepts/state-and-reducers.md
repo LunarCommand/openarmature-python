@@ -59,12 +59,11 @@ while not at END:
     current_node = next_node_for(state)
 ```
 
-This is by design. Per the spec's
-[graph engine foundation proposal](https://github.com/LunarCommand/openarmature-spec/blob/main/proposals/0001-graph-engine-foundation.md),
-"checkpoint/resume, per-node streaming, persistent state backends, and
-human-in-the-loop interrupts" are explicit non-goals for the engine.
-They're pipeline-layer utilities that compose *on top of* the graph
-primitives. Keeping the engine one-job keeps it small.
+This is by design. Checkpoint/resume, per-node streaming, persistent
+state backends, and human-in-the-loop interrupts are explicit
+non-goals for the engine itself. They're pipeline-layer utilities
+that compose *on top of* the graph primitives. Keeping the engine
+one-job keeps it small.
 
 What you do have for "what happened":
 

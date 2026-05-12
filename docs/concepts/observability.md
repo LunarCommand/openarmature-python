@@ -62,7 +62,7 @@ Common pattern: graph-attached for global concerns (Sentry, metrics,
 structured tracing); invocation-scoped for per-request concerns (a
 request-ID closure, a per-call snapshot ring).
 
-## The NodeEvent shape (spec v0.6.0)
+## The NodeEvent shape
 
 ```python
 @dataclass(frozen=True)
@@ -105,8 +105,9 @@ A walk-through:
   + the current node's name, outermost-first. For a top-level node:
   `(node_name,)`. For a subgraph-internal node:
   `(outer_subgraph_node_name, inner_name)`. A *tuple of strings* —
-  per spec, implementations MUST NOT join with a delimiter at the
-  API boundary, so node names may contain any characters.
+  the framework keeps it as a tuple at the API boundary rather than
+  joining with a delimiter, so node names can contain any characters
+  without parsing ambiguity.
 
 - **`step`** — monotonic counter starting at 0, scoped to one
   outermost invocation. Subgraph-internal nodes increment the same
@@ -119,7 +120,7 @@ A walk-through:
   the outer state.
 
 - **`error`** — the wrapped runtime error on `completed` events that
-  failed. `event.error.category` gives the spec category;
+  failed. `event.error.category` gives the canonical error category;
   `event.error.__cause__` gives the original exception. **Edge /
   routing errors land here too** — see *Routing errors and the
   completed event* below.
@@ -136,8 +137,8 @@ A walk-through:
 
 - **`fan_out_config`** — populated on `started` / `completed` events
   for the *fan-out node itself*, carrying the resolved
-  `item_count` / `concurrency` / `error_policy` / `parent_node_name`
-  (spec proposal 0013, v0.10.0). `None` on every other event.
+  `item_count` / `concurrency` / `error_policy` / `parent_node_name`.
+  `None` on every other event.
 
 ## Routing errors and the completed event
 
@@ -250,8 +251,8 @@ Two identifiers travel with every invocation:
   having its own `invocation_id`.
 
 `correlation_id` is the load-bearing join key in the multi-backend
-scenario the charter calls out: a Langfuse trace, an OTel trace, and
-a structured log all end up with the same `correlation_id` even
+scenario: a Langfuse trace, an OTel trace, and a structured log all
+end up with the same `correlation_id` even
 though their `invocation_id`s differ. It's exported from the
 `openarmature.observability` package as `current_correlation_id` /
 `current_invocation_id` (and friends) for code that needs to thread
@@ -280,7 +281,7 @@ correlation:
 
 `OTelObserver` constructs a **private** `TracerProvider` from the
 processor you supply — it never registers globally and never reads
-`get_tracer_provider()`. This is mandated by spec observability §6.
+`get_tracer_provider()`. This isolation is intentional.
 
 The motivation is concrete: many production stacks already register a
 global `TracerProvider` (Langfuse v3's OpenInference integration is

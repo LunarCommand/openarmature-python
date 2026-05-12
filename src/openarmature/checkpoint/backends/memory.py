@@ -1,4 +1,6 @@
-"""In-memory Checkpointer (spec §10.11).
+# Spec: one of the reference backends listed in pipeline-utilities §10.11.
+
+"""In-memory Checkpointer.
 
 Keeps records in a Python ``dict`` keyed by ``invocation_id``. NOT
 durable across process crashes — useful for tests, short-lived runs,

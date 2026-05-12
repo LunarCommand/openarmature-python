@@ -27,6 +27,60 @@
   box-shadow: none;
 }
 
+/* ===== Landing CTAs (mode-agnostic) =====
+ * Both buttons on the landing — "Get started" and "View on GitHub" —
+ * render identically, primary class or not. Material's default
+ * primary fills the bg with primary-fg color; override both classes
+ * so they behave as outline buttons with a hover-fill.
+ *
+ * Default: ``#9d4edd`` outline + matching purple text + transparent
+ * background (so the surface color shows through, dark or light).
+ * Hover / focus: solid ``#9d4edd`` fill + white text + light-gray
+ * outline as the hover indicator. */
+.md-typeset .md-button,
+.md-typeset .md-button--primary {
+  background-color: transparent;
+  color: #9d4edd;
+  border-color: #9d4edd;
+}
+
+/* Hover/focus split per theme so each theme's body text color is
+ * applied explicitly — the mode-agnostic ``var(--md-default-fg-color)``
+ * variant resolved invisibly on the purple bg in practice. The
+ * scheme-attribute selector also raises specificity over Material's
+ * default ``.md-typeset .md-button:hover`` so the rule wins
+ * unambiguously regardless of cascade order. */
+[data-md-color-scheme="default"] .md-typeset .md-button:focus,
+[data-md-color-scheme="default"] .md-typeset .md-button:hover,
+[data-md-color-scheme="default"] .md-typeset .md-button--primary:focus,
+[data-md-color-scheme="default"] .md-typeset .md-button--primary:hover {
+  background-color: #9d4edd;
+  color: hsla(0, 0%, 0%, 0.87);
+  border-color: #2e2f35;
+}
+
+[data-md-color-scheme="slate"] .md-typeset .md-button:focus,
+[data-md-color-scheme="slate"] .md-typeset .md-button:hover,
+[data-md-color-scheme="slate"] .md-typeset .md-button--primary:focus,
+[data-md-color-scheme="slate"] .md-typeset .md-button--primary:hover {
+  background-color: #9d4edd;
+  color: hsla(225, 15%, 90%, 0.82);
+  border-color: #2e2f35;
+}
+
+/* The landing's six feature cards (``<div class="grid cards">``) are
+ * static — they don't link anywhere — so Material's default hover
+ * effect (border dissolves + elevation shadow) gives a misleading
+ * "I'm clickable" affordance. Pin the hover state to match the
+ * default to suppress the change entirely. */
+.md-typeset .grid.cards > ol > li:focus-within,
+.md-typeset .grid.cards > ol > li:hover,
+.md-typeset .grid.cards > ul > li:focus-within,
+.md-typeset .grid.cards > ul > li:hover {
+  box-shadow: none;
+  border-color: var(--md-default-fg-color--lightest);
+}
+
 /* ===== Dark-theme styling =====
  * All rules below are scoped to ``[data-md-color-scheme="slate"]`` so
  * the light theme keeps Material's defaults until we tackle it

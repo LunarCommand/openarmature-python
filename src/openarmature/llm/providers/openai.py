@@ -1,14 +1,17 @@
-"""OpenAI-compatible HTTPX-based provider (spec §8).
+# Spec: realizes llm-provider §8 (concrete OpenAI provider) including
+# the §8.3 wire-error mapping table.
 
-Implements the spec's :class:`Provider` Protocol against the OpenAI
-Chat Completions wire format (``POST /v1/chat/completions``). The
-same wire format is the de facto standard for vLLM, LM Studio,
-llama.cpp, and other local LLM servers, so this provider talks to
-all of them with the right ``base_url``.
+"""OpenAI-compatible HTTPX-based provider.
 
-**Error mapping (spec §8.3):**
+Implements the :class:`Provider` Protocol against the OpenAI Chat
+Completions wire format (``POST /v1/chat/completions``). The same
+wire format is the de facto standard for vLLM, LM Studio, llama.cpp,
+and other local LLM servers, so this provider talks to all of them
+with the right ``base_url``.
 
-| OpenAI condition                                  | Spec category                |
+**Error mapping:**
+
+| OpenAI condition                                  | Category                     |
 |---------------------------------------------------|------------------------------|
 | ``ConnectError``/``ConnectTimeout``/``ReadTimeout``/network | provider_unavailable |
 | HTTP 401, 403                                     | provider_authentication      |
@@ -17,7 +20,7 @@ all of them with the right ``base_url``.
 | HTTP 429 (with ``Retry-After`` → ``retry_after``) | provider_rate_limit          |
 | HTTP 400 (schema violation)                       | provider_invalid_request     |
 | HTTP 5xx (other)                                  | provider_unavailable         |
-| 200 OK that fails to parse into §6 shape          | provider_invalid_response    |
+| 200 OK that fails to parse into Response shape    | provider_invalid_response    |
 
 **``ready()`` probe.** Hits ``GET /v1/models`` and:
 
@@ -26,13 +29,13 @@ all of them with the right ``base_url``.
 - 200 + bound model in returned list → success.
 - 200 + bound model NOT in list → ``provider_invalid_model``.
 
-The spec's ``provider_model_not_loaded`` distinction needs a
-server-specific probe (LM Studio's loaded-vs-configured endpoint,
-vLLM's health endpoint, llama.cpp's runtime-status endpoint) that
-this base provider can't generically emit. Subclasses or
-purpose-built local-server provider variants close that gap; the
-base ``OpenAIProvider`` documents the limitation here rather than
-silently treating "model in catalog" as "model loaded."
+The ``provider_model_not_loaded`` distinction needs a server-specific
+probe (LM Studio's loaded-vs-configured endpoint, vLLM's health
+endpoint, llama.cpp's runtime-status endpoint) that this base
+provider can't generically emit. Subclasses or purpose-built
+local-server provider variants close that gap; the base
+``OpenAIProvider`` documents the limitation here rather than silently
+treating "model in catalog" as "model loaded."
 """
 
 from __future__ import annotations
@@ -188,13 +191,13 @@ class OpenAIProvider:
         tools: Sequence[Tool] | None = None,
         config: RuntimeConfig | None = None,
     ) -> Response:
-        """Single completion call per spec §5.
+        """Single completion call.
 
-        Pre-send validation runs first (per-message Pydantic + list-
-        level invariants per §3 "Validation timing"). HTTP errors
-        map to §7 categories per §8.3. The successful 200 body is
-        parsed into a :class:`Response` per §8.2 — failure to parse
-        raises ``provider_invalid_response``.
+        Pre-send validation runs first (per-message Pydantic +
+        list-level invariants). HTTP errors map to canonical
+        provider-error categories. The successful 200 body is parsed
+        into a :class:`Response` — failure to parse raises
+        ``provider_invalid_response``.
         """
         validate_message_list(messages)
         validate_tools(tools)
@@ -462,15 +465,15 @@ def _wire_to_assistant_message(wire: dict[str, Any], *, lenient_args: bool) -> A
 
 def classify_http_error(resp: httpx.Response) -> Exception:
     """Map a non-200 ``httpx.Response`` from an OpenAI-shape API to
-    the right spec §7 error category.
+    the right canonical error category.
 
-    Returns the exception (does not raise) so the caller can ``raise``
-    with consistent traceback context.
+    Returns the exception (does not raise) so the caller can
+    ``raise`` with consistent traceback context.
 
     Reusable by third-party Provider implementations targeting any
     OpenAI-compatible endpoint (vLLM, LM Studio, llama.cpp server,
     etc.) — the wire shape is stable across these and the helper
-    saves implementers from reimplementing the spec §7 mapping table.
+    saves implementers from reimplementing the mapping table.
     """
     status = resp.status_code
     try:
@@ -518,7 +521,7 @@ def parse_retry_after(value: str | None) -> float | None:
     HTTP-date.
 
     Reusable by third-party Provider implementations that need to
-    surface ``Retry-After`` to spec §7's ``retry_after`` field.
+    surface ``Retry-After`` to ``ProviderRateLimit.retry_after``.
     """
     if value is None:
         return None

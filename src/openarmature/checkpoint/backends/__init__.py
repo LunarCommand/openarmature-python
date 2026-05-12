@@ -1,3 +1,8 @@
+# Spec: pipeline-utilities §10.11 enumerates the reference backends
+# (in-memory + SQLite shipped here) and names sibling-package adapters
+# for Temporal / DBOS / Restate / Redis as informative future work,
+# not part of this package.
+
 """Concrete Checkpointer backends.
 
 Each backend satisfies the
@@ -5,7 +10,7 @@ Each backend satisfies the
 catalog ships :class:`InMemoryCheckpointer` (no durability; tests +
 short-lived runs) and :class:`SQLiteCheckpointer` (single-host
 durable). Sibling-package adapters for Temporal, DBOS, Restate, and
-Redis are informative per spec §10.11 — not specified here.
+Redis are out of scope here.
 
 Users typically import from the package root::
 

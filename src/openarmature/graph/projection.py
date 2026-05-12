@@ -1,13 +1,13 @@
 """Subgraph projection strategies.
 
-Per spec v0.2.0 §2 Subgraph: the default is **no projection in** (a subgraph
-runs from its own schema's field defaults) and **field-name matching for
-projection out** (subgraph fields whose names match parent fields are merged
+The default is **no projection in** (a subgraph runs from its own
+schema's field defaults) and **field-name matching for projection
+out** (subgraph fields whose names match parent fields are merged
 back into the parent via the parent's reducers).
 
-Spec v0.2.0 (proposal 0002) adds explicit input/output mapping: a
-subgraph-as-node MAY declare `inputs` (parent → subgraph, additive over the
-default of no-projection-in) and/or `outputs` (subgraph → parent, replacement
+A subgraph-as-node MAY also declare ``inputs`` (parent → subgraph,
+additive over the default of no-projection-in) and/or ``outputs``
+(subgraph → parent, replacement
 for field-name matching). Implemented here as `ExplicitMapping`.
 
 Strategies parameterize on parent and child state types so consumer-authored
@@ -27,13 +27,13 @@ def _field_name_match_projection[ChildT: State](
     parent_state: State,
     subgraph_state_cls: type[ChildT],
 ) -> Mapping[str, Any]:
-    """Spec v0.2 §2 default projection-out: subgraph fields whose names
-    match parent fields are merged back via the parent's reducers; non-
-    matching subgraph fields are discarded.
+    """Default projection-out: subgraph fields whose names match
+    parent fields are merged back via the parent's reducers;
+    non-matching subgraph fields are discarded.
 
-    Shared by `FieldNameMatching.project_out` (which always uses it) and
-    `ExplicitMapping.project_out` (which falls back to it when `outputs`
-    was not declared, per spec v0.2).
+    Shared by ``FieldNameMatching.project_out`` (which always uses it)
+    and ``ExplicitMapping.project_out`` (which falls back to it when
+    ``outputs`` was not declared).
     """
     parent_fields = set(type(parent_state).model_fields.keys())
     sub_fields = set(subgraph_state_cls.model_fields.keys())
@@ -74,13 +74,13 @@ class ProjectionStrategy[ParentT: State, ChildT: State](Protocol):
 
 
 class FieldNameMatching[ParentT: State, ChildT: State]:
-    """Default projection per spec v0.2.0 §2 Subgraph.
+    """Default subgraph projection strategy.
 
-    Parameterized for protocol conformance under generics. `ParentT` is not
-    consumed (the default projection ignores parent state on the way in),
-    but carrying the type variable keeps the default assignable to
-    `ProjectionStrategy[ParentT, ChildT]` without type gymnastics at the
-    SubgraphNode default-factory site.
+    Parameterized for protocol conformance under generics. ``ParentT``
+    is not consumed (the default projection ignores parent state on
+    the way in), but carrying the type variable keeps the default
+    assignable to ``ProjectionStrategy[ParentT, ChildT]`` without type
+    gymnastics at the SubgraphNode default-factory site.
     """
 
     def project_in(self, parent_state: ParentT, subgraph_state_cls: type[ChildT]) -> ChildT:
@@ -96,25 +96,27 @@ class FieldNameMatching[ParentT: State, ChildT: State]:
 
 
 class ExplicitMapping[ParentT: State, ChildT: State]:
-    """Per spec v0.2.0 §2: explicit input/output mapping.
+    """Explicit input/output mapping between parent and subgraph
+    state.
 
-    `inputs`: subgraph_field → parent_field. At entry, the named parent field's
-    current value is copied into the named subgraph field. Subgraph fields not
-    listed receive their schema-declared defaults — there is NO field-name
-    fallback (additive over the spec's default no-projection-in).
+    ``inputs``: subgraph_field → parent_field. At entry, the named
+    parent field's current value is copied into the named subgraph
+    field. Subgraph fields not listed receive their schema-declared
+    defaults — there is NO field-name fallback (additive over the
+    default no-projection-in).
 
-    `outputs`: parent_field → subgraph_field. At exit, the named subgraph
-    field's value is merged into the named parent field via the parent's
-    reducer. Subgraph fields not listed are discarded — `outputs` REPLACES
-    field-name matching for projection-out.
+    ``outputs``: parent_field → subgraph_field. At exit, the named
+    subgraph field's value is merged into the named parent field via
+    the parent's reducer. Subgraph fields not listed are discarded —
+    ``outputs`` REPLACES field-name matching for projection-out.
 
-    The two directions are independent: pass either, both, or neither. The
-    spec distinguishes "absent" (default applies) from "present but empty"
-    (only for `outputs`, where the defaults differ); `outputs=None` means
-    absent (fall back to field-name matching), `outputs={}` means present
-    and empty (project nothing). For `inputs` the two defaults coincide
-    (no-projection-in either way), so the distinction is only meaningful
-    for `outputs`.
+    The two directions are independent: pass either, both, or
+    neither. The ``outputs`` field distinguishes "absent" (default
+    applies) from "present but empty"; ``outputs=None`` means absent
+    (fall back to field-name matching), ``outputs={}`` means present
+    and empty (project nothing). For ``inputs`` the two defaults
+    coincide (no-projection-in either way), so the distinction is
+    only meaningful for ``outputs``.
     """
 
     def __init__(

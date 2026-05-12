@@ -1,17 +1,17 @@
+# Spec: realizes llm-provider §7 (seven canonical error categories).
+
 """Errors raised by an llm-provider implementation.
 
-Per spec llm-provider §7: a provider call (``ready()`` or
-``complete()``) MAY raise one of seven canonical category errors.
-Each error class carries a ``category`` class attribute matching the
-canonical string identifier so callers can dispatch on the category
-without matching exception types directly.
+A provider call (``ready()`` or ``complete()``) MAY raise one of
+seven canonical category errors. Each error class carries a
+``category`` class attribute matching the canonical string identifier
+so callers can dispatch on the category without matching exception
+types directly.
 
 This module is also the single source of truth for the canonical
 category strings — :data:`TRANSIENT_CATEGORIES` lives here, and
 ``openarmature.graph.middleware.retry``'s default classifier imports
-it. Phase 2's retry middleware deliberately hardcoded the set to
-avoid a circular dependency before llm-provider was implemented;
-now that this module exists, the strings have a real home.
+it.
 """
 
 from __future__ import annotations
@@ -19,7 +19,7 @@ from __future__ import annotations
 from typing import Any
 
 # ---------------------------------------------------------------------------
-# Canonical category strings (spec §7)
+# Canonical category strings (llm-provider spec §7)
 # ---------------------------------------------------------------------------
 
 PROVIDER_AUTHENTICATION = "provider_authentication"
@@ -57,7 +57,8 @@ TRANSIENT_CATEGORIES: frozenset[str] = frozenset(
 
 class LlmProviderError(Exception):
     """Base for all llm-provider errors. Each subclass carries a
-    ``category`` class attribute matching one of the spec §7 strings.
+    ``category`` class attribute matching one of the canonical
+    category strings above.
 
     Provider-originated errors SHOULD preserve the underlying provider
     exception as ``__cause__`` so callers can reach the wire-level
@@ -114,8 +115,8 @@ class ProviderRateLimit(LlmProviderError):
 
 class ProviderInvalidResponse(LlmProviderError):
     """Provider returned a malformed response that cannot be parsed
-    into the §6 shape (missing required fields, invalid tool_calls
-    structure, invalid JSON)."""
+    into the expected :class:`Response` shape (missing required
+    fields, invalid tool_calls structure, invalid JSON)."""
 
     category = PROVIDER_INVALID_RESPONSE
 

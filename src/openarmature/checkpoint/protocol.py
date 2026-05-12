@@ -1,4 +1,12 @@
-"""Checkpointer Protocol + record types (spec pipeline-utilities §10.1, §10.2).
+# Spec mapping (pipeline-utilities):
+# - Module realizes §10.1 (Checkpointer Protocol) + §10.2 (record types:
+#   CheckpointRecord, NodePosition, CheckpointSummary).
+# - Save fires per §10.3 (outermost-graph + subgraph-internal completed
+#   events).
+# - Fan-out internal events do NOT save in v1 per §10.7 (atomic-restart
+#   contract); proposal 0009 specifies the future per-instance variant.
+
+"""Checkpointer Protocol + record types.
 
 The :class:`Checkpointer` Protocol is the persistence seam between the
 engine's save/resume machinery and a concrete backend (in-memory,
@@ -10,8 +18,8 @@ the user's Pydantic state schema.
 A :class:`CheckpointRecord` is a frozen, hashable snapshot of one
 invocation's progress at one save point. The engine produces one
 record per ``completed`` event for outermost-graph nodes and
-subgraph-internal nodes (per §10.3). Fan-out instance internal events
-do NOT produce records in v1 (per §10.7's atomic-restart contract).
+subgraph-internal nodes. Fan-out instance internal events do NOT
+produce records in the shipping version (atomic-restart contract).
 
 The :data:`CHECKPOINT_SCHEMA_VERSION` constant is the single source
 of truth for the persisted record shape — bump it whenever the field
@@ -31,11 +39,17 @@ from typing import Any, Protocol
 # fan-out resume) is the concrete near-term candidate, since it
 # populates ``fan_out_progress`` and the load path will need to
 # distinguish v1 records (where it's None) from v2 records (where it
-# carries instance-level progress data). Backends that reject
-# mismatches MUST raise CheckpointRecordInvalid per §10.10.
+# carries instance-level progress data). Backends that reject mismatches
+# MUST raise CheckpointRecordInvalid per spec §10.10.
 CHECKPOINT_SCHEMA_VERSION = "1"
 
 
+# Spec: realizes pipeline-utilities §10.2 NodePosition. Field semantics
+# tied to graph-engine §6 NodeEvent (step shared; namespace here omits
+# the node's own name where NodeEvent.namespace includes it).
+# ``fan_out_index`` is part of the shape so a future v2 per-instance
+# fan-out resume mode can populate it without a record-shape migration
+# (proposal 0009).
 @dataclass(frozen=True)
 class NodePosition:
     """A single completed-node coordinate in the resume map.
@@ -45,23 +59,24 @@ class NodePosition:
     derivation relies on ``set`` membership to skip nodes that have
     already completed.
 
-    Per spec §10.2:
-    - ``namespace`` is the chain of containing-graph node names from
+    Fields:
+
+    - ``namespace`` — chain of containing-graph node names from
       outermost down to (but **not including**) this node. Empty for
       outermost-graph nodes; one entry for subgraph-internal nodes;
       two entries when nested two deep, and so on. Distinct from
-      graph-engine §6's NodeEvent namespace which includes the node's
-      own name — there NodeEvent.namespace == NodePosition.namespace +
-      (NodePosition.node_name,).
-    - ``node_name`` is the node's local name in its containing graph.
-    - ``step`` is the monotonic step counter at the time the node
-      completed (shared with §6 NodeEvent.step).
-    - ``attempt_index`` is the 0-based retry attempt index. The final
+      ``NodeEvent.namespace`` which includes the node's own name —
+      ``NodeEvent.namespace == NodePosition.namespace +
+      (NodePosition.node_name,)``.
+    - ``node_name`` — the node's local name in its containing graph.
+    - ``step`` — the monotonic step counter at the time the node
+      completed (shared with ``NodeEvent.step``).
+    - ``attempt_index`` — 0-based retry attempt index. The final
       successful attempt's index is what gets recorded.
-    - ``fan_out_index`` is populated only for events from inside a
-      fan-out instance — but per §10.3 those events do NOT produce
-      records in v1. The field is part of the position shape so v2
-      per-instance fan-out resume can populate it without a
+    - ``fan_out_index`` — populated only for events from inside a
+      fan-out instance. Those events do NOT produce records in the
+      shipping version; the field is part of the position shape so a
+      future per-instance fan-out resume can populate it without a
       record-shape migration.
     """
 
@@ -72,15 +87,18 @@ class NodePosition:
     fan_out_index: int | None = None
 
 
+# Spec: realizes pipeline-utilities §10.2 CheckpointRecord.
+# ``fan_out_progress`` is reserved for proposal 0009 (per-instance
+# fan-out resume); always ``None`` in the shipping version.
 @dataclass(frozen=True)
 class CheckpointRecord:
-    """One invocation's progress at one save point (spec §10.2).
+    """One invocation's progress at one save point.
 
     Frozen — backends MUST treat the record as immutable; the engine
     builds a fresh record per ``completed`` event rather than mutating
-    a shared one. The ``fan_out_progress`` field is reserved for the
-    v2 per-instance fan-out resume follow-on; in v1 it is always
-    ``None``.
+    a shared one. The ``fan_out_progress`` field is reserved for a
+    future per-instance fan-out resume mode; in the shipping version
+    it is always ``None``.
     """
 
     invocation_id: str
@@ -93,14 +111,16 @@ class CheckpointRecord:
     fan_out_progress: None = field(default=None)
 
 
+# Spec: realizes pipeline-utilities §10.1 CheckpointSummary. The four
+# declared fields are the spec-mandated minimum; implementations MAY
+# add backend-specific fields beyond these.
 @dataclass(frozen=True)
 class CheckpointSummary:
     """Lightweight record-level metadata returned by
-    :meth:`Checkpointer.list` (spec §10.1).
+    :meth:`Checkpointer.list`.
 
     Implementations MAY add backend-specific fields; the four declared
-    here are the spec-mandated minimum and form the cross-backend
-    portable subset callers can rely on.
+    here are the cross-backend portable subset callers can rely on.
     """
 
     invocation_id: str
@@ -122,8 +142,11 @@ class CheckpointFilter:
     correlation_id: str | None = None
 
 
+# Spec: realizes pipeline-utilities §10.1 Checkpointer Protocol. Save
+# semantics are synchronous-by-contract per §10.3; resume on missing
+# record raises ``CheckpointNotFound`` per §10.4 step 1.
 class Checkpointer(Protocol):
-    """Persistence seam for graph invocations (spec §10.1).
+    """Persistence seam for graph invocations.
 
     Implementations MUST be safe to share across concurrent
     invocations of the same graph (the engine does not serialize

@@ -1,12 +1,16 @@
+# Spec: realizes graph-engine §2 (Edge, END concepts). END is a
+# distinct engine sentinel (not a reserved node name) — using the
+# literal string ``"END"`` as a target fails ``DanglingEdge`` at compile.
+
 """Edges and the END sentinel.
 
-Per spec §2 Concepts (Edge, END): edges are static or conditional; each node
-has exactly one outgoing edge. END is a distinct engine sentinel (not a
-reserved node name) used as a routing target to halt execution.
+Edges are static or conditional; each node has exactly one outgoing
+edge. `END` is a distinct engine sentinel used as a routing target
+to halt execution.
 
-`ConditionalEdge` is generic on the outer graph's state type so the routing
-function's parameter is typed against the user's `State` subclass — not
-`Any` — at type-check time.
+`ConditionalEdge` is generic on the outer graph's state type so the
+routing function's parameter is typed against the user's `State`
+subclass — not `Any` — at type-check time.
 """
 
 from collections.abc import Callable

@@ -1,4 +1,7 @@
-"""openarmature.llm — llm-provider capability per spec proposal 0006.
+# Spec: this package implements the llm-provider capability (spec
+# proposal 0006).
+
+"""openarmature.llm — LLM provider abstraction.
 
 Public surface: typed ``Message`` / ``Tool`` / ``Response``, the
 ``Provider`` Protocol, the canonical error categories, and an
@@ -14,7 +17,7 @@ OpenAI-compatible provider. Users write::
         UserMessage,
     )
 
-All seven §7 error categories and the canonical ``TRANSIENT_CATEGORIES``
+All seven error categories and the canonical ``TRANSIENT_CATEGORIES``
 frozenset are also re-exported here so callers writing custom retry
 classifiers don't have to reach into ``openarmature.llm.errors``.
 """
