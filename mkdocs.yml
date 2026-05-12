@@ -10,12 +10,6 @@ edit_uri: edit/main/docs/
 # on the maintainer's workstation; 8765 is the project convention.
 dev_addr: "127.0.0.1:8765"
 
-# RELEASING.md is contributor-facing — not part of the rendered site.
-# (A future PR may fold it into ``contributing/`` as a proper page.)
-exclude_docs: |
-  RELEASING.md
-
-
 theme:
   name: material
   palette:
