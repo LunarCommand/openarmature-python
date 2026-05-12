@@ -1,0 +1,69 @@
+name: Docs
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "docs/**"
+      - "mkdocs.yml"
+      - "pyproject.toml"
+      - "src/**"
+      - ".github/workflows/docs.yml"
+  push:
+    branches: [main]
+    paths:
+      - "docs/**"
+      - "mkdocs.yml"
+      - "pyproject.toml"
+      - "src/**"
+      - ".github/workflows/docs.yml"
+
+# Least-privilege: read code for the build; ``deployments: write`` lets
+# the Cloudflare Pages action attach a deployment status to the commit.
+permissions:
+  contents: read
+  deployments: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          # mkdocstrings imports the package source; the spec submodule
+          # is not referenced by docs but keep the conventional recursive
+          # checkout consistent with ``ci.yml``.
+          submodules: recursive
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8.1.0
+        with:
+          enable-cache: true
+
+      - name: Sync deps (docs group)
+        # ``--group docs`` installs the project itself in editable mode
+        # plus the ``docs`` dependency group. mkdocstrings needs to
+        # import ``openarmature`` to introspect docstrings, which the
+        # editable install provides.
+        run: uv sync --frozen --group docs
+
+      - name: Build site (strict)
+        # ``--strict`` fails the build on any warning. Catches broken
+        # internal links, missing nav references, plugin misconfig
+        # early — before the deploy step.
+        run: uv run mkdocs build --strict
+
+      - name: Deploy to Cloudflare Pages
+        # Only deploy on pushes to main. PR builds prove the site
+        # builds but do not deploy.
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CF_API_TOKEN }}
+          accountId: ${{ secrets.CF_ACCOUNT_ID }}
+          command: pages deploy site --project-name=openarmature-docs --branch=main

@@ -1,0 +1,222 @@
+/* ===== Footer meta row (mode-agnostic structural fix) =====
+ * Compact, vertically-centered. Material's default leaves the copyright
+ * text and social icons at different baselines because each side has
+ * its own intrinsic padding. Force flex centering and reset side-
+ * specific padding so the block padding here controls the whole bar's
+ * height. */
+.md-footer-meta__inner {
+  padding-block: 5px;
+  align-items: center;
+}
+
+.md-copyright,
+.md-social {
+  padding: 0;
+  margin: 0;
+}
+
+.md-social__link {
+  padding-block: 0;
+}
+
+/* ===== Header shadow (mode-agnostic) =====
+ * Remove Material's default drop shadow under the top nav so the bar
+ * sits flat against the 1px divider line below it. */
+.md-header,
+.md-header[data-md-state="shadow"] {
+  box-shadow: none;
+}
+
+/* ===== Dark-theme styling =====
+ * All rules below are scoped to ``[data-md-color-scheme="slate"]`` so
+ * the light theme keeps Material's defaults until we tackle it
+ * separately. */
+
+/* Unified surface color: all major sections share the footer-nav strip
+ * color (the bar just above the meta footer with prev/next arrows).
+ *
+ * Brand highlight: ``#9d4edd`` (vivid purple). Drives link color,
+ * hover treatment, and the selected/active nav indicator — the same
+ * variable Material's prev/next links use for their hover, so the
+ * rollover language is consistent everywhere. */
+[data-md-color-scheme="slate"] {
+  --md-default-bg-color: var(--md-footer-bg-color);
+  --md-accent-fg-color: #9d4edd;
+  --md-typeset-a-color: #9d4edd;
+}
+
+/* Active left-nav item: purple text to indicate the current page. */
+[data-md-color-scheme="slate"] .md-nav__link--active,
+[data-md-color-scheme="slate"] .md-nav__item--active > .md-nav__link {
+  color: #9d4edd;
+}
+
+/* Content-area link color — Material's slate scheme resolves
+ * ``--md-typeset-a-color`` from primary (black in our config), then
+ * patches it to a built-in blue via a slate-only override. Target the
+ * link selector directly to win against that override. */
+[data-md-color-scheme="slate"] .md-typeset a,
+[data-md-color-scheme="slate"] .md-typeset a:hover,
+[data-md-color-scheme="slate"] .md-typeset a:focus,
+[data-md-color-scheme="slate"] .md-typeset a:active {
+  color: #9d4edd;
+}
+
+/* Hide the default Material book-icon logo next to the site name; the
+ * "OpenArmature" wordmark stands on its own and already links to the
+ * site root. */
+.md-header__button.md-logo {
+  display: none;
+}
+
+/* Hide Material's auto-generated site-name header at the top of the
+ * primary sidebar — we have an explicit ``OpenArmature: index.md``
+ * entry in the nav config which serves as the home link. */
+.md-nav--primary > .md-nav__title {
+  display: none;
+}
+
+/* Disable the repo-source fade-in animation that fires on every page
+ * load (the GitHub link in the top right). */
+.md-source,
+.md-source__icon,
+.md-source__repository,
+.md-source__facts,
+.md-source__fact {
+  animation: none !important;
+}
+
+[data-md-color-scheme="slate"] .md-header,
+[data-md-color-scheme="slate"] .md-footer-meta {
+  background-color: var(--md-footer-bg-color);
+}
+
+/* 1px subtle gray dividers between sections. Translucent white reads
+ * as gray on the dark surface and adapts if surface tone changes. */
+[data-md-color-scheme="slate"] .md-header {
+  border-bottom: 1px solid hsla(0, 0%, 100%, 0.1);
+}
+
+[data-md-color-scheme="slate"] .md-sidebar--primary {
+  border-right: 1px solid hsla(0, 0%, 100%, 0.1);
+}
+
+[data-md-color-scheme="slate"] .md-sidebar--secondary {
+  border-left: 1px solid hsla(0, 0%, 100%, 0.1);
+}
+
+[data-md-color-scheme="slate"] .md-footer-nav {
+  border-top: 1px solid hsla(0, 0%, 100%, 0.1);
+}
+
+[data-md-color-scheme="slate"] .md-footer-meta {
+  border-top: 1px solid hsla(0, 0%, 100%, 0.1);
+}
+
+/* Search box: 1px gray outline + slightly rounded corners, matching
+ * the divider language. */
+[data-md-color-scheme="slate"] .md-search__form {
+  border: 1px solid hsla(0, 0%, 100%, 0.2);
+  border-radius: 0.4rem;
+}
+
+/* ===== Light-theme styling =====
+ * Mirrors the dark-theme structure. Unified surface color ``#fbfefb``
+ * (near-white with a hint of green); 1px translucent-black dividers
+ * (15% black reads as a soft gray line); same ``#9d4edd`` highlight
+ * for links + active nav items; same rounded outline on search.
+ *
+ * Material's ``primary: custom`` (set in mkdocs.yml for this scheme)
+ * delegates the brand color to CSS variables — we point both
+ * ``--md-primary-fg-color`` (header bg) and ``--md-default-bg-color``
+ * (page bg) at ``#fbfefb`` so the entire surface is one tone.
+ * ``--md-primary-bg-color`` is the text color *on* the primary
+ * surface; dark text reads well on the light sage. */
+[data-md-color-scheme="default"] {
+  --md-primary-fg-color: #fbfefb;
+  --md-primary-bg-color: hsla(0, 0%, 0%, 0.87);
+  --md-primary-bg-color--light: hsla(0, 0%, 0%, 0.54);
+  --md-default-bg-color: #fbfefb;
+  --md-footer-bg-color: #fbfefb;
+  --md-accent-fg-color: #9d4edd;
+
+  /* Material's footer-fg variables default to white-on-dark; flip to
+   * dark-on-light so any element that reads them (icons, secondary
+   * footer text) renders against our light surface. */
+  --md-footer-fg-color: hsla(0, 0%, 0%, 0.87);
+  --md-footer-fg-color--light: hsla(0, 0%, 0%, 0.54);
+  --md-footer-fg-color--lighter: hsla(0, 0%, 0%, 0.32);
+}
+
+[data-md-color-scheme="default"] .md-header,
+[data-md-color-scheme="default"] .md-footer-meta {
+  background-color: #fbfefb;
+}
+
+[data-md-color-scheme="default"] .md-header {
+  border-bottom: 1px solid hsla(0, 0%, 0%, 0.15);
+}
+
+[data-md-color-scheme="default"] .md-sidebar--primary {
+  border-right: 1px solid hsla(0, 0%, 0%, 0.15);
+}
+
+[data-md-color-scheme="default"] .md-sidebar--secondary {
+  border-left: 1px solid hsla(0, 0%, 0%, 0.15);
+}
+
+[data-md-color-scheme="default"] .md-footer-nav {
+  border-top: 1px solid hsla(0, 0%, 0%, 0.15);
+}
+
+[data-md-color-scheme="default"] .md-footer-meta {
+  border-top: 1px solid hsla(0, 0%, 0%, 0.15);
+}
+
+[data-md-color-scheme="default"] .md-nav__link--active,
+[data-md-color-scheme="default"] .md-nav__item--active > .md-nav__link {
+  color: #9d4edd;
+}
+
+[data-md-color-scheme="default"] .md-typeset a,
+[data-md-color-scheme="default"] .md-typeset a:hover,
+[data-md-color-scheme="default"] .md-typeset a:focus,
+[data-md-color-scheme="default"] .md-typeset a:active {
+  color: #9d4edd;
+}
+
+[data-md-color-scheme="default"] .md-search__form {
+  border: 1px solid hsla(0, 0%, 0%, 0.2);
+  border-radius: 0.4rem;
+}
+
+/* Prev/next footer-nav link text matches the content heading color
+ * (same as body text — headings only differ by weight). */
+[data-md-color-scheme="default"] .md-footer__link,
+[data-md-color-scheme="default"] .md-footer__title,
+[data-md-color-scheme="default"] .md-footer__direction {
+  color: var(--md-default-fg-color);
+}
+
+/* Copyright text matches body text color. Material wraps the
+ * copyright in ``.md-copyright__highlight`` with its own color rule,
+ * so target both. */
+[data-md-color-scheme="default"] .md-copyright,
+[data-md-color-scheme="default"] .md-copyright__highlight {
+  color: var(--md-default-fg-color);
+}
+
+/* GH logo in the footer social row — inherit the dark body color so
+ * it's visible against the near-white bg. */
+[data-md-color-scheme="default"] .md-social__link {
+  color: var(--md-default-fg-color);
+}
+
+/* GitHub source icon + label render in dark text on the light header
+ * (default white-on-primary would be invisible on the near-white bg). */
+[data-md-color-scheme="default"] .md-header__source,
+[data-md-color-scheme="default"] .md-source,
+[data-md-color-scheme="default"] .md-source__icon,
+[data-md-color-scheme="default"] .md-source__repository {
+  color: hsla(0, 0%, 0%, 0.87);
+}

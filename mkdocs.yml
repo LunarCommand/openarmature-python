@@ -1,0 +1,96 @@
+site_name: OpenArmature
+site_url: https://docs.openarmature.ai/
+site_description: Workflow framework for LLM pipelines and tool-calling agents
+copyright: "©OpenArmature 2026 to present"
+repo_url: https://github.com/LunarCommand/openarmature-python
+repo_name: LunarCommand/openarmature-python
+edit_uri: edit/main/docs/
+
+# Local ``mkdocs serve`` binds here. Default 8000 was already in use
+# on the maintainer's workstation; 8765 is the project convention.
+dev_addr: "127.0.0.1:8765"
+
+# RELEASING.md is contributor-facing — not part of the rendered site.
+# (A future PR may fold it into ``contributing/`` as a proper page.)
+exclude_docs: |
+  RELEASING.md
+
+
+theme:
+  name: material
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: custom
+      accent: teal
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: black
+      accent: teal
+      toggle:
+        icon: material/weather-night
+        name: Switch to light mode
+  features:
+    - content.code.copy
+    - content.code.annotate
+    - content.tabs.link
+    - navigation.indexes
+    - navigation.sections
+    - navigation.tracking
+    - navigation.footer
+    - search.highlight
+    - search.suggest
+    - toc.follow
+
+plugins:
+  - search
+  - mkdocstrings:
+      handlers:
+        python:
+          paths: [src]
+          options:
+            members_order: source
+            separate_signature: true
+            filters: ["!^_"]
+            merge_init_into_class: true
+            show_signature_annotations: true
+            signature_crossrefs: true
+  - glightbox
+
+markdown_extensions:
+  - tables
+  - toc:
+      permalink: true
+  - admonition
+  - attr_list
+  - md_in_html
+  - footnotes
+  - pymdownx.details
+  - pymdownx.superfences
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.tasklist:
+      custom_checkbox: true
+
+nav:
+  - OpenArmature: index.md
+  - Getting Started: getting-started/index.md
+  - Concepts: concepts/index.md
+  - Reference: reference/index.md
+  - Contributing: contributing/index.md
+
+extra:
+  # Hide the "Made with Material for MkDocs" footer.
+  generator: false
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/LunarCommand/openarmature-python
+
+extra_css:
+  - stylesheets/extra.css

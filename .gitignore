@@ -21,6 +21,10 @@ dist/
 .mypy_cache/
 .pyright/
 
+# MkDocs build output + plugin cache
+site/
+.cache/
+
 # Coverage
 .coverage
 .coverage.*
