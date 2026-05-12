@@ -7,11 +7,14 @@ Python reference implementation of [OpenArmature](https://github.com/LunarComman
 ## Install
 
 ```bash
-pip install openarmature             # core
-pip install 'openarmature[otel]'     # with OpenTelemetry observability
+uv add openarmature                  # core
+uv add 'openarmature[otel]'          # with OpenTelemetry observability
+# or, with pip:
+pip install openarmature
+pip install 'openarmature[otel]'
 ```
 
-Or for editable local development:
+For editable local development:
 
 ```bash
 uv add --editable /path/to/openarmature-python

@@ -7,6 +7,8 @@ shape on one screen.
 ## Install
 
 ```bash
+uv add openarmature
+# or, with pip:
 pip install openarmature
 ```
 
