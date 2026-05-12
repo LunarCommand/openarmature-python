@@ -11,7 +11,7 @@ state, structural graph checks, and observability that doesn't require
 buy-in from every node.
 
 [Get started](getting-started/index.md){ .md-button .md-button--primary }
-[View on GitHub](https://github.com/LunarCommand/openarmature-python){ .md-button }
+[View on GitHub](https://github.com/LunarCommand/openarmature-python){ .md-button target="_blank" rel="noopener" }
 
 ---
 

@@ -1,35 +1,22 @@
-# Authoring a custom Provider
+# Authoring a Provider
 
-`openarmature` ships an `OpenAIProvider` for any OpenAI Chat
-Completions-compatible endpoint (vLLM, LM Studio, llama.cpp, the OpenAI
-API itself). If you need to target a different wire format — Anthropic
-Messages, Bedrock, an internal gateway, a hand-rolled inference service —
-implement the `Provider` Protocol yourself.
+When you target a wire format that isn't OpenAI Chat Completions —
+Anthropic Messages, Bedrock, an internal gateway, a hand-rolled
+inference service — implement the `Provider` Protocol yourself. The
+shipped `OpenAIProvider` is ~465 lines because it handles every
+edge case; a minimum-viable Provider is closer to 60 lines.
 
-This page walks through a minimal skeleton (~60 lines of real code) and the
-contract a Provider has to satisfy.
-
-## What you implement
-
-The `Provider` Protocol is two async methods:
-
-- `async ready() -> None` — verifies the bound model is reachable. A
-  successful return means the next `complete()` shouldn't raise
-  errors that surface mismatched configuration or unloaded state.
-- `async complete(messages, tools=None, config=None) -> Response` —
-  performs a single completion. **Stateless** (no per-call state held
-  across invocations), **reentrant** (safe to call concurrently), and
-  **non-mutating** (`messages` MUST NOT be modified). The Provider does
-  not loop on tool calls and does not retry — those are the caller's and
-  middleware's jobs respectively.
+If you're new to Providers, read [Model Providers](index.md) for the
+overview and contract guarantees before continuing.
 
 ## Skeleton
 
-A minimal OpenAI-compatible provider targeting any `/v1/chat/completions`
-endpoint. Compare with `openarmature.llm.OpenAIProvider` (~465 lines) to
-see what a full implementation adds (tool-call wire mapping, observability
-spans, the `/v1/models` catalog probe, retry-after parsing, lenient
-argument parsing under `finish_reason="error"`, etc.).
+A minimal OpenAI-compatible Provider targeting any
+`/v1/chat/completions` endpoint. Compare with
+`openarmature.llm.OpenAIProvider` to see what a full implementation
+adds (tool-call wire mapping, observability spans, the `/v1/models`
+catalog probe, retry-after parsing, lenient argument parsing under
+`finish_reason="error"`, etc.).
 
 ```python
 from collections.abc import Sequence
@@ -140,16 +127,16 @@ When you ship a Provider, the following must hold:
 
 **Statelessness + reentrancy.**
 
-- [ ] `complete()` MUST NOT carry state across calls. Each call sees the
-      full message list; there is no implicit conversation state.
+- [ ] `complete()` MUST NOT carry state across calls. Each call sees
+      the full message list; there is no implicit conversation state.
 - [ ] Multiple `complete()` calls MAY run concurrently on the same
-      Provider instance. The HTTP client should be safe for concurrent
-      use (httpx.AsyncClient is).
+      Provider instance. The HTTP client should be safe for
+      concurrent use (httpx.AsyncClient is).
 
 **Non-mutation.**
 
-- [ ] `messages` passed to `complete()` MUST NOT be mutated. Build wire
-      bodies from copies / projections; never modify the input.
+- [ ] `messages` passed to `complete()` MUST NOT be mutated. Build
+      wire bodies from copies / projections; never modify the input.
 
 **Boundary validation.**
 
@@ -158,53 +145,57 @@ When you ship a Provider, the following must hold:
       but, when present, must be the first message; last must be
       `user` or `tool`; every `tool_call_id` matches an earlier
       assistant `ToolCall.id`).
-- [ ] Call `validate_tools(tools)` if tools are accepted (duplicate-name
-      check).
+- [ ] Call `validate_tools(tools)` if tools are accepted
+      (duplicate-name check).
 
 **Error mapping.**
 
-- [ ] Network failures (connection errors, timeouts) → `ProviderUnavailable`.
+- [ ] Network failures (connection errors, timeouts) →
+      `ProviderUnavailable`.
 - [ ] HTTP 401/403 → `ProviderAuthentication`.
 - [ ] HTTP 400 → `ProviderInvalidRequest`.
-- [ ] HTTP 404 with model-not-found → `ProviderInvalidModel`; otherwise →
-      `ProviderUnavailable`.
-- [ ] HTTP 429 → `ProviderRateLimit` with `retry_after` from the header.
-- [ ] HTTP 503 with model-loading → `ProviderModelNotLoaded`; otherwise →
-      `ProviderUnavailable`.
+- [ ] HTTP 404 with model-not-found → `ProviderInvalidModel`;
+      otherwise → `ProviderUnavailable`.
+- [ ] HTTP 429 → `ProviderRateLimit` with `retry_after` from the
+      header.
+- [ ] HTTP 503 with model-loading → `ProviderModelNotLoaded`;
+      otherwise → `ProviderUnavailable`.
 - [ ] HTTP 5xx (other) → `ProviderUnavailable`.
 - [ ] 200 OK that fails to parse into the expected response shape →
       `ProviderInvalidResponse`.
 
-For OpenAI-compatible endpoints, `classify_http_error` does the whole
-non-200 mapping table for you; the skeleton above just delegates.
+For OpenAI-compatible endpoints, `classify_http_error` does the
+whole non-200 mapping table for you; the skeleton above just
+delegates.
 
 **Finish reasons.**
 
 - [ ] Return one of: `"stop"`, `"length"`, `"tool_calls"`,
-      `"content_filter"`, `"error"`. Map the wire format's finish-reason
-      vocabulary to these five.
+      `"content_filter"`, `"error"`. Map the wire format's
+      finish-reason vocabulary to these five.
 
 ## Beyond the skeleton
 
-The skeleton omits things real providers usually need. Reach for
-`openarmature.llm.OpenAIProvider` as a reference when you need any of:
+The skeleton omits things real Providers usually need. Reach for
+`openarmature.llm.OpenAIProvider` as a reference when you need any
+of:
 
 - **Tool calls** — wire-mapping the `tool_calls` array on
-  `AssistantMessage` to the provider's expected shape, parsing tool
+  `AssistantMessage` to the Provider's expected shape, parsing tool
   results back from `ToolMessage`s.
-- **Observability spans** — opt-in `started`/`completed` events around
-  the wire call so the OTel observer can build LLM spans.
-- **Lenient response parsing** under `finish_reason="error"` — degraded
-  responses surface what they can; tool-call arguments that fail to
-  parse populate `arguments=None` instead of raising.
-- **Catalog-aware `ready()`** — `GET /v1/models` plus checking whether
-  the bound model is in the returned catalog (and, for local servers
-  like LM Studio, whether it's actually loaded).
-- **`Retry-After` parsing** — use `parse_retry_after` (re-exported from
-  `openarmature.llm`) to populate the `retry_after` field of
+- **Observability spans** — opt-in `started`/`completed` events
+  around the wire call so the OTel observer can build LLM spans.
+- **Lenient response parsing** under `finish_reason="error"` —
+  degraded responses surface what they can; tool-call arguments that
+  fail to parse populate `arguments=None` instead of raising.
+- **Catalog-aware `ready()`** — `GET /v1/models` plus checking
+  whether the bound model is in the returned catalog (and, for local
+  servers like LM Studio, whether it's actually loaded).
+- **`Retry-After` parsing** — use `parse_retry_after` (re-exported
+  from `openarmature.llm`) to populate the `retry_after` field of
   `ProviderRateLimit` from the response header.
 
 The conformance fixtures under
 `tests/conformance/test_llm_provider.py` exercise the wire mapping
-end-to-end; a custom Provider that passes those fixtures matches the
-contract.
+end-to-end; a custom Provider that passes those fixtures matches
+the contract.

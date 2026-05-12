@@ -24,12 +24,14 @@ PYTHON_EXAMPLES = [example for example in find_examples(DOCS_DIR) if example.pre
 
 @pytest.mark.parametrize("example", PYTHON_EXAMPLES, ids=str)
 def test_docs_example(example: CodeExample, eval_example: EvalExample) -> None:
-    # Only ``getting-started/`` snippets are full runnable programs.
-    # Concept-page snippets are illustrative — they reference names
-    # defined out-of-band (a builder local, a not-yet-defined class)
-    # and aren't meant to stand alone. Drift detection still covers the
-    # core API via Quickstart + the Provider skeleton + the auto-generated
-    # mkdocstrings reference.
-    if "getting-started" not in str(example.path):
+    # Only snippets under sections holding full runnable programs are
+    # executed (``getting-started/`` Quickstart, ``model-providers/``
+    # Provider Protocol + skeleton). Concept-page snippets are
+    # illustrative — they reference names defined out-of-band (a
+    # builder local, a not-yet-defined class) and aren't meant to
+    # stand alone. Drift detection still covers the core API via the
+    # executed snippets plus the auto-generated mkdocstrings reference.
+    runnable_sections = ("getting-started", "model-providers")
+    if not any(section in str(example.path) for section in runnable_sections):
         pytest.skip("illustrative snippet, not a standalone program")
     eval_example.run(example)
