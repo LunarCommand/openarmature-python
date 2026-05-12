@@ -1,4 +1,8 @@
-"""Message, Tool, ToolCall — the typed conversation surface (spec §3 + §4).
+# Spec: realizes llm-provider §3 (Message + ToolCall typed surface +
+# validation timing) and §4 (Tool definition). Tool-call ids preserved
+# verbatim — no rewrite or normalization, per spec §3.
+
+"""Message, Tool, ToolCall — the typed conversation surface.
 
 A conversation is an ordered list of messages, one of four kinds
 discriminated by ``role``: ``system``, ``user``, ``assistant``,
@@ -11,13 +15,13 @@ time. List-level invariants — like "every tool message's
 ``tool_call_id`` matches an earlier assistant ``ToolCall.id``" — are
 checked at the ``complete()`` boundary, not at construction (a
 single Message can't see the rest of the list). Both layers are
-required: spec §3 "Validation timing".
+required.
 
-Tool-call ids are preserved verbatim per spec §3 — implementations
-MUST NOT rewrite or normalize provider-supplied ids. The ``id``
-field is a plain ``str`` with no normalizer, so a UUID with hyphens,
-a vendor-prefixed id (``bifrost_abc-def``), or any other string
-shape round-trips unchanged.
+Tool-call ids are preserved verbatim — implementations MUST NOT
+rewrite or normalize provider-supplied ids. The ``id`` field is a
+plain ``str`` with no normalizer, so a UUID with hyphens, a
+vendor-prefixed id (``bifrost_abc-def``), or any other string shape
+round-trips unchanged.
 """
 
 from __future__ import annotations
@@ -30,9 +34,9 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 class ToolCall(BaseModel):
     """An assistant's request to invoke a named tool.
 
-    Per spec §3: ``id`` is opaque correlator within a single message
-    list. Implementations MUST preserve provider-supplied ids
-    verbatim — neither rewriting nor normalizing.
+    ``id`` is an opaque correlator within a single message list.
+    Implementations MUST preserve provider-supplied ids verbatim —
+    neither rewriting nor normalizing.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -49,13 +53,12 @@ class ToolCall(BaseModel):
 class Tool(BaseModel):
     """A function the model may request the user execute.
 
-    Per spec §4: ``parameters`` is a JSON Schema (object schema)
-    describing the argument record. Kept as a plain ``dict[str, Any]``
-    rather than a typed schema class so the spec's
-    "JSON Schema, not language-native types" intent surfaces directly
-    — implementations may offer ergonomic constructors that compile
-    from native types (Pydantic ``model_json_schema()``) but the
-    surface is JSON Schema.
+    ``parameters`` is a JSON Schema (object schema) describing the
+    argument record. Kept as a plain ``dict[str, Any]`` rather than a
+    typed schema class so the "JSON Schema, not language-native
+    types" intent surfaces directly — implementations may offer
+    ergonomic constructors that compile from native types (Pydantic
+    ``model_json_schema()``) but the surface is JSON Schema.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -78,8 +81,8 @@ class _MessageBase(BaseModel):
 
 
 class SystemMessage(_MessageBase):
-    """Spec §3: system messages have non-empty ``content``; no
-    tool_calls; no tool_call_id."""
+    """System messages have non-empty ``content``; no tool_calls; no
+    tool_call_id."""
 
     role: Literal["system"] = "system"
     content: str
@@ -92,8 +95,8 @@ class SystemMessage(_MessageBase):
 
 
 class UserMessage(_MessageBase):
-    """Spec §3: user messages have non-empty ``content``; no
-    tool_calls; no tool_call_id."""
+    """User messages have non-empty ``content``; no tool_calls; no
+    tool_call_id."""
 
     role: Literal["user"] = "user"
     content: str
@@ -106,10 +109,10 @@ class UserMessage(_MessageBase):
 
 
 class AssistantMessage(_MessageBase):
-    """Spec §3: assistant messages MAY carry ``tool_calls``. If
-    ``tool_calls`` is present and non-empty, ``content`` MAY be empty
-    (the assistant is purely calling tools); otherwise ``content``
-    MUST be a non-empty string. ``tool_call_id`` MUST be absent."""
+    """Assistant messages MAY carry ``tool_calls``. If ``tool_calls``
+    is present and non-empty, ``content`` MAY be empty (the assistant
+    is purely calling tools); otherwise ``content`` MUST be a
+    non-empty string. ``tool_call_id`` MUST be absent."""
 
     role: Literal["assistant"] = "assistant"
     content: str = ""
@@ -126,10 +129,10 @@ class AssistantMessage(_MessageBase):
 
 
 class ToolMessage(_MessageBase):
-    """Spec §3: tool messages carry the textual result of a tool call.
+    """Tool messages carry the textual result of a tool call.
     ``tool_call_id`` MUST be present and match the ``id`` of an
-    earlier assistant ToolCall in the same message list. The list-
-    level matching is checked at the ``complete()`` boundary by
+    earlier assistant ToolCall in the same message list. The
+    list-level matching is checked at the ``complete()`` boundary by
     :func:`provider.validate_message_list`, not at construction."""
 
     role: Literal["tool"] = "tool"

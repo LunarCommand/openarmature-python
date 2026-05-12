@@ -1,9 +1,12 @@
+# Spec: this package implements the graph-engine capability. Compile-time
+# and runtime error categories come from graph-engine §2 and §4.
+
 """Public API for the OpenArmature graph engine.
 
-Re-exports the surface a user touches when building and running a graph: the
-state schema base, reducers, the builder/compiled pair, edge primitives and
-the END sentinel, the node/subgraph/projection seams, and the canonical
-compile-time and runtime error categories from spec §2 and §4.
+Re-exports the surface a user touches when building and running a
+graph: the state schema base, reducers, the builder/compiled pair,
+edge primitives and the END sentinel, the node/subgraph/projection
+seams, and the canonical compile-time and runtime error categories.
 """
 
 from .builder import GraphBuilder

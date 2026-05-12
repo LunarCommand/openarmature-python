@@ -1,8 +1,8 @@
 """Graph builder: mutable construction → compile to immutable `CompiledGraph`.
 
-Per spec §2: compilation MUST fail if the graph has no declared entry,
-unreachable nodes, dangling edges, a node with more than one outgoing edge,
-or a field with more than one declared reducer.
+Compilation MUST fail if the graph has no declared entry, unreachable
+nodes, dangling edges, a node with more than one outgoing edge, or a
+field with more than one declared reducer.
 
 `GraphBuilder[StateT]` is parameterized on the graph's state type. Node
 functions, conditional-edge functions, and the returned `CompiledGraph[StateT]`
@@ -109,23 +109,22 @@ class GraphBuilder[StateT: State]:
         errors_field: str | None = None,
         middleware: Iterable[Middleware] | None = None,
     ) -> Self:
-        """Register a fan-out node per pipeline-utilities §9.
+        """Register a fan-out node.
 
         Validates configuration at registration time:
 
-        - Exactly one of ``items_field`` or ``count`` MUST be specified
-          (``fan_out_count_mode_ambiguous`` otherwise).
-        - ``items_field`` MUST refer to a list-typed field on the parent
-          state schema (``fan_out_field_not_list`` otherwise).
-        - ``items_field`` mode requires ``item_field``; ``count`` mode
-          forbids ``item_field``.
+        - Exactly one of ``items_field`` or ``count`` MUST be
+          specified (``fan_out_count_mode_ambiguous`` otherwise).
+        - ``items_field`` MUST refer to a list-typed field on the
+          parent state schema (``fan_out_field_not_list`` otherwise).
+        - ``items_field`` mode requires ``item_field``; ``count``
+          mode forbids ``item_field``.
         - ``on_empty`` and ``error_policy`` MUST be one of the
-          spec-defined string literals.
+          permitted string literals (``"raise"`` / ``"noop"`` and
+          ``"fail_fast"`` / ``"collect"`` respectively).
         - ``inputs`` / ``extra_outputs`` / ``count_field`` field
           references go through the existing
           ``mapping_references_undeclared_field`` rule.
-
-        See spec §9 for full field semantics.
         """
         if name in self._nodes:
             raise ValueError(f"node {name!r} already declared")
@@ -240,13 +239,14 @@ class GraphBuilder[StateT: State]:
         return self
 
     def with_checkpointer(self, checkpointer: Checkpointer) -> Self:
-        """Register a Checkpointer for the compiled graph (spec §10.1.1).
+        """Register a Checkpointer for the compiled graph.
 
         At most one Checkpointer per graph; calling
-        ``with_checkpointer`` again replaces the previously-stored one.
-        Pass the result of :meth:`compile` to :meth:`CompiledGraph.invoke`
-        as usual; the engine fires saves at every ``completed`` event
-        for outermost-graph and subgraph-internal nodes per §10.3.
+        ``with_checkpointer`` again replaces the previously-stored
+        one. Pass the result of :meth:`compile` to
+        :meth:`CompiledGraph.invoke` as usual; the engine fires saves
+        at every ``completed`` event for outermost-graph and
+        subgraph-internal nodes.
         """
         self._checkpointer = checkpointer
         return self
@@ -254,10 +254,10 @@ class GraphBuilder[StateT: State]:
     def add_middleware(self, middleware: Middleware) -> Self:
         """Register a per-graph middleware applied to every node in this graph.
 
-        Per spec pipeline-utilities §3: per-graph middleware composes
-        OUTSIDE per-node middleware. Calling order is preserved
-        (outer-to-inner) — earlier ``add_middleware`` calls produce
-        outer layers in the runtime chain.
+        Per-graph middleware composes OUTSIDE per-node middleware.
+        Calling order is preserved (outer-to-inner) — earlier
+        ``add_middleware`` calls produce outer layers in the runtime
+        chain.
         """
         self._middleware.append(middleware)
         return self

@@ -5,6 +5,11 @@ repos:
       - id: trailing-whitespace
       - id: end-of-file-fixer
       - id: check-yaml
+        # ``mkdocs.yml`` uses ``!!python/name:...`` tags (e.g. for
+        # Material's emoji extension) that safe_load can't parse.
+        # ``--unsafe`` skips constructor validation but still catches
+        # malformed YAML, which is the bug class this hook is for.
+        args: ["--unsafe"]
       - id: check-toml
       - id: check-merge-conflict
       - id: check-added-large-files

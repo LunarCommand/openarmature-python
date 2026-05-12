@@ -1,4 +1,6 @@
-"""Retry middleware (canonical, spec pipeline-utilities §6.1).
+# Spec: canonical retry middleware per pipeline-utilities §6.1.
+
+"""Retry middleware (canonical).
 
 Wraps a node's chain with retry-on-transient-error logic. Each retry
 attempt produces its own ``started``/``completed`` event pair from the
@@ -30,14 +32,14 @@ from ._core import NextCall
 
 
 def default_classifier(exc: Exception, _state: Any) -> bool:
-    """Spec §6.1 default classifier — purely category-based, ignores state.
+    """Default classifier — purely category-based, ignores state.
 
     Returns True if either the exception itself or its ``__cause__``
     carries a ``category`` attribute matching ``TRANSIENT_CATEGORIES``.
     The cause-walking covers the common case of a graph-engine
-    ``NodeException`` wrapping an llm-provider transient — per the spec:
-    "a `node_exception` whose `__cause__` is a transient category MUST
-    be classified as transient."
+    ``NodeException`` wrapping an llm-provider transient: a
+    ``node_exception`` whose ``__cause__`` is a transient category
+    classifies as transient.
 
     The ``_state`` parameter is ignored by the default; the leading
     underscore is the canonical Python convention for "intentionally
@@ -63,10 +65,10 @@ def exponential_jitter_backoff(
 ) -> float:
     """Default backoff: ``random.uniform(0, min(cap, base * 2**attempt))``.
 
-    Per spec §6.1: jitter is mandatory — fixed exponential backoff
-    causes synchronized retries from many concurrent callers, amplifying
+    Jitter is mandatory — fixed exponential backoff causes
+    synchronized retries from many concurrent callers, amplifying
     rate-limit storms. ``base`` and ``cap`` are configurable; the
-    spec-mandated defaults are 1.0 and 30.0 seconds.
+    defaults are 1.0 and 30.0 seconds.
     """
     return random.uniform(0, min(cap, base * (2**attempt)))
 
@@ -93,7 +95,7 @@ OnRetryCallback = Callable[[Exception, int], Awaitable[None]]
 
 
 class RetryMiddleware:
-    """Spec §6.1 canonical retry middleware.
+    """Canonical retry middleware.
 
     Configuration:
 

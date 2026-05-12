@@ -1,18 +1,20 @@
+# Spec: realizes graph-engine §2 (Node concept) and pipeline-utilities
+# §3 (Registration: per-node middleware). Per-graph middleware composes
+# OUTSIDE the per-node list at runtime per §3.
+
 """Graph nodes.
 
-Per spec §2 Concepts (Node): a node is a named unit of work. Nodes MUST be
-asynchronous and MUST NOT mutate the state they receive — they return a
-partial update which the engine merges via reducers.
+A node is a named unit of work. Nodes are asynchronous and don't
+mutate the state they receive — they return a partial update which
+the engine merges via reducers.
 
-The `Node` Protocol exists so subgraphs can compose as nodes alongside
-plain function-backed nodes (see `subgraph.SubgraphNode`). Both are
-parameterized on `StateT` so the outer graph's state type flows through
-to node functions at type-check time.
+The `Node` Protocol exists so subgraphs can compose as nodes
+alongside plain function-backed nodes (see `subgraph.SubgraphNode`).
+Both are parameterized on `StateT` so the outer graph's state type
+flows through to node functions at type-check time.
 
-Per pipeline-utilities §3 Registration, each node carries an optional
-ordered tuple of `Middleware` declared at its registration site
-(per-node middleware). The engine composes per-graph middleware OUTSIDE
-this list at runtime per §3.
+Each node carries an optional ordered tuple of `Middleware` declared
+at its registration site (per-node middleware).
 """
 
 from collections.abc import Awaitable, Callable, Mapping
@@ -34,7 +36,7 @@ class Node[StateT: State](Protocol):
     @property
     def middleware(self) -> tuple[Middleware, ...]:
         """Per-node middleware applied at this node's registration site,
-        outer-to-inner. Composed inside any per-graph middleware per §3."""
+        outer-to-inner. Composed inside any per-graph middleware."""
         raise NotImplementedError
 
     async def run(self, state: StateT) -> Mapping[str, Any]:

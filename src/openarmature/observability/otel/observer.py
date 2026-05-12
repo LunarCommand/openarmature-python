@@ -1,44 +1,58 @@
-"""OTelObserver — observer-driven span lifecycle (spec observability §6).
+# Spec mapping (observability):
+# - Observer-driven span lifecycle realizes §6 (RECOMMENDED path).
+# - Span status comes from §4.2 error-category mapping.
+# - Internal span maps are keyed by ``invocation_id``, which is also
+#   surfaced as the ``openarmature.invocation_id`` span attribute per
+#   §5.1.
+# - Subgraph dispatch span names come from §4.5 (parent graph's
+#   SubgraphNode name); hierarchy from §4.1/§4.3; detached trace mode
+#   from §4.4.
+# - ``correlation_id`` cross-run join key surfaces as the
+#   ``openarmature.correlation_id`` span attribute (§3.1).
+# - Private TracerProvider per §6 isolation requirement (prevents
+#   global-provider auto-instrumentation libraries from emitting
+#   duplicate spans alongside ours).
 
-The observer subscribes to all three §6 phases (``started``,
+"""OTelObserver — observer-driven span lifecycle.
+
+The observer subscribes to all three node-event phases (``started``,
 ``completed``, ``checkpoint_saved``) plus the LLM-provider events the
 ``OpenAIProvider`` enqueues from inside node bodies. On a ``started``
 event it opens a leaf span and pushes it onto an in-flight map keyed
 by ``(namespace, attempt_index, fan_out_index)``; on the matching
-``completed`` event it pops the span, applies §4.2 status mapping,
-and closes it.
+``completed`` event it pops the span, applies the status mapping, and
+closes it.
 
 **Per-invocation state isolation.** All internal span maps are
-outer-keyed by ``invocation_id`` (per spec §5.1: each invocation has
-a fresh framework-minted UUIDv4). A single observer can be safely
-shared across concurrent invocations (e.g., an ASGI service running
+outer-keyed by ``invocation_id`` (each invocation has a fresh
+framework-minted UUIDv4). A single observer can be safely shared
+across concurrent invocations (e.g., an ASGI service running
 ``asyncio.gather([invoke(), invoke()])`` on one observer); each
 invocation's spans live in their own sub-dict, lazy-allocated on
-first event. The ``correlation_id`` is the cross-run join key (spec
-§3.1) and is set as the ``openarmature.correlation_id`` attribute on
-every span — it is *not* the state-scoping key, because resume runs
-preserve the correlation_id and would (incorrectly) cause the
-resumed run's spans to inherit the prior invocation's trace.
+first event. The ``correlation_id`` is the cross-run join key set as
+the ``openarmature.correlation_id`` attribute on every span — it is
+*not* the state-scoping key, because resume runs preserve the
+correlation_id and would (incorrectly) cause the resumed run's spans
+to inherit the prior invocation's trace.
 
-**No cross-event OTel context tokens.** Parent spans are resolved from
-the observer's own internal maps within a single event handler's
-scope — never from ``opentelemetry.context.get_current()``. Spans are
-opened with ``context=set_span_in_context(parent_span)`` directly
-rather than ``attach()``-ing tokens that would have to be ``detach()``
--ed on the matching completed event. This eliminates LIFO-violation
-hazards under interleaved fan-out events and makes the observer
-robust to dispatch ordering.
+**No cross-event OTel context tokens.** Parent spans are resolved
+from the observer's own internal maps within a single event
+handler's scope — never from ``opentelemetry.context.get_current()``.
+Spans are opened with ``context=set_span_in_context(parent_span)``
+directly rather than ``attach()``-ing tokens that would have to be
+``detach()``-ed on the matching completed event. This eliminates
+LIFO-violation hazards under interleaved fan-out events and makes
+the observer robust to dispatch ordering.
 
 Subtree isolation lives in dedicated dicts rather than the leaf-span
 key:
 
 - ``subgraph_spans`` — synthetic subgraph dispatch spans (the engine
-  wrapper is transparent per fixture 013, but observability §4.5
-  mandates a span). Keyed by namespace prefix. Open lazily on the
-  first deeper-namespace event, close when subsequent events leave
-  the prefix.
-- ``detached_roots`` — root spans for detached subgraphs (§4.4) and
-  per-instance detached fan-out roots. Each lives in its own fresh
+  wrapper is transparent but the observer mints a span anyway).
+  Keyed by namespace prefix. Open lazily on the first deeper-
+  namespace event, close when subsequent events leave the prefix.
+- ``detached_roots`` — root spans for detached subgraphs and per-
+  instance detached fan-out roots. Each lives in its own fresh
   ``trace_id``; the parent's dispatch span carries an OTel
   :class:`Link` to the detached trace.
 - ``_invocation_span`` — root invocation span keyed by
@@ -46,13 +60,13 @@ key:
   :meth:`shutdown`.
 
 Spans are emitted through a **private** :class:`TracerProvider`
-constructed by this observer — never the OTel global. Per spec §6
-TracerProvider isolation, registering globally would cause every
-auto-instrumentation library that writes to the global provider
-(OpenInference, opentelemetry-instrumentation-openai, LiteLLM, etc.)
-to emit duplicate spans alongside ours.
+constructed by this observer — never the OTel global. Registering
+globally would cause every auto-instrumentation library that writes
+to the global provider (OpenInference,
+opentelemetry-instrumentation-openai, LiteLLM, etc.) to emit
+duplicate spans alongside ours.
 
-Detached trace mode (§4.4) is implemented by minting a fresh
+Detached trace mode is implemented by minting a fresh
 :class:`SpanContext` with a new ``trace_id`` when entering a
 configured-detached subgraph or fan-out; the parent's dispatch span
 carries an OTel :class:`Link` to the detached trace.

@@ -1,8 +1,8 @@
 """Middleware subpackage — protocol + canonical implementations.
 
 The ``Middleware`` Protocol and chain-composition machinery live in
-:mod:`._core`; the spec-mandated canonical middleware (Retry, Timing)
-live in their own modules. The subpackage's public surface is
+:mod:`._core`; the canonical middleware (Retry, Timing) live in their
+own modules. The subpackage's public surface is
 re-exported here so callers can write::
 
     from openarmature.graph.middleware import (

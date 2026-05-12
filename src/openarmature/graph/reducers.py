@@ -1,8 +1,12 @@
+# Spec: realizes graph-engine §2 (Reducer concept) — last_write_wins,
+# append, and merge are the three built-ins the spec requires.
+
 """Reducers for merging node updates into state.
 
-Per spec §2 Concepts (Reducer): each state field has exactly one reducer; the
-default is last_write_wins. Implementations MUST provide last_write_wins,
-append (for list-typed fields), and merge (for mapping-typed fields).
+Each state field has exactly one reducer; the default is
+``last_write_wins``. The three built-ins are ``last_write_wins``,
+``append`` (for list-typed fields), and ``merge`` (for mapping-typed
+fields).
 """
 
 from collections.abc import Mapping

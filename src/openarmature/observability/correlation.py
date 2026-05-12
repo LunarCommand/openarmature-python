@@ -1,28 +1,31 @@
-"""Cross-backend correlation primitives (spec observability §3).
+# Spec: realizes observability §3 (correlation primitives).
+# ``current_correlation_id`` and ``_active_observers`` are
+# ContextVar-backed per §3.1's "MUST propagate via the language's
+# idiomatic context primitive" requirement.
+
+"""Cross-backend correlation primitives.
 
 Two ``ContextVar``-backed primitives that any observability backend
-mapping (OTel here, Langfuse / Datadog / custom in the future) consumes
-through a uniform user-readable surface:
+mapping (OTel here, Langfuse / Datadog / custom in the future)
+consumes through a uniform user-readable surface:
 
 - :data:`current_correlation_id` — the per-invocation cross-backend
   join key. Set on every outermost ``invoke()`` call (caller-supplied
-  or auto-generated UUIDv4 per spec §3.1) and reset on return. User
-  code in node bodies, middleware, and observers reads it via
+  or auto-generated UUIDv4) and reset on return. User code in node
+  bodies, middleware, and observers reads it via
   :func:`current_correlation_id`.
 - :data:`_active_observers` — the observer set in scope for any code
   running INSIDE a node body. Read by capability backends that need
-  to emit observer events from outside the engine's per-step machinery
-  (e.g., the llm-provider span hook puts a NodeEvent-shaped record on
-  the engine's delivery queue, then those observers receive it). The
-  engine sets this around each ``chain(state)`` invocation via
-  ``try/finally`` so reset is guaranteed even on exception.
+  to emit observer events from outside the engine's per-step
+  machinery (e.g., the llm-provider span hook puts a NodeEvent-shaped
+  record on the engine's delivery queue, then those observers receive
+  it). The engine sets this around each ``chain(state)`` invocation
+  via ``try/finally`` so reset is guaranteed even on exception.
 
 These primitives live in the core package — no OpenTelemetry
-dependency — because the spec §3.1 contract ("MUST propagate via the
-language's idiomatic context primitive — Python ``ContextVar``") is
-backend-agnostic. The OTel-specific surfacing lives under
-``openarmature.observability.otel`` and is gated behind the
-``[otel]`` extras.
+dependency — because the contract is backend-agnostic. The
+OTel-specific surfacing lives under ``openarmature.observability.otel``
+and is gated behind the ``[otel]`` extras.
 """
 
 from __future__ import annotations
@@ -37,7 +40,7 @@ if TYPE_CHECKING:
 
 
 # ---------------------------------------------------------------------------
-# Correlation ID — spec observability §3.1
+# Correlation ID (observability spec §3.1)
 # ---------------------------------------------------------------------------
 
 
@@ -48,10 +51,10 @@ def current_correlation_id() -> str | None:
     """Return the correlation ID for the current invocation, or
     ``None`` if no openarmature invocation is in scope.
 
-    Per spec §3.1 the correlation ID MUST be readable from anywhere
-    within an invocation's async call tree — node bodies, middleware,
-    observers — without explicit threading through function arguments.
-    This is the public reader.
+    The correlation ID is readable from anywhere within an
+    invocation's async call tree — node bodies, middleware, observers
+    — without explicit threading through function arguments. This is
+    the public reader.
 
     Returns ``None`` outside an invocation (e.g., at module import
     time, inside a test that runs without going through ``invoke()``).
@@ -77,7 +80,7 @@ def _reset_correlation_id(token: Token[str | None]) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Invocation ID — spec observability §5.1
+# Invocation ID (observability spec §5.1)
 #
 # The framework-generated UUIDv4 that ties spans of one invocation
 # together within a single backend. Distinct from ``correlation_id``
@@ -96,10 +99,10 @@ def current_invocation_id() -> str | None:
     invocation, or ``None`` if no openarmature invocation is in
     scope.
 
-    Per spec observability §5.1 every invocation produces a unique
-    UUIDv4 ``invocation_id``, framework-generated, surfaced as the
-    ``openarmature.invocation_id`` attribute on the invocation span
-    + on every per-backend record. This is the public reader for
+    Every invocation produces a unique UUIDv4 ``invocation_id``,
+    framework-generated, surfaced as the
+    ``openarmature.invocation_id`` attribute on the invocation span +
+    on every per-backend record. This is the public reader for
     backend mappings (OTel, future Langfuse) that need to populate
     that attribute.
     """
@@ -136,7 +139,7 @@ def current_active_observers() -> tuple[SubscribedObserver, ...]:
     the engine's per-step machinery (e.g., the llm-provider span hook
     inside ``OpenAIProvider.complete``) reads this to find which
     observers should receive the event. Combined with the engine's
-    delivery queue, this preserves spec §6's strict serial ordering
+    delivery queue, this preserves strict serial event ordering
     across all event sources within an invocation.
 
     Returns an empty tuple when no invocation is active, by design —
@@ -184,7 +187,7 @@ def current_dispatch() -> Callable[[NodeEvent], None] | None:
 
     Capability code emitting observer events from inside a node body
     calls this to put a ``NodeEvent``-shaped record on the engine's
-    delivery queue. The queue's serial worker preserves spec §6's
+    delivery queue. The queue's serial worker preserves
     per-invocation event ordering across all event sources (engine,
     checkpoint, LLM provider, future backends).
     """

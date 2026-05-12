@@ -1,17 +1,22 @@
-"""Response and RuntimeConfig (spec §6).
+# Spec: realizes llm-provider §6 (Response shape + RuntimeConfig).
+# ``raw`` follows charter §3.1 principle 8 (Transparency over
+# abstraction) — carries everything the provider returned, including
+# fields the spec doesn't normalize (logprobs, content-filter detail,
+# vendor extensions).
+
+"""Response and RuntimeConfig.
 
 The ``Response`` is what ``Provider.complete()`` returns: the
 assistant message, a finish reason, optional usage, and the verbatim
-parsed provider response. Per charter §3.1 principle 8
-"Transparency over abstraction", ``raw`` carries everything the
-provider returned — including fields the spec doesn't normalize
+parsed provider response. ``raw`` carries everything the provider
+returned — including fields the abstraction doesn't normalize
 (logprobs, content-filter detail, vendor-specific extensions) so
 users who need them can reach through the abstraction directly.
 
 ``RuntimeConfig`` is the optional per-call sampling-parameter record.
 Implementations MAY accept additional provider-specific fields; the
 four declared here (temperature, max_tokens, top_p, seed) are the
-spec-mandated minimum.
+mandated minimum.
 """
 
 from __future__ import annotations
@@ -30,7 +35,7 @@ FinishReason = Literal["stop", "length", "tool_calls", "content_filter", "error"
 
 
 class Usage(BaseModel):
-    """Token-accounting record per spec §6.
+    """Token-accounting record.
 
     Each field is a non-negative integer or ``None``. If the provider
     does not report usage, all three MUST be ``None``.
@@ -46,11 +51,11 @@ class Usage(BaseModel):
 class Response(BaseModel):
     """The result of a ``Provider.complete()`` call.
 
-    Per spec §6:
-
     - ``message`` is the assistant message returned by the model.
       Always ``role: "assistant"``. May carry ``tool_calls``.
-    - ``finish_reason`` is one of the five spec values.
+    - ``finish_reason`` is one of the five canonical values
+      (``"stop"`` / ``"length"`` / ``"tool_calls"`` /
+      ``"content_filter"`` / ``"error"``).
     - ``usage`` is the token record (all ``None`` if the provider
       didn't report usage).
     - ``raw`` is the parsed provider response, populated on every
@@ -67,11 +72,10 @@ class Response(BaseModel):
 
 
 class RuntimeConfig(BaseModel):
-    """Per-call sampling parameters and budget hints (spec §6).
+    """Per-call sampling parameters and budget hints.
 
     All four fields are optional. Implementations MAY accept
-    additional provider-specific fields; this is the spec-mandated
-    minimum.
+    additional provider-specific fields; this is the minimum.
     """
 
     model_config = ConfigDict(extra="allow")

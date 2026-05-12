@@ -43,7 +43,7 @@ jobs:
         # ``opentelemetry.*`` symbols come back Unknown and pyright
         # produces hundreds of false-positive errors on
         # ``tests/unit/test_observability_otel.py``.
-        run: uv sync --frozen --all-extras
+        run: uv sync --frozen --all-extras --group examples
 
       - name: Lint (ruff check)
         run: uv run ruff check .

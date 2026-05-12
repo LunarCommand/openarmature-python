@@ -1,13 +1,13 @@
 """Subgraphs as nodes.
 
-Per spec v0.2.0 §2 Subgraph: a compiled graph is used as a node inside another
-graph. The subgraph runs against its own state schema; projection between
-parent and subgraph is delegated to a `ProjectionStrategy` (default:
-`FieldNameMatching`; spec v0.2.0 also defines `ExplicitMapping`).
+A compiled graph is used as a node inside another graph. The
+subgraph runs against its own state schema; projection between parent
+and subgraph is delegated to a ``ProjectionStrategy`` (default:
+``FieldNameMatching``; ``ExplicitMapping`` is also available).
 
-Per spec v0.3.0 §6 Observer hooks: when a subgraph runs as part of a parent
-invocation, its inner-node events bubble up to outer observers (in addition
-to the subgraph's own attached observers), the step counter spans the
+When a subgraph runs as part of a parent invocation, its inner-node
+events bubble up to outer observers (in addition to the subgraph's
+own attached observers), the step counter spans the
 subgraph boundary, and the namespace extends. SubgraphNode.run accepts an
 optional `_InvocationContext` so the engine can thread that context through;
 called without it (e.g., direct test invocation), SubgraphNode falls back to
@@ -38,10 +38,10 @@ if TYPE_CHECKING:
 class SubgraphNode[ParentT: State, ChildT: State]:
     """A node backed by a compiled subgraph.
 
-    Per pipeline-utilities §4: the parent's per-node middleware on a
-    SubgraphNode wraps the subgraph dispatch as a single atomic call —
-    parent middleware does NOT cross into the subgraph's internal nodes
-    (those are wrapped by the subgraph's own middleware independently).
+    The parent's per-node middleware on a SubgraphNode wraps the
+    subgraph dispatch as a single atomic call — parent middleware
+    does NOT cross into the subgraph's internal nodes (those are
+    wrapped by the subgraph's own middleware independently).
     """
 
     name: str
@@ -63,11 +63,11 @@ class SubgraphNode[ParentT: State, ChildT: State]:
         public `invoke()` — a fresh root invocation with no parent observer
         chain.
 
-        When `context` is provided (the engine's normal path during a parent
-        run), the subgraph descends into a child context that shares the
-        parent's queue + step counter and extends the namespace and parent-
-        state stack. Observer events from inner nodes bubble up to outer
-        observers per spec v0.3.0 §6.
+        When `context` is provided (the engine's normal path during
+        a parent run), the subgraph descends into a child context
+        that shares the parent's queue + step counter and extends the
+        namespace and parent-state stack. Observer events from inner
+        nodes bubble up to outer observers.
         """
         # Resume-with-saved-inner-state (spec pipeline-utilities §10.4):
         # if the loaded record's latest save fired from inside this

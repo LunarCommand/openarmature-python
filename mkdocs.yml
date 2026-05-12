@@ -1,0 +1,126 @@
+site_name: OpenArmature
+site_url: https://docs.openarmature.ai/
+site_description: Workflow framework for LLM pipelines and tool-calling agents
+copyright: "©OpenArmature 2026 to present"
+repo_url: https://github.com/LunarCommand/openarmature-python
+repo_name: LunarCommand/openarmature-python
+edit_uri: edit/main/docs/
+
+# Local ``mkdocs serve`` binds here. Default 8000 was already in use
+# on the maintainer's workstation; 8765 is the project convention.
+dev_addr: "127.0.0.1:8765"
+
+theme:
+  name: material
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: custom
+      accent: teal
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: black
+      accent: teal
+      toggle:
+        icon: material/weather-night
+        name: Switch to light mode
+  features:
+    - content.code.copy
+    - content.code.annotate
+    - content.tabs.link
+    - navigation.indexes
+    - navigation.sections
+    - navigation.tracking
+    - navigation.footer
+    - search.highlight
+    - search.suggest
+    - toc.follow
+
+plugins:
+  - search
+  - mkdocstrings:
+      handlers:
+        python:
+          paths: [src]
+          options:
+            members_order: source
+            separate_signature: true
+            filters: ["!^_"]
+            merge_init_into_class: true
+            show_signature_annotations: true
+            signature_crossrefs: true
+  - glightbox
+  # /llms.txt + /llms-full.txt for AI coding assistants. Plain-text
+  # versions of the docs that assistants can ingest in one shot —
+  # matches the charter's "agent-friendly" framing.
+  - llmstxt:
+      full_output: llms-full.txt
+      sections:
+        Getting Started:
+          - getting-started/*.md
+        Concepts:
+          - concepts/*.md
+        Reference:
+          - reference/*.md
+
+markdown_extensions:
+  - tables
+  - toc:
+      permalink: true
+  - admonition
+  - attr_list
+  - md_in_html
+  - footnotes
+  - pymdownx.details
+  - pymdownx.emoji:
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg
+  - pymdownx.superfences
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.tasklist:
+      custom_checkbox: true
+
+nav:
+  - OpenArmature: index.md
+  - Getting Started:
+    - Quickstart: getting-started/index.md
+  - Concepts:
+    - concepts/index.md
+    - State and reducers: concepts/state-and-reducers.md
+    - Graphs: concepts/graphs.md
+    - Composition: concepts/composition.md
+    - Fan-out: concepts/fan-out.md
+    - Observability: concepts/observability.md
+    - Checkpointing: concepts/checkpointing.md
+  - Model Providers:
+    - model-providers/index.md
+    - Authoring a Provider: model-providers/authoring.md
+  - Reference:
+    - reference/index.md
+    - openarmature.graph: reference/graph.md
+    - openarmature.llm: reference/llm.md
+    - openarmature.checkpoint: reference/checkpoint.md
+    - openarmature.observability: reference/observability.md
+  - Contributing: contributing/index.md
+
+extra:
+  # Hide the "Made with Material for MkDocs" footer.
+  generator: false
+  # Versioned docs via mike. The dropdown shows once at least one
+  # version has been published (``mike deploy <version>``); pre-1.0
+  # it stays hidden because nothing's deployed.
+  version:
+    provider: mike
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/LunarCommand/openarmature-python
+
+extra_css:
+  - stylesheets/extra.css

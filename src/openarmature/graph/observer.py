@@ -1,8 +1,8 @@
 """Observer hooks: protocol, subscription, delivery queue, per-invocation context.
 
-Per spec v0.6.0 §6 (proposal 0005): each node attempt produces a started/
-completed event pair, and observers register with an optional `phases`
-set so they can subscribe to one phase or both. The graph never awaits
+Each node attempt produces a started/completed event pair, and
+observers register with an optional ``phases`` set so they can
+subscribe to one phase or both. The graph never awaits
 observer processing.
 
 This module defines:
@@ -50,13 +50,14 @@ class Observer(Protocol):
 
         compiled.attach_observer(log_observer)
 
-    Per spec v0.6.0 §6:
+    Contract:
 
-    - Observers MUST be async so the delivery queue can await each one
-      and coordinate ordering. The graph itself never awaits observers.
-    - Observers MUST NOT alter state, routing, or any other aspect of
-      the graph run — read-only side effects (logging, metrics, span
-      emission) only.
+    - Observers MUST be async so the delivery queue can await each
+      one and coordinate ordering. The graph itself never awaits
+      observers.
+    - Observers MUST NOT alter state, routing, or any other aspect
+      of the graph run — read-only side effects (logging, metrics,
+      span emission) only.
 
     The event parameter is positional-only (`event, /`) so structural
     conformance doesn't pin you to that name — any of `event`, `_event`,
@@ -78,8 +79,8 @@ class Observer(Protocol):
     ``prepare_sync`` is **opt-in via ``hasattr``** — no subclass or
     Protocol method required. Observers that don't define it skip
     the synchronous prep entirely; observers that do define it run
-    only for ``"started"``-phase events, errors warned not propagated
-    (same isolation contract as the async path per spec §6).
+    only for ``"started"``-phase events, with errors warned-not-
+    propagated (same isolation contract as the async path).
     """
 
     async def __call__(self, event: NodeEvent, /) -> None: ...
@@ -103,25 +104,24 @@ KNOWN_PHASES: frozenset[str] = frozenset({"started", "completed", "checkpoint_sa
 class SubscribedObserver:
     """An observer paired with its phase subscription set.
 
-    Per spec v0.6.0 §6: observers register with an optional `phases`
-    parameter naming the phase strings they want to receive. The
-    default is `ALL_PHASES` — historically named when there were only
-    two phases, now meaning "the default subscription" (`{"started",
-    "completed"}`). The new `"checkpoint_saved"` phase from
-    pipeline-utilities §10.8 is opt-in: subscribe to it explicitly via
-    `phases={"checkpoint_saved"}` (or include it in a custom set).
-    `KNOWN_PHASES` is the full "every phase the engine can produce"
+    Observers register with an optional ``phases`` parameter naming
+    the phase strings they want to receive. The default is
+    ``ALL_PHASES`` — historically named when there were only two
+    phases, now meaning "the default subscription"
+    (``{"started", "completed"}``). The ``"checkpoint_saved"`` phase
+    is opt-in: subscribe to it explicitly via
+    ``phases={"checkpoint_saved"}`` (or include it in a custom set).
+    ``KNOWN_PHASES`` is the full "every phase the engine can produce"
     set used by the registration-time validator.
 
-    Empty phase sets are forbidden — passing one raises `ValueError`
-    at registration time per the spec's "implementations SHOULD raise"
-    guidance, hardened to MUST here so misconfiguration surfaces
+    Empty phase sets are forbidden — passing one raises
+    ``ValueError`` at registration time so misconfiguration surfaces
     immediately.
 
-    Construct one of these directly when handing phase-filtered observers
-    to `CompiledGraph.invoke(observers=...)`. For the single-observer
-    `attach_observer` path, pass `phases=` as a keyword argument and the
-    engine wraps it for you.
+    Construct one of these directly when handing phase-filtered
+    observers to ``CompiledGraph.invoke(observers=...)``. For the
+    single-observer ``attach_observer`` path, pass ``phases=`` as a
+    keyword argument and the engine wraps it for you.
     """
 
     observer: Observer
@@ -129,7 +129,7 @@ class SubscribedObserver:
 
     def __post_init__(self) -> None:
         if not self.phases:
-            raise ValueError("phases must be non-empty; spec §6 forbids empty phase subscriptions")
+            raise ValueError("phases must be non-empty")
         invalid = self.phases - KNOWN_PHASES
         if invalid:
             raise ValueError(f"unknown phase(s): {sorted(invalid)}; allowed: {sorted(KNOWN_PHASES)}")
@@ -161,12 +161,12 @@ def _coerce_subscribed(
 
 @dataclass(frozen=True)
 class RemoveHandle:
-    """Returned by `CompiledGraph.attach_observer`. Call `.remove()` to
-    detach the observer. Idempotent — calling `.remove()` after the
-    observer is already detached is a no-op.
+    """Returned by ``CompiledGraph.attach_observer``. Call
+    ``.remove()`` to detach the observer. Idempotent — calling
+    ``.remove()`` after the observer is already detached is a no-op.
 
-    Per spec v0.6.0 §6: changes to the registered observer set during a
-    graph run do NOT take effect until the next invocation.
+    Changes to the registered observer set during a graph run do NOT
+    take effect until the next invocation.
     """
 
     _observers: list[SubscribedObserver]
@@ -379,9 +379,9 @@ def _dispatch(context: _InvocationContext, event: NodeEvent) -> None:
     prep — the wrapper acts as a uniform phase shield across both
     sync prep and async dispatch.
 
-    Errors from ``prepare_sync`` follow the same isolation contract as
-    the async path per spec §6: don't propagate, don't break siblings,
-    don't block the queueing or subsequent events. Reported via
+    Errors from ``prepare_sync`` follow the same isolation contract
+    as the async path: don't propagate, don't break siblings, don't
+    block the queueing or subsequent events. Reported via
     ``warnings.warn``.
 
     No-op when no observers exist for this depth — avoids paying the queue
@@ -449,17 +449,17 @@ def _dispatch(context: _InvocationContext, event: NodeEvent) -> None:
 async def deliver_loop(queue: asyncio.Queue[_QueuedItem | None]) -> None:
     """Background worker: read queued events, deliver to observers serially.
 
-    Per spec v0.6.0 §6:
-    - No two observers receive the same event concurrently (we await each).
-    - No observer receives event N+1 until everyone has finished N (the
-      loop processes one item fully before pulling the next).
-    - Observers whose `phases` set excludes the event's phase do NOT
-      receive it. Phase filter applies at delivery, not dispatch — the
-      engine still produces both events for every attempt.
-    - Observer exceptions don't propagate, don't break siblings, don't
-      block subsequent events. Reported via `warnings.warn`.
+    - No two observers receive the same event concurrently (we await
+      each).
+    - No observer receives event N+1 until everyone has finished N
+      (the loop processes one item fully before pulling the next).
+    - Observers whose ``phases`` set excludes the event's phase do
+      NOT receive it. Phase filter applies at delivery, not dispatch
+      — the engine still produces both events for every attempt.
+    - Observer exceptions don't propagate, don't break siblings,
+      don't block subsequent events. Reported via ``warnings.warn``.
 
-    The loop terminates when it receives `_DRAIN_SENTINEL` (None).
+    The loop terminates when it receives ``_DRAIN_SENTINEL`` (None).
     """
     while True:
         item = await queue.get()

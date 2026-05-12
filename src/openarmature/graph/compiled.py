@@ -1,24 +1,24 @@
 """Compiled graph + execute loop.
 
-Per spec §3 Execution model: execution begins at the entry node; each step
-runs a node, merges its partial update via per-field reducers, then evaluates
-the outgoing edge against the post-update state to choose the next node (or
-END to halt).
+Execution begins at the entry node; each step runs a node, merges
+its partial update via per-field reducers, then evaluates the
+outgoing edge against the post-update state to choose the next node
+(or END to halt).
 
-Per spec §4 Error semantics: node, edge, reducer, and routing errors carry
-recoverable state; state validation errors do not.
+Node, edge, reducer, and routing errors carry recoverable state;
+state validation errors do not.
 
-Per spec v0.6.0 §6 Observer hooks: each node attempt produces a
-started/completed event PAIR. The engine dispatches the started event
-before invoking the wrapped node function and the completed event after
-the reducer merge succeeds (with `post_state` populated) or after the
-node, reducer, or state validation fails (with `error` populated).
-Routing errors do NOT produce their own event pair — they arise after
-the preceding node's completed event has already been dispatched.
+Each node attempt produces a started/completed event PAIR. The
+engine dispatches the started event before invoking the wrapped node
+function and the completed event after the reducer merge succeeds
+(with ``post_state`` populated) or after the node, reducer, or state
+validation fails (with ``error`` populated). Routing errors do NOT
+produce their own event pair — they land on the preceding node's
+``completed`` event with ``error`` populated.
 
-`CompiledGraph[StateT]` and `_merge_partial[StateT]` carry the concrete state
-subclass through to `invoke()`'s return type, so consumers don't need
-`cast(MyState, ...)` at the call site.
+``CompiledGraph[StateT]`` and ``_merge_partial[StateT]`` carry the
+concrete state subclass through to ``invoke()``'s return type, so
+consumers don't need ``cast(MyState, ...)`` at the call site.
 """
 
 from __future__ import annotations
@@ -158,9 +158,9 @@ def _merge_partial[StateT: State](
 ) -> StateT:
     """Apply per-field reducers to merge a node's partial update into prior state.
 
-    Re-validates the resulting state against the schema (per spec §2 SHOULD
-    validate at node boundaries). Wraps reducer failures as `ReducerError` and
-    schema failures as `StateValidationError`.
+    Re-validates the resulting state against the schema (validation
+    happens at node boundaries). Wraps reducer failures as
+    ``ReducerError`` and schema failures as ``StateValidationError``.
     """
 
     new_values = prior.model_dump()
@@ -285,43 +285,42 @@ class CompiledGraph[StateT: State]:
     ) -> RemoveHandle:
         """Register a graph-attached observer.
 
-        Per spec v0.6.0 §6: graph-attached observers fire on every invocation
-        of this graph until removed — including when this graph runs as a
-        subgraph inside a parent. Returns a `RemoveHandle` whose `.remove()`
-        method detaches the observer; idempotent.
+        Graph-attached observers fire on every invocation of this
+        graph until removed — including when this graph runs as a
+        subgraph inside a parent. Returns a ``RemoveHandle`` whose
+        ``.remove()`` method detaches the observer; idempotent.
 
-        `phases` selects the phase strings (`"started"`, `"completed"`) the
-        observer subscribes to; default is both. An empty `phases` set
-        raises `ValueError` at registration time.
+        ``phases`` selects the phase strings (``"started"``,
+        ``"completed"``) the observer subscribes to; default is both.
+        An empty ``phases`` set raises ``ValueError`` at registration
+        time.
 
-        Per spec: changes to the registered set during a graph run do NOT
-        take effect until the next invocation. The set of observers
-        delivering events for an in-flight invocation is fixed at the point
-        the invocation begins.
+        Changes to the registered set during a graph run do NOT take
+        effect until the next invocation. The set of observers
+        delivering events for an in-flight invocation is fixed at
+        the point the invocation begins.
         """
         subscribed = _coerce_subscribed(observer, phases=phases)
         self._attached_observers.append(subscribed)
         return RemoveHandle(_observers=self._attached_observers, _observer=subscribed)
 
     # ------------------------------------------------------------------
-    # Checkpointer registration (spec pipeline-utilities §10.1.1)
+    # Checkpointer registration
     # ------------------------------------------------------------------
 
     def attach_checkpointer(self, checkpointer: Checkpointer | None) -> None:
-        """Register a Checkpointer for this graph (spec §10.1.1).
+        """Register a Checkpointer for this graph.
 
-        Pass ``None`` to clear a previously-registered backend. Without
-        a registered Checkpointer the engine never calls ``save()`` and
-        ``invoke(resume_invocation=...)`` raises
-        ``checkpoint_not_found`` — the default-off behavior matches the
-        broader OA pattern of "the contract is normative; the
-        activation is an explicit choice."
+        Pass ``None`` to clear a previously-registered backend.
+        Without a registered Checkpointer the engine never calls
+        ``save()`` and ``invoke(resume_invocation=...)`` raises
+        ``checkpoint_not_found``.
 
-        At most one Checkpointer per graph (§10.1.1). Calling
-        ``attach_checkpointer`` again replaces the previously-registered
-        one; multi-backend fan-out is the user's responsibility (wrap
-        two underlying Checkpointers behind a custom protocol-conforming
-        implementation if needed).
+        At most one Checkpointer per graph. Calling
+        ``attach_checkpointer`` again replaces the previously-
+        registered one; multi-backend fan-out is the user's
+        responsibility (wrap two underlying Checkpointers behind a
+        custom protocol-conforming implementation if needed).
         """
         self._checkpointer_slot[0] = checkpointer
 
@@ -334,14 +333,15 @@ class CompiledGraph[StateT: State]:
         """Await delivery of every observer event produced by prior
         invocations of this graph.
 
-        Per spec v0.6.0 §6: callers running in short-lived processes (scripts,
-        serverless functions, CLIs) MUST use drain to avoid losing observer
+        Callers running in short-lived processes (scripts, serverless
+        functions, CLIs) MUST use drain to avoid losing observer
         events that were dispatched but not yet delivered.
 
-        Only events dispatched before this call are awaited; events from
-        invocations started concurrently with drain may or may not be
-        included. Subgraph events from active invocations are part of the
-        parent invocation's worker and are covered automatically.
+        Only events dispatched before this call are awaited; events
+        from invocations started concurrently with drain may or may
+        not be included. Subgraph events from active invocations are
+        part of the parent invocation's worker and are covered
+        automatically.
 
         **Unbounded by design.** Drain blocks until every queued event has
         been delivered to every subscribed observer. A slow, hung, or
@@ -371,35 +371,36 @@ class CompiledGraph[StateT: State]:
         correlation_id: str | None = None,
         resume_invocation: str | None = None,
     ) -> StateT:
-        """Run the graph from `initial_state` to END and return the final state.
+        """Run the graph from ``initial_state`` to END and return the
+        final state.
 
-        Optional `observers` are invocation-scoped — they fire only for this
-        run, after all graph-attached observers (including subgraph-attached
-        ones for events originating in subgraphs) per spec v0.6.0 §6.
+        Optional ``observers`` are invocation-scoped — they fire only
+        for this run, after all graph-attached observers (including
+        subgraph-attached ones for events originating in subgraphs).
 
-        Each entry in `observers` may be either a bare `Observer` callable
-        (subscribes to both phases) or a `SubscribedObserver` wrapping an
-        observer with an explicit `phases` set.
+        Each entry in ``observers`` may be either a bare ``Observer``
+        callable (subscribes to both phases) or a ``SubscribedObserver``
+        wrapping an observer with an explicit ``phases`` set.
 
-        Per spec v0.6.0 §6: this method returns as soon as the graph
-        execution loop completes, regardless of whether the observer
-        delivery queue has finished processing every dispatched event. Use
-        `await compiled.drain()` if you need delivery-completion guarantees.
+        This method returns as soon as the graph execution loop
+        completes, regardless of whether the observer delivery queue
+        has finished processing every dispatched event. Use
+        ``await compiled.drain()`` if you need delivery-completion
+        guarantees.
 
-        **Checkpointing (pipeline-utilities §10):**
+        **Checkpointing.**
 
         - ``correlation_id`` is the per-invocation cross-backend join
-          key (see observability §3 in spec v0.7+). Caller-supplied or
-          auto-generated UUIDv4 when absent. Preserved unchanged across
-          ``resume_invocation``.
-        - ``resume_invocation`` names a prior invocation_id to resume
-          from. Requires a registered Checkpointer; raises
+          key. Caller-supplied or auto-generated UUIDv4 when absent.
+          Preserved unchanged across ``resume_invocation``.
+        - ``resume_invocation`` names a prior ``invocation_id`` to
+          resume from. Requires a registered Checkpointer; raises
           ``CheckpointNotFound`` when the backend has no record for
           the supplied id, ``CheckpointRecordInvalid`` when the
           loaded record's schema is incompatible. Resume mints a NEW
-          ``invocation_id`` per §10.4 — each attempt is its own
-          invocation in the observability sense; the
-          ``correlation_id`` is the cross-attempt join key.
+          ``invocation_id`` — each attempt is its own invocation in
+          the observability sense; the ``correlation_id`` is the
+          cross-attempt join key.
         - **Save-failure policy.** This implementation raises
           ``CheckpointSaveFailed`` to the caller of ``invoke()``
           immediately when ``Checkpointer.save`` raises; saves are
@@ -407,7 +408,7 @@ class CompiledGraph[StateT: State]:
           own retry logic if transient backend failures should be
           reattempted.
 
-        Raises one of the runtime error categories from spec §4 on failure.
+        Raises one of the runtime error categories on failure.
         """
 
         invocation_scoped = tuple(_coerce_subscribed(o) for o in (observers or ()))
