@@ -6,7 +6,12 @@ Python reference implementation of [OpenArmature](https://github.com/LunarComman
 
 ## Install
 
-Not yet on PyPI. For local use, install from a checkout:
+```bash
+pip install openarmature             # core
+pip install 'openarmature[otel]'     # with OpenTelemetry observability
+```
+
+Or for editable local development:
 
 ```bash
 uv add --editable /path/to/openarmature-python
