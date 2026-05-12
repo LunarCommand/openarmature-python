@@ -1,5 +1,5 @@
 site_name: OpenArmature
-site_url: https://docs.openarmature.ai/
+site_url: https://openarmature.ai/
 site_description: Workflow framework for LLM pipelines and tool-calling agents
 copyright: "©OpenArmature 2026 to present"
 repo_url: https://github.com/LunarCommand/openarmature-python
