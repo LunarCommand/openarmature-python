@@ -80,7 +80,9 @@ markdown_extensions:
 
 nav:
   - OpenArmature: index.md
-  - Getting Started: getting-started/index.md
+  - Getting Started:
+    - Quickstart: getting-started/index.md
+    - Authoring a Provider: getting-started/provider-authoring.md
   - Concepts: concepts/index.md
   - Reference: reference/index.md
   - Contributing: contributing/index.md
