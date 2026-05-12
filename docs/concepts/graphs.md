@@ -164,14 +164,20 @@ final = await graph.invoke(S())
 
 The per-step loop:
 
-1. Run the current node, await its result.
-2. Merge its partial update into state via per-field reducers.
-3. Re-validate state against the schema.
-4. Evaluate the outgoing edge against the *post-merge* state to pick
+1. Dispatch the `started` observer event for the current node.
+2. Run the current node, await its result.
+3. Merge its partial update into state via per-field reducers.
+4. Re-validate state against the schema.
+5. Evaluate the outgoing edge against the *post-merge* state to pick
    the next node (or `END`).
+6. Dispatch the `completed` observer event — populating `post_state`
+   if the step succeeded, or `error` if any of steps 2–5 failed
+   (including edge / routing errors, which attach to the preceding
+   node's `completed` event rather than producing a new one).
 
 The output is the final `State` instance — whatever state looks like
-when an edge returns `END`.
+when an edge returns `END`. See [Observability](observability.md) for
+what observers do with the started/completed pair.
 
 ## Runtime errors carry context
 

@@ -3,122 +3,164 @@
 Run the same subgraph many times in parallel, each instance receiving
 a different input, results merged back deterministically.
 
-The single-graph-twice pattern from
-[`ExplicitMapping`](composition.md#explicitmapping-declarative) handles
-two-or-three call sites where you know the parent fields up front. Fan-out
+The "same subgraph at two-or-three call sites" pattern from
+[`ExplicitMapping`](composition.md#explicitmapping-declarative)
+handles cases where you know the parent fields up front. Fan-out
 handles N call sites where N is determined at runtime — "for each
-URL in `state.urls`, run the scraping subgraph; gather the results."
+item in `state.urls`, run the scraping subgraph; collect the
+results."
 
-## The shape
+## Two modes: per-item or per-count
 
-A fan-out node is a regular node that, instead of running a function,
-runs a *compiled subgraph N times*. You register it with a
-`FanOutNode`:
+A fan-out can dispatch instances driven by a list in state
+(`items_field` mode) or by a count resolved from state (`count` mode).
+
+**`items_field` mode** — one instance per item in a parent list field:
 
 ```python
 from openarmature.graph import FanOutConfig, FanOutNode
 
-# instance_subgraph: CompiledGraph[InstanceState]
-# - one instance per item in the source field
-# - results merged back per the projection
-
-fan_out = FanOutNode(
-    subgraph=instance_subgraph,
+scrape_all = FanOutNode(
+    name="scrape_all",
     config=FanOutConfig(
-        source_field="urls",                    # parent field — must be a list
-        instance_input_field="url",             # subgraph field that receives each item
-        concurrency=4,                          # max in-flight instances
-        error_policy="continue_on_error",       # or "halt_on_error"
+        subgraph=scrape_subgraph,        # CompiledGraph[ScrapeState]
+        items_field="urls",              # parent list field — one instance per item
+        item_field="url",                # subgraph field that receives each item
+        collect_field="content",         # subgraph field whose value is collected
+        target_field="contents",         # parent list field that receives the collection
+        concurrency=4,
+        error_policy="fail_fast",        # or "collect"
+        on_empty="raise",                # or "noop"
     ),
 )
-
-builder.add_node("scrape_all", fan_out)
+builder.add_node("scrape_all", scrape_all)
 ```
 
-The engine reads `state.urls`, dispatches one subgraph invocation per
-URL (up to `concurrency` at a time), and merges the per-instance
-results back into the parent via per-field reducers.
+**`count` mode** — fixed-or-dynamic instance count, no list field:
 
-## Per-instance state
+```python
+fan_out = FanOutNode(
+    name="sample",
+    config=FanOutConfig(
+        subgraph=sample_subgraph,
+        count=8,                          # int or callable: state -> int
+        collect_field="reading",
+        target_field="readings",
+        concurrency=4,
+    ),
+)
+```
 
-Each instance gets its own subgraph state, distinct from siblings. The
-instance receives:
+Both `count` and `concurrency` accept a callable that takes the
+pre-fan-out parent state and returns an int (`None` for `concurrency`
+means unbounded). That lets you size the dispatch from state at run
+time.
 
-- The dispatched item (in the field named by `instance_input_field`).
-- Any other input fields projected in via the projection strategy
-  (same as a regular subgraph).
+## Per-instance state, inputs and outputs
 
-It produces a final state on its own, no different from a non-fan-out
-subgraph invocation. The projection's `project_out` runs for each
-instance, producing a partial update merged into the parent.
+Each instance gets its own subgraph state — distinct from siblings,
+distinct from the parent. By default the instance receives only:
 
-The parent's reducers handle merging across instances. Two patterns
-matter:
+- the dispatched item in the field named by `item_field` (in
+  `items_field` mode); and
+- the parent-field-name-mapped values declared in `inputs`.
 
-- **List accumulation via `append`.** Each instance returns its result
-  in a list field; the parent has `append`, so the per-instance
-  results concatenate in *instance order*.
-- **Map keyed by item id via `merge`.** Each instance returns
-  `{"results": {item_id: result}}`; the parent has `merge`, so the
-  per-instance partials assemble into one keyed map.
+`inputs` is a `Mapping[subgraph_field, parent_field]`. The subgraph
+fields not named in `inputs` (and not `item_field`) take their
+schema defaults — same closed-by-default-on-the-way-in posture as
+the explicit-projection story for ordinary subgraphs.
 
-## Concurrency is bounded, not unlimited
-
-`concurrency` caps the number of in-flight instances. Higher values
-trade memory + downstream-API pressure for wall-clock latency. Tune to
-the slowest external dependency: an LLM endpoint at 4 parallel
-requests; a scraping target at 1 to be polite.
-
-The engine drives the bound with `asyncio.Semaphore`. Instances queue
-up internally; you don't see them in state until they finish.
+On exit, each instance's `collect_field` value becomes one element
+of the parent's `target_field` list, in instance-index order. To
+collect additional per-instance fields, declare
+`extra_outputs: Mapping[parent_field, subgraph_field]` — each becomes
+its own parent list of the same length, instance-index-aligned.
 
 ## Error policy
 
-What happens when one instance fails? Two modes:
+Two values:
 
-- **`halt_on_error`** — the first instance failure halts the whole
-  fan-out node. The engine cancels the in-flight siblings (best
-  effort) and raises a `NodeException` wrapping the failing
-  instance's error. Strict semantics, useful when one bad result
-  invalidates the rest.
-- **`continue_on_error`** — instance failures are captured into the
-  result; the fan-out continues to completion. Each failed instance's
-  partial update includes an error marker (typically a list of
-  `errors` in the parent's state). Loose semantics, useful when N-1
-  good results are useful even if 1 fails.
+- **`"fail_fast"`** (default) — the first instance failure cancels
+  the in-flight siblings (`asyncio.gather` semantics) and propagates
+  as a `NodeException` wrapping the failing instance's cause, with
+  `recoverable_state` set to the parent's pre-fan-out snapshot. Use
+  this when one bad result invalidates the rest.
+- **`"collect"`** — instance failures are captured; the fan-out runs
+  to completion. Failed instances contribute nothing to
+  `target_field`. If you declare `errors_field` on the config, each
+  failed instance produces a record (`{"fan_out_index": str(idx),
+  "category": str}`) appended to that parent list field.
 
-Choose based on whether you can use partial results.
+Choose by whether partial results are useful.
+
+## What ends up in the parent
+
+After the fan-out completes, the parent receives a partial update
+containing:
+
+- `target_field` — list of `collect_field` values, instance-index order.
+- Each parent name in `extra_outputs` — list of values from the named
+  subgraph field, instance-index order.
+- `count_field` (if configured) — the instance count.
+- `errors_field` (if configured, `"collect"` policy only) — per-instance
+  error records.
+- `on_empty="noop"` for an empty items_field → all the above with empty
+  lists; `count_field` set to 0.
+
+## Empty fan-outs
+
+If `items_field` is set and the parent list is empty (or `count`
+resolves to 0):
+
+- `on_empty="raise"` (default) — raises `FanOutEmpty` (a runtime
+  error category).
+- `on_empty="noop"` — emits an empty partial (no instances dispatched,
+  no errors).
 
 ## Observability per instance
 
-Observer events fire for every node inside every instance, with
-namespaces that include the fan-out index:
+The fan-out node's own `started` / `completed` events carry a
+`fan_out_config` payload populated from the resolved
+`item_count` / `concurrency` / `error_policy` / `parent_node_name`
+(spec proposal 0013, v0.10.0).
 
-- `namespace = ("scrape_all", "fan_out_instance_3", "fetch")` —
-  fetch node inside the 4th instance of fan-out node `scrape_all`.
-- `event.fan_out_index = 3` — explicit instance index on the event.
-- `event.parent_node_name = "scrape_all"` — the fan-out node's name,
-  for parent attribution.
+Per-instance events have `fan_out_index = N` (0-based) and a
+namespace whose final element is the fan-out node's name — instances
+do NOT contribute a separate synthetic namespace element. Backends
+disambiguate per-instance spans using `fan_out_index` alongside the
+namespace.
 
-This lets observers (and the OTel mapping in particular) build a
-hierarchy where each instance is a sibling span under the fan-out
-node's span, with per-instance attributes.
+## Resume semantics
+
+A fan-out node's `completed` event triggers a save like any other
+outermost-graph or subgraph-internal node. **Per-instance internal
+events do NOT save in v1** — spec pipeline-utilities §10.7 documents
+the v1 atomic-restart contract: on resume, the fan-out re-runs
+end-to-end if it hadn't completed.
+
+A v2 per-instance fan-out resume mode is the subject of an open
+spec proposal ([0009](https://github.com/LunarCommand/openarmature-spec/blob/main/proposals/0009-pipeline-utilities-per-instance-fan-out-resume.md)).
+The `fan_out_progress` field on `CheckpointRecord` is reserved for
+its eventual contents. Until it accepts, atomic restart is the
+shipping behavior.
 
 ## When to reach for fan-out
 
-The signal: you have N similar pieces of work, N depends on state at
-runtime (not at build time), and the work is independent enough that
-running them concurrently is correct.
-
-If N is known at build time and small (≤3), `ExplicitMapping` at
-multiple sites is simpler. If the work isn't independent — instance 2
-needs instance 1's output — that's a linear pipeline, not fan-out.
+The signal: N similar pieces of work, N depends on state at runtime
+(not at build time), the work is independent enough to run
+concurrently. If N is known at build time and small (≤3),
+`ExplicitMapping` at multiple subgraph sites is simpler. If the
+work isn't independent — instance 2 needs instance 1's output —
+that's a linear pipeline, not fan-out.
 
 ## What fan-out is NOT
 
-- **Not a map-reduce.** No reduce phase beyond the parent's reducers.
-  If you need a real reduce, do it in a node *after* the fan-out.
-- **Not a queue.** All instances dispatch within a single invocation;
-  the engine doesn't persist them.
-- **Not retry.** If an instance fails and you want a retry, that's the
-  middleware layer, not fan-out.
+- **Not a map-reduce.** No reduce phase beyond the parent's
+  reducers. If you need a real reduce, do it in a node *after* the
+  fan-out.
+- **Not a queue.** All instances dispatch within a single
+  invocation; the engine doesn't persist them.
+- **Not retry.** If an instance fails and you want a retry,
+  wrap the subgraph (or individual nodes inside it) with retry
+  middleware. The fan-out's `error_policy` is a fan-in-collection
+  decision, not a recovery one.
