@@ -98,7 +98,14 @@ nav:
   - Getting Started:
     - Quickstart: getting-started/index.md
     - Authoring a Provider: getting-started/provider-authoring.md
-  - Concepts: concepts/index.md
+  - Concepts:
+    - concepts/index.md
+    - State and reducers: concepts/state-and-reducers.md
+    - Graphs: concepts/graphs.md
+    - Composition: concepts/composition.md
+    - Fan-out: concepts/fan-out.md
+    - Observability: concepts/observability.md
+    - Checkpointing: concepts/checkpointing.md
   - Reference:
     - reference/index.md
     - openarmature.graph: reference/graph.md
