@@ -105,7 +105,6 @@ nav:
     - openarmature.llm: reference/llm.md
     - openarmature.checkpoint: reference/checkpoint.md
     - openarmature.observability: reference/observability.md
-  - Contributing: contributing/index.md
 
 extra:
   # Hide the "Made with Material for MkDocs" footer.

@@ -1,6 +1,6 @@
 # Quickstart
 
-Build and run a two-node graph in under a minute. No LLM required — this is
+Build and run a two-node graph in under a minute. No LLM required. This is
 the smallest possible openarmature program so you can see every part of the
 shape on one screen.
 
@@ -54,7 +54,7 @@ assert final.log == ["hello", "world"]
 
 ## What just happened
 
-- **`S`** is the state schema — a frozen Pydantic model. Nodes can't mutate
+- **`S`** is the state schema, a frozen Pydantic model. Nodes can't mutate
   it; they return partial-update dicts and the engine merges them.
 - **`append`** is the reducer attached to `log`. When `hello` returns
   `{"log": ["hello"]}`, the engine *appends* to the existing list rather
@@ -69,9 +69,9 @@ assert final.log == ["hello", "world"]
 
 ## Next
 
-- [Concepts](../concepts/index.md) — deeper on state, reducers,
+- [Concepts](../concepts/index.md): deeper on state, reducers,
   projections, fan-out, subgraphs, observability.
-- [Examples](https://github.com/LunarCommand/openarmature-python/tree/main/examples)
-  — five runnable demos, each driving a local OpenAI-compatible LLM
+- [Examples](https://github.com/LunarCommand/openarmature-python/tree/main/examples):
+  five runnable demos, each driving a local OpenAI-compatible LLM
   endpoint to do real work.
-- [API reference](../reference/index.md) — auto-generated from docstrings.
+- [API reference](../reference/index.md): auto-generated from docstrings.

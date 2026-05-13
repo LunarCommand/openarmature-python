@@ -1,8 +1,8 @@
 # Authoring a Provider
 
-When you target a wire format that isn't OpenAI Chat Completions —
-Anthropic Messages, Bedrock, an internal gateway, a hand-rolled
-inference service — implement the `Provider` Protocol yourself. The
+When you target a wire format that isn't OpenAI Chat Completions
+(Anthropic Messages, Bedrock, an internal gateway, a hand-rolled
+inference service), implement the `Provider` Protocol yourself. The
 shipped `OpenAIProvider` is ~465 lines because it handles every
 edge case; a minimum-viable Provider is closer to 60 lines.
 
@@ -180,18 +180,18 @@ The skeleton omits things real Providers usually need. Reach for
 `openarmature.llm.OpenAIProvider` as a reference when you need any
 of:
 
-- **Tool calls** — wire-mapping the `tool_calls` array on
+- **Tool calls.** Wire-mapping the `tool_calls` array on
   `AssistantMessage` to the Provider's expected shape, parsing tool
   results back from `ToolMessage`s.
-- **Observability spans** — opt-in `started`/`completed` events
+- **Observability spans.** Opt-in `started`/`completed` events
   around the wire call so the OTel observer can build LLM spans.
-- **Lenient response parsing** under `finish_reason="error"` —
-  degraded responses surface what they can; tool-call arguments that
+- **Lenient response parsing** under `finish_reason="error"`.
+  Degraded responses surface what they can; tool-call arguments that
   fail to parse populate `arguments=None` instead of raising.
-- **Catalog-aware `ready()`** — `GET /v1/models` plus checking
+- **Catalog-aware `ready()`.** `GET /v1/models` plus checking
   whether the bound model is in the returned catalog (and, for local
   servers like LM Studio, whether it's actually loaded).
-- **`Retry-After` parsing** — use `parse_retry_after` (re-exported
+- **`Retry-After` parsing.** Use `parse_retry_after` (re-exported
   from `openarmature.llm`) to populate the `retry_after` field of
   `ProviderRateLimit` from the response header.
 

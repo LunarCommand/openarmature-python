@@ -7,8 +7,8 @@ pipeline of reusable sub-pipelines:
 2. **Subgraphs** encapsulate a sub-pipeline as a single node.
 3. **Projections** translate state across the subgraph boundary.
 
-None of these add new primitives — a conditional edge is still one
-outgoing edge, a subgraph is still a single node — but they change
+None of these add new primitives (a conditional edge is still one
+outgoing edge, a subgraph is still a single node) but they change
 what a graph can express.
 
 ## Conditional edges
@@ -52,7 +52,7 @@ it somewhere invisible," state-driven routing gives you:
 
 **Why sync?** Conditional edges are routing decisions, not units of
 work. If you want `async def`, the right move is to do the IO in the
-producing node and write the decision to a state field — exactly what
+producing node and write the decision to a state field, exactly what
 `classify` does. Keeping edges sync keeps the loop simple to read:
 node (async) → merge → edge (sync) → next.
 
@@ -114,7 +114,7 @@ builder.add_subgraph_node("research", research_subgraph, projection=...)
 **Separate state schemas are load-bearing.** The subgraph has its own
 `State` subclass, distinct from the parent's. At compile time, the
 subgraph's reducer table and field validation are built against its
-own schema. Parent fields can't leak in by accident — they aren't in
+own schema. Parent fields can't leak in by accident; they aren't in
 scope on either side of the boundary. **The only way data crosses is
 through the projection.**
 
@@ -153,14 +153,14 @@ If you don't pass a `projection=` argument, you get this. It behaves
 asymmetrically:
 
 - **`project_in`: parent state is ignored.** Returns
-  `subgraph_state_cls()` — a fresh instance from the subgraph's
+  `subgraph_state_cls()`, a fresh instance from the subgraph's
   defaults. If the subgraph has a required field, this constructor
   fails; the subgraph can't run without an explicit projection.
 - **`project_out`: field-name intersection.** Looks at the subgraph's
   final state, keeps fields whose names also exist on the parent, and
   returns them as a partial update. The parent's reducers then merge.
 
-The asymmetry — "closed on the way in, open on the way back" — is by
+The asymmetry, "closed on the way in, open on the way back," is by
 design. The author opts *in* to sharing data with the subgraph; the
 subgraph's observable outputs route back through the parent's reducers
 automatically.
@@ -183,9 +183,9 @@ projection = ExplicitMapping[ParentState, SubgraphState](
 builder.add_subgraph_node("analyze_a", subgraph, projection=projection)
 ```
 
-`inputs` and `outputs` are independent — pass either, both, or neither.
+`inputs` and `outputs` are independent; pass either, both, or neither.
 
-**Asymmetry — inputs additive, outputs replacement.** This mirrors the
+**Asymmetry: inputs additive, outputs replacement.** This mirrors the
 default's asymmetry.
 
 - `inputs` is *additive over no-projection-in*. Subgraph fields named
@@ -193,7 +193,7 @@ default's asymmetry.
   fields get their schema defaults.
 - `outputs` *replaces* field-name matching when present. Only pairs
   named in `outputs` are merged back. Unnamed subgraph fields are
-  discarded — no slip of extra fields by accident.
+  discarded, so no slip of extra fields by accident.
 
 **`None` vs `{}` for `outputs`:**
 
@@ -206,7 +206,7 @@ default's asymmetry.
 **Compile-time validation.** `ExplicitMapping.validate` runs at
 parent-graph compile and raises `MappingReferencesUndeclaredField` if
 any mapping names a field that isn't on the relevant schema.
-Refactor-safe — if you rename a parent field but forget the mapping,
+Refactor-safe: if you rename a parent field but forget the mapping,
 construction fails, not runtime.
 
 **The case `ExplicitMapping` uniquely unlocks.** Same subgraph at
@@ -235,13 +235,13 @@ builder.add_subgraph_node(
 
 The two sites address disjoint parent fields, so they cannot collide.
 Without explicit mapping, both calls would have to read from and write
-to the same parent fields under name matching — making "run the same
+to the same parent fields under name matching, making "run the same
 subgraph twice on different inputs" structurally impossible.
 
 ### Custom projection strategies
 
-If you need behavior beyond name-mapping — synthesize values, project
-conditionally, transform on the way through — write a class that
+If you need behavior beyond name-mapping (synthesize values, project
+conditionally, transform on the way through), write a class that
 matches the Protocol:
 
 ```python
@@ -268,12 +268,12 @@ A few design points worth sitting with:
 - **Unknown fields from `project_out` raise.** Parent's `extra="forbid"`
   catches typos at the merge boundary.
 - **The `parent_state` argument of `project_out` is for context, not
-  for writing.** You can read it to decide what to project — "only
-  return the answer if the parent was in a research route" — but you
+  for writing.** You can read it to decide what to project ("only
+  return the answer if the parent was in a research route") but you
   can't mutate it.
 
 `ProjectionStrategy` is a `Protocol`, not a base class. A class fits
 the shape or it doesn't; the type checker verifies at use sites. If
 you have Java instincts ("where's the `implements` keyword?"), reach
-for TypeScript or Go interface instincts instead — that's the same
+for TypeScript or Go interface instincts instead; that's the same
 family.

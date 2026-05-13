@@ -2,7 +2,7 @@
 
 Save state at every node boundary; resume a crashed run from the last
 saved point on a subsequent `invoke()`. Without a checkpointer, the
-engine holds no state across invocations — a crash means start-from-entry.
+engine holds no state across invocations; a crash means start-from-entry.
 
 ## Wiring a checkpointer
 
@@ -27,7 +27,7 @@ graph = (
 
 The engine writes a record at every `completed` event for outermost-
 graph nodes and subgraph-internal nodes. **Fan-out instance internal
-events do NOT save** in the shipping version — atomic-restart is the
+events do NOT save** in the shipping version. Atomic-restart is the
 fan-out contract.
 
 ## Saves are synchronous-by-contract
@@ -40,7 +40,7 @@ because the save resolves before the next node runs.
 
 The corollary: slow backends throttle execution. Wrapping a high-
 latency persistence layer in a checkpointer makes the whole graph
-run at its latency. Plan accordingly — async writes inside the
+run at its latency. Plan accordingly: async writes inside the
 backend (e.g., `asyncio.to_thread` around a sync driver) are fine;
 fire-and-forget patterns that return before durability is established
 violate the contract.
@@ -94,7 +94,7 @@ Field framing worth getting right:
   there.
 - **`correlation_id` ≠ `invocation_id`.** `invocation_id` identifies
   *this* graph run uniquely. `correlation_id` is a cross-system
-  identifier propagated via ContextVar — multiple invocations
+  identifier propagated via ContextVar; multiple invocations
   related by a higher-level request can share one `correlation_id`
   while each having its own `invocation_id`. See
   [Observability](observability.md) for how `correlation_id`
@@ -119,15 +119,15 @@ class Checkpointer(Protocol):
     async def delete(self, invocation_id: str) -> None: ...
 ```
 
-- **`save`** — persist the record under `invocation_id`. Durable for
+- **`save`**: persist the record under `invocation_id`. Durable for
   any backend that documents durability. Synchronous-by-contract per
   the section above.
-- **`load`** — return the *most recent* record for `invocation_id`,
+- **`load`**: return the *most recent* record for `invocation_id`,
   or `None`. Round-trip-stable with what `save` wrote.
-- **`list`** — enumerate saved invocations, optionally filtered by
+- **`list`**: enumerate saved invocations, optionally filtered by
   `CheckpointFilter` (currently a single `correlation_id` field; v1
   ships intentionally narrow).
-- **`delete`** — remove all records for `invocation_id`. No-op if the
+- **`delete`**: remove all records for `invocation_id`. No-op if the
   invocation has no record (no error).
 
 Backends MUST be safe to share across concurrent invocations; the
@@ -137,10 +137,10 @@ call.
 
 ## Two built-in backends
 
-- **`InMemoryCheckpointer`** — backed by a dict in process memory.
+- **`InMemoryCheckpointer`**: backed by a dict in process memory.
   Loses everything on process exit. Useful for tests and short-lived
   contexts that want the API surface without disk overhead.
-- **`SQLiteCheckpointer`** — backed by a SQLite database file.
+- **`SQLiteCheckpointer`**: backed by a SQLite database file.
   Survives process exit. Reasonable default for any non-trivial use.
 
 Custom backends just implement the four-method Protocol. Targets that
@@ -155,7 +155,7 @@ adapter layer.
   cheap; checkpoints are pure overhead.
 - **Pipelines whose external side effects can't safely be re-played.**
   If node A sends an email, resuming from after A means the email
-  has already sent — fine if your downstream is idempotent, surprising
+  has already sent; fine if your downstream is idempotent, surprising
   if it isn't. Reason explicitly about replay semantics before turning
   on resume.
 
