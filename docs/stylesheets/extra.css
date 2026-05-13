@@ -1,12 +1,16 @@
 /* ===== Footer meta row (mode-agnostic structural fix) =====
- * Compact, vertically-centered. Material's default leaves the copyright
- * text and social icons at different baselines because each side has
- * its own intrinsic padding. Force flex centering and reset side-
- * specific padding so the block padding here controls the whole bar's
- * height. */
+ * Compact, vertically-centered, single-row at all viewport widths.
+ * Material's default leaves the copyright text and social icons at
+ * different baselines because each side has its own intrinsic
+ * padding, AND stacks them at narrow widths. Force flex row with
+ * centering + nowrap so the bar reads as one line on mobile too. */
 .md-footer-meta__inner {
-  padding-block: 5px;
+  display: flex;
+  flex-direction: row;
+  flex-wrap: nowrap;
+  justify-content: space-between;
   align-items: center;
+  padding-block: 5px;
 }
 
 .md-copyright,
@@ -167,16 +171,6 @@
   display: none;
 }
 
-/* Disable the repo-source fade-in animation that fires on every page
- * load (the GitHub link in the top right). */
-.md-source,
-.md-source__icon,
-.md-source__repository,
-.md-source__facts,
-.md-source__fact {
-  animation: none !important;
-}
-
 [data-md-color-scheme="slate"] .md-header,
 [data-md-color-scheme="slate"] .md-footer-meta {
   background-color: var(--md-footer-bg-color);
@@ -314,13 +308,4 @@
  * it's visible against the near-white bg. */
 [data-md-color-scheme="default"] .md-social__link {
   color: var(--md-default-fg-color);
-}
-
-/* GitHub source icon + label render in dark text on the light header
- * (default white-on-primary would be invisible on the near-white bg). */
-[data-md-color-scheme="default"] .md-header__source,
-[data-md-color-scheme="default"] .md-source,
-[data-md-color-scheme="default"] .md-source__icon,
-[data-md-color-scheme="default"] .md-source__repository {
-  color: hsla(0, 0%, 0%, 0.87);
 }

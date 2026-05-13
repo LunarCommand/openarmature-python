@@ -1,10 +1,7 @@
 site_name: OpenArmature
 site_url: https://openarmature.ai/
 site_description: Workflow framework for LLM pipelines and tool-calling agents
-copyright: "©OpenArmature 2026 to present"
-repo_url: https://github.com/LunarCommand/openarmature-python
-repo_name: LunarCommand/openarmature-python
-edit_uri: edit/main/docs/
+copyright: "©OpenArmature 2026"
 
 # Local ``mkdocs serve`` binds here. Default 8000 was already in use
 # on the maintainer's workstation; 8765 is the project convention.
@@ -115,7 +112,7 @@ extra:
   generator: false
   social:
     - icon: fontawesome/brands/github
-      link: https://github.com/LunarCommand/openarmature-python
+      link: https://github.com/LunarCommand
 
 extra_css:
   - stylesheets/extra.css
