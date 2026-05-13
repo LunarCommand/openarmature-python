@@ -31,8 +31,8 @@ guarantees come baked in:
   `{"plann": "..."}` (typo) fails loudly with a `StateValidationError`
   instead of silently dropping the key.
 
-Everything else Pydantic gives you — validators, computed fields,
-custom types, `Field` metadata — still works. You don't need to set
+Everything else Pydantic gives you (validators, computed fields,
+custom types, `Field` metadata) still works. You don't need to set
 `model_config` yourself; subclassing `State` is enough.
 
 **Why frozen?** It rules out a whole class of bugs that make multi-step
@@ -73,7 +73,7 @@ What you do have for "what happened":
   returns.
 - **Crash context.** The four non-validation runtime errors
   (`NodeException`, `EdgeException`, `ReducerError`, `RoutingError`)
-  carry a `recoverable_state` — the state at the point of failure. Good
+  carry a `recoverable_state`, the state at the point of failure. Good
   for forensics; not a walkable timeline.
 
 If you need a full timeline (debugging, eval, time-travel,
@@ -100,7 +100,7 @@ field and calls `reducer(prior_value, partial_value)`. Fields without
 an annotated reducer fall back to `last_write_wins`.
 
 **The point of per-field reducers:** a node shouldn't know how its
-output combines with prior state — that's a property of the field, not
+output combines with prior state. That's a property of the field, not
 the node. `trace.append`, `meta.merge`, `score.last_write_wins`. The
 schema declares the policy once; nodes return their increment; the
 engine applies the merge consistently. If two nodes write the same
@@ -124,7 +124,7 @@ You can write your own. A reducer is any named callable matching the
 
 ## How reducers execute
 
-A reducer **always returns a new value** — never mutates `prior`. That
+A reducer **always returns a new value**; never mutates `prior`. That
 matches the frozen-state contract: the prior list/dict may still be a
 snapshot somebody else holds.
 
@@ -147,7 +147,7 @@ async def plan_node(s: GraphState) -> dict[str, list[str]]:
     return {"trace": ["plan"]}   # add ["plan"] to trace
 ```
 
-NOT `{"trace": s.trace + ["plan"]}` — that's already what `append`
+NOT `{"trace": s.trace + ["plan"]}`. That's already what `append`
 does. Returning the full list would concatenate twice and duplicate
 entries.
 
@@ -160,7 +160,7 @@ class Bad(State):
     log: Annotated[list[str], append, merge] = Field(default_factory=list)
 ```
 
-But `GraphBuilder.compile()` fails with `ConflictingReducers("log")` —
+But `GraphBuilder.compile()` fails with `ConflictingReducers("log")`;
 the graph never compiles, so you can't reach runtime with an ambiguous
 merge policy. The same compile pass picks the one declared reducer per
 field; with no declaration, the default is `last_write_wins`.

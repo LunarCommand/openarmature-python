@@ -2,11 +2,11 @@
 
 Two complementary patterns:
 
-- **The `trace` field pattern** — a typed list inside state that nodes
+- **The `trace` field pattern**: a typed list inside state that nodes
   append to. State-shaped history, accessible from inside the graph,
   visible in the final state. Falls out of existing primitives.
   Covered in [State and reducers](state-and-reducers.md).
-- **Observer hooks** — out-of-band events delivered to external code,
+- **Observer hooks**: out-of-band events delivered to external code,
   with full pre/post state snapshots, error context, and visibility
   across subgraph boundaries. The control-side equivalent of the
   data-side `trace` field. This page.
@@ -39,7 +39,7 @@ _: Observer = StructuredLogger()  # structural conformance check
 
 ## Two registration modes
 
-**Graph-attached** — fires on every invocation until removed:
+**Graph-attached**: fires on every invocation until removed:
 
 ```python
 compiled = builder.compile()
@@ -49,10 +49,10 @@ handle.remove()                 # idempotent
 ```
 
 Changes to the registered set during a graph run don't take effect
-until the next invocation — the in-flight observer set is fixed at
+until the next invocation. The in-flight observer set is fixed at
 `invoke()` time.
 
-**Invocation-scoped** — fires only for one specific run:
+**Invocation-scoped**: fires only for one specific run:
 
 ```python
 final = await compiled.invoke(initial, observers=[request_logger])
@@ -82,7 +82,7 @@ class NodeEvent:
 
 A walk-through:
 
-- **`phase`** — every node attempt produces a `started` / `completed`
+- **`phase`**: every node attempt produces a `started` / `completed`
   *pair*. The pair shares `step` and `pre_state`. `started` fires
   before the node body runs; `completed` fires after the reducer
   merge succeeds *and* the outgoing edge has been evaluated. A
@@ -98,44 +98,44 @@ A walk-through:
   `phases=KNOWN_PHASES`, exported from `openarmature.graph`, to
   subscribe to every phase including `checkpoint_saved`).
 
-- **`node_name`** — the node's local name in its immediate containing
+- **`node_name`**: the node's local name in its immediate containing
   graph. For nested subgraphs, the inner name, NOT a qualified path.
 
-- **`namespace`** — the qualified path of containing-graph node names
+- **`namespace`**: the qualified path of containing-graph node names
   + the current node's name, outermost-first. For a top-level node:
   `(node_name,)`. For a subgraph-internal node:
-  `(outer_subgraph_node_name, inner_name)`. A *tuple of strings* —
+  `(outer_subgraph_node_name, inner_name)`. A *tuple of strings*;
   the framework keeps it as a tuple at the API boundary rather than
   joining with a delimiter, so node names can contain any characters
   without parsing ambiguity.
 
-- **`step`** — monotonic counter starting at 0, scoped to one
+- **`step`**: monotonic counter starting at 0, scoped to one
   outermost invocation. Subgraph-internal nodes increment the same
   counter; subgraph events interleave with outer events. The
   `started`/`completed` pair for one attempt share the same step.
 
-- **`pre_state`** / **`post_state`** — state the node received vs.
+- **`pre_state`** / **`post_state`**: state the node received vs.
   state after the reducer merge. *Shape varies with namespace*: for
   a subgraph-internal node, both are subgraph-state instances, not
   the outer state.
 
-- **`error`** — the wrapped runtime error on `completed` events that
+- **`error`**: the wrapped runtime error on `completed` events that
   failed. `event.error.category` gives the canonical error category;
   `event.error.__cause__` gives the original exception. **Edge /
-  routing errors land here too** — see *Routing errors and the
+  routing errors land here too**; see *Routing errors and the
   completed event* below.
 
-- **`parent_states`** — one snapshot per containing graph, outermost
+- **`parent_states`**: one snapshot per containing graph, outermost
   first. Empty tuple for outermost-graph events. Invariant:
   `len(parent_states) == len(namespace) - 1`.
 
-- **`attempt_index`** — 0-based retry attempt counter. `0` for nodes
+- **`attempt_index`**: 0-based retry attempt counter. `0` for nodes
   not wrapped by retry middleware; `1+` for retries.
 
-- **`fan_out_index`** — 0-based per-instance index for events inside
+- **`fan_out_index`**: 0-based per-instance index for events inside
   a fan-out instance; `None` outside.
 
-- **`fan_out_config`** — populated on `started` / `completed` events
+- **`fan_out_config`**: populated on `started` / `completed` events
   for the *fan-out node itself*, carrying the resolved
   `item_count` / `concurrency` / `error_policy` / `parent_node_name`.
   `None` on every other event.
@@ -150,10 +150,10 @@ When a conditional edge raises or returns an invalid target:
 4. The edge fn raises (`EdgeException`) OR returns something that
    isn't a declared node name or `END` (`RoutingError`).
 5. The engine populates that error into the preceding node's
-   `completed` event and dispatches it — sharing the
+   `completed` event and dispatches it, sharing the
    started/completed pair rather than synthesising a new event.
 
-So edge / routing errors *do* land on a `NodeEvent` — on the
+So edge / routing errors *do* land on a `NodeEvent`, on the
 *preceding* node's `completed` event, with `error` populated and
 `post_state` left `None`. Observers see the failure attributed to the
 right node without a synthetic event.
@@ -161,7 +161,7 @@ right node without a synthetic event.
 ## Subgraph events bubble up
 
 A subgraph-attached observer sees its own internal node events
-whenever the subgraph runs — directly OR as a subgraph inside a
+whenever the subgraph runs, directly OR as a subgraph inside a
 parent. The parent's observers ALSO see those internal events.
 
 Delivery order for an event from a subgraph-internal node:
@@ -171,7 +171,7 @@ outermost-graph-attached → ... → subgraph-attached → invocation-scoped
 ```
 
 Within each level, registration order. The subgraph-as-node wrapper
-itself does *not* generate its own event — it's transparent to
+itself does *not* generate its own event; it's transparent to
 observers.
 
 ## Serial delivery
@@ -196,7 +196,7 @@ naturally), or push events to an internal queue and return fast.
 
 The graph's execution loop dispatches events onto a per-invocation
 queue and **does not await** observer processing. Event dispatch is
-constant-time from the graph's perspective — observers can't slow
+constant-time from the graph's perspective; observers can't slow
 node execution down.
 
 This means `await compiled.invoke(...)` returns when the graph
@@ -217,7 +217,7 @@ await compiled.drain()
 - Snapshot at call time. Events from invocations started concurrently
   with `drain()` may or may not be included.
 - Subgraph events are part of the parent. A parent drain covers every
-  subgraph event from any of its invocations — no need to drain each
+  subgraph event from any of its invocations; no need to drain each
   subgraph separately.
 
 If you forget `drain()` in a CLI, the symptom is an empty trace file
@@ -240,10 +240,10 @@ side concern.
 
 Two identifiers travel with every invocation:
 
-- **`invocation_id`** — unique per `invoke()` call. Identifies *this
+- **`invocation_id`**: unique per `invoke()` call. Identifies *this
   run*. Surfaced on `CheckpointRecord.invocation_id`, observer span
   attributes, log records.
-- **`correlation_id`** — a cross-system identifier propagated via
+- **`correlation_id`**: a cross-system identifier propagated via
   `ContextVar`. Multiple invocations related by a higher-level
   request (e.g., a parent run that spawns a subgraph via direct
   `await sub.invoke(...)`, or a user-request that drives several
@@ -280,14 +280,14 @@ correlation:
 ### TracerProvider isolation
 
 `OTelObserver` constructs a **private** `TracerProvider` from the
-processor you supply — it never registers globally and never reads
+processor you supply. It never registers globally and never reads
 `get_tracer_provider()`. This isolation is intentional.
 
 The motivation is concrete: many production stacks already register a
 global `TracerProvider` (Langfuse v3's OpenInference integration is
 the recurring example) for their own instrumentation. If openarmature
 piggybacked on the global provider, every span the engine emits would
-also flow to those other backends — doubling exports, corrupting
+also flow to those other backends, doubling exports, corrupting
 hierarchies, and tying openarmature's lifecycle to whichever
 unrelated library happened to register first. Isolation prevents
 that; the observer's spans only flow through the processor you handed
@@ -296,7 +296,7 @@ it.
 ### Detached trace mode
 
 Some subgraphs or fan-outs are better as their own root trace than as
-descendants of the parent's span tree — long-running asynchronous
+descendants of the parent's span tree: long-running asynchronous
 work, retries that would balloon a parent span, or work that gets
 reported to a different backend.
 
@@ -314,6 +314,6 @@ A detached subgraph or fan-out gets a fresh trace root (new
 `trace_id`); the `correlation_id` still propagates through, so
 join semantics survive even when trace boundaries don't.
 
-The non-detached default is what you want most of the time — one
+The non-detached default is what you want most of the time: one
 trace per outermost invocation, with subgraphs and fan-out instances
 as nested spans.

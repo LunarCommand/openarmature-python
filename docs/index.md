@@ -6,7 +6,7 @@ hide:
 
 # OpenArmature
 
-A workflow framework for LLM pipelines and tool-calling agents — typed
+A workflow framework for LLM pipelines and tool-calling agents. Typed
 state, structural graph checks, and observability that doesn't require
 buy-in from every node.
 
@@ -22,7 +22,7 @@ buy-in from every node.
     ---
 
     State schemas are Pydantic models with `frozen=True` and
-    `extra="forbid"`. Nodes can't mutate state — they return partial
+    `extra="forbid"`. Nodes can't mutate state; they return partial
     updates and the engine merges via per-field reducers.
 
 -   :material-graph:{ .lg .middle } &nbsp; __Compile-time checks__
@@ -58,7 +58,7 @@ buy-in from every node.
 
     ---
 
-    The engine has no concept of LLMs or tools — those live at the node
+    The engine has no concept of LLMs or tools; those live at the node
     boundary. Use any provider, any model, any external system.
 
 </div>
@@ -66,6 +66,6 @@ buy-in from every node.
 ---
 
 Built around an open, language-agnostic
-[specification](https://github.com/LunarCommand/openarmature-spec).
+[specification](https://github.com/LunarCommand/openarmature-spec){target="_blank" rel="noopener"}.
 A TypeScript implementation is on the roadmap; behaviour stays
 identical across implementations via spec conformance fixtures.

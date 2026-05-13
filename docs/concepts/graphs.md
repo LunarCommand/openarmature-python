@@ -33,14 +33,14 @@ Three things to notice:
 - **The return is a `Mapping`, not a `dict` literally.** You can return
   any dict shape that satisfies the type; field names are validated
   against the state schema at merge time (extra keys raise).
-- **Empty dict is fine.** `return {}` means "I made no state changes" —
+- **Empty dict is fine.** `return {}` means "I made no state changes";
   state passes through, execution moves on per the outgoing edge. Good
   for logging or pure-observation nodes.
 
-**Why async?** The canonical node does IO — LLM call, HTTP request,
+**Why async?** The canonical node does IO: LLM call, HTTP request,
 tool invocation. An async signature lets the runtime overlap IO when
 you eventually add parallel branches or retries. For a purely CPU node,
-async costs nothing — you just `return {...}` without an `await`.
+async costs nothing; you just `return {...}` without an `await`.
 
 You register the node on a builder under a name:
 
@@ -64,7 +64,7 @@ builder.add_edge("plan", "write")    # after `plan` merges, run `write`
 builder.add_edge("write", END)       # after `write` merges, halt
 ```
 
-`END` is a sentinel object — a distinct value, not the string `"END"`:
+`END` is a sentinel object, a distinct value, not the string `"END"`:
 
 ```python
 from openarmature.graph import END
@@ -107,23 +107,23 @@ graph = (
 
 The methods you'll use:
 
-- **`GraphBuilder(state_cls)`** — constructor. The state class
+- **`GraphBuilder(state_cls)`**: constructor. The state class
   determines the reducer table at compile time.
-- **`.add_node(name, fn)`** — register an async node function.
-- **`.add_edge(source, target)`** — static edge. `target` is a node
+- **`.add_node(name, fn)`**: register an async node function.
+- **`.add_edge(source, target)`**: static edge. `target` is a node
   name or `END`.
-- **`.add_conditional_edge(source, fn)`** — branching edge. `fn(state)`
+- **`.add_conditional_edge(source, fn)`**: branching edge. `fn(state)`
   is sync and returns a node name or `END`.
-- **`.add_subgraph_node(name, compiled, projection=None)`** — register
+- **`.add_subgraph_node(name, compiled, projection=None)`**: register
   a compiled graph as a node inside this graph (see
   [Composition](composition.md)).
-- **`.set_entry(name)`** — declare where execution begins.
-- **`.compile()`** — validate and return `CompiledGraph`.
+- **`.set_entry(name)`**: declare where execution begins.
+- **`.compile()`**: validate and return `CompiledGraph`.
 
 **Why split builder and compiled?** Construction and execution are
 different problems. Construction is mutable and permissive (add things
 in whatever order reads well); execution wants something immutable and
-validated. `compile()` is the one-way door between the two — and
+validated. `compile()` is the one-way door between the two, and
 structural problems surface at the door so a bad graph can't reach
 runtime.
 
@@ -141,7 +141,7 @@ runtime.
 | `UnreachableNode`                  | A declared node isn't reachable from the entry via any edge path         |
 | `MappingReferencesUndeclaredField` | A subgraph projection mapping names a field absent from the schema       |
 
-Every failure here is a graph-shape problem — the kind of thing that
+Every failure here is a graph-shape problem, the kind of thing that
 would otherwise crash mid-execution with a confusing traceback.
 Catching them at construction means you *cannot* invoke a malformed
 graph.
@@ -170,12 +170,12 @@ The per-step loop:
 4. Re-validate state against the schema.
 5. Evaluate the outgoing edge against the *post-merge* state to pick
    the next node (or `END`).
-6. Dispatch the `completed` observer event — populating `post_state`
+6. Dispatch the `completed` observer event, populating `post_state`
    if the step succeeded, or `error` if any of steps 2–5 failed
    (including edge / routing errors, which attach to the preceding
    node's `completed` event rather than producing a new one).
 
-The output is the final `State` instance — whatever state looks like
+The output is the final `State` instance: whatever state looks like
 when an edge returns `END`. See [Observability](observability.md) for
 what observers do with the started/completed pair.
 
@@ -192,7 +192,7 @@ engine raises one of these:
 | `RoutingError`         | Conditional edge returned something that isn't a node name or `END` |         yes          |
 | `StateValidationError` | Merged state fails schema validation (typo'd field, bad type)       |          no          |
 
-`recoverable_state` is the state at the point of failure —
+`recoverable_state` is the state at the point of failure:
 pre-failing-node for node/edge/routing errors, pre-merge for reducer
 errors. Useful for post-crash forensics. State validation errors don't
 carry recoverable_state because the merge that triggered the failure

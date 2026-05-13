@@ -1,14 +1,14 @@
 # Model Providers
 
 A **Provider** is the seam between OpenArmature's graph engine and
-any LLM backend — OpenAI's hosted API, an Anthropic Messages
+any LLM backend (OpenAI's hosted API, an Anthropic Messages
 endpoint, a local vLLM / LM Studio / llama.cpp server, or an
-internal gateway. The engine doesn't know about LLMs; nodes call
+internal gateway). The engine doesn't know about LLMs; nodes call
 providers, providers do the wire work.
 
 ## What ships
 
-- **`OpenAIProvider`** — implements the OpenAI Chat Completions wire
+- **`OpenAIProvider`**: implements the OpenAI Chat Completions wire
   format (`POST /v1/chat/completions`). Talks to OpenAI itself plus
   the local servers that adopt the same format (vLLM, LM Studio,
   llama.cpp). One Provider class covers most real-world deployments.
@@ -41,7 +41,7 @@ class Provider(Protocol):
 - **`ready()`** verifies the bound model is reachable. Pre-flight
   check, typically called once before invoking the graph.
 - **`complete()`** performs a single completion call and returns the
-  full `Response` — message, finish reason, token usage, raw wire
+  full `Response`: message, finish reason, token usage, raw wire
   payload.
 
 ### Behaviour guarantees
@@ -55,7 +55,7 @@ class Provider(Protocol):
   Provider returns with `finish_reason="tool_calls"`. The caller
   executes the tool and makes a follow-on `complete()` with the
   result. The Provider does not re-enter itself.
-- **No retry on transient errors.** That's middleware's job — wrap a
+- **No retry on transient errors.** That's middleware's job; wrap a
   node in `RetryMiddleware` or similar.
 
 ## Errors
@@ -64,7 +64,7 @@ Seven canonical error categories cover every failure mode:
 
 | Error                       | Trigger                                       |
 | --------------------------- | --------------------------------------------- |
-| `ProviderAuthentication`    | 401 / 403 — bad key, expired token            |
+| `ProviderAuthentication`    | 401 / 403 (bad key, expired token)            |
 | `ProviderUnavailable`       | 5xx, network failure, timeout                 |
 | `ProviderInvalidModel`      | Bound model doesn't exist on the provider     |
 | `ProviderModelNotLoaded`    | Model known but not currently serving         |
@@ -73,7 +73,7 @@ Seven canonical error categories cover every failure mode:
 | `ProviderInvalidRequest`    | Malformed request (per-message or list-level) |
 
 Three of these (`Unavailable`, `RateLimit`, `ModelNotLoaded`) are
-exported in `TRANSIENT_CATEGORIES` — the canonical "safe to retry"
+exported in `TRANSIENT_CATEGORIES`, the canonical "safe to retry"
 set used by the default retry-middleware classifier.
 
 ## A minimal example
@@ -108,9 +108,9 @@ nodes call it inside their bodies.
 
 ## Where to next
 
-- **[Authoring a Provider](authoring.md)** — how to implement the
+- **[Authoring a Provider](authoring.md)**: how to implement the
   Protocol for a non-default wire format. Includes a ~60-line
   skeleton + contract checklist.
-- **[API reference: `openarmature.llm`](../reference/llm.md)** — the
+- **[API reference: `openarmature.llm`](../reference/llm.md)**: the
   full public surface (Message types, Response, Usage, RuntimeConfig,
   error classes).
