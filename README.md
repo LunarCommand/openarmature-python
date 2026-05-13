@@ -55,7 +55,7 @@ The OpenTelemetry mapping mandates a private `TracerProvider`. That prevents the
 
 ## Hello World
 
-Forty lines that show the engine in action. Three reducer policies declared on one state class. Routing as a pure function of state, not a hidden state machine. An observer attached at compile time that sees every node boundary the engine emits. No LLM, no API key, no boilerplate. Copy it, run it, watch the events fire. Requires Python 3.12 or later.
+About fifty lines that show the engine in action. Three reducer policies declared on one state class. Routing as a pure function of state, not a hidden state machine. An observer attached at compile time that sees every node boundary the engine emits. No LLM, no API key, no boilerplate. Copy it, run it, watch the events fire. Requires Python 3.12 or later.
 
 ```python
 import asyncio
@@ -127,12 +127,19 @@ graph = (
 )
 graph.attach_observer(trace)
 
-final = asyncio.run(graph.invoke(PipelineState(query="what is RAG?")))
+async def main() -> None:
+    try:
+        await graph.invoke(PipelineState(query="what is RAG?"))
+    finally:
+        await graph.drain()
+
+
+asyncio.run(main())
 # classify: sources=[]
 # research: sources=['wikipedia', 'arxiv']
 ```
 
-A few things to notice in those forty lines:
+A few things to notice in this short example:
 
 - **Three reducer policies on one state schema.** `query` and `classification` get the default `last_write_wins`. `sources` is `Annotated[list[str], append]`, so successive writes concatenate. `metadata` is `Annotated[dict[str, str], merge]`, so successive writes shallow-merge. The merge policy lives on the schema, once.
 - **Conditional routing as a state function.** `route` reads `state.classification` and returns a node name. The graph engine doesn't care that this happens to be deterministic; it would accept an LLM-driven router with the same shape.
