@@ -113,11 +113,6 @@ nav:
 extra:
   # Hide the "Made with Material for MkDocs" footer.
   generator: false
-  # Versioned docs via mike. The dropdown shows once at least one
-  # version has been published (``mike deploy <version>``); pre-1.0
-  # it stays hidden because nothing's deployed.
-  version:
-    provider: mike
   social:
     - icon: fontawesome/brands/github
       link: https://github.com/LunarCommand/openarmature-python
