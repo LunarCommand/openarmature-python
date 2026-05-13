@@ -8,9 +8,7 @@
 
 **Documentation:** [openarmature.ai](https://openarmature.ai)
 
-<div align="center">
-<h3>OpenArmature is a workflow framework for LLM pipelines and tool-calling agents.</h3>
-</div>
+### OpenArmature is a workflow framework for LLM pipelines and tool-calling agents.
 
 Typed state, compile-time topology checks, and observability and crash-safe checkpoints are baked into the engine. The graph layer itself has no concept of LLMs or tools, so the same primitives drive deterministic ETL pipelines and tool-calling agents alike.
 
