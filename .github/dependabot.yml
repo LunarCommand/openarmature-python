@@ -1,0 +1,24 @@
+# Dependabot configuration.
+#
+# All workflows pin third-party actions by commit SHA per CodeQL findings
+# 21 + 22 on PR #32 and the chore/pin-action-shas plan in
+# openarmature-coord/docs/future-work.md. SHA-pinning is a security
+# posture choice — tag refs are mutable, SHAs are not — and Dependabot is
+# the maintenance pair: it surfaces version bumps as PRs (with updated
+# SHA + version comment), so the security benefit doesn't trade off
+# against keeping actions current.
+#
+# Monthly cadence keeps the PR volume bounded. Action releases cluster
+# around new GitHub Actions runner features and GH platform updates; a
+# month is long enough for batched updates but short enough to catch
+# real security advisories in time.
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "monthly"
+    open-pull-requests-limit: 10
+    commit-message:
+      prefix: "chore"
+      include: "scope"
