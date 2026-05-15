@@ -29,13 +29,20 @@ PROVIDER_MODEL_NOT_LOADED = "provider_model_not_loaded"
 PROVIDER_RATE_LIMIT = "provider_rate_limit"
 PROVIDER_INVALID_RESPONSE = "provider_invalid_response"
 PROVIDER_INVALID_REQUEST = "provider_invalid_request"
+STRUCTURED_OUTPUT_INVALID = "structured_output_invalid"
 
 
 # Per spec §7 "Retry classification": these three categories are
-# *transient* — a retry MAY succeed. The other four
+# *transient* — a retry MAY succeed. The other categories
 # (`provider_authentication`, `provider_invalid_model`,
-# `provider_invalid_request`, `provider_invalid_response`) are
-# non-transient and MUST NOT be retried by the default classifier.
+# `provider_invalid_request`, `provider_invalid_response`,
+# `structured_output_invalid`) are non-transient and MUST NOT be
+# retried by the default classifier.
+#
+# ``structured_output_invalid`` is explicitly non-transient by default
+# per §7: a model that fails schema compliance on a given prompt usually
+# fails the same way on retry. Users wanting retry-on-validation-failure
+# semantics MAY include it in a custom classifier's transient set.
 #
 # Note: ``finish_reason: "error"`` is also transient per spec §7, but
 # that's a Response-level signal rather than an exception category, so
@@ -130,6 +137,45 @@ class ProviderInvalidRequest(LlmProviderError):
     category = PROVIDER_INVALID_REQUEST
 
 
+# Non-transient by default — a model that fails schema compliance on a
+# given prompt usually fails the same way on retry. The default
+# RetryMiddleware classifier does NOT retry this category. Users wanting
+# retry-on-validation-failure semantics MAY include the category in a
+# custom classifier's transient set.
+#
+# Distinct from ProviderInvalidResponse, which covers wire-shape
+# malformation. StructuredOutputInvalid is raised when the wire envelope
+# is fine but the content does not validate against the caller's schema.
+class StructuredOutputInvalid(LlmProviderError):
+    """Raised when a ``complete()`` call requested a ``response_schema``
+    and the provider's content could not be parsed as JSON or did not
+    validate against the schema.
+
+    Attributes:
+        response_schema: The JSON Schema requested.
+        raw_content: The raw response content the model produced.
+        failure_description: A description of the parse or validation
+            failure.
+    """
+
+    category = STRUCTURED_OUTPUT_INVALID
+    response_schema: dict[str, Any]
+    raw_content: str
+    failure_description: str
+
+    def __init__(
+        self,
+        *args: Any,
+        response_schema: dict[str, Any],
+        raw_content: str,
+        failure_description: str,
+    ) -> None:
+        super().__init__(*args)
+        self.response_schema = response_schema
+        self.raw_content = raw_content
+        self.failure_description = failure_description
+
+
 __all__ = [
     "PROVIDER_AUTHENTICATION",
     "PROVIDER_INVALID_MODEL",
@@ -138,6 +184,7 @@ __all__ = [
     "PROVIDER_MODEL_NOT_LOADED",
     "PROVIDER_RATE_LIMIT",
     "PROVIDER_UNAVAILABLE",
+    "STRUCTURED_OUTPUT_INVALID",
     "TRANSIENT_CATEGORIES",
     "LlmProviderError",
     "ProviderAuthentication",
@@ -147,4 +194,5 @@ __all__ = [
     "ProviderModelNotLoaded",
     "ProviderRateLimit",
     "ProviderUnavailable",
+    "StructuredOutputInvalid",
 ]
