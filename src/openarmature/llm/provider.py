@@ -74,6 +74,11 @@ class Provider(Protocol):
     ) -> Response:
         """Perform a single completion call.
 
+        Returns a :class:`Response` carrying the assistant message,
+        finish reason, usage, and raw payload. When ``response_schema``
+        is supplied and the model returns structured content,
+        ``Response.parsed`` carries the validated value.
+
         Args:
             messages: The conversation to send. MUST NOT be mutated by
                 the implementation.
@@ -84,12 +89,6 @@ class Provider(Protocol):
                 supplied, the implementation constrains the model's
                 output to the schema and populates ``Response.parsed``
                 with the validated value.
-
-        Returns:
-            A :class:`Response` carrying the assistant message, finish
-            reason, usage, raw payload, and (when ``response_schema``
-            was supplied and the model returned structured content)
-            the parsed structured value.
         """
         ...
 
