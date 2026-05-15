@@ -55,7 +55,7 @@ The OpenTelemetry mapping mandates a private `TracerProvider`. That prevents the
 
 ## Hello World
 
-About sixty lines that show the engine in action. Three reducer policies declared on one state class. An LLM call that returns a typed object, not a string. Conditional routing as a pure function of state, not a hidden state machine. An observer attached at compile time that sees every node boundary the engine emits. Requires Python 3.12 or later and an OpenAI-compatible endpoint (defaults to OpenAI public API; works against any local server too).
+About a hundred lines that show the engine in action. Three reducer policies declared on one state class. Three LLM calls each returning typed structured output (Pydantic class on two, raw JSON Schema dict on the third). Conditional routing as a pure function of state, not a hidden state machine. An observer attached at compile time that sees every node boundary the engine emits. Requires Python 3.12 or later and an OpenAI-compatible endpoint (defaults to OpenAI public API; works against any local server too).
 
 ```python
 import asyncio
@@ -73,9 +73,16 @@ class Classification(BaseModel):
     rationale: str
 
 
+class Summary(BaseModel):
+    one_liner: str
+    confidence: float
+
+
 class PipelineState(State):
     query: str                                                # last_write_wins (default)
-    classification: Classification | None = None              # last_write_wins
+    classification: Classification | None = None              # set by classify
+    research_plan: dict[str, Any] | None = None               # set by research (dict-schema form)
+    summary: Summary | None = None                            # set by summarize
     sources: Annotated[list[str], append] = Field(            # appends across writes
         default_factory=list
     )
@@ -94,17 +101,37 @@ provider = OpenAIProvider(
 async def classify(state: PipelineState) -> Mapping[str, Any]:
     response = await provider.complete(
         [UserMessage(content=f"Route to 'research' or 'summarize': {state.query!r}")],
-        response_schema=Classification,
+        response_schema=Classification,                                  # class → instance
     )
     return {"classification": response.parsed, "metadata": {"classified_by": "llm"}}
 
 
 async def research(state: PipelineState) -> Mapping[str, Any]:
-    return {"sources": ["wikipedia", "arxiv"], "metadata": {"tool": "search"}}
+    response = await provider.complete(
+        [UserMessage(content=f"Plan research for {state.query!r}: list topics + follow-ups.")],
+        response_schema={                                                # dict → dict
+            "type": "object",
+            "properties": {
+                "topics": {"type": "array", "items": {"type": "string"}},
+                "follow_up_questions": {"type": "array", "items": {"type": "string"}},
+            },
+            "required": ["topics", "follow_up_questions"],
+            "additionalProperties": False,
+        },
+    )
+    return {
+        "research_plan": response.parsed,
+        "sources": ["wikipedia", "arxiv"],
+        "metadata": {"tool": "research"},
+    }
 
 
 async def summarize(state: PipelineState) -> Mapping[str, Any]:
-    return {"sources": ["cache"], "metadata": {"tool": "summarizer"}}
+    response = await provider.complete(
+        [UserMessage(content=f"Summarize {state.query!r} in one sentence with confidence 0-1.")],
+        response_schema=Summary,                                         # class → instance
+    )
+    return {"summary": response.parsed, "sources": ["cache"], "metadata": {"tool": "summarize"}}
 
 
 def route(state: PipelineState) -> str:
@@ -135,6 +162,10 @@ async def main() -> None:
     try:
         final = await graph.invoke(PipelineState(query="what is RAG?"))
         print(f"\nclassification: {final.classification}")
+        if final.research_plan is not None:
+            print(f"research_plan: {final.research_plan}")
+        if final.summary is not None:
+            print(f"summary: {final.summary}")
     finally:
         await graph.drain()
 
@@ -142,12 +173,12 @@ async def main() -> None:
 asyncio.run(main())
 ```
 
-Set `LLM_API_KEY=sk-...` and run. To swap providers, point `LLM_BASE_URL` and `LLM_MODEL` at OpenRouter, vLLM, LM Studio, llama.cpp — anything that speaks the OpenAI Chat Completions wire format. The example also lives at [`examples/00-hello-world/main.py`](./examples/00-hello-world/main.py); see [`examples/`](./examples/) for more runnable demos.
+Set `LLM_API_KEY=sk-...` and run. To swap providers, point `LLM_BASE_URL` and `LLM_MODEL` at OpenRouter, vLLM, LM Studio, llama.cpp, or anything else that speaks the OpenAI Chat Completions wire format. The example also lives at [`examples/00-hello-world/main.py`](./examples/00-hello-world/main.py); see [`examples/`](./examples/) for more runnable demos.
 
 A few things to notice:
 
-- **Three reducer policies on one state schema.** `query` and `classification` get the default `last_write_wins`. `sources` is `Annotated[list[str], append]`, so successive writes concatenate. `metadata` is `Annotated[dict[str, str], merge]`, so successive writes shallow-merge. The merge policy lives on the schema, once.
-- **Structured output as a typed object.** `provider.complete(..., response_schema=Classification)` returns `Response.parsed` as a validated `Classification` instance, not a string the caller has to JSON-parse and re-validate. Pass a JSON Schema dict instead of a class for the raw form.
+- **Three reducer policies on one state schema.** `query` / `classification` / `research_plan` / `summary` get the default `last_write_wins`. `sources` is `Annotated[list[str], append]`, so successive writes concatenate. `metadata` is `Annotated[dict[str, str], merge]`, so successive writes shallow-merge. The merge policy lives on the schema, once.
+- **Structured output, two forms.** `response_schema=Classification` (a Pydantic class) returns `Response.parsed` as a validated `Classification` instance, typed end-to-end. `response_schema={...}` (a raw JSON Schema dict) returns `Response.parsed` as a plain dict. Same wire shape underneath; pick the form that fits.
 - **Conditional routing on a parsed field.** `route` reads `state.classification.intent` and returns the next node's name. The graph engine doesn't care the discriminator came from an LLM; it would accept a deterministic rule with the same shape.
 - **Observer sees both phases.** `trace` filters to `completed` events for brevity; the engine also delivers `started` events.
 - **The graph either compiles or it doesn't.** Remove `.set_entry()` and `.compile()` raises `NoDeclaredEntry` before `invoke()` runs.

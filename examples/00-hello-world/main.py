@@ -1,5 +1,6 @@
-"""Hello-world demo: a 3-node graph that classifies a query with an LLM
-(via structured output) and routes to one of two follow-up nodes.
+"""Hello-world demo: a 3-node graph where each node makes an LLM call
+with structured output. Classify a query, then either plan research or
+write a one-sentence summary.
 
 **Demonstrates:**
 
@@ -7,18 +8,21 @@
   ``append``, ``merge``).
 - ``OpenAIProvider`` from ``openarmature.llm`` against any
   OpenAI-compatible endpoint.
-- Structured output via a Pydantic class — the model's response comes
-  back as a validated ``Classification`` instance, not a string.
-- Conditional routing as a pure function of state (``route``).
+- Both ``response_schema`` forms:
+  - Pydantic class (``Classification``, ``Summary``): typed
+    instance on ``Response.parsed``.
+  - JSON Schema dict (``research``): raw dict on ``Response.parsed``.
+- Conditional routing on a parsed field (``route`` reads
+  ``state.classification.intent``).
 - ``attach_observer`` for boundary visibility.
 
 **Configuration** (env vars; OpenAI defaults shown):
 
-- ``LLM_BASE_URL`` — defaults to ``https://api.openai.com``. **Host
-  root only** — the impl adds ``/v1/chat/completions`` and
+- ``LLM_BASE_URL``: defaults to ``https://api.openai.com``. **Host
+  root only**; the impl adds ``/v1/chat/completions`` and
   ``/v1/models`` itself, so do NOT include ``/v1`` in this value.
-- ``LLM_MODEL`` — defaults to ``gpt-4o-mini``.
-- ``LLM_API_KEY`` — required (your OpenAI API key, or empty for
+- ``LLM_MODEL``: defaults to ``gpt-4o-mini``.
+- ``LLM_API_KEY``: required (your OpenAI API key, or empty for
   local servers that don't authenticate).
 
 Run with:
@@ -48,22 +52,28 @@ from openarmature.graph import (
 from openarmature.llm import OpenAIProvider, UserMessage
 
 
+# Pydantic schemas the model is constrained to produce. Passing a
+# class as ``response_schema`` makes the framework convert to JSON
+# Schema, instruct the provider to return matching content, validate
+# the response, and yield an instance via ``Response.parsed``.
 class Classification(BaseModel):
-    """The Pydantic schema the model is constrained to produce.
-
-    Passed as ``response_schema`` to ``provider.complete()``; the
-    framework converts to JSON Schema, instructs the provider to
-    return matching content, validates the response, and yields a
-    ``Classification`` instance via ``Response.parsed``.
-    """
-
     intent: Literal["research", "summarize"]
     rationale: str
 
 
+class Summary(BaseModel):
+    one_liner: str
+    confidence: float
+
+
+# State holds intermediate artifacts from each LLM call. ``research``
+# uses a dict schema (rather than a class), so its parsed value is a
+# raw dict, typed here as ``dict[str, Any] | None``.
 class PipelineState(State):
     query: str
     classification: Classification | None = None
+    research_plan: dict[str, Any] | None = None
+    summary: Summary | None = None
     sources: Annotated[list[str], append] = Field(default_factory=list)
     metadata: Annotated[dict[str, str], merge] = Field(default_factory=dict)
 
@@ -76,12 +86,15 @@ _provider = OpenAIProvider(
 
 
 async def classify(state: PipelineState) -> Mapping[str, Any]:
+    # response_schema=class form: parsed comes back as a Classification
+    # instance. The model picks the branch (research vs summarize) and
+    # the routing function below reads it as a typed field.
     response = await _provider.complete(
         [
             UserMessage(
                 content=(
-                    f"Route this query to either 'research' (look something up) or "
-                    f"'summarize' (condense known material): {state.query!r}"
+                    f"Route this query to either 'research' (find new information) "
+                    f"or 'summarize' (condense known material): {state.query!r}"
                 )
             )
         ],
@@ -91,11 +104,55 @@ async def classify(state: PipelineState) -> Mapping[str, Any]:
 
 
 async def research(state: PipelineState) -> Mapping[str, Any]:
-    return {"sources": ["wikipedia", "arxiv"], "metadata": {"tool": "search"}}
+    # response_schema=dict form: parsed comes back as a plain dict.
+    # Same wire shape as the class form: the framework converts a
+    # class via .model_json_schema() under the hood. Use dict when
+    # you want raw shape without declaring a Pydantic model.
+    response = await _provider.complete(
+        [
+            UserMessage(
+                content=(
+                    f"Plan research for the query {state.query!r}. List up to 3 "
+                    f"specific topics to investigate and up to 3 follow-up questions."
+                )
+            )
+        ],
+        response_schema={
+            "type": "object",
+            "properties": {
+                "topics": {"type": "array", "items": {"type": "string"}},
+                "follow_up_questions": {"type": "array", "items": {"type": "string"}},
+            },
+            "required": ["topics", "follow_up_questions"],
+            "additionalProperties": False,
+        },
+    )
+    return {
+        "research_plan": response.parsed,
+        "sources": ["wikipedia", "arxiv"],
+        "metadata": {"tool": "research"},
+    }
 
 
 async def summarize(state: PipelineState) -> Mapping[str, Any]:
-    return {"sources": ["cache"], "metadata": {"tool": "summarizer"}}
+    # Pydantic-class form again: parsed is a Summary instance with
+    # a typed one_liner and a confidence float.
+    response = await _provider.complete(
+        [
+            UserMessage(
+                content=(
+                    f"Summarize {state.query!r} in one sentence. Set confidence "
+                    f"between 0 and 1 reflecting how well-established the answer is."
+                )
+            )
+        ],
+        response_schema=Summary,
+    )
+    return {
+        "summary": response.parsed,
+        "sources": ["cache"],
+        "metadata": {"tool": "summarize"},
+    }
 
 
 def route(state: PipelineState) -> str:
@@ -132,6 +189,10 @@ async def main() -> None:
     try:
         final = await graph.invoke(PipelineState(query="what is RAG?"))
         print(f"\nclassification: {final.classification}")
+        if final.research_plan is not None:
+            print(f"research_plan: {final.research_plan}")
+        if final.summary is not None:
+            print(f"summary: {final.summary}")
         print(f"sources: {final.sources}")
         print(f"metadata: {final.metadata}")
     finally:
