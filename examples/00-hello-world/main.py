@@ -178,8 +178,12 @@ def route(state: PipelineState) -> str:
 async def trace(event: NodeEvent) -> None:
     # OpenAIProvider emits NodeEvent-shaped events for LLM-span
     # tracking under a sentinel namespace; those have post_state=None.
-    # Filter to events that carry a state snapshot before reading it.
-    if event.phase == "completed" and event.error is None and event.post_state is not None:
+    # Filter to events that carry a PipelineState snapshot before
+    # reading it. The isinstance check both narrows the type for
+    # static checkers (post_state is typed as the base State, not
+    # PipelineState) and acts as a defensive guard against any
+    # foreign-state observer event the engine might dispatch.
+    if event.phase == "completed" and event.error is None and isinstance(event.post_state, PipelineState):
         print(f"{event.node_name}: sources={event.post_state.sources}")
 
 
