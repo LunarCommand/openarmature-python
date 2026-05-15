@@ -38,6 +38,8 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import Any, Protocol, cast
 
+from pydantic import BaseModel
+
 from .errors import ProviderInvalidRequest
 from .messages import (
     AssistantMessage,
@@ -67,15 +69,26 @@ class Provider(Protocol):
         messages: Sequence[Message],
         tools: Sequence[Tool] | None = None,
         config: RuntimeConfig | None = None,
+        response_schema: dict[str, Any] | type[BaseModel] | None = None,
     ) -> Response:
         """Perform a single completion call.
 
-        ``messages`` MUST NOT be mutated. ``complete()`` does NOT loop
-        on tool calls — if the response's ``finish_reason`` is
-        ``"tool_calls"``, the caller is responsible for executing the
-        tools and making a follow-on call with ``tool`` messages
-        appended. ``complete()`` does NOT retry; transient errors
-        propagate.
+        Args:
+            messages: The conversation to send. MUST NOT be mutated by
+                the implementation.
+            tools: Optional tool definitions the model may call.
+            config: Optional per-call sampling parameters.
+            response_schema: Optional JSON Schema (dict) or Pydantic
+                model class describing the expected output shape. When
+                supplied, the implementation constrains the model's
+                output to the schema and populates ``Response.parsed``
+                with the validated value.
+
+        Returns:
+            A :class:`Response` carrying the assistant message, finish
+            reason, usage, raw payload, and (when ``response_schema``
+            was supplied and the model returned structured content)
+            the parsed structured value.
         """
         ...
 
