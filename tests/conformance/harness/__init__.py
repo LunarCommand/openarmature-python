@@ -24,6 +24,13 @@ from .fixtures import (
 )
 from .loader import discover_fixtures, load_fixture
 from .skip import SkipReason
+from .wire import (
+    assert_error_carries,
+    assert_response_format_absent,
+    assert_system_references_schema,
+    match_wire_body,
+    request_body,
+)
 
 __all__ = [
     "CasesFixture",
@@ -31,6 +38,11 @@ __all__ = [
     "GraphFixture",
     "LlmProviderFixture",
     "SkipReason",
+    "assert_error_carries",
+    "assert_response_format_absent",
+    "assert_system_references_schema",
     "discover_fixtures",
     "load_fixture",
+    "match_wire_body",
+    "request_body",
 ]
