@@ -57,6 +57,22 @@ def test_validate_response_schema_rejects_missing_type() -> None:
         validate_response_schema({"properties": {"x": {"type": "integer"}}})
 
 
+def test_validate_response_schema_rejects_external_ref() -> None:
+    # External or otherwise unresolvable $refs would surface at
+    # validate() time as raw referencing-library exceptions; the
+    # boundary check should reject them with the canonical
+    # ProviderInvalidRequest category.
+    with pytest.raises(ProviderInvalidRequest, match="unresolvable"):
+        validate_response_schema(
+            {
+                "type": "object",
+                "properties": {"x": {"$ref": "https://example.com/schema.json"}},
+                "required": ["x"],
+                "additionalProperties": False,
+            }
+        )
+
+
 def test_validate_response_schema_rejects_malformed_schema() -> None:
     # `"type": "foobar"` is not a valid JSON Schema type keyword; the
     # boundary check should catch this and raise ProviderInvalidRequest
@@ -186,10 +202,14 @@ def test_strict_mode_resolves_internal_ref() -> None:
 
 
 def test_strict_mode_unresolvable_ref_fails() -> None:
-    schema = {
+    # Root is strict-compatible so the walk reaches the $ref inside
+    # properties.x. The external ref is unresolvable, so the walker
+    # returns False from the ref branch (not from a root-level fail).
+    schema: dict[str, Any] = {
         "type": "object",
         "properties": {"x": {"$ref": "https://example.com/external-schema.json"}},
         "required": ["x"],
+        "additionalProperties": False,
     }
     assert strict_mode_supported(schema) is False
 

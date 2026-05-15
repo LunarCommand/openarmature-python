@@ -78,21 +78,32 @@ class PipelineState(State):
     metadata: Annotated[dict[str, str], merge] = Field(default_factory=dict)
 
 
-_provider = OpenAIProvider(
-    base_url=os.environ.get("LLM_BASE_URL", "https://api.openai.com"),
-    model=os.environ.get("LLM_MODEL", "gpt-4o-mini"),
-    # ``or None`` so an exported-but-empty LLM_API_KEY falls through to
-    # no-auth (matters for local servers like vLLM that reject an empty
-    # bearer header).
-    api_key=os.environ.get("LLM_API_KEY") or None,
-)
+# Lazy initialization: the provider is constructed on first call from
+# inside a node body, not at import time. That avoids opening an
+# httpx.AsyncClient connection pool when tools (test harnesses, doc
+# builders, IDE inspection) import this module without running main().
+_provider_instance: OpenAIProvider | None = None
+
+
+def _get_provider() -> OpenAIProvider:
+    global _provider_instance
+    if _provider_instance is None:
+        _provider_instance = OpenAIProvider(
+            base_url=os.environ.get("LLM_BASE_URL", "https://api.openai.com"),
+            model=os.environ.get("LLM_MODEL", "gpt-4o-mini"),
+            # ``or None`` so an exported-but-empty LLM_API_KEY falls
+            # through to no-auth (matters for local servers like vLLM
+            # that reject an empty bearer header).
+            api_key=os.environ.get("LLM_API_KEY") or None,
+        )
+    return _provider_instance
 
 
 async def classify(state: PipelineState) -> Mapping[str, Any]:
     # response_schema=class form: parsed comes back as a Classification
     # instance. The model picks the branch (research vs summarize) and
     # the routing function below reads it as a typed field.
-    response = await _provider.complete(
+    response = await _get_provider().complete(
         [
             UserMessage(
                 content=(
@@ -111,7 +122,7 @@ async def research(state: PipelineState) -> Mapping[str, Any]:
     # Same wire shape as the class form: the framework converts a
     # class via .model_json_schema() under the hood. Use dict when
     # you want raw shape without declaring a Pydantic model.
-    response = await _provider.complete(
+    response = await _get_provider().complete(
         [
             UserMessage(
                 content=(
@@ -140,7 +151,7 @@ async def research(state: PipelineState) -> Mapping[str, Any]:
 async def summarize(state: PipelineState) -> Mapping[str, Any]:
     # Pydantic-class form again: parsed is a Summary instance with
     # a typed one_liner and a confidence float.
-    response = await _provider.complete(
+    response = await _get_provider().complete(
         [
             UserMessage(
                 content=(
@@ -200,7 +211,8 @@ async def main() -> None:
         print(f"metadata: {final.metadata}")
     finally:
         await graph.drain()
-        await _provider.aclose()
+        if _provider_instance is not None:
+            await _provider_instance.aclose()
 
 
 if __name__ == "__main__":

@@ -557,6 +557,17 @@ def _parse_and_validate(
             raw_content=content,
             failure_description=exc.message,
         ) from exc
+    except jsonschema.SchemaError as exc:
+        # Safety net: validate_response_schema's pre-validation should
+        # have caught this, but any schema-side exception (including
+        # ref-resolution failures via the `referencing` library) MUST
+        # still map to the canonical taxonomy rather than leak raw.
+        raise StructuredOutputInvalid(
+            "response could not be validated against the supplied schema",
+            response_schema=schema_dict,
+            raw_content=content,
+            failure_description=str(exc),
+        ) from exc
     return parsed_dict
 
 

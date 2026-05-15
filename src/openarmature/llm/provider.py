@@ -210,6 +210,34 @@ def validate_response_schema(schema: object) -> None:
         jsonschema.Draft202012Validator.check_schema(schema_dict)
     except jsonschema.SchemaError as exc:
         raise ProviderInvalidRequest(f"response_schema: not a valid JSON Schema: {exc.message}") from exc
+    # check_schema() validates the schema's own syntax but does not
+    # traverse $ref targets. Walk all refs in the schema and confirm
+    # each resolves to a subschema within the document, so external or
+    # broken refs fail here rather than escaping at parse time as
+    # raw referencing-library exceptions.
+    _check_refs_resolvable(schema_dict)
+
+
+def _check_refs_resolvable(schema: dict[str, Any]) -> None:
+    """Walk the schema tree and raise ProviderInvalidRequest for any
+    $ref value that cannot be resolved internally."""
+
+    def walk(node: Any) -> None:
+        if isinstance(node, dict):
+            node_dict = cast("dict[str, Any]", node)
+            ref = node_dict.get("$ref")
+            if isinstance(ref, str) and _resolve_ref(ref, schema) is None:
+                raise ProviderInvalidRequest(
+                    f"response_schema: unresolvable $ref {ref!r}; only internal "
+                    "refs (#/... or #) are supported by the provider's validator"
+                )
+            for value in node_dict.values():
+                walk(value)
+        elif isinstance(node, list):
+            for item in cast("list[Any]", node):
+                walk(item)
+
+    walk(schema)
 
 
 # Strict mode (OpenAI's response_format strict:true and the analogous
