@@ -360,6 +360,13 @@ class OpenAIProvider:
                     "strict": strict_mode_supported(schema_dict),
                 },
             }
+        elif not include_response_format:
+            # On the fallback path the §8.5.1 contract is "response_format
+            # MUST NOT be on the wire." RuntimeConfig is extra="allow" so
+            # a caller could pass response_format through via the extras
+            # loop above; strip it here so the fallback contract holds
+            # regardless of caller-supplied extras.
+            body.pop("response_format", None)
         return body
 
     # ------------------------------------------------------------------

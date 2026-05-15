@@ -94,7 +94,7 @@ class PipelineState(State):
 provider = OpenAIProvider(
     base_url=os.environ.get("LLM_BASE_URL", "https://api.openai.com"),  # host root; impl adds /v1
     model=os.environ.get("LLM_MODEL", "gpt-4o-mini"),
-    api_key=os.environ.get("LLM_API_KEY"),
+    api_key=os.environ.get("LLM_API_KEY") or None,                      # empty → no-auth
 )
 
 
@@ -168,6 +168,7 @@ async def main() -> None:
             print(f"summary: {final.summary}")
     finally:
         await graph.drain()
+        await provider.aclose()
 
 
 asyncio.run(main())

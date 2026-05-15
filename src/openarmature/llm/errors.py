@@ -1,15 +1,15 @@
-# Spec: realizes llm-provider §7 (seven canonical error categories).
+# Spec: realizes llm-provider §7 (canonical error categories).
 
 """Errors raised by an llm-provider implementation.
 
-A provider call (``ready()`` or ``complete()``) MAY raise one of
-seven canonical category errors. Each error class carries a
-``category`` class attribute matching the canonical string identifier
-so callers can dispatch on the category without matching exception
-types directly.
+A provider call (``ready()`` or ``complete()``) MAY raise one of the
+canonical category errors documented below. Each error class carries
+a ``category`` class attribute matching the canonical string
+identifier so callers can dispatch on the category without matching
+exception types directly.
 
 This module is also the single source of truth for the canonical
-category strings — :data:`TRANSIENT_CATEGORIES` lives here, and
+category strings; :data:`TRANSIENT_CATEGORIES` lives here, and
 ``openarmature.graph.middleware.retry``'s default classifier imports
 it.
 """

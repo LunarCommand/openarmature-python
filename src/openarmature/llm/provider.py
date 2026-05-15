@@ -14,9 +14,11 @@ A provider MUST expose two operations:
   A successful return implies the next ``complete()`` would not
   raise errors that surface mismatched configuration or unloaded
   state.
-- ``async complete(messages, tools=None, config=None) -> Response``
-  — performs a single completion. Stateless, reentrant, MUST NOT
-  mutate its inputs.
+- ``async complete(messages, tools=None, config=None, response_schema=None) -> Response``
+  performs a single completion. Stateless, reentrant, MUST NOT mutate
+  its inputs. When ``response_schema`` is supplied (a JSON Schema
+  dict or Pydantic class), the implementation constrains the model's
+  output and populates ``Response.parsed``.
 
 This module also exports :func:`validate_message_list`: a list-level
 invariant check that complements per-message Pydantic validation. A
@@ -177,9 +179,12 @@ def validate_tools(tools: Sequence[Tool] | None) -> None:
 
 # Spec llm-provider §5 requires the response_schema argument to
 # complete() to be a valid JSON Schema with a top-level type "object".
-# The pre-send check here is the structural minimum; deeper validity
-# (recursive JSON Schema correctness, vendor extensions) is delegated
-# to the runtime validator at parse time.
+# The boundary check here validates BOTH constraints: structural
+# (must be a dict with top-level type: "object") AND full JSON Schema
+# validity via Draft202012Validator.check_schema(). The runtime
+# validator on the parse path only handles instance-against-schema
+# failures; malformed schemas fail here rather than escaping at decode
+# time as jsonschema.SchemaError.
 def validate_response_schema(schema: object) -> None:
     """Pre-send validation for a JSON Schema passed as the
     ``response_schema`` argument to ``complete()``.
@@ -224,9 +229,11 @@ def strict_mode_supported(schema: dict[str, Any]) -> bool:
     by native-decoding LLM wire paths.
 
     Returns True iff for every nested (sub)schema in the tree
-    ``additionalProperties`` is not ``true`` and every key in
-    ``properties`` appears in ``required``. False on any violation, on
-    an unresolvable ``$ref``, or on an unknown shape.
+    ``additionalProperties`` is explicitly ``false`` (an omitted key
+    counts as non-strict, since JSON Schema's default is to permit
+    extras) and every key in ``properties`` appears in ``required``.
+    False on any violation, on an unresolvable ``$ref``, or on an
+    unknown shape.
 
     Args:
         schema: The root JSON Schema dict.
@@ -236,6 +243,13 @@ def strict_mode_supported(schema: dict[str, Any]) -> bool:
         otherwise.
     """
     return _strict_mode_check(schema, root=schema, visited=set())
+
+
+# JSON Schema primitive types: terminal-strict-compatible because they
+# carry no nested structure to verify. Object/array types have their
+# own branch checks; anything else (const, enum, unknown keywords,
+# empty {}) is conservatively non-strict.
+_PRIMITIVE_TYPES = frozenset({"string", "integer", "number", "boolean", "null"})
 
 
 def _strict_mode_check(
@@ -311,7 +325,23 @@ def _strict_mode_check(
                 if not _strict_mode_check(item, root=root, visited=visited):
                     return False
 
-    return True
+    # Determine whether the schema declared a shape we know how to
+    # verify. Object/array branches above already returned False on
+    # any internal violation; reaching here means all internal checks
+    # passed. Combinators with all branches passing are likewise OK.
+    # Primitive types are terminal. Anything else (empty schema,
+    # `const`/`enum`-only, unknown keywords) is conservatively
+    # non-strict — the walker can't statically verify it.
+    has_combinator = any(k in schema_dict for k in ("anyOf", "oneOf", "allOf"))
+    if is_object_type or is_array_type or has_combinator:
+        return True
+    if isinstance(schema_type, str) and schema_type in _PRIMITIVE_TYPES:
+        return True
+    if isinstance(schema_type, list) and all(
+        isinstance(t, str) and t in _PRIMITIVE_TYPES for t in cast("list[Any]", schema_type)
+    ):
+        return True
+    return False
 
 
 # Internal-only $ref resolver. Handles JSON Pointer fragments rooted
@@ -320,6 +350,11 @@ def _strict_mode_check(
 # None. JSON Pointer escape rules (`~0` for `~`, `~1` for `/`) are
 # unescaped per RFC 6901.
 def _resolve_ref(ref: str, root: dict[str, Any]) -> dict[str, Any] | None:
+    # Bare "#" is the JSON Pointer for the document root; "#/" prefixes
+    # an internal path. Anything else (external URIs, relative refs we
+    # can't resolve without a base) we treat as unresolvable.
+    if ref == "#":
+        return root
     if not ref.startswith("#/"):
         return None
     parts = ref[2:].split("/")

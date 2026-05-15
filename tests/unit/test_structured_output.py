@@ -178,6 +178,44 @@ def test_strict_mode_unresolvable_ref_fails() -> None:
     assert strict_mode_supported(schema) is False
 
 
+def test_strict_mode_empty_property_schema_fails() -> None:
+    # A property schema of {} (matches anything) cannot be statically
+    # verified as strict-compatible. The walker should return False
+    # rather than fall through to True.
+    schema: dict[str, Any] = {
+        "type": "object",
+        "properties": {"x": {}},
+        "required": ["x"],
+        "additionalProperties": False,
+    }
+    assert strict_mode_supported(schema) is False
+
+
+def test_strict_mode_primitive_property_passes() -> None:
+    # Primitive types (string, integer, number, boolean, null) carry no
+    # nested structure to verify, so they are terminal-strict-compatible.
+    schema: dict[str, Any] = {
+        "type": "object",
+        "properties": {"name": {"type": "string"}, "age": {"type": "integer"}},
+        "required": ["name", "age"],
+        "additionalProperties": False,
+    }
+    assert strict_mode_supported(schema) is True
+
+
+def test_strict_mode_resolves_bare_root_ref() -> None:
+    # JSON Pointer "#" is a valid reference to the document root
+    # (RFC 6901). A schema using $ref: "#" for self-recursion should
+    # resolve through and inherit the root's strict-mode status.
+    schema: dict[str, Any] = {
+        "type": "object",
+        "properties": {"value": {"type": "string"}, "self": {"$ref": "#"}},
+        "required": ["value", "self"],
+        "additionalProperties": False,
+    }
+    assert strict_mode_supported(schema) is True
+
+
 def test_strict_mode_handles_ref_cycle() -> None:
     # Self-referential schema: each entry has a "children" key pointing
     # back to the same definition. Without cycle protection this would
@@ -445,7 +483,7 @@ async def test_pydantic_class_wire_body_matches_dict_form() -> None:
 
     body_class = json.loads(captured_class[0].content)
     body_dict = json.loads(captured_dict[0].content)
-    assert body_class["response_format"] == body_dict["response_format"]
+    assert body_class == body_dict
 
 
 # ---------------------------------------------------------------------------
@@ -453,20 +491,26 @@ async def test_pydantic_class_wire_body_matches_dict_form() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_inspect_property_native_default() -> None:
+async def test_inspect_property_native_default() -> None:
     provider = OpenAIProvider(
         base_url="http://mock-llm.test",
         model="test-model",
         api_key="test-key",
     )
-    assert provider.uses_prompt_augmentation_fallback is False
+    try:
+        assert provider.uses_prompt_augmentation_fallback is False
+    finally:
+        await provider.aclose()
 
 
-def test_inspect_property_fallback_when_forced() -> None:
+async def test_inspect_property_fallback_when_forced() -> None:
     provider = OpenAIProvider(
         base_url="http://mock-llm.test",
         model="test-model",
         api_key="test-key",
         force_prompt_augmentation_fallback=True,
     )
-    assert provider.uses_prompt_augmentation_fallback is True
+    try:
+        assert provider.uses_prompt_augmentation_fallback is True
+    finally:
+        await provider.aclose()

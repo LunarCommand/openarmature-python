@@ -81,7 +81,10 @@ class PipelineState(State):
 _provider = OpenAIProvider(
     base_url=os.environ.get("LLM_BASE_URL", "https://api.openai.com"),
     model=os.environ.get("LLM_MODEL", "gpt-4o-mini"),
-    api_key=os.environ.get("LLM_API_KEY"),
+    # ``or None`` so an exported-but-empty LLM_API_KEY falls through to
+    # no-auth (matters for local servers like vLLM that reject an empty
+    # bearer header).
+    api_key=os.environ.get("LLM_API_KEY") or None,
 )
 
 
@@ -197,6 +200,7 @@ async def main() -> None:
         print(f"metadata: {final.metadata}")
     finally:
         await graph.drain()
+        await _provider.aclose()
 
 
 if __name__ == "__main__":
