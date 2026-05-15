@@ -55,26 +55,27 @@ The OpenTelemetry mapping mandates a private `TracerProvider`. That prevents the
 
 ## Hello World
 
-About fifty lines that show the engine in action. Three reducer policies declared on one state class. Routing as a pure function of state, not a hidden state machine. An observer attached at compile time that sees every node boundary the engine emits. No LLM, no API key, no boilerplate. Copy it, run it, watch the events fire. Requires Python 3.12 or later.
+About sixty lines that show the engine in action. Three reducer policies declared on one state class. An LLM call that returns a typed object, not a string. Conditional routing as a pure function of state, not a hidden state machine. An observer attached at compile time that sees every node boundary the engine emits. Requires Python 3.12 or later and an OpenAI-compatible endpoint (defaults to OpenAI public API; works against any local server too).
 
 ```python
 import asyncio
-from typing import Annotated
+import os
+from collections.abc import Mapping
+from typing import Annotated, Any, Literal
 
-from openarmature.graph import (
-    END,
-    GraphBuilder,
-    NodeEvent,
-    State,
-    append,
-    merge,
-)
-from pydantic import Field
+from openarmature.graph import END, GraphBuilder, NodeEvent, State, append, merge
+from openarmature.llm import OpenAIProvider, UserMessage
+from pydantic import BaseModel, Field
+
+
+class Classification(BaseModel):
+    intent: Literal["research", "summarize"]
+    rationale: str
 
 
 class PipelineState(State):
     query: str                                                # last_write_wins (default)
-    classification: str = ""                                  # last_write_wins
+    classification: Classification | None = None              # last_write_wins
     sources: Annotated[list[str], append] = Field(            # appends across writes
         default_factory=list
     )
@@ -83,30 +84,32 @@ class PipelineState(State):
     )
 
 
-async def classify(state: PipelineState) -> dict:
-    decision = "research" if "?" in state.query else "summarize"
-    return {
-        "classification": decision,
-        "metadata": {"classified_by": "rule"},
-    }
+provider = OpenAIProvider(
+    base_url=os.environ.get("LLM_BASE_URL", "https://api.openai.com/v1"),
+    model=os.environ.get("LLM_MODEL", "gpt-4o-mini"),
+    api_key=os.environ.get("LLM_API_KEY"),
+)
 
 
-async def research(state: PipelineState) -> dict:
-    return {
-        "sources": ["wikipedia", "arxiv"],
-        "metadata": {"tool": "search"},
-    }
+async def classify(state: PipelineState) -> Mapping[str, Any]:
+    response = await provider.complete(
+        [UserMessage(content=f"Route to 'research' or 'summarize': {state.query!r}")],
+        response_schema=Classification,
+    )
+    return {"classification": response.parsed, "metadata": {"classified_by": "llm"}}
 
 
-async def summarize(state: PipelineState) -> dict:
-    return {
-        "sources": ["cache"],
-        "metadata": {"tool": "summarizer"},
-    }
+async def research(state: PipelineState) -> Mapping[str, Any]:
+    return {"sources": ["wikipedia", "arxiv"], "metadata": {"tool": "search"}}
+
+
+async def summarize(state: PipelineState) -> Mapping[str, Any]:
+    return {"sources": ["cache"], "metadata": {"tool": "summarizer"}}
 
 
 def route(state: PipelineState) -> str:
-    return state.classification
+    assert state.classification is not None
+    return state.classification.intent
 
 
 async def trace(event: NodeEvent) -> None:
@@ -127,22 +130,25 @@ graph = (
 )
 graph.attach_observer(trace)
 
+
 async def main() -> None:
     try:
-        await graph.invoke(PipelineState(query="what is RAG?"))
+        final = await graph.invoke(PipelineState(query="what is RAG?"))
+        print(f"\nclassification: {final.classification}")
     finally:
         await graph.drain()
 
 
 asyncio.run(main())
-# classify: sources=[]
-# research: sources=['wikipedia', 'arxiv']
 ```
 
-A few things to notice in this short example:
+Set `LLM_API_KEY=sk-...` and run. To swap providers, point `LLM_BASE_URL` and `LLM_MODEL` at OpenRouter, vLLM, LM Studio, llama.cpp — anything that speaks the OpenAI Chat Completions wire format. The example also lives at [`examples/00-hello-world/main.py`](./examples/00-hello-world/main.py); see [`examples/`](./examples/) for more runnable demos.
+
+A few things to notice:
 
 - **Three reducer policies on one state schema.** `query` and `classification` get the default `last_write_wins`. `sources` is `Annotated[list[str], append]`, so successive writes concatenate. `metadata` is `Annotated[dict[str, str], merge]`, so successive writes shallow-merge. The merge policy lives on the schema, once.
-- **Conditional routing as a state function.** `route` reads `state.classification` and returns a node name. The graph engine doesn't care that this happens to be deterministic; it would accept an LLM-driven router with the same shape.
+- **Structured output as a typed object.** `provider.complete(..., response_schema=Classification)` returns `Response.parsed` as a validated `Classification` instance, not a string the caller has to JSON-parse and re-validate. Pass a JSON Schema dict instead of a class for the raw form.
+- **Conditional routing on a parsed field.** `route` reads `state.classification.intent` and returns the next node's name. The graph engine doesn't care the discriminator came from an LLM; it would accept a deterministic rule with the same shape.
 - **Observer sees both phases.** `trace` filters to `completed` events for brevity; the engine also delivers `started` events.
 - **The graph either compiles or it doesn't.** Remove `.set_entry()` and `.compile()` raises `NoDeclaredEntry` before `invoke()` runs.
 
