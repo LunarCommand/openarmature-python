@@ -79,7 +79,7 @@ examples = [
 packages = ["src/openarmature"]
 
 [tool.pyright]
-include = ["src", "tests"]
+include = ["src", "tests", "examples"]
 pythonVersion = "3.12"
 typeCheckingMode = "strict"
 reportMissingTypeStubs = false
