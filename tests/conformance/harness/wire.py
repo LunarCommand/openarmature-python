@@ -42,9 +42,10 @@ def match_wire_body(
 ) -> None:
     """Recursive deep-equal between an actual wire-body value and an
     expected shape. Strings equal to ``"*"`` in the expected value match
-    any non-empty string in the actual value. Keys present in
-    ``expected`` MUST be present in ``actual`` and equal; keys present
-    in ``actual`` but absent from ``expected`` are allowed.
+    any non-empty string in the actual value. ``expected_wire_request``
+    is a literal compare: keys present in ``actual`` but absent from
+    ``expected`` are NOT allowed. Partial assertions belong in the
+    sibling ``expected_wire_request_checks`` block.
 
     Raises :class:`AssertionError` with a JSON-pointer-style path on
     mismatch.
@@ -61,6 +62,9 @@ def match_wire_body(
             raise AssertionError(f"wire mismatch at {path}: expected object, got {type(actual).__name__}")
         expected_map = cast("Mapping[str, Any]", expected)
         actual_map = cast("Mapping[str, Any]", actual)
+        extra = set(actual_map) - set(expected_map)
+        if extra:
+            raise AssertionError(f"wire mismatch at {path}: unexpected extra keys in actual: {sorted(extra)}")
         for key, exp_v in expected_map.items():
             if key not in actual_map:
                 raise AssertionError(f"wire mismatch at {path}: missing key {key!r}")

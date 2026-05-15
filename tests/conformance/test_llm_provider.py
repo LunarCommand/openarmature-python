@@ -37,6 +37,7 @@ from openarmature.llm import (
     ProviderInvalidRequest,
     ProviderRateLimit,
     Response,
+    RuntimeConfig,
     SystemMessage,
     Tool,
     ToolCall,
@@ -410,23 +411,40 @@ async def _run_one_case(spec: Mapping[str, Any]) -> None:
         await provider.aclose()
 
 
+# Keys that may live as siblings to a ``call:`` block in a cases-shape
+# fixture but are conceptually call-level metadata. ``_iter_calls``
+# copies these from the case into the yielded call so the test runner
+# sees them in one place.
+_CASE_LEVEL_CALL_KEYS = (
+    "expected",
+    "expected_wire_request",
+    "expected_wire_request_checks",
+    "response_schema",
+    "retry_middleware",
+)
+
+
 def _iter_calls(spec: Mapping[str, Any]) -> Iterator[Mapping[str, Any]]:
-    """Yield each call dict with its ``expected`` block attached.
+    """Yield each call dict with its case-level metadata attached.
 
     Two shapes the fixtures use:
     - ``calls: [{operation, messages, expected, ...}]`` — call and
       expected are siblings inside each call entry.
     - ``call: {operation, messages, ...}`` + sibling ``expected: ...``
-      — the case-shape, where expected lives alongside the call.
-    Both are normalised here to a flat dict where ``expected`` is on
-    the call.
+      (and possibly ``expected_wire_request:``, ``response_schema:``,
+      ``retry_middleware:``) — the case-shape, where call-level
+      metadata lives alongside the call. All sibling keys in
+      ``_CASE_LEVEL_CALL_KEYS`` are folded into the call dict here so
+      the runner reads them from one place. The nested ``call`` block
+      takes precedence when both are present.
     """
     if "calls" in spec:
         yield from cast("list[Mapping[str, Any]]", spec["calls"])
     elif "call" in spec:
         call = dict(cast("Mapping[str, Any]", spec["call"]))
-        if "expected" in spec and "expected" not in call:
-            call["expected"] = spec["expected"]
+        for key in _CASE_LEVEL_CALL_KEYS:
+            if key in spec and key not in call:
+                call[key] = spec[key]
         yield call
     else:
         raise AssertionError("fixture has neither `calls` nor `call` block")
@@ -441,6 +459,8 @@ async def _run_one_call(
     expected = cast("Mapping[str, Any]", call_spec.get("expected") or {})
     response_schema = call_spec.get("response_schema")
     retry_mw_cfg = cast("Mapping[str, Any] | None", call_spec.get("retry_middleware"))
+    config_block = call_spec.get("config")
+    config = RuntimeConfig(**cast("Mapping[str, Any]", config_block)) if config_block else None
 
     if operation == "complete":
         # Per spec §3 "Validation timing" — complete() validates at
@@ -461,7 +481,7 @@ async def _run_one_call(
                 except ValidationError as ve:
                     raise ProviderInvalidRequest(str(ve)) from ve
                 await _maybe_with_retry(
-                    lambda: provider.complete(messages, tools, response_schema=response_schema),
+                    lambda: provider.complete(messages, tools, config, response_schema=response_schema),
                     retry_mw_cfg,
                 )
             _assert_raises_matches(excinfo, expected["raises"])
@@ -476,7 +496,7 @@ async def _run_one_call(
             messages_snapshot = [m.model_dump(mode="json") for m in messages]
             tools = _build_tools(cast("list[Mapping[str, Any]] | None", call_spec.get("tools")))
             response = await _maybe_with_retry(
-                lambda: provider.complete(messages, tools, response_schema=response_schema),
+                lambda: provider.complete(messages, tools, config, response_schema=response_schema),
                 retry_mw_cfg,
             )
             _assert_response_matches(response, cast("Mapping[str, Any]", expected.get("response") or {}))

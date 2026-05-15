@@ -42,6 +42,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import uuid
 from collections.abc import Sequence
 from typing import Any, Literal, cast
@@ -237,9 +238,8 @@ class OpenAIProvider:
         # On the fallback path, the wire-side messages list is an
         # augmented COPY of the caller's messages — original messages
         # MUST NOT be mutated. _augment_messages_with_schema_directive
-        # builds a fresh list; the original instances are reused
-        # (immutable Pydantic models) so the caller's sequence is
-        # untouched.
+        # builds a fresh list and does not modify the reused Message
+        # instances in place; the caller's sequence is untouched.
         wire_messages: Sequence[Message] = messages
         if schema_dict is not None and self._force_prompt_augmentation_fallback:
             wire_messages = _augment_messages_with_schema_directive(messages, schema_dict)
@@ -461,9 +461,15 @@ def _normalize_response_schema(
     if response_schema is None:
         return None, None
     if isinstance(response_schema, type):
-        # Per the Protocol signature, the only class form accepted is
-        # a BaseModel subclass; non-BaseModel classes will AttributeError
-        # on model_json_schema below.
+        # Defensive runtime check: the Protocol signature accepts
+        # type[BaseModel], but Python doesn't enforce that at the call
+        # boundary. Reject non-BaseModel classes with a canonical error
+        # instead of letting AttributeError leak from model_json_schema.
+        if not issubclass(response_schema, BaseModel):  # pyright: ignore[reportUnnecessaryIsInstance]
+            raise ProviderInvalidRequest(
+                f"response_schema: class form MUST be a Pydantic BaseModel subclass "
+                f"(got {response_schema.__name__})"
+            )
         schema_dict = response_schema.model_json_schema()
         validate_response_schema(schema_dict)
         return schema_dict, response_schema
@@ -471,14 +477,22 @@ def _normalize_response_schema(
     return response_schema, None
 
 
+# OpenAI's response_format.json_schema.name field is restricted to
+# letters, digits, underscores, and dashes with a max length of 64
+# characters. A JSON Schema title can be any string ("Person Record",
+# "User's Profile", etc.), so verbatim use risks a 400 on the wire.
+_OPENAI_SCHEMA_NAME_RE = re.compile(r"^[a-zA-Z0-9_-]{1,64}$")
+
+
 # Derive a stable identifier for the JSON Schema for OpenAI's
 # response_format.json_schema.name field. Uses the schema's `title`
-# when present (and a valid identifier-shaped string); otherwise
-# derives a deterministic short hash so the same schema always
-# produces the same name across calls.
+# when it satisfies the provider's name constraints; otherwise derives
+# a deterministic short hash so the same schema always produces the
+# same name across calls. Sanitizing-in-place would silently mutate
+# user intent; the hash is a more honest fallback.
 def _derive_schema_name(schema: dict[str, Any]) -> str:
     title = schema.get("title")
-    if isinstance(title, str) and title:
+    if isinstance(title, str) and _OPENAI_SCHEMA_NAME_RE.match(title):
         return title
     canonical = json.dumps(schema, sort_keys=True).encode("utf-8")
     return f"oa_schema_{hashlib.sha256(canonical).hexdigest()[:16]}"
@@ -546,9 +560,11 @@ _SCHEMA_DIRECTIVE_TEMPLATE = (
 # Construct a fresh message list with a schema directive added. The
 # directive is appended to the existing system message's content when
 # present, or prepended as a new system message otherwise. The caller's
-# original list is never mutated; Message instances are reused because
-# they are immutable Pydantic models. The serialized schema appears
-# verbatim in the directive so callers that need to verify the directive
+# original list is never mutated; Message instances are reused, and
+# this helper does not modify them in place (the message models are
+# not frozen Pydantic models, so the safety is structural, not
+# enforced by the type). The serialized schema appears verbatim in
+# the directive so callers that need to verify the directive
 # references the schema (conformance harnesses, observability spans)
 # can substring-match the canonical JSON form.
 def _augment_messages_with_schema_directive(
@@ -585,7 +601,10 @@ def _message_to_wire(msg: Message) -> dict[str, Any]:
                     "type": "function",
                     "function": {
                         "name": tc.name,
-                        "arguments": json.dumps(tc.arguments or {}),
+                        # Canonical compact form (no inter-token spaces). Matches
+                        # the spec's wire-mapping fixture (005, cases shape) and
+                        # the form OpenAI itself emits.
+                        "arguments": json.dumps(tc.arguments or {}, separators=(",", ":")),
                     },
                 }
                 for tc in msg.tool_calls

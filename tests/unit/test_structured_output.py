@@ -57,6 +57,21 @@ def test_validate_response_schema_rejects_missing_type() -> None:
         validate_response_schema({"properties": {"x": {"type": "integer"}}})
 
 
+def test_validate_response_schema_rejects_malformed_schema() -> None:
+    # `"type": "foobar"` is not a valid JSON Schema type keyword; the
+    # boundary check should catch this and raise ProviderInvalidRequest
+    # rather than letting jsonschema.SchemaError leak at parse time.
+    with pytest.raises(ProviderInvalidRequest, match="not a valid JSON Schema"):
+        validate_response_schema(
+            {
+                "type": "object",
+                "properties": {"x": {"type": "foobar"}},
+                "required": ["x"],
+                "additionalProperties": False,
+            }
+        )
+
+
 # ---------------------------------------------------------------------------
 # strict_mode_supported
 # ---------------------------------------------------------------------------
@@ -88,6 +103,18 @@ def test_strict_mode_additional_properties_true_fails() -> None:
         "properties": {"a": {"type": "string"}},
         "required": ["a"],
         "additionalProperties": True,
+    }
+    assert strict_mode_supported(schema) is False
+
+
+def test_strict_mode_missing_additional_properties_fails() -> None:
+    # OpenAI strict mode requires additionalProperties: false to be
+    # EXPLICITLY set; absence (the default for Pydantic-derived schemas)
+    # is not strict-compatible.
+    schema = {
+        "type": "object",
+        "properties": {"a": {"type": "string"}},
+        "required": ["a"],
     }
     assert strict_mode_supported(schema) is False
 
@@ -132,10 +159,12 @@ def test_strict_mode_resolves_internal_ref() -> None:
                 "type": "object",
                 "properties": {"a": {"type": "string"}},
                 "required": ["a"],
+                "additionalProperties": False,
             }
         },
         "properties": {"inner": {"$ref": "#/$defs/Inner"}},
         "required": ["inner"],
+        "additionalProperties": False,
     }
     assert strict_mode_supported(schema) is True
 
@@ -153,7 +182,7 @@ def test_strict_mode_handles_ref_cycle() -> None:
     # Self-referential schema: each entry has a "children" key pointing
     # back to the same definition. Without cycle protection this would
     # recurse forever.
-    schema = {
+    schema: dict[str, Any] = {
         "type": "object",
         "$defs": {
             "Node": {
@@ -163,10 +192,12 @@ def test_strict_mode_handles_ref_cycle() -> None:
                     "children": {"$ref": "#/$defs/Node"},
                 },
                 "required": ["value", "children"],
+                "additionalProperties": False,
             }
         },
         "properties": {"root": {"$ref": "#/$defs/Node"}},
         "required": ["root"],
+        "additionalProperties": False,
     }
     assert strict_mode_supported(schema) is True
 
@@ -195,6 +226,28 @@ def test_derive_schema_name_is_deterministic() -> None:
 
 def test_derive_schema_name_ignores_empty_title() -> None:
     schema = {"type": "object", "title": "", "properties": {"x": {"type": "string"}}, "required": ["x"]}
+    assert _derive_schema_name(schema).startswith("oa_schema_")
+
+
+def test_derive_schema_name_falls_back_on_title_with_spaces() -> None:
+    # OpenAI's name field rejects spaces; the hash fallback fires.
+    schema = {
+        "type": "object",
+        "title": "Person Record",
+        "properties": {"x": {"type": "string"}},
+        "required": ["x"],
+    }
+    assert _derive_schema_name(schema).startswith("oa_schema_")
+
+
+def test_derive_schema_name_falls_back_on_title_too_long() -> None:
+    # OpenAI's name field has a 64-char cap; longer titles fall back.
+    schema = {
+        "type": "object",
+        "title": "A" * 65,
+        "properties": {"x": {"type": "string"}},
+        "required": ["x"],
+    }
     assert _derive_schema_name(schema).startswith("oa_schema_")
 
 
@@ -271,6 +324,24 @@ def _mock_chat_completion_response(content: str) -> httpx.MockTransport:
         return httpx.Response(200, content=json.dumps(body).encode("utf-8"))
 
     return httpx.MockTransport(handler)
+
+
+async def test_non_basemodel_class_raises_provider_invalid_request() -> None:
+    transport = _mock_chat_completion_response('{"x":1}')
+    provider = OpenAIProvider(
+        base_url="http://mock-llm.test",
+        model="test-model",
+        api_key="test-key",
+        transport=transport,
+    )
+    try:
+        with pytest.raises(ProviderInvalidRequest, match="BaseModel subclass"):
+            await provider.complete(
+                [UserMessage(content="x")],
+                response_schema=str,  # type: ignore[arg-type]
+            )
+    finally:
+        await provider.aclose()
 
 
 async def test_pydantic_class_returns_validated_instance() -> None:

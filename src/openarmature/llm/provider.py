@@ -38,6 +38,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import Any, Protocol, cast
 
+import jsonschema
 from pydantic import BaseModel
 
 from .errors import ProviderInvalidRequest
@@ -184,8 +185,9 @@ def validate_response_schema(schema: object) -> None:
     """Pre-send validation for a JSON Schema passed as the
     ``response_schema`` argument to ``complete()``.
 
-    Raises :class:`ProviderInvalidRequest` if the schema is not a dict
-    or does not declare a top-level object type.
+    Raises :class:`ProviderInvalidRequest` if the schema is not a dict,
+    does not declare a top-level object type, or is not a valid JSON
+    Schema document.
     """
     if not isinstance(schema, dict):
         raise ProviderInvalidRequest(f"response_schema: MUST be a dict (got {type(schema).__name__})")
@@ -195,12 +197,23 @@ def validate_response_schema(schema: object) -> None:
         raise ProviderInvalidRequest(
             f"response_schema: top-level type MUST be 'object' (got {schema_type!r})"
         )
+    # Full JSON Schema validity check at the boundary so a malformed
+    # schema raises ProviderInvalidRequest here instead of escaping as
+    # jsonschema.SchemaError at decode time. ValidationError covers
+    # instance-against-schema failures and is handled separately on the
+    # parse path.
+    try:
+        jsonschema.Draft202012Validator.check_schema(schema_dict)
+    except jsonschema.SchemaError as exc:
+        raise ProviderInvalidRequest(f"response_schema: not a valid JSON Schema: {exc.message}") from exc
 
 
 # Strict mode (OpenAI's response_format strict:true and the analogous
 # native-decoding paths in Anthropic / Gemini) requires the schema to
 # satisfy two rules at every nested level:
-#   1. additionalProperties is NOT true (false or absent).
+#   1. additionalProperties is EXPLICITLY false. OpenAI rejects schemas
+#      where the key is absent, since absence means JSON Schema's
+#      default of permitting extras.
 #   2. every key in `properties` is listed in `required`.
 # strict_mode_supported() walks the schema tree (object properties,
 # array items, anyOf/oneOf/allOf branches, $ref targets with cycle
@@ -272,7 +285,7 @@ def _strict_mode_check(
     )
 
     if is_object_type:
-        if schema_dict.get("additionalProperties") is True:
+        if schema_dict.get("additionalProperties") is not False:
             return False
         properties = schema_dict.get("properties")
         if properties is not None and not isinstance(properties, dict):
