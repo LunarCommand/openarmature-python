@@ -30,6 +30,19 @@ def test_spec_version_matches_pyproject() -> None:
 _CHANGELOG_VERSION_RE = re.compile(r"^## \[(\d+\.\d+\.\d+)\]")
 
 
+def _read_latest_spec_version_from_changelog(path: Path) -> str:
+    """Return the first non-``[Unreleased]`` versioned heading from a
+    Keep-a-Changelog file. Raises :class:`AssertionError` if no
+    versioned heading is present (the file is malformed for our
+    purposes).
+    """
+    for line in path.read_text().splitlines():
+        match = _CHANGELOG_VERSION_RE.match(line)
+        if match:
+            return match.group(1)
+    raise AssertionError(f"no versioned heading found in {path}")
+
+
 def test_spec_version_matches_submodule_changelog() -> None:
     # Third value AGENTS.md flags: the submodule pin (the spec
     # checkout the parent repo records). We verify by reading the
@@ -41,13 +54,7 @@ def test_spec_version_matches_submodule_changelog() -> None:
     changelog_path = Path(__file__).resolve().parent.parent / "openarmature-spec" / "CHANGELOG.md"
     if not changelog_path.exists():
         pytest.skip("openarmature-spec/CHANGELOG.md is not present")
-    for line in changelog_path.read_text().splitlines():
-        match = _CHANGELOG_VERSION_RE.match(line)
-        if match:
-            submodule_latest = match.group(1)
-            break
-    else:
-        pytest.fail("could not find a versioned heading in openarmature-spec/CHANGELOG.md")
+    submodule_latest = _read_latest_spec_version_from_changelog(changelog_path)
     assert openarmature.__spec_version__ == submodule_latest, (
         f"submodule's CHANGELOG latest is {submodule_latest}, but "
         f"__spec_version__ is {openarmature.__spec_version__}"
