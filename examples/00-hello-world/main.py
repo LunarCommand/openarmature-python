@@ -14,7 +14,9 @@
 
 **Configuration** (env vars; OpenAI defaults shown):
 
-- ``LLM_BASE_URL`` — defaults to ``https://api.openai.com/v1``.
+- ``LLM_BASE_URL`` — defaults to ``https://api.openai.com``. **Host
+  root only** — the impl adds ``/v1/chat/completions`` and
+  ``/v1/models`` itself, so do NOT include ``/v1`` in this value.
 - ``LLM_MODEL`` — defaults to ``gpt-4o-mini``.
 - ``LLM_API_KEY`` — required (your OpenAI API key, or empty for
   local servers that don't authenticate).
@@ -67,7 +69,7 @@ class PipelineState(State):
 
 
 _provider = OpenAIProvider(
-    base_url=os.environ.get("LLM_BASE_URL", "https://api.openai.com/v1"),
+    base_url=os.environ.get("LLM_BASE_URL", "https://api.openai.com"),
     model=os.environ.get("LLM_MODEL", "gpt-4o-mini"),
     api_key=os.environ.get("LLM_API_KEY"),
 )
@@ -103,7 +105,10 @@ def route(state: PipelineState) -> str:
 
 
 async def trace(event: NodeEvent) -> None:
-    if event.phase == "completed" and event.error is None:
+    # OpenAIProvider emits NodeEvent-shaped events for LLM-span
+    # tracking under a sentinel namespace; those have post_state=None.
+    # Filter to events that carry a state snapshot before reading it.
+    if event.phase == "completed" and event.error is None and event.post_state is not None:
         print(f"{event.node_name}: sources={event.post_state.sources}")
 
 

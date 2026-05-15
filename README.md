@@ -85,7 +85,7 @@ class PipelineState(State):
 
 
 provider = OpenAIProvider(
-    base_url=os.environ.get("LLM_BASE_URL", "https://api.openai.com/v1"),
+    base_url=os.environ.get("LLM_BASE_URL", "https://api.openai.com"),  # host root; impl adds /v1
     model=os.environ.get("LLM_MODEL", "gpt-4o-mini"),
     api_key=os.environ.get("LLM_API_KEY"),
 )
@@ -113,7 +113,7 @@ def route(state: PipelineState) -> str:
 
 
 async def trace(event: NodeEvent) -> None:
-    if event.phase == "completed" and event.error is None:
+    if event.phase == "completed" and event.error is None and event.post_state is not None:
         print(f"{event.node_name}: sources={event.post_state.sources}")
 
 
