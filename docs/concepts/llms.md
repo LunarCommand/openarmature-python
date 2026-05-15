@@ -97,11 +97,18 @@ async def classify(state):
     return {"classification": response.parsed}
 ```
 
-`Response.parsed` is a validated `Classification` instance. Field
-access is statically typed (`response.parsed.intent` returns
-`Literal["research", "summarize"]`); the framework calls
-`.model_json_schema()` under the hood to derive the wire body and
-`.model_validate()` to deserialize the response.
+`Response.parsed` is a validated `Classification` instance at
+runtime; the framework calls `.model_json_schema()` under the hood
+to derive the wire body and `.model_validate()` to deserialize the
+response.
+
+Static typing is shallower. `Response.parsed` is annotated as
+`dict[str, Any] | BaseModel | None`, so a type checker won't narrow
+to `Classification` from the `response_schema=Classification`
+argument alone. Callers that want static field access either
+`cast(Classification, response.parsed)`, narrow with `isinstance`,
+or assign the value into a typed local. Generic `Response[T]` is on
+the table as a follow-up.
 
 ### JSON Schema dict form
 

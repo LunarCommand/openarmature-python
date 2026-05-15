@@ -67,11 +67,14 @@ class MyProvider:
         config: RuntimeConfig | None = None,
         response_schema: dict[str, Any] | type[BaseModel] | None = None,
     ) -> Response:
-        # response_schema support is an optional capability; a skeleton
-        # provider can raise ProviderInvalidRequest when it's set, or
-        # ignore it and return free-form text. A production provider
-        # would wire it through to native response_format support or
-        # the prompt-augmentation fallback. See ``openarmature.llm.OpenAIProvider``.
+        # response_schema is part of the Protocol; a skeleton provider
+        # MUST NOT silently ignore it — callers expect either
+        # Response.parsed populated or a StructuredOutputInvalid raise.
+        # Until the wire path is implemented, raise
+        # ProviderInvalidRequest when response_schema is set. A
+        # production provider wires it through to native response_format
+        # support or the prompt-augmentation fallback; see
+        # ``openarmature.llm.OpenAIProvider``.
         validate_message_list(messages)
         validate_tools(tools)
 

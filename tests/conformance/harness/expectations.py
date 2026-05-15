@@ -71,6 +71,12 @@ class LlmProviderResponseAssertion(_ForbidExtras):
     finish_reason: str | None = None
     usage: dict[str, Any] | None = None
     raw_check: dict[str, Any] | None = None
+    # `parsed` was introduced by proposal 0016 — the runtime asserts
+    # equality against ``Response.parsed``. Typed as Any | None because
+    # the fixture-side value can be a dict (dict-schema input form),
+    # a model_dump-equivalent dict (class-schema form), or None
+    # (tool-call response or no-schema call).
+    parsed: Any | None = None
 
 
 class LlmProviderRaisesAssertion(BaseModel):
