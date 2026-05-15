@@ -75,17 +75,6 @@ _DEFERRED_FIXTURES: dict[str, str] = {
     "018-content-blocks-image-source-missing": "0015 multimodal images (PR-2)",
     "019-content-blocks-invalid-detail-value": "0015 multimodal images (PR-2)",
     "020-content-blocks-inline-image-missing-media-type": "0015 multimodal images (PR-2)",
-    # proposal 0016 — structured output (this PR; wired up later in the
-    # commit sequence). These rows are removed in the commit that drives
-    # the structured-output fixtures.
-    "021-structured-output-success": "0016 structured output (this PR; not yet wired)",
-    "022-structured-output-parse-failure": "0016 structured output (this PR; not yet wired)",
-    "023-structured-output-validation-failure": "0016 structured output (this PR; not yet wired)",
-    "024-structured-output-non-transient": "0016 structured output (this PR; not yet wired)",
-    "025-structured-output-with-tool-calls": "0016 structured output (this PR; not yet wired)",
-    "026-structured-output-openai-wire-mapping-native": "0016 structured output (this PR; not yet wired)",
-    "027-structured-output-openai-wire-mapping-fallback": "0016 structured output (this PR; not yet wired)",
-    "028-structured-output-no-schema-regression": "0016 structured output (this PR; not yet wired)",
 }
 
 
