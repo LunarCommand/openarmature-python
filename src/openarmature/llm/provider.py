@@ -39,8 +39,10 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from typing import Any, Protocol, cast
+from urllib.parse import unquote
 
 import jsonschema
+from jsonschema.validators import validator_for
 from pydantic import BaseModel
 
 from .errors import ProviderInvalidRequest
@@ -207,7 +209,13 @@ def validate_response_schema(schema: object) -> None:
     # instance-against-schema failures and is handled separately on the
     # parse path.
     try:
-        jsonschema.Draft202012Validator.check_schema(schema_dict)
+        # Pick the validator class the runtime would use, so the
+        # boundary check uses the same metaschema as
+        # jsonschema.validate(). validator_for reads the schema's
+        # $schema URL; absent that, it defaults to the latest
+        # supported draft.
+        validator_cls = validator_for(schema_dict)
+        validator_cls.check_schema(schema_dict)
     except jsonschema.SchemaError as exc:
         raise ProviderInvalidRequest(f"response_schema: not a valid JSON Schema: {exc.message}") from exc
     # check_schema() validates the schema's own syntax but does not
@@ -218,24 +226,73 @@ def validate_response_schema(schema: object) -> None:
     _check_refs_resolvable(schema_dict)
 
 
+# Subschema-bearing keywords by container shape. Used by
+# _check_refs_resolvable to walk only positions that the runtime
+# treats as schemas. Anything outside these is data (default, const,
+# enum, annotations like description / $comment, unknown / extension
+# keywords like x-*) where a nested "$ref" key is just a value.
+_SINGLE_SUBSCHEMA_KEYWORDS = frozenset(
+    {
+        "additionalProperties",
+        "propertyNames",
+        "items",
+        "contains",
+        "if",
+        "then",
+        "else",
+        "not",
+        "unevaluatedItems",
+        "unevaluatedProperties",
+    }
+)
+_MAP_OF_SUBSCHEMA_KEYWORDS = frozenset(
+    {
+        "properties",
+        "patternProperties",
+        "$defs",
+        "definitions",
+        "dependentSchemas",
+    }
+)
+_LIST_OF_SUBSCHEMA_KEYWORDS = frozenset(
+    {
+        "allOf",
+        "anyOf",
+        "oneOf",
+        "prefixItems",
+    }
+)
+
+
 def _check_refs_resolvable(schema: dict[str, Any]) -> None:
-    """Walk the schema tree and raise ProviderInvalidRequest for any
-    $ref value that cannot be resolved internally."""
+    """Walk subschema positions in the document and raise
+    ProviderInvalidRequest for any $ref value that cannot be resolved
+    internally. Skips data positions (default, const, enum,
+    annotations, unknown / extension keywords) where a "$ref" key is
+    just a value and the runtime would not try to resolve it.
+    """
 
     def walk(node: Any) -> None:
-        if isinstance(node, dict):
-            node_dict = cast("dict[str, Any]", node)
-            ref = node_dict.get("$ref")
-            if isinstance(ref, str) and _resolve_ref(ref, schema) is None:
-                raise ProviderInvalidRequest(
-                    f"response_schema: unresolvable $ref {ref!r}; only internal "
-                    "refs (#/... or #) are supported by the provider's validator"
-                )
-            for value in node_dict.values():
+        if not isinstance(node, dict):
+            return
+        node_dict = cast("dict[str, Any]", node)
+        ref = node_dict.get("$ref")
+        if isinstance(ref, str) and _resolve_ref(ref, schema) is _UNRESOLVABLE:
+            raise ProviderInvalidRequest(
+                f"response_schema: unresolvable $ref {ref!r}; only internal "
+                "refs (#/... or #) are supported by the provider's validator"
+            )
+        for key, value in node_dict.items():
+            if key in _SINGLE_SUBSCHEMA_KEYWORDS:
                 walk(value)
-        elif isinstance(node, list):
-            for item in cast("list[Any]", node):
-                walk(item)
+            elif key in _MAP_OF_SUBSCHEMA_KEYWORDS:
+                if isinstance(value, dict):
+                    for subschema in cast("dict[str, Any]", value).values():
+                        walk(subschema)
+            elif key in _LIST_OF_SUBSCHEMA_KEYWORDS:
+                if isinstance(value, list):
+                    for subschema in cast("list[Any]", value):
+                        walk(subschema)
 
     walk(schema)
 
@@ -299,8 +356,11 @@ def _strict_mode_check(
             return True
         visited.add(ref)
         target = _resolve_ref(ref, root)
-        if target is None:
+        if target is _UNRESOLVABLE:
             return False
+        # _strict_mode_check on a non-dict (e.g. boolean subschema)
+        # returns False via the `if not isinstance(schema, dict)` line
+        # at the top — the conservative answer for strict-mode compat.
         return _strict_mode_check(target, root=root, visited=visited)
 
     # Combinator branches — every branch must independently satisfy
@@ -381,29 +441,43 @@ def _strict_mode_check(
     return False
 
 
+# Sentinel returned by _resolve_ref when the ref isn't internally
+# resolvable (path doesn't exist in the document, or the ref is
+# external / relative). Distinguishing "unresolvable" from "resolved
+# to a non-dict value" matters because boolean subschemas (true /
+# false) are valid JSON Schema and we want to surface them to the
+# caller rather than reject them at the boundary.
+_UNRESOLVABLE: Any = object()
+
+
 # Internal-only $ref resolver. Handles JSON Pointer fragments rooted
 # at the document (`#/$defs/Foo`, `#/definitions/Foo`); external refs
-# (anything not starting with `#/`) are unresolvable here and return
-# None. JSON Pointer escape rules (`~0` for `~`, `~1` for `/`) are
-# unescaped per RFC 6901.
-def _resolve_ref(ref: str, root: dict[str, Any]) -> dict[str, Any] | None:
+# (anything not starting with `#/`) return the unresolvable sentinel.
+# JSON Pointer escape rules (`~0` for `~`, `~1` for `/`) are unescaped
+# per RFC 6901.
+def _resolve_ref(ref: str, root: dict[str, Any]) -> Any:
     # Bare "#" is the JSON Pointer for the document root; "#/" prefixes
     # an internal path. Anything else (external URIs, relative refs we
-    # can't resolve without a base) we treat as unresolvable.
+    # can't resolve without a base) is treated as unresolvable.
     if ref == "#":
         return root
     if not ref.startswith("#/"):
-        return None
+        return _UNRESOLVABLE
     parts = ref[2:].split("/")
     current: Any = root
     for part in parts:
-        decoded = part.replace("~1", "/").replace("~0", "~")
+        # Per RFC 6901 §6: a JSON Pointer used as a URI fragment is
+        # percent-encoded; percent-decoding happens BEFORE the
+        # `~1` / `~0` JSON-Pointer unescape pair.
+        decoded = unquote(part).replace("~1", "/").replace("~0", "~")
         if not isinstance(current, dict) or decoded not in cast("dict[str, Any]", current):
-            return None
+            return _UNRESOLVABLE
         current = cast("dict[str, Any]", current)[decoded]
-    if isinstance(current, dict):
-        return cast("dict[str, Any]", current)
-    return None
+    # Return whatever's at the resolved path — dict, bool, or otherwise.
+    # Callers decide what to do with non-dict subschemas: strict-mode
+    # validation conservatively rejects them; ref-resolvability
+    # validation accepts them.
+    return current
 
 
 __all__ = [

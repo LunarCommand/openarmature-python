@@ -537,6 +537,29 @@ def _parse_and_validate(
 
     # Pydantic-class path: validate and return the BaseModel instance.
     if schema_class is not None:
+        # Validate against the generated JSON Schema FIRST so the
+        # class path enforces the same strict per-type checks as the
+        # dict path. Pydantic's default model_validate is coercive
+        # (it accepts "30" for an int field), which would silently
+        # accept responses that fail the wire schema. Running
+        # jsonschema first matches the dict-schema path's strictness;
+        # model_validate then constructs the typed instance.
+        try:
+            jsonschema.validate(instance=parsed_dict, schema=schema_dict)
+        except jsonschema.ValidationError as exc:
+            raise StructuredOutputInvalid(
+                "response failed JSON Schema validation",
+                response_schema=schema_dict,
+                raw_content=content,
+                failure_description=_format_jsonschema_failure(exc),
+            ) from exc
+        except jsonschema.SchemaError as exc:
+            raise StructuredOutputInvalid(
+                "response could not be validated against the supplied schema",
+                response_schema=schema_dict,
+                raw_content=content,
+                failure_description=str(exc),
+            ) from exc
         try:
             return schema_class.model_validate(parsed_dict)
         except ValidationError as exc:
@@ -555,7 +578,7 @@ def _parse_and_validate(
             "response failed JSON Schema validation",
             response_schema=schema_dict,
             raw_content=content,
-            failure_description=exc.message,
+            failure_description=_format_jsonschema_failure(exc),
         ) from exc
     except jsonschema.SchemaError as exc:
         # Safety net: validate_response_schema's pre-validation should
@@ -569,6 +592,16 @@ def _parse_and_validate(
             failure_description=str(exc),
         ) from exc
     return parsed_dict
+
+
+def _format_jsonschema_failure(exc: jsonschema.ValidationError) -> str:
+    """jsonschema.ValidationError.message describes the value mismatch
+    (e.g., "'30' is not of type 'integer'") but doesn't include the
+    failing field path. Prefix with ``json_path`` (e.g., ``$.age``) so
+    the failure_description string carries both, matching the dict-
+    schema and class-schema paths.
+    """
+    return f"{exc.json_path}: {exc.message}"
 
 
 _SCHEMA_DIRECTIVE_TEMPLATE = (

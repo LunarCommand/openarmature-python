@@ -9,35 +9,60 @@ mixing LLM calls into graph nodes.
 
 ## LLM calls are async IO inside a node
 
-Construct one [`Provider`](../reference/llm.md) at startup and share it
-across nodes. Each `complete()` call carries the full message list and
-returns a [`Response`](../reference/llm.md); the provider is stateless
-and reentrant, so multiple nodes (or fan-out instances) can call into
-it concurrently without coordination.
+Construct one [`Provider`](../reference/llm.md) when your application
+owns its lifecycle (entry-point coroutine, FastAPI startup event,
+lazy on-first-use) and share it across nodes. Each `complete()` call
+carries the full message list and returns a
+[`Response`](../reference/llm.md); the provider is stateless and
+reentrant, so multiple nodes (or fan-out instances) can call into it
+concurrently without coordination.
+
+`OpenAIProvider` eagerly opens an `httpx.AsyncClient` in its
+constructor; that client must be closed with `await provider.aclose()`
+to release the connection pool. Constructing the provider as a
+module-level side effect (`provider = OpenAIProvider(...)` at the top
+of the file) leaks the client in tooling, tests, and docs-build
+processes that import the module without running your shutdown path.
+Prefer lazy construction or an explicit lifecycle hook.
 
 ```python
 import os
 from openarmature.llm import OpenAIProvider, UserMessage
 
-provider = OpenAIProvider(
-    base_url=os.environ.get("LLM_BASE_URL", "https://api.openai.com"),
-    model="gpt-4o-mini",
-    api_key=os.environ["LLM_API_KEY"],
-)
+_provider_instance: OpenAIProvider | None = None
+
+
+def _get_provider() -> OpenAIProvider:
+    global _provider_instance
+    if _provider_instance is None:
+        _provider_instance = OpenAIProvider(
+            base_url=os.environ.get("LLM_BASE_URL", "https://api.openai.com"),
+            model="gpt-4o-mini",
+            api_key=os.environ["LLM_API_KEY"],
+        )
+    return _provider_instance
 
 
 async def analyze(state: AnalysisState) -> dict:
-    response = await provider.complete(
+    response = await _get_provider().complete(
         [UserMessage(content=state.text)],
     )
     return {"raw": response.message.content}
+
+
+async def main() -> None:
+    try:
+        ...  # build graph, invoke
+    finally:
+        if _provider_instance is not None:
+            await _provider_instance.aclose()
 ```
 
 The provider goes wherever your application's other long-lived
-dependencies go: module-level constant, dependency-injection
-container, factory function. It does not need to be constructed per
-call, and constructing it cheaply (no eager network calls) means
-import-time setup is fine.
+dependencies go (dependency-injection container, factory, lazy
+module-level cache), and you close it on the same lifecycle hook you
+use for those. A FastAPI app uses `app.on_event("shutdown")`; a
+script uses a `try/finally` around the entry-point coroutine.
 
 A real graph hits LLMs from multiple nodes. The conventional shape:
 

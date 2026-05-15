@@ -57,6 +57,20 @@ def test_validate_response_schema_rejects_missing_type() -> None:
         validate_response_schema({"properties": {"x": {"type": "integer"}}})
 
 
+def test_validate_response_schema_accepts_ref_to_boolean_subschema() -> None:
+    # Boolean true/false are valid JSON Schema subschemas. A $ref
+    # whose target is a boolean must resolve cleanly (not raise
+    # ProviderInvalidRequest as if it were unresolvable).
+    schema: dict[str, Any] = {
+        "type": "object",
+        "$defs": {"Any": True},
+        "properties": {"x": {"$ref": "#/$defs/Any"}},
+        "required": ["x"],
+        "additionalProperties": False,
+    }
+    validate_response_schema(schema)  # no raise
+
+
 def test_validate_response_schema_rejects_external_ref() -> None:
     # External or otherwise unresolvable $refs would surface at
     # validate() time as raw referencing-library exceptions; the
@@ -71,6 +85,53 @@ def test_validate_response_schema_rejects_external_ref() -> None:
                 "additionalProperties": False,
             }
         )
+
+
+def test_validate_response_schema_ignores_ref_under_data_keywords() -> None:
+    # JSON Schema permits arbitrary data under keywords like
+    # ``default``, ``const``, ``enum``, ``$comment``, and unknown /
+    # extension keywords (``x-*``). A ``"$ref"`` key in those positions
+    # is data, not a schema reference, and must not be resolved.
+    schema: dict[str, Any] = {
+        "type": "object",
+        "properties": {
+            "x": {
+                "type": "string",
+                "default": {"$ref": "this-is-data-not-a-ref"},
+            }
+        },
+        "required": ["x"],
+        "additionalProperties": False,
+    }
+    validate_response_schema(schema)  # no raise
+
+
+def test_validate_response_schema_accepts_percent_encoded_ref() -> None:
+    # JSON Pointer fragments are URI-encoded; spaces in a $defs key
+    # appear as %20 on the wire. _resolve_ref must percent-decode
+    # before applying JSON Pointer's ~0/~1 unescape rules.
+    schema: dict[str, Any] = {
+        "type": "object",
+        "$defs": {"Name With Spaces": {"type": "string"}},
+        "properties": {"x": {"$ref": "#/$defs/Name%20With%20Spaces"}},
+        "required": ["x"],
+        "additionalProperties": False,
+    }
+    validate_response_schema(schema)  # no raise
+
+
+def test_validate_response_schema_accepts_draft07_schema() -> None:
+    # A schema declaring draft-07 (still common in tooling) must pass
+    # the boundary check via the draft-07 metaschema rather than be
+    # rejected by a hard-coded 2020-12 metaschema.
+    schema: dict[str, Any] = {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "type": "object",
+        "properties": {"x": {"type": "string"}},
+        "required": ["x"],
+        "additionalProperties": False,
+    }
+    validate_response_schema(schema)  # no raise
 
 
 def test_validate_response_schema_rejects_malformed_schema() -> None:
@@ -448,6 +509,31 @@ async def test_pydantic_class_returns_validated_instance() -> None:
     assert isinstance(response.parsed, PersonModel)
     assert response.parsed.name == "Alice"
     assert response.parsed.age == 30
+
+
+async def test_pydantic_class_path_rejects_coercible_string_for_int() -> None:
+    # The dict-schema path rejects {"age": "30"} against an integer
+    # field via strict jsonschema validation. The class path was
+    # previously accepting the same input via Pydantic's default
+    # coercive model_validate ("30" → 30). Both paths now run
+    # jsonschema first, so both reject the coercion case.
+    transport = _mock_chat_completion_response('{"name":"Alice","age":"30"}')
+    provider = OpenAIProvider(
+        base_url="http://mock-llm.test",
+        model="test-model",
+        api_key="test-key",
+        transport=transport,
+    )
+    try:
+        with pytest.raises(StructuredOutputInvalid) as excinfo:
+            await provider.complete(
+                [UserMessage(content="generate a person")],
+                response_schema=PersonModel,
+            )
+    finally:
+        await provider.aclose()
+    assert "age" in excinfo.value.failure_description
+    assert "integer" in excinfo.value.failure_description
 
 
 async def test_pydantic_validation_failure_wraps_in_structured_output_invalid() -> None:
