@@ -36,7 +36,7 @@ Violations raise ``provider_invalid_request``.
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import Protocol
+from typing import Any, Protocol, cast
 
 from .errors import ProviderInvalidRequest
 from .messages import (
@@ -157,8 +157,162 @@ def validate_tools(tools: Sequence[Tool] | None) -> None:
         seen.add(t.name)
 
 
+# ---------------------------------------------------------------------------
+# Schema helpers — used by structured-output Provider implementations
+# ---------------------------------------------------------------------------
+
+
+# Spec llm-provider §5 requires the response_schema argument to
+# complete() to be a valid JSON Schema with a top-level type "object".
+# The pre-send check here is the structural minimum; deeper validity
+# (recursive JSON Schema correctness, vendor extensions) is delegated
+# to the runtime validator at parse time.
+def validate_response_schema(schema: object) -> None:
+    """Pre-send validation for a JSON Schema passed as the
+    ``response_schema`` argument to ``complete()``.
+
+    Raises :class:`ProviderInvalidRequest` if the schema is not a dict
+    or does not declare a top-level object type.
+    """
+    if not isinstance(schema, dict):
+        raise ProviderInvalidRequest(f"response_schema: MUST be a dict (got {type(schema).__name__})")
+    schema_dict = cast("dict[str, Any]", schema)
+    schema_type = schema_dict.get("type")
+    if schema_type != "object":
+        raise ProviderInvalidRequest(
+            f"response_schema: top-level type MUST be 'object' (got {schema_type!r})"
+        )
+
+
+# Strict mode (OpenAI's response_format strict:true and the analogous
+# native-decoding paths in Anthropic / Gemini) requires the schema to
+# satisfy two rules at every nested level:
+#   1. additionalProperties is NOT true (false or absent).
+#   2. every key in `properties` is listed in `required`.
+# strict_mode_supported() walks the schema tree (object properties,
+# array items, anyOf/oneOf/allOf branches, $ref targets with cycle
+# protection) and returns True only if BOTH rules hold across the full
+# tree. An unresolvable $ref or unknown-shape branch returns False —
+# the safer choice when we can't statically verify the constraint.
+def strict_mode_supported(schema: dict[str, Any]) -> bool:
+    """Whether a JSON Schema satisfies the strict-mode constraints used
+    by native-decoding LLM wire paths.
+
+    Returns True iff for every nested (sub)schema in the tree
+    ``additionalProperties`` is not ``true`` and every key in
+    ``properties`` appears in ``required``. False on any violation, on
+    an unresolvable ``$ref``, or on an unknown shape.
+
+    Args:
+        schema: The root JSON Schema dict.
+
+    Returns:
+        ``True`` if the schema cleanly supports strict mode; ``False``
+        otherwise.
+    """
+    return _strict_mode_check(schema, root=schema, visited=set())
+
+
+def _strict_mode_check(
+    schema: Any,
+    *,
+    root: dict[str, Any],
+    visited: set[str],
+) -> bool:
+    if not isinstance(schema, dict):
+        return False
+    schema_dict = cast("dict[str, Any]", schema)
+
+    # $ref resolution. Cycle protection: a $ref already in `visited`
+    # has been (or is being) validated up the chain; returning True
+    # avoids infinite recursion without weakening the rule.
+    ref = schema_dict.get("$ref")
+    if isinstance(ref, str):
+        if ref in visited:
+            return True
+        visited.add(ref)
+        target = _resolve_ref(ref, root)
+        if target is None:
+            return False
+        return _strict_mode_check(target, root=root, visited=visited)
+
+    # Combinator branches — every branch must independently satisfy
+    # the strict-mode constraints. anyOf/oneOf/allOf members may
+    # themselves be arbitrary schemas; recursing handles nested
+    # objects inside each.
+    for combinator in ("anyOf", "oneOf", "allOf"):
+        branches = schema_dict.get(combinator)
+        if branches is None:
+            continue
+        if not isinstance(branches, list):
+            return False
+        for branch in cast("list[Any]", branches):
+            if not _strict_mode_check(branch, root=root, visited=visited):
+                return False
+
+    schema_type = schema_dict.get("type")
+    is_object_type = schema_type == "object" or (
+        isinstance(schema_type, list) and "object" in cast("list[Any]", schema_type)
+    )
+    is_array_type = schema_type == "array" or (
+        isinstance(schema_type, list) and "array" in cast("list[Any]", schema_type)
+    )
+
+    if is_object_type:
+        if schema_dict.get("additionalProperties") is True:
+            return False
+        properties = schema_dict.get("properties")
+        if properties is not None and not isinstance(properties, dict):
+            return False
+        properties_dict = cast("dict[str, Any]", properties or {})
+        required = schema_dict.get("required")
+        if required is not None and not isinstance(required, list):
+            return False
+        required_set: set[str] = set(cast("list[str]", required or []))
+        for prop_name, prop_schema in properties_dict.items():
+            if prop_name not in required_set:
+                return False
+            if not _strict_mode_check(prop_schema, root=root, visited=visited):
+                return False
+
+    if is_array_type:
+        items = schema_dict.get("items")
+        if isinstance(items, dict):
+            if not _strict_mode_check(items, root=root, visited=visited):
+                return False
+        elif isinstance(items, list):
+            # Tuple-form items: each entry is its own schema.
+            for item in cast("list[Any]", items):
+                if not _strict_mode_check(item, root=root, visited=visited):
+                    return False
+
+    return True
+
+
+# Internal-only $ref resolver. Handles JSON Pointer fragments rooted
+# at the document (`#/$defs/Foo`, `#/definitions/Foo`); external refs
+# (anything not starting with `#/`) are unresolvable here and return
+# None. JSON Pointer escape rules (`~0` for `~`, `~1` for `/`) are
+# unescaped per RFC 6901.
+def _resolve_ref(ref: str, root: dict[str, Any]) -> dict[str, Any] | None:
+    if not ref.startswith("#/"):
+        return None
+    parts = ref[2:].split("/")
+    current: Any = root
+    for part in parts:
+        decoded = part.replace("~1", "/").replace("~0", "~")
+        if not isinstance(current, dict) or decoded not in cast("dict[str, Any]", current):
+            return None
+        current = cast("dict[str, Any]", current)[decoded]
+    if isinstance(current, dict):
+        return cast("dict[str, Any]", current)
+    return None
+
+
 __all__ = [
     "Provider",
+    "strict_mode_supported",
     "validate_message_list",
+    "validate_response_schema",
     "validate_tools",
 ]

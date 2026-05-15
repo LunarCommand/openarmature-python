@@ -51,7 +51,13 @@ from .messages import (
     ToolMessage,
     UserMessage,
 )
-from .provider import Provider, validate_message_list, validate_tools
+from .provider import (
+    Provider,
+    strict_mode_supported,
+    validate_message_list,
+    validate_response_schema,
+    validate_tools,
+)
 from .providers import OpenAIProvider, classify_http_error, parse_retry_after
 from .response import FinishReason, ParsedValue, Response, RuntimeConfig, Usage
 
@@ -90,6 +96,8 @@ __all__ = [
     "UserMessage",
     "classify_http_error",
     "parse_retry_after",
+    "strict_mode_supported",
     "validate_message_list",
+    "validate_response_schema",
     "validate_tools",
 ]
