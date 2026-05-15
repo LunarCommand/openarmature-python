@@ -106,9 +106,16 @@ class OpenAIProvider:
         api_key: str | None = None,
         transport: httpx.AsyncBaseTransport | None = None,
         timeout: float = 60.0,
+        force_prompt_augmentation_fallback: bool = False,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.model = model
+        # ``force_prompt_augmentation_fallback`` switches structured-output
+        # calls from the native response_format wire path to the
+        # prompt-augmentation fallback. Used for older OpenAI-compatible
+        # servers (some vLLM/LM Studio/llama.cpp versions) that reject
+        # or silently ignore response_format.
+        self._force_prompt_augmentation_fallback = force_prompt_augmentation_fallback
         self._headers: dict[str, str] = {"Content-Type": "application/json"}
         if api_key is not None:
             self._headers["Authorization"] = f"Bearer {api_key}"
@@ -120,6 +127,14 @@ class OpenAIProvider:
             transport=transport,
             timeout=timeout,
         )
+
+    @property
+    def uses_prompt_augmentation_fallback(self) -> bool:
+        """Whether ``complete(response_schema=...)`` builds the wire
+        body via prompt augmentation (``True``) or the native
+        ``response_format`` path (``False``).
+        """
+        return self._force_prompt_augmentation_fallback
 
     async def aclose(self) -> None:
         """Close the underlying HTTP client. Optional — async clients
@@ -219,7 +234,22 @@ class OpenAIProvider:
         validate_message_list(messages)
         validate_tools(tools)
         schema_dict, schema_class = _normalize_response_schema(response_schema)
-        body = self._build_request_body(messages, tools, config, schema_dict)
+        # On the fallback path, the wire-side messages list is an
+        # augmented COPY of the caller's messages — original messages
+        # MUST NOT be mutated. _augment_messages_with_schema_directive
+        # builds a fresh list; the original instances are reused
+        # (immutable Pydantic models) so the caller's sequence is
+        # untouched.
+        wire_messages: Sequence[Message] = messages
+        if schema_dict is not None and self._force_prompt_augmentation_fallback:
+            wire_messages = _augment_messages_with_schema_directive(messages, schema_dict)
+        body = self._build_request_body(
+            wire_messages,
+            tools,
+            config,
+            schema_dict,
+            include_response_format=not self._force_prompt_augmentation_fallback,
+        )
 
         # Spec observability §5.5 LLM provider span: when an
         # observability backend is active in the current invocation,
@@ -296,6 +326,7 @@ class OpenAIProvider:
         tools: Sequence[Tool] | None,
         config: RuntimeConfig | None,
         schema_dict: dict[str, Any] | None,
+        include_response_format: bool = True,
     ) -> dict[str, Any]:
         body: dict[str, Any] = {
             "model": self.model,
@@ -318,7 +349,9 @@ class OpenAIProvider:
             extras = config.model_extra or {}
             for k, v in extras.items():
                 body.setdefault(k, v)
-        if schema_dict is not None:
+        # response_format is omitted entirely on the fallback path —
+        # the schema travels in the augmented system message instead.
+        if schema_dict is not None and include_response_format:
             body["response_format"] = {
                 "type": "json_schema",
                 "json_schema": {
@@ -501,6 +534,36 @@ def _parse_and_validate(
             failure_description=exc.message,
         ) from exc
     return parsed_dict
+
+
+_SCHEMA_DIRECTIVE_TEMPLATE = (
+    "You MUST return only valid JSON that conforms to the following JSON Schema. "
+    "Do not include prose, markdown fences, or any text outside the JSON object.\n\n"
+    "JSON Schema:\n{schema_json}"
+)
+
+
+# Construct a fresh message list with a schema directive added. The
+# directive is appended to the existing system message's content when
+# present, or prepended as a new system message otherwise. The caller's
+# original list is never mutated; Message instances are reused because
+# they are immutable Pydantic models. The serialized schema appears
+# verbatim in the directive so callers that need to verify the directive
+# references the schema (conformance harnesses, observability spans)
+# can substring-match the canonical JSON form.
+def _augment_messages_with_schema_directive(
+    messages: Sequence[Message],
+    schema_dict: dict[str, Any],
+) -> list[Message]:
+    directive = _SCHEMA_DIRECTIVE_TEMPLATE.format(schema_json=json.dumps(schema_dict, sort_keys=True))
+    out: list[Message] = list(messages)
+    if out and isinstance(out[0], SystemMessage):
+        existing = out[0]
+        merged = SystemMessage(content=f"{existing.content}\n\n{directive}")
+        out[0] = merged
+    else:
+        out.insert(0, SystemMessage(content=directive))
+    return out
 
 
 def _message_to_wire(msg: Message) -> dict[str, Any]:
