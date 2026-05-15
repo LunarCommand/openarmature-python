@@ -12,7 +12,7 @@ overload's class-in → instance-out shape.
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import Any, cast
 
 import httpx
 import pytest
@@ -120,33 +120,49 @@ def test_strict_mode_missing_additional_properties_fails() -> None:
 
 
 def test_strict_mode_recurses_into_nested_object() -> None:
+    # Root is strict-compatible (additionalProperties: false, all
+    # properties in required) so the walk DOES reach the nested
+    # object. The nested object violates the rule; breaking the
+    # recursion would break this test rather than be hidden by a
+    # root-level fail.
     schema: dict[str, Any] = {
         "type": "object",
         "properties": {
             "outer": {
                 "type": "object",
                 "properties": {"inner": {"type": "string"}},
-                "required": [],  # nested object violates rule
+                "required": [],  # nested object violates the rule
+                "additionalProperties": False,
             },
         },
         "required": ["outer"],
+        "additionalProperties": False,
     }
     assert strict_mode_supported(schema) is False
 
 
 def test_strict_mode_anyof_branch_must_satisfy() -> None:
-    # anyOf member violating the constraint → False
-    schema = {
+    # Root is strict-compatible so the walk reaches the anyOf branches.
+    # One branch is a non-strict object (no required, no
+    # additionalProperties: false) — the failure must come from there,
+    # not from the root.
+    schema: dict[str, Any] = {
         "type": "object",
         "properties": {
             "x": {
                 "anyOf": [
                     {"type": "string"},
-                    {"type": "object", "properties": {"y": {"type": "string"}}},  # no required
+                    {
+                        "type": "object",
+                        "properties": {"y": {"type": "string"}},
+                        # no required, no additionalProperties: false →
+                        # branch violation
+                    },
                 ]
             },
         },
         "required": ["x"],
+        "additionalProperties": False,
     }
     assert strict_mode_supported(schema) is False
 
@@ -186,6 +202,18 @@ def test_strict_mode_empty_property_schema_fails() -> None:
         "type": "object",
         "properties": {"x": {}},
         "required": ["x"],
+        "additionalProperties": False,
+    }
+    assert strict_mode_supported(schema) is False
+
+
+def test_strict_mode_array_without_items_fails() -> None:
+    # An array without items has unconstrained content; the walker
+    # can't statically verify nested shapes, so strict mode rejects.
+    schema: dict[str, Any] = {
+        "type": "object",
+        "properties": {"tags": {"type": "array"}},
+        "required": ["tags"],
         "additionalProperties": False,
     }
     assert strict_mode_supported(schema) is False
@@ -514,3 +542,44 @@ async def test_inspect_property_fallback_when_forced() -> None:
         assert provider.uses_prompt_augmentation_fallback is True
     finally:
         await provider.aclose()
+
+
+async def test_fallback_mode_preserves_response_format_on_free_form_calls() -> None:
+    # The fallback gate is structured-output-only. A free-form call
+    # (response_schema=None) on a fallback-mode provider must preserve
+    # a caller-supplied ``response_format`` from RuntimeConfig extras,
+    # because the fallback contract only governs structured-output
+    # calls.
+    from openarmature.llm import RuntimeConfig
+
+    transport = _mock_chat_completion_response('{"ok":true}')
+    provider = OpenAIProvider(
+        base_url="http://mock-llm.test",
+        model="test-model",
+        api_key="test-key",
+        transport=transport,
+        force_prompt_augmentation_fallback=True,
+    )
+    captured_body_response_format: dict[str, Any] | None = None
+    original_post = provider._client.post
+
+    async def capturing_post(*args: Any, **kwargs: Any) -> Any:
+        nonlocal captured_body_response_format
+        body = kwargs.get("json")
+        if isinstance(body, dict):
+            captured_body_response_format = cast("dict[str, Any]", body).get("response_format")
+        return await original_post(*args, **kwargs)
+
+    # Avoid touching the captured-request shape directly; intercept at
+    # the client.post level so we see the constructed JSON body.
+    provider._client.post = capturing_post  # type: ignore[method-assign]
+    try:
+        caller_extra = {"type": "json_object"}
+        config = RuntimeConfig(response_format=caller_extra)  # type: ignore[call-arg]
+        await provider.complete(
+            [UserMessage(content="hello")],
+            config=config,
+        )
+    finally:
+        await provider.aclose()
+    assert captured_body_response_format == caller_extra

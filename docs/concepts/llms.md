@@ -82,6 +82,8 @@ JSON Schema dict (raw-dict return). Same wire shape underneath.
 ### Pydantic class form
 
 ```python
+from typing import Literal
+
 from pydantic import BaseModel
 
 class Classification(BaseModel):

@@ -248,7 +248,10 @@ class OpenAIProvider:
             tools,
             config,
             schema_dict,
-            include_response_format=not self._force_prompt_augmentation_fallback,
+            # The fallback only governs structured-output calls; free-
+            # form calls (schema_dict is None) must preserve any
+            # caller-supplied response_format from RuntimeConfig extras.
+            include_response_format=(schema_dict is None or not self._force_prompt_augmentation_fallback),
         )
 
         # Spec observability §5.5 LLM provider span: when an

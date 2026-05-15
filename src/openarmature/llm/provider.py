@@ -316,6 +316,11 @@ def _strict_mode_check(
 
     if is_array_type:
         items = schema_dict.get("items")
+        # Missing or unrecognized items: contents are unconstrained and
+        # may include shapes the walker can't statically verify. Strict
+        # mode rejects that case.
+        if items is None:
+            return False
         if isinstance(items, dict):
             if not _strict_mode_check(items, root=root, visited=visited):
                 return False
@@ -324,6 +329,10 @@ def _strict_mode_check(
             for item in cast("list[Any]", items):
                 if not _strict_mode_check(item, root=root, visited=visited):
                     return False
+        else:
+            # items present but not dict or list (e.g. items: true) is
+            # not a strict-compatible shape.
+            return False
 
     # Determine whether the schema declared a shape we know how to
     # verify. Object/array branches above already returned False on

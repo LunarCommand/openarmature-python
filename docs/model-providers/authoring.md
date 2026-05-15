@@ -27,6 +27,7 @@ from pydantic import BaseModel
 from openarmature.llm import (
     AssistantMessage,
     Message,
+    ProviderInvalidRequest,
     ProviderInvalidResponse,
     ProviderUnavailable,
     Response,
@@ -75,6 +76,10 @@ class MyProvider:
         # production provider wires it through to native response_format
         # support or the prompt-augmentation fallback; see
         # ``openarmature.llm.OpenAIProvider``.
+        if response_schema is not None:
+            raise ProviderInvalidRequest(
+                "response_schema is not supported by this provider"
+            )
         validate_message_list(messages)
         validate_tools(tools)
 
