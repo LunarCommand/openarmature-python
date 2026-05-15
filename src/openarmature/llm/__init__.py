@@ -53,7 +53,7 @@ from .messages import (
 )
 from .provider import Provider, validate_message_list, validate_tools
 from .providers import OpenAIProvider, classify_http_error, parse_retry_after
-from .response import FinishReason, Response, RuntimeConfig, Usage
+from .response import FinishReason, ParsedValue, Response, RuntimeConfig, Usage
 
 __all__ = [
     "PROVIDER_AUTHENTICATION",
@@ -70,6 +70,7 @@ __all__ = [
     "LlmProviderError",
     "Message",
     "OpenAIProvider",
+    "ParsedValue",
     "Provider",
     "ProviderAuthentication",
     "ProviderInvalidModel",

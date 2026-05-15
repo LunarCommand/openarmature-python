@@ -27,6 +27,14 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from .messages import AssistantMessage
 
+# ``parsed`` may carry either a raw dict (when the caller passed a
+# JSON-Schema dict as response_schema) or a Pydantic model instance
+# (when the caller passed a BaseModel subclass). The latter is a
+# per-language ergonomic — the runtime shape mirrors what the caller
+# requested. Absent (None) on calls without response_schema and on
+# tool-call responses regardless of whether response_schema was set.
+ParsedValue = dict[str, Any] | BaseModel | None
+
 # The five spec §6 finish-reason values. Modeled as a Literal union so
 # pydantic rejects unknown values at parse time — provider responses
 # carrying a non-standard value surface as ``provider_invalid_response``
@@ -51,24 +59,40 @@ class Usage(BaseModel):
 class Response(BaseModel):
     """The result of a ``Provider.complete()`` call.
 
-    - ``message`` is the assistant message returned by the model.
-      Always ``role: "assistant"``. May carry ``tool_calls``.
-    - ``finish_reason`` is one of the five canonical values
-      (``"stop"`` / ``"length"`` / ``"tool_calls"`` /
-      ``"content_filter"`` / ``"error"``).
-    - ``usage`` is the token record (all ``None`` if the provider
-      didn't report usage).
-    - ``raw`` is the parsed provider response, populated on every
-      successful return. Carries everything the provider returned —
-      the normalized fields above are derived from it.
+    Attributes:
+        message: The assistant message returned by the model.
+            Always ``role: "assistant"``. May carry ``tool_calls``.
+        finish_reason: One of ``"stop"``, ``"length"``, ``"tool_calls"``,
+            ``"content_filter"``, ``"error"``.
+        usage: The token record (all ``None`` if the provider didn't
+            report usage).
+        raw: The parsed provider response, populated on every successful
+            return. Carries everything the provider returned; the
+            normalized fields above are derived from it.
+        parsed: The parsed-and-validated structured value when the call
+            supplied a ``response_schema`` and the model returned
+            structured content. ``None`` otherwise. The runtime type
+            depends on the schema form the caller passed: ``dict`` for
+            a JSON-Schema dict input, a ``BaseModel`` instance for a
+            Pydantic class input.
     """
 
-    model_config = ConfigDict(extra="forbid")
+    # ``parsed`` is absent (None) on calls that didn't supply a
+    # response_schema, and on responses whose finish_reason is
+    # "tool_calls" — the tool-call path and the structured-content
+    # path are mutually exclusive at the response level.
+    #
+    # message.content carries the model's content string verbatim.
+    # parsed is the post-receive deserialization of that content
+    # against the schema; the provider's content string is NOT
+    # re-serialized from parsed.
+    model_config = ConfigDict(extra="forbid", arbitrary_types_allowed=True)
 
     message: AssistantMessage
     finish_reason: FinishReason
     usage: Usage
     raw: dict[str, Any]
+    parsed: ParsedValue = None
 
 
 class RuntimeConfig(BaseModel):
@@ -90,6 +114,7 @@ class RuntimeConfig(BaseModel):
 
 __all__ = [
     "FinishReason",
+    "ParsedValue",
     "Response",
     "RuntimeConfig",
     "Usage",
