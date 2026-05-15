@@ -1,4 +1,4 @@
-import subprocess
+import re
 import tomllib
 from pathlib import Path
 
@@ -16,7 +16,7 @@ def test_spec_version_matches_pyproject() -> None:
     # AGENTS.md flags __spec_version__, pyproject.toml's
     # [tool.openarmature].spec_version, and the submodule pin as
     # required to stay in sync. This test catches the pyproject ↔
-    # runtime drift class; test_spec_version_matches_submodule_pin
+    # runtime drift class; test_spec_version_matches_submodule_changelog
     # below catches the submodule side.
     pyproject_path = Path(__file__).resolve().parent.parent / "pyproject.toml"
     config = tomllib.loads(pyproject_path.read_text())
@@ -24,29 +24,31 @@ def test_spec_version_matches_pyproject() -> None:
     assert openarmature.__spec_version__ == pyproject_spec_version
 
 
-def test_spec_version_matches_submodule_pin() -> None:
-    # The submodule's git HEAD must be at the v{__spec_version__}
-    # tag, completing the three-place drift check from AGENTS.md.
-    # Skips cleanly when the submodule isn't a git checkout (e.g.,
-    # installed-package CI lanes pulling from PyPI sdists).
-    spec_dir = Path(__file__).resolve().parent.parent / "openarmature-spec"
-    if not (spec_dir / ".git").exists():
-        pytest.skip("openarmature-spec is not a git checkout")
-    try:
-        result = subprocess.run(
-            ["git", "-C", str(spec_dir), "describe", "--tags", "--exact-match", "HEAD"],
-            capture_output=True,
-            text=True,
-            check=True,
-        )
-    except subprocess.CalledProcessError:
-        pytest.fail(
-            "submodule HEAD is not at any tag; bump it to "
-            f"v{openarmature.__spec_version__} or update __spec_version__"
-        )
-    submodule_tag = result.stdout.strip()
-    expected = f"v{openarmature.__spec_version__}"
-    assert submodule_tag == expected, (
-        f"submodule pinned at {submodule_tag}, but __spec_version__ is "
-        f"{openarmature.__spec_version__} (expected tag {expected})"
+# Keep a Changelog heading: ``## [0.15.0]`` (with optional trailing
+# date). The ``[Unreleased]`` entry uses a non-numeric tag and is
+# skipped by this pattern.
+_CHANGELOG_VERSION_RE = re.compile(r"^## \[(\d+\.\d+\.\d+)\]")
+
+
+def test_spec_version_matches_submodule_changelog() -> None:
+    # Third value AGENTS.md flags: the submodule pin (the spec
+    # checkout the parent repo records). We verify by reading the
+    # spec's CHANGELOG.md at the pinned commit and asserting the
+    # latest versioned entry equals __spec_version__. CHANGELOG
+    # parsing is more robust than ``git describe`` (no tag-fetch
+    # dependency, works in any checkout shape) and the spec follows
+    # Keep a Changelog so the format is stable.
+    changelog_path = Path(__file__).resolve().parent.parent / "openarmature-spec" / "CHANGELOG.md"
+    if not changelog_path.exists():
+        pytest.skip("openarmature-spec/CHANGELOG.md is not present")
+    for line in changelog_path.read_text().splitlines():
+        match = _CHANGELOG_VERSION_RE.match(line)
+        if match:
+            submodule_latest = match.group(1)
+            break
+    else:
+        pytest.fail("could not find a versioned heading in openarmature-spec/CHANGELOG.md")
+    assert openarmature.__spec_version__ == submodule_latest, (
+        f"submodule's CHANGELOG latest is {submodule_latest}, but "
+        f"__spec_version__ is {openarmature.__spec_version__}"
     )
