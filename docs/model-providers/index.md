@@ -153,14 +153,14 @@ inspect which path is active.
 ### Strict mode
 
 OpenAI's native path supports a `strict: true` flag that engages
-schema-constrained decoding. It applies only when the schema satisfies
-specific constraints: `additionalProperties` explicitly `false` on
-every object, every key in `properties` listed in `required`, no
-unresolvable `$ref` targets. `strict_mode_supported(schema)` (exported
-from `openarmature.llm`) performs the deep recursive check; the
-provider passes `strict: true` to the wire when the schema satisfies
-it, and `strict: false` otherwise. Either way, the provider validates
-the response post-receive.
+schema-constrained decoding. The provider passes `strict: true` when
+the schema satisfies the strict-mode constraints and `strict: false`
+otherwise; the full constraint list lives on the
+[LLMs concepts page](../concepts/llms.md#strict-mode).
+`strict_mode_supported(schema)` is exported from `openarmature.llm`
+for callers wanting to check the heuristic directly. Either way, the
+provider validates the response post-receive against the supplied
+schema.
 
 ## A minimal example
 

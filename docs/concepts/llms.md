@@ -163,22 +163,38 @@ inspect which path is active.
 ### Strict mode
 
 OpenAI's native path supports a `strict: true` flag that engages the
-model's schema-constrained decoding (the model literally cannot emit
-non-conforming tokens). It applies only when the schema satisfies
-specific constraints: `additionalProperties` explicitly `false` on every
-object, every key in `properties` listed in `required`, no
-unresolvable `$ref` targets.
-
-`strict_mode_supported(schema)` performs the deep recursive check. The
-provider passes `strict: true` to the wire when the schema satisfies
-it, and `strict: false` otherwise. Either way, the provider validates
-the response post-receive against the supplied schema. Strict is a
+model's schema-constrained decoding: the model literally cannot emit
+non-conforming tokens. The framework decides `strict: true` vs
+`strict: false` automatically based on whether your schema satisfies
+strict-mode constraints. Either way, the framework validates the
+response post-receive against the supplied schema; strict is a
 wire-level optimization, not a correctness requirement.
 
-If you control the schema, prefer making it strict-compatible:
-explicit `additionalProperties: false` plus `required` covering every
-property. Pydantic-derived schemas may need a tweak to satisfy this
-(`model_config = ConfigDict(extra="forbid")` on the class).
+`strict_mode_supported(schema)` (exported from `openarmature.llm`)
+performs the deep recursive check. The heuristic is conservative —
+anything not on the list below trips to `strict: false`:
+
+- Top-level schema is `type: "object"`.
+- For every nested object: `additionalProperties` is **explicitly**
+  `false`, and every key in `properties` is listed in `required`.
+- For every nested array: `items` is present and points to a
+  verifiable schema (dict, or tuple-form list of dicts).
+- Every branch of `anyOf` / `oneOf` / `allOf` independently satisfies
+  the above.
+- Internal `$ref` targets (`#/...` or bare `#`) resolve and their
+  resolved schema passes. External refs (any other URI) and `$ref`
+  cycles are handled conservatively.
+- Primitive types (`string`, `integer`, `number`, `boolean`, `null`)
+  are accepted as terminal: no nested structure to verify.
+- Empty `{}` schemas and unrecognized-keyword schemas (`const`-only,
+  `enum`-only, etc.) trip to non-strict; the walker can't statically
+  verify them.
+
+If you control the schema and want strict mode, the easiest path is to
+set `additionalProperties: false` and put every property in `required`
+on every object. Pydantic-derived schemas may need `model_config =
+ConfigDict(extra="forbid")` on the class to get the
+`additionalProperties: false` in the generated JSON Schema.
 
 ## Routing on parsed fields
 
