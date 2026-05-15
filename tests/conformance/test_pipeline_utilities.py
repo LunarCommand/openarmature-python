@@ -90,6 +90,32 @@ def _fixture_id(path: Path) -> str:
     return path.stem
 
 
+# Fixtures whose implementation lands in a later PR of the 5-proposal
+# batch (proposals 0011, 0014, 0015, 0016, 0017). Skip-marked here so a
+# green test run at this commit means "everything we claim to implement
+# passes." Each subsequent PR drops its own rows as it lands the
+# underlying support.
+_DEFERRED_FIXTURES: dict[str, str] = {
+    # proposal 0011 — parallel branches (PR-5 of the batch)
+    "032-parallel-branches-basic": "0011 parallel branches (PR-5)",
+    "033-parallel-branches-fail-fast": "0011 parallel branches (PR-5)",
+    "034-parallel-branches-collect": "0011 parallel branches (PR-5)",
+    "035-parallel-branches-different-state-schemas": "0011 parallel branches (PR-5)",
+    "036-parallel-branches-with-branch-middleware-retry": "0011 parallel branches (PR-5)",
+    "037-parallel-branches-determinism": "0011 parallel branches (PR-5)",
+    "038-parallel-branches-compose-with-fan-out": "0011 parallel branches (PR-5)",
+    # proposal 0014 — state migration (PR-4 of the batch)
+    "039-state-migration-additive-field": "0014 state migration (PR-4)",
+    "040-state-migration-chain": "0014 state migration (PR-4)",
+    "041-state-migration-missing": "0014 state migration (PR-4)",
+    "042-state-migration-versions-match-no-op": "0014 state migration (PR-4)",
+    "043-state-migration-parent-states-migrated": "0014 state migration (PR-4)",
+    "044-state-migration-post-migration-deserialization-fails": "0014 state migration (PR-4)",
+    "045-state-migration-no-path-in-registry": "0014 state migration (PR-4)",
+    "046-state-migration-function-raises": "0014 state migration (PR-4)",
+}
+
+
 def _unsupported_directive(spec: dict[str, Any]) -> str | None:
     """Return the first node directive the driver can't translate yet."""
 
@@ -317,6 +343,9 @@ async def test_pipeline_utility_fixture(
     fixture_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    fixture_id = fixture_path.stem
+    if fixture_id in _DEFERRED_FIXTURES:
+        pytest.skip(f"{fixture_id}: {_DEFERRED_FIXTURES[fixture_id]}")
     spec = _load(fixture_path)
 
     # Cases-shape fixtures (014, 016, 018-019, 021-023): each case is

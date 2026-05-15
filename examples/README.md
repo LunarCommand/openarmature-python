@@ -6,6 +6,18 @@ End-to-end demo projects for `openarmature`. Each is a standalone
 
 ## Demos
 
+### [`00-hello-world/`](./00-hello-world/main.py)
+
+Classify a query with an LLM and route to one of two follow-up
+nodes. Demonstrates: typed `State` with three reducer policies, the
+`OpenAIProvider` from `openarmature.llm`, structured output via a
+Pydantic class (`response_schema=Classification` → `Response.parsed`
+as a `Classification` instance), conditional routing on a parsed
+field, and a compile-time observer.
+
+Configured via env vars (`LLM_BASE_URL`, `LLM_MODEL`, `LLM_API_KEY`);
+defaults to OpenAI public API with `gpt-4o-mini`.
+
 ### [`01-linear-pipeline/`](./01-linear-pipeline/main.py)
 
 Minimal two-node graph (`plan → write`). Demonstrates: typed `State`,

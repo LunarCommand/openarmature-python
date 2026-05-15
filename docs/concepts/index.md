@@ -12,6 +12,8 @@ the framework, or jump to whichever concept you need.
   data seam.
 - [Fan-out](fan-out.md): running the same subgraph many times in
   parallel, results merged back deterministically.
+- [LLMs](llms.md): how LLM calls fit into nodes, structured output,
+  routing on parsed fields, errors at the LLM boundary.
 - [Observability](observability.md): node-boundary hooks, OTel mapping,
   log correlation.
 - [Checkpointing](checkpointing.md): save state at each node boundary,

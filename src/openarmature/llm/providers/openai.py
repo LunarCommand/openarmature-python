@@ -40,13 +40,16 @@ treating "model in catalog" as "model loaded."
 
 from __future__ import annotations
 
+import hashlib
 import json
+import re
 import uuid
 from collections.abc import Sequence
 from typing import Any, Literal, cast
 
 import httpx
-from pydantic import ValidationError
+import jsonschema
+from pydantic import BaseModel, ValidationError
 
 from openarmature.graph.events import NodeEvent
 from openarmature.graph.state import State
@@ -66,6 +69,7 @@ from ..errors import (
     ProviderModelNotLoaded,
     ProviderRateLimit,
     ProviderUnavailable,
+    StructuredOutputInvalid,
 )
 from ..messages import (
     AssistantMessage,
@@ -75,8 +79,13 @@ from ..messages import (
     ToolCall,
     UserMessage,
 )
-from ..provider import validate_message_list, validate_tools
-from ..response import FinishReason, Response, RuntimeConfig, Usage
+from ..provider import (
+    strict_mode_supported,
+    validate_message_list,
+    validate_response_schema,
+    validate_tools,
+)
+from ..response import FinishReason, ParsedValue, Response, RuntimeConfig, Usage
 
 
 class OpenAIProvider:
@@ -98,9 +107,16 @@ class OpenAIProvider:
         api_key: str | None = None,
         transport: httpx.AsyncBaseTransport | None = None,
         timeout: float = 60.0,
+        force_prompt_augmentation_fallback: bool = False,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.model = model
+        # ``force_prompt_augmentation_fallback`` switches structured-output
+        # calls from the native response_format wire path to the
+        # prompt-augmentation fallback. Used for older OpenAI-compatible
+        # servers (some vLLM/LM Studio/llama.cpp versions) that reject
+        # or silently ignore response_format.
+        self._force_prompt_augmentation_fallback = force_prompt_augmentation_fallback
         self._headers: dict[str, str] = {"Content-Type": "application/json"}
         if api_key is not None:
             self._headers["Authorization"] = f"Bearer {api_key}"
@@ -112,6 +128,14 @@ class OpenAIProvider:
             transport=transport,
             timeout=timeout,
         )
+
+    @property
+    def uses_prompt_augmentation_fallback(self) -> bool:
+        """Whether ``complete(response_schema=...)`` builds the wire
+        body via prompt augmentation (``True``) or the native
+        ``response_format`` path (``False``).
+        """
+        return self._force_prompt_augmentation_fallback
 
     async def aclose(self) -> None:
         """Close the underlying HTTP client. Optional — async clients
@@ -191,18 +215,44 @@ class OpenAIProvider:
         messages: Sequence[Message],
         tools: Sequence[Tool] | None = None,
         config: RuntimeConfig | None = None,
+        response_schema: dict[str, Any] | type[BaseModel] | None = None,
     ) -> Response:
         """Single completion call.
 
         Pre-send validation runs first (per-message Pydantic +
-        list-level invariants). HTTP errors map to canonical
-        provider-error categories. The successful 200 body is parsed
-        into a :class:`Response` — failure to parse raises
-        ``provider_invalid_response``.
+        list-level invariants + response_schema shape check). HTTP
+        errors map to canonical provider-error categories. The
+        successful 200 body is parsed into a :class:`Response` —
+        failure to parse raises ``provider_invalid_response``; failure
+        to validate the response content against ``response_schema``
+        raises ``structured_output_invalid``.
+
+        When ``response_schema`` is supplied as a Pydantic BaseModel
+        subclass, ``Response.parsed`` is a validated instance of that
+        class; when supplied as a JSON Schema dict,
+        ``Response.parsed`` is the deserialized dict.
         """
         validate_message_list(messages)
         validate_tools(tools)
-        body = self._build_request_body(messages, tools, config)
+        schema_dict, schema_class = _normalize_response_schema(response_schema)
+        # On the fallback path, the wire-side messages list is an
+        # augmented COPY of the caller's messages — original messages
+        # MUST NOT be mutated. _augment_messages_with_schema_directive
+        # builds a fresh list and does not modify the reused Message
+        # instances in place; the caller's sequence is untouched.
+        wire_messages: Sequence[Message] = messages
+        if schema_dict is not None and self._force_prompt_augmentation_fallback:
+            wire_messages = _augment_messages_with_schema_directive(messages, schema_dict)
+        body = self._build_request_body(
+            wire_messages,
+            tools,
+            config,
+            schema_dict,
+            # The fallback only governs structured-output calls; free-
+            # form calls (schema_dict is None) must preserve any
+            # caller-supplied response_format from RuntimeConfig extras.
+            include_response_format=(schema_dict is None or not self._force_prompt_augmentation_fallback),
+        )
 
         # Spec observability §5.5 LLM provider span: when an
         # observability backend is active in the current invocation,
@@ -226,7 +276,7 @@ class OpenAIProvider:
             dispatch(_make_llm_event("started", call_id=call_id, model=self.model))
 
         try:
-            response = await self._do_complete(body)
+            response = await self._do_complete(body, schema_dict, schema_class)
         except Exception as exc:
             if dispatch is not None:
                 dispatch(_make_llm_event("completed", call_id=call_id, model=self.model, error=exc))
@@ -244,7 +294,12 @@ class OpenAIProvider:
             )
         return response
 
-    async def _do_complete(self, body: dict[str, Any]) -> Response:
+    async def _do_complete(
+        self,
+        body: dict[str, Any],
+        schema_dict: dict[str, Any] | None,
+        schema_class: type[BaseModel] | None,
+    ) -> Response:
         """Wire-call helper: separated from ``complete()`` so the
         LLM-provider span hook in ``complete()`` can wrap success and
         failure paths uniformly."""
@@ -262,7 +317,7 @@ class OpenAIProvider:
             raise ProviderInvalidResponse("POST /v1/chat/completions returned non-JSON body") from exc
         if not isinstance(payload_raw, dict):
             raise ProviderInvalidResponse("POST /v1/chat/completions returned a non-object body")
-        return self._parse_response(cast("dict[str, Any]", payload_raw))
+        return self._parse_response(cast("dict[str, Any]", payload_raw), schema_dict, schema_class)
 
     # ------------------------------------------------------------------
     # Request building (spec §8.1)
@@ -273,6 +328,8 @@ class OpenAIProvider:
         messages: Sequence[Message],
         tools: Sequence[Tool] | None,
         config: RuntimeConfig | None,
+        schema_dict: dict[str, Any] | None,
+        include_response_format: bool = True,
     ) -> dict[str, Any]:
         body: dict[str, Any] = {
             "model": self.model,
@@ -295,13 +352,36 @@ class OpenAIProvider:
             extras = config.model_extra or {}
             for k, v in extras.items():
                 body.setdefault(k, v)
+        # response_format is omitted entirely on the fallback path —
+        # the schema travels in the augmented system message instead.
+        if schema_dict is not None and include_response_format:
+            body["response_format"] = {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": _derive_schema_name(schema_dict),
+                    "schema": schema_dict,
+                    "strict": strict_mode_supported(schema_dict),
+                },
+            }
+        elif not include_response_format:
+            # On the fallback path the §8.5.1 contract is "response_format
+            # MUST NOT be on the wire." RuntimeConfig is extra="allow" so
+            # a caller could pass response_format through via the extras
+            # loop above; strip it here so the fallback contract holds
+            # regardless of caller-supplied extras.
+            body.pop("response_format", None)
         return body
 
     # ------------------------------------------------------------------
     # Response parsing (spec §8.2)
     # ------------------------------------------------------------------
 
-    def _parse_response(self, payload: dict[str, Any]) -> Response:
+    def _parse_response(
+        self,
+        payload: dict[str, Any],
+        schema_dict: dict[str, Any] | None,
+        schema_class: type[BaseModel] | None,
+    ) -> Response:
         try:
             choices = cast("list[dict[str, Any]]", payload["choices"])
             choice = choices[0]
@@ -358,17 +438,202 @@ class OpenAIProvider:
         except ValidationError as exc:
             raise ProviderInvalidResponse(f"invalid usage record: {exc}") from exc
 
+        # Structured-output parsing. parsed is absent when no schema
+        # was requested AND when the response is a tool-call response
+        # — the tool-call path and structured-content path are
+        # mutually exclusive at the response level.
+        parsed: ParsedValue = None
+        if schema_dict is not None and finish_reason_typed != "tool_calls":
+            parsed = _parse_and_validate(assistant_msg.content, schema_dict, schema_class)
+
         return Response(
             message=assistant_msg,
             finish_reason=finish_reason_typed,
             usage=usage,
             raw=payload,
+            parsed=parsed,
         )
 
 
 # ---------------------------------------------------------------------------
 # Wire-format helpers
 # ---------------------------------------------------------------------------
+
+
+# Normalize a response_schema argument to a dict (plus the optional
+# BaseModel subclass form for the post-parse instance return). Accepts
+# either form per the Provider Protocol; raises ProviderInvalidRequest
+# on invalid shapes (non-dict, non-object-top-level for the dict form;
+# pre-validated by validate_response_schema).
+def _normalize_response_schema(
+    response_schema: dict[str, Any] | type[BaseModel] | None,
+) -> tuple[dict[str, Any] | None, type[BaseModel] | None]:
+    if response_schema is None:
+        return None, None
+    if isinstance(response_schema, type):
+        # Defensive runtime check: the Protocol signature accepts
+        # type[BaseModel], but Python doesn't enforce that at the call
+        # boundary. Reject non-BaseModel classes with a canonical error
+        # instead of letting AttributeError leak from model_json_schema.
+        if not issubclass(response_schema, BaseModel):  # pyright: ignore[reportUnnecessaryIsInstance]
+            raise ProviderInvalidRequest(
+                f"response_schema: class form MUST be a Pydantic BaseModel subclass "
+                f"(got {response_schema.__name__})"
+            )
+        schema_dict = response_schema.model_json_schema()
+        validate_response_schema(schema_dict)
+        return schema_dict, response_schema
+    validate_response_schema(response_schema)
+    return response_schema, None
+
+
+# OpenAI's response_format.json_schema.name field is restricted to
+# letters, digits, underscores, and dashes with a max length of 64
+# characters. A JSON Schema title can be any string ("Person Record",
+# "User's Profile", etc.), so verbatim use risks a 400 on the wire.
+_OPENAI_SCHEMA_NAME_RE = re.compile(r"^[a-zA-Z0-9_-]{1,64}$")
+
+
+# Derive a stable identifier for the JSON Schema for OpenAI's
+# response_format.json_schema.name field. Uses the schema's `title`
+# when it satisfies the provider's name constraints; otherwise derives
+# a deterministic short hash so the same schema always produces the
+# same name across calls. Sanitizing-in-place would silently mutate
+# user intent; the hash is a more honest fallback.
+def _derive_schema_name(schema: dict[str, Any]) -> str:
+    title = schema.get("title")
+    if isinstance(title, str) and _OPENAI_SCHEMA_NAME_RE.match(title):
+        return title
+    canonical = json.dumps(schema, sort_keys=True).encode("utf-8")
+    return f"oa_schema_{hashlib.sha256(canonical).hexdigest()[:16]}"
+
+
+# Parse the model's content string as JSON, then validate against
+# the schema. The dict-schema path uses jsonschema; the BaseModel-class
+# path uses Pydantic's native validator (which produces an instance
+# of the supplied class).
+def _parse_and_validate(
+    content: str,
+    schema_dict: dict[str, Any],
+    schema_class: type[BaseModel] | None,
+) -> ParsedValue:
+    try:
+        loaded = json.loads(content)
+    except json.JSONDecodeError as exc:
+        raise StructuredOutputInvalid(
+            "response content is not valid JSON",
+            response_schema=schema_dict,
+            raw_content=content,
+            failure_description=str(exc),
+        ) from exc
+    if not isinstance(loaded, dict):
+        raise StructuredOutputInvalid(
+            "response JSON is not an object",
+            response_schema=schema_dict,
+            raw_content=content,
+            failure_description=f"top-level type is {type(loaded).__name__}, expected object",
+        )
+    parsed_dict = cast("dict[str, Any]", loaded)
+
+    # Pydantic-class path: validate and return the BaseModel instance.
+    if schema_class is not None:
+        # Validate against the generated JSON Schema FIRST so the
+        # class path enforces the same strict per-type checks as the
+        # dict path. Pydantic's default model_validate is coercive
+        # (it accepts "30" for an int field), which would silently
+        # accept responses that fail the wire schema. Running
+        # jsonschema first matches the dict-schema path's strictness;
+        # model_validate then constructs the typed instance.
+        try:
+            jsonschema.validate(instance=parsed_dict, schema=schema_dict)
+        except jsonschema.ValidationError as exc:
+            raise StructuredOutputInvalid(
+                "response failed JSON Schema validation",
+                response_schema=schema_dict,
+                raw_content=content,
+                failure_description=_format_jsonschema_failure(exc),
+            ) from exc
+        except jsonschema.SchemaError as exc:
+            raise StructuredOutputInvalid(
+                "response could not be validated against the supplied schema",
+                response_schema=schema_dict,
+                raw_content=content,
+                failure_description=str(exc),
+            ) from exc
+        try:
+            return schema_class.model_validate(parsed_dict)
+        except ValidationError as exc:
+            raise StructuredOutputInvalid(
+                "response failed Pydantic validation",
+                response_schema=schema_dict,
+                raw_content=content,
+                failure_description=str(exc),
+            ) from exc
+
+    # Dict-schema path: jsonschema validation, return the dict.
+    try:
+        jsonschema.validate(instance=parsed_dict, schema=schema_dict)
+    except jsonschema.ValidationError as exc:
+        raise StructuredOutputInvalid(
+            "response failed JSON Schema validation",
+            response_schema=schema_dict,
+            raw_content=content,
+            failure_description=_format_jsonschema_failure(exc),
+        ) from exc
+    except jsonschema.SchemaError as exc:
+        # Safety net: validate_response_schema's pre-validation should
+        # have caught this, but any schema-side exception (including
+        # ref-resolution failures via the `referencing` library) MUST
+        # still map to the canonical taxonomy rather than leak raw.
+        raise StructuredOutputInvalid(
+            "response could not be validated against the supplied schema",
+            response_schema=schema_dict,
+            raw_content=content,
+            failure_description=str(exc),
+        ) from exc
+    return parsed_dict
+
+
+def _format_jsonschema_failure(exc: jsonschema.ValidationError) -> str:
+    """jsonschema.ValidationError.message describes the value mismatch
+    (e.g., "'30' is not of type 'integer'") but doesn't include the
+    failing field path. Prefix with ``json_path`` (e.g., ``$.age``) so
+    the failure_description string carries both, matching the dict-
+    schema and class-schema paths.
+    """
+    return f"{exc.json_path}: {exc.message}"
+
+
+_SCHEMA_DIRECTIVE_TEMPLATE = (
+    "You MUST return only valid JSON that conforms to the following JSON Schema. "
+    "Do not include prose, markdown fences, or any text outside the JSON object.\n\n"
+    "JSON Schema:\n{schema_json}"
+)
+
+
+# Construct a fresh message list with a schema directive added. The
+# directive is appended to the existing system message's content when
+# present, or prepended as a new system message otherwise. The caller's
+# original list is never mutated; Message instances are reused, and
+# this helper does not modify them in place (the message models are
+# not frozen Pydantic models, so the safety is structural, not
+# enforced by the type). The serialized schema appears verbatim in
+# the directive so callers that need to verify the directive
+# references the schema (conformance harnesses, observability spans)
+# can substring-match the canonical JSON form.
+def _augment_messages_with_schema_directive(
+    messages: Sequence[Message],
+    schema_dict: dict[str, Any],
+) -> list[Message]:
+    directive = _SCHEMA_DIRECTIVE_TEMPLATE.format(schema_json=json.dumps(schema_dict, sort_keys=True))
+    out: list[Message] = list(messages)
+    if out and isinstance(out[0], SystemMessage):
+        existing = out[0]
+        merged = SystemMessage(content=f"{existing.content}\n\n{directive}")
+        out[0] = merged
+    else:
+        out.insert(0, SystemMessage(content=directive))
+    return out
 
 
 def _message_to_wire(msg: Message) -> dict[str, Any]:
@@ -390,7 +655,10 @@ def _message_to_wire(msg: Message) -> dict[str, Any]:
                     "type": "function",
                     "function": {
                         "name": tc.name,
-                        "arguments": json.dumps(tc.arguments or {}),
+                        # Canonical compact form (no inter-token spaces). Matches
+                        # the spec's wire-mapping fixture (005, cases shape) and
+                        # the form OpenAI itself emits.
+                        "arguments": json.dumps(tc.arguments or {}, separators=(",", ":")),
                     },
                 }
                 for tc in msg.tool_calls

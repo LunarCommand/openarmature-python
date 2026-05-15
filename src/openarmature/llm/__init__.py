@@ -30,6 +30,7 @@ from .errors import (
     PROVIDER_MODEL_NOT_LOADED,
     PROVIDER_RATE_LIMIT,
     PROVIDER_UNAVAILABLE,
+    STRUCTURED_OUTPUT_INVALID,
     TRANSIENT_CATEGORIES,
     LlmProviderError,
     ProviderAuthentication,
@@ -39,6 +40,7 @@ from .errors import (
     ProviderModelNotLoaded,
     ProviderRateLimit,
     ProviderUnavailable,
+    StructuredOutputInvalid,
 )
 from .messages import (
     AssistantMessage,
@@ -49,9 +51,15 @@ from .messages import (
     ToolMessage,
     UserMessage,
 )
-from .provider import Provider, validate_message_list, validate_tools
+from .provider import (
+    Provider,
+    strict_mode_supported,
+    validate_message_list,
+    validate_response_schema,
+    validate_tools,
+)
 from .providers import OpenAIProvider, classify_http_error, parse_retry_after
-from .response import FinishReason, Response, RuntimeConfig, Usage
+from .response import FinishReason, ParsedValue, Response, RuntimeConfig, Usage
 
 __all__ = [
     "PROVIDER_AUTHENTICATION",
@@ -61,12 +69,14 @@ __all__ = [
     "PROVIDER_MODEL_NOT_LOADED",
     "PROVIDER_RATE_LIMIT",
     "PROVIDER_UNAVAILABLE",
+    "STRUCTURED_OUTPUT_INVALID",
     "TRANSIENT_CATEGORIES",
     "AssistantMessage",
     "FinishReason",
     "LlmProviderError",
     "Message",
     "OpenAIProvider",
+    "ParsedValue",
     "Provider",
     "ProviderAuthentication",
     "ProviderInvalidModel",
@@ -77,6 +87,7 @@ __all__ = [
     "ProviderUnavailable",
     "Response",
     "RuntimeConfig",
+    "StructuredOutputInvalid",
     "SystemMessage",
     "Tool",
     "ToolCall",
@@ -85,6 +96,8 @@ __all__ = [
     "UserMessage",
     "classify_http_error",
     "parse_retry_after",
+    "strict_mode_supported",
     "validate_message_list",
+    "validate_response_schema",
     "validate_tools",
 ]

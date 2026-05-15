@@ -94,6 +94,7 @@ nav:
     - Graphs: concepts/graphs.md
     - Composition: concepts/composition.md
     - Fan-out: concepts/fan-out.md
+    - LLMs: concepts/llms.md
     - Observability: concepts/observability.md
     - Checkpointing: concepts/checkpointing.md
   - Model Providers:

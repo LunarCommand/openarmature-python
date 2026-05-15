@@ -64,6 +64,18 @@ _STANDARD_RUNTIME_FIXTURES = [
 ]
 
 
+# Fixtures whose implementation lands in a later PR of the 5-proposal
+# batch (proposals 0011, 0014, 0015, 0016, 0017). Skip-marked here so a
+# green test run at this commit means "everything we claim to implement
+# passes." Each subsequent PR drops its own rows as it lands the
+# underlying support.
+_DEFERRED_FIXTURES: dict[str, str] = {
+    # proposal 0011 — parallel branches; adds ``branch_name`` to
+    # NodeEvent (PR-5 of the batch)
+    "021-observer-branch-name": "0011 parallel branches (PR-5)",
+}
+
+
 # Node directives the legacy adapter doesn't (yet) translate. Phase 1+ will
 # either expand the adapter or replace it with the typed harness.
 _UNSUPPORTED_NODE_DIRECTIVES = frozenset(
@@ -167,6 +179,9 @@ def _compile_subgraphs_map(
 
 @pytest.mark.parametrize("fixture_path", _STANDARD_RUNTIME_FIXTURES, ids=_fixture_id)
 async def test_runtime_fixture(fixture_path: Path) -> None:
+    fixture_id = fixture_path.stem
+    if fixture_id in _DEFERRED_FIXTURES:
+        pytest.skip(f"{fixture_id}: {_DEFERRED_FIXTURES[fixture_id]}")
     spec = _load(fixture_path)
 
     # ``cases:`` form (e.g., 020-observer-edge-error-events): each entry

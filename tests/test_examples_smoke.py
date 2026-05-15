@@ -30,6 +30,7 @@ import pytest
 EXAMPLES_DIR = Path(__file__).parent.parent / "examples"
 
 DEMOS = [
+    "00-hello-world",
     "01-linear-pipeline",
     "02-routing-and-subgraphs",
     "03-explicit-subgraph-mapping",

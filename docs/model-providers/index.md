@@ -23,8 +23,9 @@ A Provider implements two async methods:
 
 ```python
 from collections.abc import Sequence
-from typing import Protocol
+from typing import Any, Protocol
 
+from pydantic import BaseModel
 from openarmature.llm import Message, Response, RuntimeConfig, Tool
 
 
@@ -35,6 +36,7 @@ class Provider(Protocol):
         messages: Sequence[Message],
         tools: Sequence[Tool] | None = None,
         config: RuntimeConfig | None = None,
+        response_schema: dict[str, Any] | type[BaseModel] | None = None,
     ) -> Response: ...
 ```
 
@@ -42,7 +44,9 @@ class Provider(Protocol):
   check, typically called once before invoking the graph.
 - **`complete()`** performs a single completion call and returns the
   full `Response`: message, finish reason, token usage, raw wire
-  payload.
+  payload, and (when `response_schema` is supplied) a parsed
+  structured value on `Response.parsed`. See
+  [Structured output](#structured-output) below.
 
 ### Behaviour guarantees
 
@@ -60,21 +64,103 @@ class Provider(Protocol):
 
 ## Errors
 
-Seven canonical error categories cover every failure mode:
+Eight canonical error categories cover every failure mode:
 
-| Error                       | Trigger                                       |
-| --------------------------- | --------------------------------------------- |
-| `ProviderAuthentication`    | 401 / 403 (bad key, expired token)            |
-| `ProviderUnavailable`       | 5xx, network failure, timeout                 |
-| `ProviderInvalidModel`      | Bound model doesn't exist on the provider     |
-| `ProviderModelNotLoaded`    | Model known but not currently serving         |
-| `ProviderRateLimit`         | 429 (with `Retry-After` exposed)              |
-| `ProviderInvalidResponse`   | 200 OK that fails to parse                    |
-| `ProviderInvalidRequest`    | Malformed request (per-message or list-level) |
+| Error                       | Trigger                                                                |
+| --------------------------- | ---------------------------------------------------------------------- |
+| `ProviderAuthentication`    | 401 / 403 (bad key, expired token)                                     |
+| `ProviderUnavailable`       | 5xx, network failure, timeout                                          |
+| `ProviderInvalidModel`      | Bound model doesn't exist on the provider                              |
+| `ProviderModelNotLoaded`    | Model known but not currently serving                                  |
+| `ProviderRateLimit`         | 429 (with `Retry-After` exposed)                                       |
+| `ProviderInvalidResponse`   | 200 OK that fails to parse                                             |
+| `ProviderInvalidRequest`    | Malformed request (per-message or list-level)                          |
+| `StructuredOutputInvalid`   | Response failed to parse as JSON or failed to validate against schema  |
 
 Three of these (`Unavailable`, `RateLimit`, `ModelNotLoaded`) are
 exported in `TRANSIENT_CATEGORIES`, the canonical "safe to retry"
 set used by the default retry-middleware classifier.
+`StructuredOutputInvalid` is non-transient by default; see
+[Structured output](#structured-output) below.
+
+## Structured output
+
+`complete()` accepts an optional `response_schema` argument that
+constrains the model's output to a caller-supplied shape. When set, the
+provider tells the model on the wire to produce conforming output,
+parses and validates the response, and surfaces the validated value on
+`Response.parsed`. Parse or validation failures raise
+`StructuredOutputInvalid`.
+
+Two `response_schema` forms are accepted: a Pydantic class
+(typed-instance return) and a raw JSON Schema dict (dict return). Same
+wire shape underneath; pick the form that fits the call site.
+
+```python
+from typing import Literal
+
+from pydantic import BaseModel
+from openarmature.llm import OpenAIProvider, UserMessage
+
+
+class Classification(BaseModel):
+    intent: Literal["research", "summarize"]
+    rationale: str
+
+
+# Class form: parsed comes back as a Classification instance.
+async def classify(provider: OpenAIProvider) -> Classification:
+    response = await provider.complete(
+        [UserMessage(content="Route: 'what is RAG?'")],
+        response_schema=Classification,
+    )
+    assert isinstance(response.parsed, Classification)
+    return response.parsed
+
+
+# Dict form: parsed comes back as a plain dict.
+async def plan_research(provider: OpenAIProvider) -> dict:
+    response = await provider.complete(
+        [UserMessage(content="Plan research for: 'what is RAG?'")],
+        response_schema={
+            "type": "object",
+            "properties": {"topics": {"type": "array", "items": {"type": "string"}}},
+            "required": ["topics"],
+            "additionalProperties": False,
+        },
+    )
+    assert isinstance(response.parsed, dict)
+    return response.parsed
+```
+
+For the rendering of structured output into LLM-using node patterns
+(routing on parsed fields, error handling, retry composition), see the
+[LLMs concept page](../concepts/llms.md).
+
+### Native and fallback wire paths
+
+`OpenAIProvider` uses OpenAI's native `response_format` field on the
+request body by default. Some OpenAI-compatible servers (older vLLM,
+some LM Studio releases, llama.cpp variants) either reject
+`response_format` or silently ignore it. Construct the provider with
+`force_prompt_augmentation_fallback=True` to switch to a
+prompt-augmentation path that prepends a system directive with the
+serialized schema and parses-and-validates post-receive. The behavioral
+contract is identical across both paths; the
+`uses_prompt_augmentation_fallback` read-only property lets callers
+inspect which path is active.
+
+### Strict mode
+
+OpenAI's native path supports a `strict: true` flag that engages
+schema-constrained decoding. The provider passes `strict: true` when
+the schema satisfies the strict-mode constraints and `strict: false`
+otherwise; the full constraint list lives on the
+[LLMs concepts page](../concepts/llms.md#strict-mode).
+`strict_mode_supported(schema)` is exported from `openarmature.llm`
+for callers wanting to check the heuristic directly. Either way, the
+provider validates the response post-receive against the supplied
+schema.
 
 ## A minimal example
 

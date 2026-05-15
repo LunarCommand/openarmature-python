@@ -23,9 +23,11 @@ from collections.abc import Sequence
 from typing import Any
 
 import httpx
+from pydantic import BaseModel
 from openarmature.llm import (
     AssistantMessage,
     Message,
+    ProviderInvalidRequest,
     ProviderInvalidResponse,
     ProviderUnavailable,
     Response,
@@ -64,7 +66,20 @@ class MyProvider:
         messages: Sequence[Message],
         tools: Sequence[Tool] | None = None,
         config: RuntimeConfig | None = None,
+        response_schema: dict[str, Any] | type[BaseModel] | None = None,
     ) -> Response:
+        # response_schema is part of the Protocol; a skeleton provider
+        # MUST NOT silently ignore it — callers expect either
+        # Response.parsed populated or a StructuredOutputInvalid raise.
+        # Until the wire path is implemented, raise
+        # ProviderInvalidRequest when response_schema is set. A
+        # production provider wires it through to native response_format
+        # support or the prompt-augmentation fallback; see
+        # ``openarmature.llm.OpenAIProvider``.
+        if response_schema is not None:
+            raise ProviderInvalidRequest(
+                "response_schema is not supported by this provider"
+            )
         validate_message_list(messages)
         validate_tools(tools)
 
@@ -183,6 +198,14 @@ of:
 - **Tool calls.** Wire-mapping the `tool_calls` array on
   `AssistantMessage` to the Provider's expected shape, parsing tool
   results back from `ToolMessage`s.
+- **Structured output.** Threading `response_schema` through the
+  request body (native `response_format` if the underlying wire
+  supports it; prompt-augmentation fallback otherwise) and validating
+  the response against the schema before returning. Populate
+  `Response.parsed` with the validated value;
+  raise `StructuredOutputInvalid` on parse or validation failure.
+  Use `validate_response_schema` and `strict_mode_supported` from
+  `openarmature.llm` to share the provider-agnostic boundary checks.
 - **Observability spans.** Opt-in `started`/`completed` events
   around the wire call so the OTel observer can build LLM spans.
 - **Lenient response parsing** under `finish_reason="error"`.

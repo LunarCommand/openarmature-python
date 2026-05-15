@@ -6,6 +6,24 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). The
 
 ## [Unreleased]
 
+### Added
+
+- **Structured output (proposal 0016, spec v0.14.0).** `Provider.complete()` now accepts an optional `response_schema` parameter — either a JSON Schema dict or a Pydantic `BaseModel` subclass. When supplied, the provider constrains the model's output to the schema and populates `Response.parsed` with the validated value (`dict` for dict-schema input, a `BaseModel` instance for class input). New `StructuredOutputInvalid` error category (non-transient by default) raises on JSON parse failure or schema validation failure; carries the requested schema, the raw response content, and a failure description.
+- **`OpenAIProvider` native response_format wire path.** When `response_schema` is supplied, the chat-completions request body carries `response_format: { type: "json_schema", json_schema: { name, schema, strict } }`. The `strict` flag is determined by a deep recursive walk over the schema (object-property required-coverage rule across `anyOf` / `oneOf` / `allOf` and `$ref` targets, with cycle protection); unresolvable refs fall through to `strict: false`. The `name` field uses `schema.title` when present, otherwise a deterministic sha256-prefix hash.
+- **`OpenAIProvider` prompt-augmentation fallback.** Constructor flag `force_prompt_augmentation_fallback: bool` (default `False`) and read-only inspect property `uses_prompt_augmentation_fallback: bool`. When the flag is on, structured-output calls build a fresh message list with a system directive containing the serialized schema, omit `response_format` from the wire, and validate the response post-receive. The caller's original `messages` list is never mutated. Use for OpenAI-compatible servers (older vLLM, some LM Studio releases, llama.cpp variants) that reject or silently ignore `response_format`.
+- **Provider-agnostic schema helpers.** `openarmature.llm.validate_response_schema(schema)` (raises `ProviderInvalidRequest` when the schema is not a dict with a top-level `type: "object"`) and `openarmature.llm.strict_mode_supported(schema)` (the deep-tree strict-mode constraint check) are exported for reuse by future Anthropic/Gemini providers.
+- **Capability-agnostic conformance harness helpers.** `tests/conformance/harness/wire.py` adds `match_wire_body` (recursive deep-equal with `"*"` wildcard support), `assert_response_format_absent`, `assert_system_references_schema`, and `assert_error_carries` for the `expected_wire_request[_checks]` and `expected.raises.carries.{...}` fixture shapes. Used by the 0016 fixtures; available for the upcoming 0014 / 0015 / 0017 fixture sets.
+- **Runtime dependency: `jsonschema>=4.0`.** Used by the dict-schema validation path. The Pydantic-class path uses Pydantic's native validator and does not need `jsonschema`.
+
+### Changed
+
+- **Pinned spec version: 0.10.0 → 0.15.0.** Adopts the skip-ahead governance principle: the submodule jumps across v0.11.0–v0.15.0 (proposals 0009, 0011, 0014, 0015, 0016, 0017) in one bump. Only the surface introduced by proposal 0016 is implemented in this changelog entry; fixtures from 0011 / 0014 / 0015 / 0017 are marked deferred-skip in the conformance suite and unmark as their respective PRs land.
+
+### Notes
+
+- **Release gate: do not tag until all of {0011, 0014, 0015, 0016, 0017} are merged.** This batch implements one proposal per PR and lands a consolidated release after the fifth PR. Cutting a release tag before the batch is complete would ship a partial spec implementation against the v0.15.0 pin.
+- **Pre-1.0 MINOR.** Existing free-form callers (no `response_schema`) see no behavior change — the new field defaults to `None`, the wire body omits `response_format`, and `Response.parsed` remains absent.
+
 ## [0.5.0] — 2026-05-10
 
 First release on real PyPI. Catches the implementation up from spec v0.5.x to v0.10.0 across six phases — the spec accepted eight proposals while the python lib was at v0.3.1, and v0.5.0 lands all of them in one curated drop.
