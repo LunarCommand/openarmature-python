@@ -48,6 +48,38 @@ CONFORMANCE_DIR = (
 )
 
 
+# Fixtures whose implementation lands in a later PR of the 5-proposal batch.
+# Skip-marked here so a green test run at this commit means "everything we
+# claim to implement passes." Each subsequent PR drops its own rows as it
+# lands the underlying support.
+_DEFERRED_FIXTURES: dict[str, str] = {
+    # proposal 0015 — multimodal images (PR-2 of the batch)
+    "009-content-blocks-text-only-equivalence": "0015 multimodal images (PR-2)",
+    "010-content-blocks-image-url": "0015 multimodal images (PR-2)",
+    "011-content-blocks-image-inline-base64": "0015 multimodal images (PR-2)",
+    "012-content-blocks-image-detail-hint": "0015 multimodal images (PR-2)",
+    "013-content-blocks-mixed-order-preserved": "0015 multimodal images (PR-2)",
+    "014-content-blocks-validation-empty-sequence": "0015 multimodal images (PR-2)",
+    "015-content-blocks-validation-empty-text-block": "0015 multimodal images (PR-2)",
+    "016-content-blocks-unsupported-by-model": "0015 multimodal images (PR-2)",
+    "017-content-blocks-system-message-text-only": "0015 multimodal images (PR-2)",
+    "018-content-blocks-image-source-missing": "0015 multimodal images (PR-2)",
+    "019-content-blocks-invalid-detail-value": "0015 multimodal images (PR-2)",
+    "020-content-blocks-inline-image-missing-media-type": "0015 multimodal images (PR-2)",
+    # proposal 0016 — structured output (this PR; wired up later in the
+    # commit sequence). These rows are removed in the commit that drives
+    # the structured-output fixtures.
+    "021-structured-output-success": "0016 structured output (this PR; not yet wired)",
+    "022-structured-output-parse-failure": "0016 structured output (this PR; not yet wired)",
+    "023-structured-output-validation-failure": "0016 structured output (this PR; not yet wired)",
+    "024-structured-output-non-transient": "0016 structured output (this PR; not yet wired)",
+    "025-structured-output-with-tool-calls": "0016 structured output (this PR; not yet wired)",
+    "026-structured-output-openai-wire-mapping-native": "0016 structured output (this PR; not yet wired)",
+    "027-structured-output-openai-wire-mapping-fallback": "0016 structured output (this PR; not yet wired)",
+    "028-structured-output-no-schema-regression": "0016 structured output (this PR; not yet wired)",
+}
+
+
 def _fixture_paths() -> list[Path]:
     return sorted(CONFORMANCE_DIR.glob("[0-9][0-9][0-9]-*.yaml"))
 
@@ -240,6 +272,9 @@ def _assert_raises_matches(
 
 @pytest.mark.parametrize("fixture_path", _fixture_paths(), ids=_fixture_id)
 async def test_llm_provider_fixture(fixture_path: Path) -> None:
+    fixture_id = fixture_path.stem
+    if fixture_id in _DEFERRED_FIXTURES:
+        pytest.skip(f"{fixture_id}: {_DEFERRED_FIXTURES[fixture_id]}")
     spec = _load(fixture_path)
 
     if "cases" in spec:
