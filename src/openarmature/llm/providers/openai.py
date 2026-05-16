@@ -75,6 +75,7 @@ from ..errors import (
 from ..messages import (
     AssistantMessage,
     ContentBlock,
+    ImageBlock,
     ImageSourceInline,
     Message,
     SystemMessage,
@@ -694,7 +695,8 @@ def _message_to_wire(msg: Message) -> dict[str, Any]:
 def _block_to_wire(block: ContentBlock) -> dict[str, Any]:
     if isinstance(block, TextBlock):
         return {"type": "text", "text": block.text}
-    # ImageBlock
+    if not isinstance(block, ImageBlock):  # pyright: ignore[reportUnnecessaryIsInstance]
+        raise TypeError(f"unhandled content block type: {type(block).__name__}")
     if isinstance(block.source, ImageSourceInline):
         url = f"data:{block.media_type};base64,{block.source.base64_data}"
     else:
@@ -854,8 +856,9 @@ def _looks_like_content_rejection(
         if error_code in _CONTENT_REJECTION_ERROR_CODES:
             return True
         lower_code = error_code.lower()
-        if "image" in lower_code and ("not_supported" in lower_code or "unsupported" in lower_code):
-            return True
+        for block_type in ("image", "audio", "video"):
+            if block_type in lower_code and ("not_supported" in lower_code or "unsupported" in lower_code):
+                return True
     if isinstance(error_type, str) and error_type.lower() in {
         "image_parse_error",
         "image_content_not_supported",

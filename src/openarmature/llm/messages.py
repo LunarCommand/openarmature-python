@@ -174,11 +174,14 @@ class ImageBlock(BaseModel):
     Attributes:
         type: The discriminator literal ``"image"``.
         source: One of ``ImageSourceURL`` or ``ImageSourceInline``.
-        media_type: IANA media type. Required when source is inline;
-            ignored when source is a URL. Providers MUST accept
-            ``image/png``, ``image/jpeg``, ``image/webp`` at minimum
-            and MAY accept additional ``image/*`` types they document
-            support for.
+        media_type: IANA media type. Required when source is inline.
+            Permitted but redundant when source is a URL (the URL
+            payload carries the content-type); the OpenAI wire path
+            currently does not surface it for URL sources, but
+            provider implementations MAY consume it as a hint.
+            Providers MUST accept ``image/png``, ``image/jpeg``,
+            ``image/webp`` at minimum and MAY accept additional
+            ``image/*`` types they document support for.
         detail: Image-processing fidelity hint. One of ``"auto"``,
             ``"low"``, ``"high"``. ``None`` (the default) omits the
             field from the wire.
