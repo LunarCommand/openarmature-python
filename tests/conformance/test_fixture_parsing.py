@@ -51,6 +51,11 @@ _DEFERRED_FIXTURES: dict[str, str] = {
     ),
     "pipeline-utilities/045-state-migration-no-path-in-registry": "0014 state migration (PR-4)",
     "pipeline-utilities/046-state-migration-function-raises": "0014 state migration (PR-4)",
+    # proposal 0015's llm-provider fixtures (009-020) were removed
+    # from this list as part of PR-2; the typed harness parses the
+    # content-block message shape via LlmCallSpec's permissive
+    # ``messages: list[dict[str, Any]]`` typing without needing
+    # model extensions.
 }
 
 

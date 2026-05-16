@@ -69,12 +69,17 @@ from ..errors import (
     ProviderModelNotLoaded,
     ProviderRateLimit,
     ProviderUnavailable,
+    ProviderUnsupportedContentBlock,
     StructuredOutputInvalid,
 )
 from ..messages import (
     AssistantMessage,
+    ContentBlock,
+    ImageBlock,
+    ImageSourceInline,
     Message,
     SystemMessage,
+    TextBlock,
     Tool,
     ToolCall,
     UserMessage,
@@ -641,7 +646,15 @@ def _message_to_wire(msg: Message) -> dict[str, Any]:
     if isinstance(msg, SystemMessage):
         return {"role": "system", "content": msg.content}
     if isinstance(msg, UserMessage):
-        return {"role": "user", "content": msg.content}
+        # Dual-shape user content (§8.1): string maps directly; a
+        # content-block sequence maps to OpenAI's content-array form
+        # per §8.1.1.
+        if isinstance(msg.content, str):
+            return {"role": "user", "content": msg.content}
+        return {
+            "role": "user",
+            "content": [_block_to_wire(block) for block in msg.content],
+        }
     if isinstance(msg, AssistantMessage):
         # Tool-call-only assistants emit ``"content": null`` on the
         # wire — that's the OpenAI convention for "no textual reply,
@@ -670,6 +683,28 @@ def _message_to_wire(msg: Message) -> dict[str, Any]:
         "content": msg.content,
         "tool_call_id": msg.tool_call_id,
     }
+
+
+# Spec §8.1.1: content-block to OpenAI content-array entry mapping.
+# Both URL-referenced and inline-base64 image blocks go through
+# OpenAI's `image_url` entry shape; the inline case is expressed as
+# an RFC 2397 data: URI carrying media_type + base64_data. The
+# `detail` hint goes on the wire only when explicitly set on the spec
+# block (None on the spec block omits it from the wire; providers
+# apply their own conceptual default of "auto").
+def _block_to_wire(block: ContentBlock) -> dict[str, Any]:
+    if isinstance(block, TextBlock):
+        return {"type": "text", "text": block.text}
+    if not isinstance(block, ImageBlock):  # pyright: ignore[reportUnnecessaryIsInstance]
+        raise TypeError(f"unhandled content block type: {type(block).__name__}")
+    if isinstance(block.source, ImageSourceInline):
+        url = f"data:{block.media_type};base64,{block.source.base64_data}"
+    else:
+        url = block.source.url
+    image_url: dict[str, Any] = {"url": url}
+    if block.detail is not None:
+        image_url["detail"] = block.detail
+    return {"type": "image_url", "image_url": image_url}
 
 
 def _tool_to_wire(tool: Tool) -> dict[str, Any]:
@@ -762,6 +797,16 @@ def classify_http_error(resp: httpx.Response) -> LlmProviderError:
     if status in (401, 403):
         return ProviderAuthentication(message or f"HTTP {status}")
     if status == 400:
+        # Spec §8.3: HTTP 400 bodies that indicate the bound model
+        # rejected a content block map to provider_unsupported_content_block
+        # rather than the generic provider_invalid_request. The
+        # detection rule is implementation-defined.
+        if _looks_like_content_rejection(error_code, error_type, message):
+            return ProviderUnsupportedContentBlock(
+                message or "HTTP 400 (content block not supported)",
+                block_type=_extract_rejected_block_type(error_code, message),
+                reason=message,
+            )
         return ProviderInvalidRequest(message or "HTTP 400")
     if status == 404:
         # 404 with model-not-found body → invalid_model.
@@ -780,6 +825,68 @@ def classify_http_error(resp: httpx.Response) -> LlmProviderError:
     if 500 <= status < 600:
         return ProviderUnavailable(message or f"HTTP {status}")
     return ProviderUnavailable(message or f"HTTP {status}")
+
+
+# Known OpenAI error codes for content-block rejections. Used by
+# classify_http_error's 400 branch to route to
+# ProviderUnsupportedContentBlock instead of ProviderInvalidRequest.
+# The list is best-effort and evolves as OpenAI's error-code surface
+# shifts; the substring fallback below catches near-misses.
+_CONTENT_REJECTION_ERROR_CODES = frozenset(
+    {
+        "image_content_not_supported",
+        "unsupported_image_media_type",
+        "audio_content_not_supported",
+        "video_content_not_supported",
+        "unsupported_content_block",
+    }
+)
+
+
+def _looks_like_content_rejection(
+    error_code: object,
+    error_type: object,
+    message: str | None,
+) -> bool:
+    """Heuristic for HTTP 400 bodies that indicate the bound model
+    rejected a content block (image / audio / video / unsupported
+    media_type). Used to route to provider_unsupported_content_block
+    rather than the generic provider_invalid_request."""
+    if isinstance(error_code, str):
+        if error_code in _CONTENT_REJECTION_ERROR_CODES:
+            return True
+        lower_code = error_code.lower()
+        for block_type in ("image", "audio", "video"):
+            if block_type in lower_code and ("not_supported" in lower_code or "unsupported" in lower_code):
+                return True
+    if isinstance(error_type, str) and error_type.lower() in {
+        "image_parse_error",
+        "image_content_not_supported",
+    }:
+        return True
+    if isinstance(message, str):
+        lower_msg = message.lower()
+        if "does not support" in lower_msg and (
+            "image" in lower_msg or "audio" in lower_msg or "video" in lower_msg
+        ):
+            return True
+    return False
+
+
+def _extract_rejected_block_type(error_code: object, message: str | None) -> str | None:
+    """Pull a best-effort block-type identifier (``"image"`` / ``"audio"``
+    / ``"video"``) out of an error code or message, for surfacing on
+    ProviderUnsupportedContentBlock.block_type."""
+    haystacks: list[str] = []
+    if isinstance(error_code, str):
+        haystacks.append(error_code.lower())
+    if isinstance(message, str):
+        haystacks.append(message.lower())
+    for haystack in haystacks:
+        for block_type in ("image", "audio", "video"):
+            if block_type in haystack:
+                return block_type
+    return None
 
 
 def parse_retry_after(value: str | None) -> float | None:

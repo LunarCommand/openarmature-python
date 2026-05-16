@@ -29,6 +29,7 @@ PROVIDER_MODEL_NOT_LOADED = "provider_model_not_loaded"
 PROVIDER_RATE_LIMIT = "provider_rate_limit"
 PROVIDER_INVALID_RESPONSE = "provider_invalid_response"
 PROVIDER_INVALID_REQUEST = "provider_invalid_request"
+PROVIDER_UNSUPPORTED_CONTENT_BLOCK = "provider_unsupported_content_block"
 STRUCTURED_OUTPUT_INVALID = "structured_output_invalid"
 
 
@@ -137,6 +138,48 @@ class ProviderInvalidRequest(LlmProviderError):
     category = PROVIDER_INVALID_REQUEST
 
 
+# Non-transient by default — the bound model's capability set does
+# not change between calls, so retrying without changing the request
+# (the message list, the bound model, or the provider) will not
+# succeed.
+#
+# Distinct from ProviderInvalidRequest. ProviderInvalidRequest covers
+# spec-shape violations (the request is malformed at the wire layer);
+# ProviderUnsupportedContentBlock covers capability mismatches (the
+# request is well-formed but the bound model can't fulfill it).
+# Splitting them lets callers route the unsupported-content case
+# differently (e.g., fall back to a multimodal-capable provider)
+# without overloading the malformed-request category.
+class ProviderUnsupportedContentBlock(LlmProviderError):
+    """Raised when the bound model does not support a content block
+    type used in the request.
+
+    Examples: a text-only model received an image block, or the model
+    supports images but not the requested ``media_type`` or ``source``
+    variant.
+
+    Attributes:
+        block_type: The block type that was rejected (e.g., ``"image"``),
+            when the provider's response makes this identifiable.
+        reason: The provider's human-readable description of the
+            rejection, when available.
+    """
+
+    category = PROVIDER_UNSUPPORTED_CONTENT_BLOCK
+    block_type: str | None
+    reason: str | None
+
+    def __init__(
+        self,
+        *args: Any,
+        block_type: str | None = None,
+        reason: str | None = None,
+    ) -> None:
+        super().__init__(*args)
+        self.block_type = block_type
+        self.reason = reason
+
+
 # Non-transient by default — a model that fails schema compliance on a
 # given prompt usually fails the same way on retry. The default
 # RetryMiddleware classifier does NOT retry this category. Users wanting
@@ -184,6 +227,7 @@ __all__ = [
     "PROVIDER_MODEL_NOT_LOADED",
     "PROVIDER_RATE_LIMIT",
     "PROVIDER_UNAVAILABLE",
+    "PROVIDER_UNSUPPORTED_CONTENT_BLOCK",
     "STRUCTURED_OUTPUT_INVALID",
     "TRANSIENT_CATEGORIES",
     "LlmProviderError",
@@ -194,5 +238,6 @@ __all__ = [
     "ProviderModelNotLoaded",
     "ProviderRateLimit",
     "ProviderUnavailable",
+    "ProviderUnsupportedContentBlock",
     "StructuredOutputInvalid",
 ]

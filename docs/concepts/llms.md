@@ -221,6 +221,117 @@ on every object. Pydantic-derived schemas may need `model_config =
 ConfigDict(extra="forbid")` on the class to get the
 `additionalProperties: false` in the generated JSON Schema.
 
+## Content blocks (multimodal user messages)
+
+User messages carry content in one of two shapes: a plain text string,
+or an ordered sequence of typed content blocks. The string form is the
+common case. Blocks are how you mix non-text modalities into a single
+turn. v1 defines two block types: text and image. Audio and video are
+deferred to future proposals.
+
+System, assistant, and tool messages stay text-string only. Image
+inputs are user-only in v1; image outputs (assistant-message-borne
+images, e.g. DALL-E-style generation) are out of scope.
+
+### Text and image blocks
+
+A text block is the array-form equivalent of a text-string message:
+`TextBlock(text="describe this")`. A user message holding a single
+text block is normatively equivalent to one with `content="describe
+this"`.
+
+An image block carries one source — URL or inline base64 — plus an
+optional `detail` hint:
+
+```python
+from openarmature.llm import (
+    ImageBlock,
+    ImageSourceInline,
+    ImageSourceURL,
+    OpenAIProvider,
+    TextBlock,
+    UserMessage,
+)
+
+
+async def describe_image(provider: OpenAIProvider) -> str:
+    response = await provider.complete(
+        [
+            UserMessage(
+                content=[
+                    ImageBlock(
+                        source=ImageSourceURL(url="https://example.com/diagram.png"),
+                        detail="high",  # optional; omitted from wire when None
+                    ),
+                    TextBlock(text="What does this diagram show?"),
+                ]
+            )
+        ]
+    )
+    return response.message.content
+```
+
+Block order is preserved on the wire. Providers vary in whether they
+treat order as semantically meaningful (an image followed by its
+describing text is a different signal from text followed by the
+image); construct the sequence in the order you want the model to
+perceive it.
+
+### URL vs inline sources
+
+- **URL source** (`ImageSourceURL`): the provider fetches the URL. Any
+  scheme the provider documents support for is valid (`http(s)://`,
+  `data:`, etc.). The framework passes it through unchanged.
+- **Inline source** (`ImageSourceInline`): the image is sent as
+  base64-encoded bytes in the request body. The `media_type` field on
+  the surrounding `ImageBlock` is **required** for inline sources (and
+  ignored for URL sources). The framework constructs an RFC 2397
+  `data:<media_type>;base64,<bytes>` URI for the wire; it does not
+  inspect, transcode, or re-encode the bytes.
+
+OpenAI, Anthropic, and Google all accept `image/png`, `image/jpeg`,
+and `image/webp` as guaranteed media types. `media_type` is typed as
+`str | None`, so callers MAY pass additional `image/*` types when
+they know the bound model supports them; portable code sticks to the
+three.
+
+### The `detail` hint
+
+`detail` is a per-image hint to the provider about processing
+fidelity: `"auto"`, `"low"`, or `"high"`. The class default is `None`,
+which **omits the field from the wire** and lets the provider apply
+its own default (conceptually `"auto"`). Setting `detail="auto"`
+explicitly on the spec block forces the wire to carry an explicit
+`"auto"` — usually unnecessary, since the provider's default is the
+same value.
+
+### When the model can't handle the block
+
+`provider_unsupported_content_block` raises when the bound model
+rejects a content block type or media variant. Concrete cases:
+
+- A text-only model (e.g., `gpt-3.5-turbo`) received an image block.
+- The model supports images but not the requested `media_type`.
+- The model supports the type but rejected the specific source variant
+  (a URL the provider can't fetch, for example).
+
+The error category is **non-transient**: retrying without changing
+the request, the bound model, or the provider won't succeed. Userland
+fallback patterns (e.g., a middleware that routes to a multimodal
+provider on this category) compose cleanly against it.
+
+`ProviderUnsupportedContentBlock` carries `block_type` ("image",
+"audio", "video") and `reason` (the provider's human-readable
+message) when those are recoverable from the rejection.
+
+`OpenAIProvider` detects content rejection via the response body —
+HTTP 400 with an error code like `image_content_not_supported` or a
+message like "does not support image inputs." Pre-send capability
+checks (failing fast before the wire trip when you know the model
+doesn't support images) live above the provider as userland
+middleware — the provider doesn't ship a static model-capability
+catalog.
+
 ## Routing on parsed fields
 
 A conditional edge is a function `state -> str` that names the next

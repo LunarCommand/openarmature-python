@@ -62,21 +62,7 @@ CONFORMANCE_DIR = (
 # Skip-marked here so a green test run at this commit means "everything we
 # claim to implement passes." Each subsequent PR drops its own rows as it
 # lands the underlying support.
-_DEFERRED_FIXTURES: dict[str, str] = {
-    # proposal 0015 — multimodal images (PR-2 of the batch)
-    "009-content-blocks-text-only-equivalence": "0015 multimodal images (PR-2)",
-    "010-content-blocks-image-url": "0015 multimodal images (PR-2)",
-    "011-content-blocks-image-inline-base64": "0015 multimodal images (PR-2)",
-    "012-content-blocks-image-detail-hint": "0015 multimodal images (PR-2)",
-    "013-content-blocks-mixed-order-preserved": "0015 multimodal images (PR-2)",
-    "014-content-blocks-validation-empty-sequence": "0015 multimodal images (PR-2)",
-    "015-content-blocks-validation-empty-text-block": "0015 multimodal images (PR-2)",
-    "016-content-blocks-unsupported-by-model": "0015 multimodal images (PR-2)",
-    "017-content-blocks-system-message-text-only": "0015 multimodal images (PR-2)",
-    "018-content-blocks-image-source-missing": "0015 multimodal images (PR-2)",
-    "019-content-blocks-invalid-detail-value": "0015 multimodal images (PR-2)",
-    "020-content-blocks-inline-image-missing-media-type": "0015 multimodal images (PR-2)",
-}
+_DEFERRED_FIXTURES: dict[str, str] = {}
 
 
 def _fixture_paths() -> list[Path]:
@@ -172,7 +158,11 @@ def _build_message(raw: Mapping[str, Any]) -> Message:
     if role == "system":
         return SystemMessage(content=cast("str", raw["content"]))
     if role == "user":
-        return UserMessage(content=cast("str", raw["content"]))
+        # Per spec §3, user content is str OR a list of content blocks.
+        # Pydantic's discriminated union on the block ``type`` field
+        # parses each dict in the list to the right TextBlock /
+        # ImageBlock variant automatically.
+        return UserMessage(content=raw["content"])
     if role == "assistant":
         tool_calls_raw = raw.get("tool_calls")
         tool_calls: list[ToolCall] | None = None

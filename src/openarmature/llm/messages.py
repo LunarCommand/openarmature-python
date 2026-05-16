@@ -94,17 +94,139 @@ class SystemMessage(_MessageBase):
         return self
 
 
+class TextBlock(BaseModel):
+    """Text content block. The content-array equivalent of a plain
+    text-string user message; a user message with exactly one
+    ``TextBlock(text=T)`` is normatively equivalent to one with
+    ``content=T``.
+
+    Attributes:
+        type: The discriminator literal ``"text"``.
+        text: A non-empty string.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal["text"] = "text"
+    text: str
+
+    @model_validator(mode="after")
+    def _check_text(self) -> TextBlock:
+        if not self.text:
+            raise ValueError("text block: text MUST be a non-empty string")
+        return self
+
+
+class ImageSourceURL(BaseModel):
+    """URL-referenced image source. The URL is passed to the provider
+    unchanged; the framework does not fetch, cache, or transform it.
+
+    Attributes:
+        type: The discriminator literal ``"url"``.
+        url: The image URL. MAY be ``http(s)://``, ``data:`` (RFC 2397
+            inline data URI), or another scheme the provider documents
+            support for.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal["url"] = "url"
+    url: str
+
+
+class ImageSourceInline(BaseModel):
+    """Inline base64-encoded image source. The framework does not
+    inspect, transcode, or re-encode the bytes; the parent ``ImageBlock``
+    MUST carry a ``media_type`` for inline sources.
+
+    Attributes:
+        type: The discriminator literal ``"inline"``.
+        base64_data: The base64-encoded image bytes.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal["inline"] = "inline"
+    base64_data: str
+
+
+# Discriminated union over the two image-source shapes. The
+# discriminator is the source's ``type`` field, matching the spec's
+# "single image block carries exactly one source — url XOR inline.
+# The discriminator is the type field on the source itself."
+ImageSource = Annotated[
+    ImageSourceURL | ImageSourceInline,
+    Field(discriminator="type"),
+]
+
+
+class ImageBlock(BaseModel):
+    """Image content block. Carries one source (URL or inline base64),
+    a conditional ``media_type`` (required for inline sources; ignored
+    for URL sources), and an optional ``detail`` hint.
+
+    The class-level default of ``detail=None`` preserves the
+    omit-by-default wire behavior: providers apply their own
+    conceptual default (``"auto"``) when ``detail`` is absent from the
+    wire payload. To force the wire to carry an explicit ``"auto"``,
+    set ``detail="auto"`` on the block.
+
+    Attributes:
+        type: The discriminator literal ``"image"``.
+        source: One of ``ImageSourceURL`` or ``ImageSourceInline``.
+        media_type: IANA media type. Required when source is inline.
+            Permitted but redundant when source is a URL (the URL
+            payload carries the content-type); the OpenAI wire path
+            currently does not surface it for URL sources, but
+            provider implementations MAY consume it as a hint.
+            Providers MUST accept ``image/png``, ``image/jpeg``,
+            ``image/webp`` at minimum and MAY accept additional
+            ``image/*`` types they document support for.
+        detail: Image-processing fidelity hint. One of ``"auto"``,
+            ``"low"``, ``"high"``. ``None`` (the default) omits the
+            field from the wire.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal["image"] = "image"
+    source: ImageSource
+    media_type: str | None = None
+    detail: Literal["auto", "low", "high"] | None = None
+
+    @model_validator(mode="after")
+    def _check_media_type_for_inline(self) -> ImageBlock:
+        if isinstance(self.source, ImageSourceInline) and self.media_type is None:
+            raise ValueError("image block: media_type is required when source is inline")
+        return self
+
+
+# Discriminated union over the two content-block shapes. The
+# discriminator is the block's ``type`` field, matching the spec's
+# "typed record with a discriminator field identifying the block
+# type."
+ContentBlock = Annotated[
+    TextBlock | ImageBlock,
+    Field(discriminator="type"),
+]
+
+
 class UserMessage(_MessageBase):
-    """User messages have non-empty ``content``; no tool_calls; no
-    tool_call_id."""
+    """User messages carry content as either a non-empty text string
+    or a non-empty ordered sequence of content blocks (text and/or
+    image). No tool_calls; no tool_call_id."""
 
     role: Literal["user"] = "user"
-    content: str
+    content: str | list[ContentBlock]
 
     @model_validator(mode="after")
     def _check_content(self) -> UserMessage:
-        if not self.content:
-            raise ValueError("user message: content MUST be a non-empty string")
+        if isinstance(self.content, str):
+            if not self.content:
+                raise ValueError("user message: content MUST be a non-empty string")
+        else:
+            if not self.content:
+                raise ValueError("user message: content MUST be a non-empty list of content blocks")
         return self
 
 
@@ -151,8 +273,14 @@ Message = Annotated[
 
 __all__ = [
     "AssistantMessage",
+    "ContentBlock",
+    "ImageBlock",
+    "ImageSource",
+    "ImageSourceInline",
+    "ImageSourceURL",
     "Message",
     "SystemMessage",
+    "TextBlock",
     "Tool",
     "ToolCall",
     "ToolMessage",
