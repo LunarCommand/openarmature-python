@@ -16,6 +16,7 @@ Per-field reducers are declared via Annotated metadata::
 """
 
 from collections.abc import Mapping
+from typing import ClassVar
 
 from pydantic import BaseModel, ConfigDict
 
@@ -30,6 +31,16 @@ class State(BaseModel):
     # matching spec §2's "typed product type validated at graph
     # boundaries" intent.
     model_config = ConfigDict(frozen=True, extra="forbid")
+
+    # User-controlled state-schema version per pipeline-utilities
+    # spec §10.2 (proposal 0014). Empty-string sentinel for state
+    # classes that don't declare a version. The framework reads
+    # ``type(state).schema_version`` at save time and writes it
+    # onto the CheckpointRecord. Declaring a non-empty value opts
+    # the state class into the migration registry: on resume,
+    # records carrying a different version route through the
+    # registered migrations per spec §10.12.
+    schema_version: ClassVar[str] = ""
 
 
 def field_reducers(state_cls: type[State]) -> Mapping[str, list[Reducer]]:

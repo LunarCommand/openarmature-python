@@ -149,6 +149,134 @@ multi-process), S3 (cross-region durability). For event-sourced
 runtimes (Temporal, DBOS, Restate, Inngest) the Protocol is the
 adapter layer.
 
+## State migrations
+
+When a checkpoint was saved against an earlier version of your state
+schema and the code has since evolved, the engine consults a
+**migration registry** to bridge the saved record into the current
+shape. Without migrations, a schema change invalidates every prior
+checkpoint; with one short registration per change, you keep your
+saved records working across releases.
+
+The wire-up is two pieces: declare a version on your state class,
+and register one migration per version bump.
+
+```python
+from typing import ClassVar
+from openarmature.graph import State, GraphBuilder
+from openarmature.checkpoint import SQLiteCheckpointer
+
+
+class MyState(State):
+    schema_version: ClassVar[str] = "v2"
+    x: int = 0
+    new_field: str = "default"      # added in v2
+
+
+def add_new_field_default(state: dict) -> dict:
+    return {**state, "new_field": "default"}
+
+
+graph = (
+    GraphBuilder(MyState)
+    .add_node(...)
+    .with_checkpointer(SQLiteCheckpointer("ck.db", serialization="json"))
+    .with_state_migration("v1", "v2", add_new_field_default)
+    .compile()
+)
+```
+
+On resume, the engine reads the saved record's `schema_version`. If
+it equals `MyState.schema_version`, the record loads via the §10.4
+fast path (no migration consulted). If it differs, the engine
+resolves a chain through the registry (BFS for the shortest path),
+applies each migration in order to the record's state, then
+deserializes the result into your current state class.
+
+### Chain resolution
+
+Registered migrations form a directed graph. Each
+`with_state_migration(a, b, fn)` is an edge from `a` to `b`. Chain
+resolution finds the shortest path between the saved version and the
+current version. Branching is fine: a v1 record can have one
+migration leading to v2 and another leading to v2-experimental;
+chain resolution picks the path that ends at the current declared
+version.
+
+Two ambiguity cases are configuration errors. Both surface as
+`CheckpointStateMigrationChainAmbiguous`:
+
+- **Duplicate edges.** Registering two migrations with the same
+  `(from_version, to_version)` pair raises at registration time so
+  the configuration error surfaces before any resume attempt.
+  Either delete one or pick distinct version identifiers.
+- **Multiple shortest paths.** A diamond like
+  `v1 → v2 → v4` and `v1 → v3 → v4` is ambiguous: both paths have
+  length 2. The engine raises during resume so the user can
+  register fewer migrations or pick a single canonical route.
+
+### The three new error categories
+
+- **`CheckpointStateMigrationChainAmbiguous`**: the registered
+  migration graph is ambiguous (duplicate `(from, to)` pair at
+  registration time, OR multiple distinct shortest paths between
+  the saved and current versions at resume time). Surfaces before
+  any migration function runs. Carries `from_version` and
+  `to_version` when known.
+- **`CheckpointStateMigrationMissing`**: the saved version doesn't
+  match the current version, and no chain bridges them. Carries
+  `from_version`, `to_version`, a count of registered migrations,
+  and a human-readable `registry_description` so operators see what
+  IS available.
+- **`CheckpointStateMigrationFailed`**: a user-supplied migration
+  function raised. Subsequent migrations in the chain don't run;
+  the resume fails. The migration's exception rides `__cause__`.
+
+Routing precedence on resume: chain-ambiguous → missing → failed →
+record-invalid.
+
+A third category, `CheckpointRecordInvalid`, continues to cover the
+**post**-migration case: a migration ran cleanly but produced
+output that the current state class can't deserialize (missing a
+required field, wrong type, etc.). The three categories are
+mutually exclusive on any given resume.
+
+### Backend support
+
+Not every backend can migrate. Migration needs the backend to expose
+a **structural intermediate form** of the loaded state (a plain
+dict, JSON tree, or similar) that's independent of the current
+state class.
+
+- **`SQLiteCheckpointer(serialization="json")`** can. JSON-encoded
+  state loads to a dict; the migration function operates on the
+  dict directly.
+- **`SQLiteCheckpointer(serialization="pickle")`** can NOT. Pickle
+  holds class identity and round-trips back to typed instances.
+- **`InMemoryCheckpointer`** can NOT. It holds live typed-state
+  references by reference; there's no serialization step.
+
+On version mismatch against a non-migration-eligible backend, the
+engine raises `CheckpointRecordInvalid` (not
+`CheckpointStateMigrationMissing`): the registry has no chance to
+bridge.
+
+### Parent-state migration
+
+Subgraph saves carry a `parent_states` chain of the outer-graph
+state captured at the moment of the inner save. On resume, the same
+migration chain applies to each entry in `parent_states` in lockstep
+with the outer state. The spec treats `parent_states` as carrying
+the same `schema_version` as the outer record (no per-parent
+version metadata in v1).
+
+### Migrations MUST be pure
+
+A migration function MUST be deterministic, with no I/O, no implicit
+state, no random or wall-clock-derived output. The framework
+doesn't enforce purity, but violating it breaks determinism
+guarantees for resume.
+
 ## When NOT to use checkpointing
 
 - **Pure pipelines that complete in seconds.** Restart-from-entry is

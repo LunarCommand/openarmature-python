@@ -42,7 +42,6 @@ from pydantic import BaseModel
 
 from ..errors import CheckpointRecordInvalid
 from ..protocol import (
-    CHECKPOINT_SCHEMA_VERSION,
     CheckpointFilter,
     CheckpointRecord,
     CheckpointSummary,
@@ -109,6 +108,13 @@ class SQLiteCheckpointer:
         self._serialization: SerializationMode = serialization
         self._lock = asyncio.Lock()
         self._initialized = False
+        # Per spec §10.12.1, a backend supports state migration only
+        # when it can expose a structural intermediate form of the
+        # loaded state that is independent of the current state
+        # class. JSON serialization satisfies this (loads to dicts);
+        # pickle holds class identity and round-trips to typed
+        # instances, so it cannot bridge a schema-version mismatch.
+        self.supports_state_migration: bool = serialization == "json"
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self._path)
@@ -230,12 +236,12 @@ class SQLiteCheckpointer:
             schema_version,
             recorded_serialization,
         ) = row
-        if schema_version != CHECKPOINT_SCHEMA_VERSION:
-            raise CheckpointRecordInvalid(
-                invocation_id,
-                f"persisted schema_version={schema_version!r} does not match "
-                f"current {CHECKPOINT_SCHEMA_VERSION!r}",
-            )
+        # Note: per spec §10.12 (proposal 0014), version mismatches
+        # are no longer rejected at the backend boundary. The engine
+        # routes mismatches through the migration registry on resume
+        # (CheckpointStateMigrationMissing if no chain, else applies
+        # the chain). The backend just round-trips the version
+        # identifier as opaque data.
         state = self._decode(state_blob, recorded_serialization, invocation_id)
         position_dicts = self._decode(positions_blob, recorded_serialization, invocation_id)
         parent_states = self._decode(parent_states_blob, recorded_serialization, invocation_id)

@@ -20,7 +20,6 @@ import pytest
 from pydantic import Field
 
 from openarmature.checkpoint import (
-    CHECKPOINT_SCHEMA_VERSION,
     Checkpointer,
     CheckpointFilter,
     CheckpointNotFound,
@@ -92,7 +91,10 @@ def test_checkpoint_record_default_schema_version() -> None:
         parent_states=(),
         last_saved_at=0.0,
     )
-    assert record.schema_version == CHECKPOINT_SCHEMA_VERSION
+    # Default schema_version is the empty-string sentinel per spec
+    # §10.2 (proposal 0014): records carry the user's state-schema
+    # version, which is "" until the state class declares one.
+    assert record.schema_version == ""
     assert record.fan_out_progress is None
 
 
@@ -305,13 +307,18 @@ async def test_schema_version_round_trips(tmp_path: Path) -> None:
     await cp.save("i", record)
     loaded = await cp.load("i")
     assert loaded is not None
-    assert loaded.schema_version == CHECKPOINT_SCHEMA_VERSION
+    # Records round-trip the user-facing schema_version verbatim per
+    # spec §10.2. With no version declared on the saved state, the
+    # default sentinel is "".
+    assert loaded.schema_version == ""
 
 
-async def test_schema_version_mismatch_rejected_by_sqlite(tmp_path: Path) -> None:
-    """A persisted record with an unrecognized schema_version raises
-    CheckpointRecordInvalid on load — sentinel behavior so future
-    record-shape evolution doesn't silently coerce older records."""
+async def test_schema_version_round_trips_through_sqlite_unchanged(tmp_path: Path) -> None:
+    """Per spec §10.12 (proposal 0014), the SQLite backend no longer
+    rejects records with non-default ``schema_version`` values — that
+    routing is now an engine concern at resume time. The backend
+    just round-trips the version identifier as opaque data so the
+    engine's migration registry has the chance to bridge it."""
     cp = SQLiteCheckpointer(tmp_path / "ck.db")
     record = CheckpointRecord(
         invocation_id="i",
@@ -320,11 +327,12 @@ async def test_schema_version_mismatch_rejected_by_sqlite(tmp_path: Path) -> Non
         completed_positions=(),
         parent_states=(),
         last_saved_at=1.0,
-        schema_version="999",  # not the current version
+        schema_version="999",  # an arbitrary user-facing identifier
     )
     await cp.save("i", record)
-    with pytest.raises(CheckpointRecordInvalid):
-        await cp.load("i")
+    loaded = await cp.load("i")
+    assert loaded is not None
+    assert loaded.schema_version == "999"
 
 
 # ---------------------------------------------------------------------------
@@ -424,6 +432,8 @@ class _AlwaysFailingCheckpointer:
     as :class:`CheckpointSaveFailed` and raises immediately to the
     caller of ``invoke()`` per the documented save-failure policy."""
 
+    supports_state_migration: bool = False
+
     async def save(self, invocation_id: str, record: CheckpointRecord) -> None:
         raise RuntimeError("simulated backend failure")
 
@@ -449,6 +459,8 @@ async def test_save_failure_raises_to_invoke_caller() -> None:
 
 
 class _CapturingCheckpointer:
+    supports_state_migration: bool = False
+
     def __init__(self) -> None:
         self.saves: list[CheckpointRecord] = []
 

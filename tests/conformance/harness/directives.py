@@ -56,16 +56,27 @@ class StateFieldSpec(_ForbidExtras):
     The ``alt_reducer`` knob exists only for ``graph-engine/007-compile-errors``'s
     ``conflicting_reducers`` case — fixtures intentionally declare two reducers
     on one field to verify the engine fails compile with the right category.
+
+    The ``required`` knob (used by the state-migration deserialization-
+    failure fixture 044) marks a field as having no default — Pydantic's
+    natural "required" shape. The default-when-omitted falls through
+    via the ``default`` field above.
     """
 
     type: str
     default: Any = None
     reducer: str | None = None
     alt_reducer: str | None = None
+    required: bool = False
 
 
 class StateSchema(_ForbidExtras):
     fields: dict[str, StateFieldSpec]
+    # User-facing state-schema version per pipeline-utilities §10.2
+    # (proposal 0014). The state-migration fixtures (039-046) declare
+    # this on each case's ``state`` block; non-migration fixtures
+    # omit it (defaults to empty-string sentinel).
+    schema_version: str = ""
 
 
 # ---------------------------------------------------------------------------

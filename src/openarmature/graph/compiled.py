@@ -28,6 +28,7 @@ import time
 import uuid
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
+from dataclasses import replace as dataclass_replace
 from typing import TYPE_CHECKING, Any, cast
 
 if TYPE_CHECKING:
@@ -45,12 +46,15 @@ if TYPE_CHECKING:
 from pydantic import ValidationError
 
 from openarmature.checkpoint.errors import (
+    CheckpointError,
     CheckpointNotFound,
     CheckpointRecordInvalid,
     CheckpointSaveFailed,
+    CheckpointStateMigrationFailed,
+    CheckpointStateMigrationMissing,
 )
+from openarmature.checkpoint.migration import MigrationRegistry, StateMigration
 from openarmature.checkpoint.protocol import (
-    CHECKPOINT_SCHEMA_VERSION,
     Checkpointer,
     CheckpointRecord,
     NodePosition,
@@ -243,6 +247,55 @@ def _no_op_finalize(_edge_error: RuntimeGraphError | None) -> None:
 
 
 @dataclass(frozen=True)
+class _MigrationSummary:
+    """Per-resume migration-chain metadata threaded out of
+    ``_migrate_record`` so the engine can dispatch an
+    ``openarmature.checkpoint.migrate`` observer event after the
+    invocation context is built (per spec §6 cross-ref in proposal
+    0014). Carried on the synthetic ``NodeEvent.pre_state``
+    payload for ``phase="checkpoint_migrated"``; the OTel observer
+    reads it to emit the span.
+    """
+
+    from_version: str
+    to_version: str
+    chain_length: int
+
+
+def _apply_migration_step(
+    migration: StateMigration,
+    value: Any,
+    label: str,
+) -> Any:
+    """Apply one migration step to one value (outer state or one
+    parent-state entry). Wraps the user-supplied migration function's
+    raise as ``CheckpointStateMigrationFailed`` per spec §10.12.2.
+    The original exception rides ``__cause__``.
+    """
+    try:
+        return migration.migrate(value)
+    except CheckpointError:
+        # Preserve canonical category — if a migration raises a
+        # CheckpointError subclass itself (rare; migrations are
+        # spec-mandated pure per §10.12.2), propagate the original
+        # category rather than wrapping it as
+        # CheckpointStateMigrationFailed.
+        raise
+    except Exception as exc:
+        # Concise wrap-message intentionally. ``raise ... from exc``
+        # preserves the original exception on ``__cause__``;
+        # Python's traceback formatter surfaces it, so embedding the
+        # underlying ``type/str`` in this message would just
+        # duplicate information (and confuse the output when the
+        # underlying ``__str__`` is multi-line).
+        raise CheckpointStateMigrationFailed(
+            f"migration {migration.from_version!r}→{migration.to_version!r} raised while migrating {label}",
+            from_version=migration.from_version,
+            to_version=migration.to_version,
+        ) from exc
+
+
+@dataclass(frozen=True)
 class CompiledGraph[StateT: State]:
     """An immutable, executable graph produced by `GraphBuilder.compile()`.
 
@@ -272,6 +325,11 @@ class CompiledGraph[StateT: State]:
     # the user can swap the registered Checkpointer via
     # ``attach_checkpointer``. ``None`` when no backend is registered.
     _checkpointer_slot: list[Checkpointer | None] = field(default_factory=lambda: [None])
+    # State-migration registry (pipeline-utilities §10.12 / proposal
+    # 0014). Populated by ``GraphBuilder.with_state_migration(s)``;
+    # consulted on resume when the loaded record's ``schema_version``
+    # does not match the current state class's ``schema_version``.
+    migration_registry: MigrationRegistry = field(default_factory=MigrationRegistry)
 
     # ------------------------------------------------------------------
     # Observer registration (spec v0.6.0 §6)
@@ -328,6 +386,93 @@ class CompiledGraph[StateT: State]:
     def checkpointer(self) -> Checkpointer | None:
         """Currently-registered Checkpointer, or ``None``."""
         return self._checkpointer_slot[0]
+
+    # ------------------------------------------------------------------
+    # State migration (pipeline-utilities §10.12 / proposal 0014)
+    # ------------------------------------------------------------------
+
+    async def _migrate_record(
+        self,
+        record: CheckpointRecord,
+        checkpointer: Checkpointer,
+        invocation_id: str,
+        current_schema_version: str,
+    ) -> tuple[CheckpointRecord, _MigrationSummary]:
+        """Resolve a migration chain for ``record`` and apply it.
+
+        Returns ``(migrated_record, summary)``. ``migrated_record``
+        has ``state`` + ``parent_states`` mapped through the chain.
+        ``summary`` carries the chain's metadata so the caller can
+        dispatch a ``checkpoint_migrated`` observer event after the
+        invocation context exists (per the spec §6 cross-ref in
+        proposal 0014).
+
+        Caller is responsible for the post-migration deserialization
+        step (§10.12.4): if the migrated state cannot deserialize
+        against the current state class, the resulting failure
+        surfaces as ``CheckpointRecordInvalid``.
+
+        Spec §10.12.2 says "parent states MUST be treated as carrying
+        the same ``schema_version`` as the outer record." We apply
+        the same chain to every entry in ``parent_states`` lockstep
+        with the outer state. Future per-parent versioning would
+        need a spec follow-on.
+        """
+        # Eligibility check first per §10.12.1: backends that hold
+        # typed in-memory state or class-bound serialization cannot
+        # expose the class-independent intermediate the registry
+        # consumes. Mismatch + no eligibility → CheckpointRecordInvalid.
+        if not getattr(checkpointer, "supports_state_migration", False):
+            raise CheckpointRecordInvalid(
+                invocation_id,
+                f"persisted schema_version={record.schema_version!r} does not "
+                f"match current {current_schema_version!r}, and the active "
+                f"checkpointer ({type(checkpointer).__name__}) does not "
+                f"support state migration",
+            )
+
+        # resolve_chain raises CheckpointStateMigrationChainAmbiguous
+        # directly on multi-shortest-path detection per spec §10.10
+        # / §10.12.2 (proposal 0018, spec v0.16.0). No except-wrap
+        # needed here — the canonical category propagates straight
+        # through and the registry's exception contract is one type
+        # regardless of when ambiguity surfaces (register vs resolve).
+        chain = self.migration_registry.resolve_chain(
+            record.schema_version,
+            current_schema_version,
+        )
+
+        if chain is None:
+            raise CheckpointStateMigrationMissing(
+                f"no migration chain from {record.schema_version!r} to {current_schema_version!r}",
+                from_version=record.schema_version,
+                to_version=current_schema_version,
+                registered_migrations_count=len(self.migration_registry),
+                registry_description=self.migration_registry.describe(),
+            )
+
+        migrated_state: Any = record.state
+        migrated_parents: list[Any] = list(record.parent_states)
+        for migration in chain:
+            migrated_state = _apply_migration_step(migration, migrated_state, "state")
+            for i, parent in enumerate(migrated_parents):
+                migrated_parents[i] = _apply_migration_step(migration, parent, f"parent_states[{i}]")
+
+        # Per spec §6 cross-ref, the caller dispatches a synthetic
+        # ``checkpoint_migrated`` observer event using the summary
+        # below as soon as the invocation context exists. We can't
+        # dispatch from here because the context isn't built yet.
+        summary = _MigrationSummary(
+            from_version=record.schema_version,
+            to_version=current_schema_version,
+            chain_length=len(chain),
+        )
+        migrated = dataclass_replace(
+            record,
+            state=migrated_state,
+            parent_states=tuple(migrated_parents),
+        )
+        return migrated, summary
 
     async def drain(self) -> None:
         """Await delivery of every observer event produced by prior
@@ -423,6 +568,13 @@ class CompiledGraph[StateT: State]:
         resume_skip_set: frozenset[tuple[str, ...]] = frozenset()
         completed_positions: list[NodePosition] = []
         pending_resume_states: dict[int, Any] = {}
+        # Populated by ``_migrate_record`` during a version-mismatched
+        # resume; left ``None`` for the no-resume + versions-match
+        # paths. Dispatched as a synthetic ``checkpoint_migrated``
+        # observer event after the invocation context is built so
+        # the OTel observer can emit an
+        # ``openarmature.checkpoint.migrate`` span per spec §6.
+        migration_summary: _MigrationSummary | None = None
         if resume_invocation is not None:
             checkpointer = self._checkpointer_slot[0]
             if checkpointer is None:
@@ -433,11 +585,27 @@ class CompiledGraph[StateT: State]:
             record = await checkpointer.load(resume_invocation)
             if record is None:
                 raise CheckpointNotFound(resume_invocation)
-            if record.schema_version != CHECKPOINT_SCHEMA_VERSION:
-                raise CheckpointRecordInvalid(
+            # Per spec §10.12 (proposal 0014): version-mismatch resume.
+            # Routing precedence (per §10.10 + §10.12.1):
+            #   1. unsupported backend → CheckpointRecordInvalid.
+            #      Backends that hold typed in-memory state or
+            #      class-bound serialization can't expose the
+            #      class-independent intermediate the migration
+            #      registry needs.
+            #   2. no chain in the registry → CheckpointStateMigrationMissing.
+            #      Actionable: register a migration.
+            #   3. chain found but a migration raises →
+            #      CheckpointStateMigrationFailed.
+            #   4. post-migration state fails to deserialize →
+            #      CheckpointRecordInvalid (the §10.12.4 boundary).
+            # Order matters — do NOT swap eligibility and registry-lookup.
+            current_schema_version = self.state_cls.schema_version
+            if record.schema_version != current_schema_version:
+                record, migration_summary = await self._migrate_record(
+                    record,
+                    checkpointer,
                     resume_invocation,
-                    f"persisted schema_version={record.schema_version!r} "
-                    f"does not match current {CHECKPOINT_SCHEMA_VERSION!r}",
+                    current_schema_version,
                 )
             # The saved record's ``state`` is post-merge state at the
             # saving node's level (depth = len(parent_states)). For
@@ -516,6 +684,28 @@ class CompiledGraph[StateT: State]:
         # processed), remove it from the active set so long-running
         # services don't leak Task references between drain() calls.
         worker.add_done_callback(self._active_workers.discard)
+        # Per spec §6 cross-ref in proposal 0014: dispatch the
+        # ``checkpoint_migrated`` event as soon as the delivery
+        # worker is alive but before any node runs, so the OTel
+        # observer can emit an
+        # ``openarmature.checkpoint.migrate`` span ahead of the
+        # invocation's node spans. The synthetic event carries the
+        # ``_MigrationSummary`` on ``pre_state`` mirroring the
+        # ``checkpoint_saved`` convention (state-on-pre, post=None).
+        if migration_summary is not None:
+            _dispatch(
+                context,
+                NodeEvent(
+                    node_name="openarmature.checkpoint.migrate",
+                    namespace=("openarmature.checkpoint.migrate",),
+                    step=-1,
+                    phase="checkpoint_migrated",
+                    pre_state=migration_summary,
+                    post_state=None,
+                    error=None,
+                    parent_states=(),
+                ),
+            )
         try:
             return await self._invoke(starting_state, context)
         finally:
@@ -1319,8 +1509,15 @@ class CompiledGraph[StateT: State]:
             ),
         )
 
-    @staticmethod
+    # Instance method (not @staticmethod) so the save-time
+    # schema_version read goes through ``self.state_cls`` — matches
+    # the resume-side check, per spec §10.2's "framework reads
+    # schema_version from the state definition at save time"
+    # wording. Reading from ``type(post_state)`` would let a State
+    # subclass instance shadow the declared graph schema and
+    # trigger spurious migrations on resume.
     async def _maybe_save_checkpoint(
+        self,
         context: _InvocationContext,
         *,
         node_name: str,
@@ -1387,7 +1584,16 @@ class CompiledGraph[StateT: State]:
             # ``step`` field on each NodePosition is the canonical
             # within-invocation order.
             last_saved_at=time.time(),
-            schema_version=CHECKPOINT_SCHEMA_VERSION,
+            # Per spec §10.2 (proposal 0014): read the user's
+            # state-schema version off the declared state class at
+            # save time. Empty-string sentinel when the user hasn't
+            # declared one — those records are not migration-eligible
+            # until they declare a non-empty version (per §10.2).
+            # ``self.state_cls`` is the authoritative source so the
+            # save-side read symmetrizes with the resume-side check
+            # (subclass schema_versions don't shadow the declared
+            # graph schema).
+            schema_version=self.state_cls.schema_version,
         )
         try:
             await checkpointer.save(context.invocation_id, record)

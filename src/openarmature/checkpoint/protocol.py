@@ -22,11 +22,12 @@ record per ``completed`` event for outermost-graph nodes and
 subgraph-internal nodes. Fan-out instance internal events do NOT
 produce records in the shipping version (atomic-restart contract).
 
-The :data:`CHECKPOINT_SCHEMA_VERSION` constant is the single source
-of truth for the persisted record shape — bump it whenever the field
-set changes incompatibly so older saved records surface as
-:class:`CheckpointRecordInvalid` on load rather than silently coercing
-to a mismatched shape.
+``CheckpointRecord.schema_version`` carries the user-facing
+state-schema identifier per spec §10.2 (proposal 0014 repurposes
+the field from the original backend-internal record-shape role).
+The framework reads ``type(state).schema_version`` at save time;
+on load, version mismatches route through the migration registry
+(per §10.12) rather than a strict equality check.
 """
 
 from __future__ import annotations
@@ -34,15 +35,6 @@ from __future__ import annotations
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import Any, Protocol
-
-# Persisted record shape version. Bump when CheckpointRecord's field
-# set or invariants change incompatibly — proposal 0009 (per-instance
-# fan-out resume) is the concrete near-term candidate, since it
-# populates ``fan_out_progress`` and the load path will need to
-# distinguish v1 records (where it's None) from v2 records (where it
-# carries instance-level progress data). Backends that reject mismatches
-# MUST raise CheckpointRecordInvalid per spec §10.10.
-CHECKPOINT_SCHEMA_VERSION = "1"
 
 
 # Spec: realizes pipeline-utilities §10.2 NodePosition. Field semantics
@@ -108,7 +100,11 @@ class CheckpointRecord:
     completed_positions: tuple[NodePosition, ...]
     parent_states: tuple[Any, ...]
     last_saved_at: float
-    schema_version: str = CHECKPOINT_SCHEMA_VERSION
+    # Per spec §10.2 (proposal 0014): the user's state-schema
+    # version, read off ``type(state).schema_version`` at save time.
+    # Empty-string sentinel for state classes that don't declare a
+    # version; non-empty declares migration-eligibility.
+    schema_version: str = ""
     fan_out_progress: None = field(default=None)
 
 
@@ -154,7 +150,45 @@ class Checkpointer(Protocol):
     access). Each operation MUST be thread-safe (Python) /
     task-coroutine-safe (asyncio); backends with synchronous I/O
     typically wrap their work in ``asyncio.to_thread`` or equivalent.
+
+    ``supports_state_migration`` marks whether the backend can
+    expose a structural intermediate form of the loaded state (a
+    plain dict, JSON tree, or similar) that is independent of the
+    current state class. JSON-encoded backends naturally satisfy
+    this; backends that store live typed state instances or use
+    class-bound serialization (pickle) cannot. Per spec §10.12.1,
+    backends that cannot expose the intermediate MUST raise
+    ``CheckpointRecordInvalid`` on version mismatch even when
+    migrations are registered — the registry has no chance to bridge.
+
+    **Attribute-presence contract.** The class-body ``= False``
+    below is a typing-level signal, not a runtime guarantee:
+    ``typing.Protocol`` does not create an instance attribute on
+    a conforming class that doesn't declare it itself. Concrete
+    backends SHOULD declare ``supports_state_migration`` (either
+    at the class level like ``InMemoryCheckpointer`` does, or as
+    an ``__init__``-set instance attribute like
+    ``SQLiteCheckpointer`` does for the mode-dependent case) so
+    Pyright accepts the structural conformance and ``getattr``
+    sees the value. The engine's resume path reads the attribute
+    via ``getattr(checkpointer, "supports_state_migration",
+    False)``, so a third-party backend that omits the attribute
+    entirely is treated as non-migration-eligible without
+    raising — that's the runtime default the engine guarantees.
     """
+
+    # Declared as an instance attribute (not ``ClassVar``) so backends
+    # can compute it at construction time when the answer depends on
+    # constructor args. SQLiteCheckpointer is the concrete case:
+    # JSON-mode supports migration, pickle-mode doesn't, and the mode
+    # is a per-instance constructor arg. Backends with a static answer
+    # (InMemoryCheckpointer is always False) override at the class
+    # level. Pyright accepts either shape because Protocol attribute
+    # conformance ignores the ClassVar marker on subclasses. The
+    # class-body default below is for typing only; see the
+    # docstring's "Attribute-presence contract" section for the
+    # runtime ``getattr``-based safety net.
+    supports_state_migration: bool = False
 
     async def save(self, invocation_id: str, record: CheckpointRecord) -> None:
         """Persist ``record`` for ``invocation_id``. After return the
@@ -186,7 +220,6 @@ class Checkpointer(Protocol):
 
 
 __all__ = [
-    "CHECKPOINT_SCHEMA_VERSION",
     "CheckpointFilter",
     "CheckpointRecord",
     "CheckpointSummary",

@@ -14,6 +14,8 @@ from collections.abc import Awaitable, Callable, Iterable, Mapping
 from types import GenericAlias, UnionType
 from typing import Any, Self, cast, get_args, get_origin
 
+from openarmature.checkpoint.errors import CheckpointStateMigrationChainAmbiguous
+from openarmature.checkpoint.migration import MigrationRegistry, StateMigration
 from openarmature.checkpoint.protocol import Checkpointer
 
 from .compiled import CompiledGraph
@@ -51,6 +53,10 @@ class GraphBuilder[StateT: State]:
         # Optional Checkpointer attached at compile time; ``None`` is
         # the spec §10.1.1 default-off behavior.
         self._checkpointer: Checkpointer | None = None
+        # State-migration registry per pipeline-utilities §10.12
+        # (proposal 0014). Populated by ``with_state_migration(s)``;
+        # passed through to the compiled graph.
+        self._migration_registry: MigrationRegistry = MigrationRegistry()
 
     def add_node(
         self,
@@ -251,6 +257,79 @@ class GraphBuilder[StateT: State]:
         self._checkpointer = checkpointer
         return self
 
+    def with_state_migration(
+        self,
+        from_version: str,
+        to_version: str,
+        migrate: Callable[[Any], Any],
+    ) -> Self:
+        """Register one state migration per pipeline-utilities §10.12.
+
+        On resume, when the saved record's ``schema_version`` does not
+        match the current state class's ``schema_version``, the engine
+        consults the registry for a chain that bridges the two and
+        applies it to the record's state (and to each entry in
+        ``parent_states``) before deserialization.
+
+        Migrations MUST be pure: deterministic, no I/O, no implicit
+        state. The framework does not police purity (per §10.12.2),
+        but violating it risks non-deterministic resume.
+
+        Raises ``CheckpointStateMigrationChainAmbiguous`` at
+        registration if the ``(from_version, to_version)`` pair is
+        already registered (per spec §10.10 / §10.12.1 — proposal
+        0018 / spec v0.16.0). Also raises ``ValueError`` if
+        ``to_version`` is the empty-string sentinel (the un-declared
+        marker per §10.2 is not a valid chain target).
+        """
+        self._migration_registry.register(
+            StateMigration(
+                from_version=from_version,
+                to_version=to_version,
+                migrate=migrate,
+            )
+        )
+        return self
+
+    def with_state_migrations(self, *migrations: StateMigration) -> Self:
+        """Register multiple migrations in one call. Convenience over
+        ``with_state_migration``; each entry is registered through the
+        same path and obeys the same ambiguity rule.
+
+        Pre-validates the full input list against the existing
+        registry + against earlier entries in the same call before
+        mutating, so a duplicate in the third entry cannot leave
+        the first two half-registered. If any duplicate ``(from,
+        to)`` pair is detected the call raises
+        ``CheckpointStateMigrationChainAmbiguous`` without mutating
+        the registry; otherwise all entries register atomically.
+        """
+        # Pre-validation pass: collect every (from, to) we're about
+        # to add, check both against the existing registry and
+        # against earlier entries in the input. Raise before
+        # mutating if anything collides.
+        seen_in_call: set[tuple[str, str]] = set()
+        for m in migrations:
+            key = (m.from_version, m.to_version)
+            if key in self._migration_registry._migrations:  # noqa: SLF001
+                raise CheckpointStateMigrationChainAmbiguous(
+                    f"duplicate state migration {m.from_version!r}→{m.to_version!r} already registered",
+                    from_version=m.from_version,
+                    to_version=m.to_version,
+                )
+            if key in seen_in_call:
+                raise CheckpointStateMigrationChainAmbiguous(
+                    f"duplicate state migration {m.from_version!r}→"
+                    f"{m.to_version!r} repeated in with_state_migrations call",
+                    from_version=m.from_version,
+                    to_version=m.to_version,
+                )
+            seen_in_call.add(key)
+        # Validation passed — commit them all.
+        for migration in migrations:
+            self._migration_registry.register(migration)
+        return self
+
     def add_middleware(self, middleware: Middleware) -> Self:
         """Register a per-graph middleware applied to every node in this graph.
 
@@ -343,6 +422,7 @@ class GraphBuilder[StateT: State]:
             edges=edges_by_source,
             reducers=resolved,
             middleware=tuple(self._middleware),
+            migration_registry=self._migration_registry,
         )
         if self._checkpointer is not None:
             compiled.attach_checkpointer(self._checkpointer)

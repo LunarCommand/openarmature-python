@@ -22,6 +22,7 @@ These tests fill the gaps the conformance harness defers:
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 
 import pytest
 from pydantic import Field
@@ -215,6 +216,120 @@ async def test_failing_node_span_carries_error_status() -> None:
 # ---------------------------------------------------------------------------
 # §10.8 checkpoint_saved → 0-duration span
 # ---------------------------------------------------------------------------
+
+
+async def test_checkpoint_migrate_emits_span_with_chain_metadata(tmp_path: Path) -> None:
+    """Spec §6 cross-ref in proposal 0014: a versioned resume whose
+    migration chain runs SHOULD emit an
+    ``openarmature.checkpoint.migrate`` span carrying
+    ``from_version`` / ``to_version`` (final) / ``chain_length``."""
+    from openarmature.checkpoint import (
+        CheckpointRecord,
+        SQLiteCheckpointer,
+    )
+
+    # JSON-mode SQLite is migration-eligible (the dict-state form the
+    # registry consumes is what the load path produces).
+    cp = SQLiteCheckpointer(tmp_path / "ck.db", serialization="json")
+
+    class _MigState(State):
+        schema_version = "v2"
+        x: int = 0
+        new_field: str = "v2_default"
+
+    async def _noop(_s: _MigState) -> dict[str, int]:
+        return {}
+
+    # Seed a v1 record so the resume triggers the v1→v2 migration.
+    invocation_id = "mig-resume"
+    await cp.save(
+        invocation_id,
+        CheckpointRecord(
+            invocation_id=invocation_id,
+            correlation_id="cid",
+            state={"x": 9},
+            completed_positions=(),
+            parent_states=(),
+            last_saved_at=0.0,
+            schema_version="v1",
+        ),
+    )
+
+    exporter = InMemorySpanExporter()
+    observer = OTelObserver(span_processor=SimpleSpanProcessor(exporter))
+    g = (
+        GraphBuilder(_MigState)
+        .add_node("noop", _noop)
+        .add_edge("noop", END)
+        .set_entry("noop")
+        .with_checkpointer(cp)
+        .with_state_migration("v1", "v2", lambda s: {**s, "new_field": "v2_default"})
+        .compile()
+    )
+    g.attach_observer(observer, phases={"started", "completed", "checkpoint_migrated"})
+    await g.invoke(
+        _MigState.model_construct(),
+        resume_invocation=invocation_id,
+    )
+    await g.drain()
+    observer.shutdown()
+
+    migrate_spans = [s for s in exporter.get_finished_spans() if s.name == "openarmature.checkpoint.migrate"]
+    assert len(migrate_spans) == 1
+    span = migrate_spans[0]
+    attrs = dict(span.attributes or {})
+    assert attrs.get("openarmature.checkpoint.migrate.from_version") == "v1"
+    assert attrs.get("openarmature.checkpoint.migrate.to_version") == "v2"
+    assert attrs.get("openarmature.checkpoint.migrate.chain_length") == 1
+
+
+async def test_checkpoint_migrate_span_absent_on_version_match(tmp_path: Path) -> None:
+    """Spec §10.12.3 fast path: when the saved record's schema_version
+    equals the current state class's schema_version, the migration
+    registry is NOT consulted. The OTel observer MUST NOT emit a
+    ``openarmature.checkpoint.migrate`` span in that case."""
+    from openarmature.checkpoint import CheckpointRecord, SQLiteCheckpointer
+
+    cp = SQLiteCheckpointer(tmp_path / "ck.db", serialization="json")
+
+    class _MatchState(State):
+        schema_version = "v1"
+        x: int = 0
+
+    async def _noop(_s: _MatchState) -> dict[str, int]:
+        return {}
+
+    invocation_id = "match-resume"
+    await cp.save(
+        invocation_id,
+        CheckpointRecord(
+            invocation_id=invocation_id,
+            correlation_id="cid",
+            state={"x": 7},
+            completed_positions=(),
+            parent_states=(),
+            last_saved_at=0.0,
+            schema_version="v1",  # matches current class
+        ),
+    )
+
+    exporter = InMemorySpanExporter()
+    observer = OTelObserver(span_processor=SimpleSpanProcessor(exporter))
+    g = (
+        GraphBuilder(_MatchState)
+        .add_node("noop", _noop)
+        .add_edge("noop", END)
+        .set_entry("noop")
+        .with_checkpointer(cp)
+        .compile()
+    )
+    g.attach_observer(observer, phases={"started", "completed", "checkpoint_migrated"})
+    await g.invoke(_MatchState.model_construct(), resume_invocation=invocation_id)
+    await g.drain()
+    observer.shutdown()
+
+    migrate_spans = [s for s in exporter.get_finished_spans() if s.name == "openarmature.checkpoint.migrate"]
+    assert migrate_spans == []
 
 
 async def test_checkpoint_save_emits_zero_duration_span() -> None:

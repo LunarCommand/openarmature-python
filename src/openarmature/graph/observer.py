@@ -95,9 +95,17 @@ class Observer(Protocol):
 ALL_PHASES: frozenset[str] = frozenset({"started", "completed"})
 
 # All phase values the engine produces (per spec graph-engine §6 +
-# pipeline-utilities §10.8). Used by the registration-time validator
-# to reject typos like ``phases={"complete"}``.
-KNOWN_PHASES: frozenset[str] = frozenset({"started", "completed", "checkpoint_saved"})
+# pipeline-utilities §10.8 + proposal 0014 §6 cross-ref). Used by
+# the registration-time validator to reject typos like
+# ``phases={"complete"}``.
+#
+# The two synthetic phases (``checkpoint_saved`` and
+# ``checkpoint_migrated``) repurpose the ``NodeEvent`` shape for
+# non-node events — see the ``NodeEvent`` docstring for conventions.
+# Both are opt-in via explicit ``phases={...}``; the default
+# subscription ``ALL_PHASES`` above is ``{"started", "completed"}``
+# only, so legacy observers never receive them.
+KNOWN_PHASES: frozenset[str] = frozenset({"started", "completed", "checkpoint_saved", "checkpoint_migrated"})
 
 
 @dataclass(frozen=True)

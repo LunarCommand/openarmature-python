@@ -258,6 +258,9 @@ class OTelObserver:
         if event.phase == "checkpoint_saved":
             self._emit_checkpoint_save_span(event)
             return
+        if event.phase == "checkpoint_migrated":
+            self._emit_checkpoint_migrate_span(event)
+            return
         if event.phase == "started":
             # Idempotent — short-circuits inside ``_open_started_span``
             # if ``prepare_sync`` already opened the span synchronously
@@ -428,6 +431,61 @@ class OTelObserver:
     # ------------------------------------------------------------------
     # Special-event paths
     # ------------------------------------------------------------------
+
+    def _emit_checkpoint_migrate_span(self, event: NodeEvent) -> None:
+        """Spec pipeline-utilities §6 cross-ref (proposal 0014): emit a
+        zero-duration ``openarmature.checkpoint.migrate`` span when
+        a versioned resume's migration chain runs. The synthetic
+        event carries ``_MigrationSummary`` on ``pre_state``; this
+        handler reads ``from_version`` / ``to_version`` /
+        ``chain_length`` from the summary onto the span.
+
+        Emitted under the invocation's root span (no parent-node
+        context — the migration runs before any node fires), so
+        trace UIs surface it as the first child of the invocation.
+        """
+        from openarmature.graph.compiled import _MigrationSummary
+        from openarmature.observability.correlation import (
+            current_correlation_id,
+            current_invocation_id,
+        )
+
+        invocation_id = current_invocation_id()
+        if invocation_id is None:
+            return
+        summary = event.pre_state
+        if not isinstance(summary, _MigrationSummary):
+            # Defensive — the engine only sets pre_state to a
+            # _MigrationSummary on this phase. Skip if something
+            # else dispatched a checkpoint_migrated event.
+            return
+        # Open (or reuse) the invocation's root span and parent the
+        # migrate span under it. The migration runs before any node
+        # fires, so the root is the natural parent — no node span
+        # exists yet at this point in the invocation.
+        if invocation_id not in self._invocation_span:
+            cid = current_correlation_id() or ""
+            self._open_invocation_span(invocation_id, cid, event)
+        root_open = self._invocation_span.get(invocation_id)
+        parent_ctx: Any = None
+        if root_open is not None:
+            parent_ctx = set_span_in_context(root_open.span)
+        attrs: dict[str, Any] = {
+            "openarmature.checkpoint.migrate.from_version": summary.from_version,
+            "openarmature.checkpoint.migrate.to_version": summary.to_version,
+            "openarmature.checkpoint.migrate.chain_length": summary.chain_length,
+        }
+        cid = current_correlation_id()
+        if cid is not None:
+            attrs["openarmature.correlation_id"] = cid
+        span = self._tracer.start_span(
+            name="openarmature.checkpoint.migrate",
+            context=parent_ctx,
+            kind=SpanKind.INTERNAL,
+            attributes=attrs,
+        )
+        span.set_status(Status(StatusCode.OK))
+        span.end()
 
     def _emit_checkpoint_save_span(self, event: NodeEvent) -> None:
         """Spec pipeline-utilities §10.8 + observability §4.5: emit a

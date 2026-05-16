@@ -14,7 +14,7 @@ Frozen dataclass — observers receive a snapshot, not a live handle.
 """
 
 from dataclasses import dataclass
-from typing import Literal
+from typing import Any, Literal
 
 from .errors import RuntimeGraphError
 from .state import State
@@ -122,13 +122,50 @@ class NodeEvent:
       be ``None``.
     - On ``completed`` events, exactly one of ``post_state`` and
       ``error`` is populated.
+
+    **Synthetic phases.** ``"checkpoint_saved"`` (pipeline-utilities
+    §10.8) and ``"checkpoint_migrated"`` (proposal 0014 §6
+    cross-ref) repurpose this dataclass for non-node events. Both
+    are opt-in via ``phases={...}`` on observer registration —
+    default subscriptions are ``{"started", "completed"}`` only, so
+    legacy observers never see them. Conventions on synthetic
+    events:
+
+    - ``checkpoint_saved``: ``pre_state`` carries the saved
+      post-merge state (still a real ``State`` instance for this
+      phase), ``post_state`` is ``None``. ``step`` matches the
+      saving node's step.
+    - ``checkpoint_migrated``: ``step=-1`` (no graph-step
+      sequencing — migrations run before any node fires).
+      ``node_name="openarmature.checkpoint.migrate"`` and
+      ``namespace=("openarmature.checkpoint.migrate",)`` are
+      dotted-pseudo identifiers, not real node names. ``pre_state``
+      carries a private ``_MigrationSummary`` dataclass with
+      ``from_version`` / ``to_version`` / ``chain_length``, NOT a
+      ``State`` instance. ``parent_states`` is the empty tuple.
+
+    Because ``pre_state`` is no longer guaranteed to be a ``State``
+    on the synthetic phases, its type is declared as ``Any`` and
+    observer authors who subscribe to those phases MUST narrow
+    per-phase before reading ``pre_state``.
     """
 
     node_name: str
     namespace: tuple[str, ...]
     step: int
-    phase: Literal["started", "completed", "checkpoint_saved"]
-    pre_state: State
+    phase: Literal[
+        "started",
+        "completed",
+        "checkpoint_saved",
+        # Synthetic phase per spec §6 cross-ref in proposal 0014:
+        # fires once at the start of a versioned resume to carry
+        # the migration chain's metadata. ``pre_state`` on this
+        # phase carries a ``_MigrationSummary`` (not a ``State``);
+        # the field type stays permissive on this dataclass and
+        # the OTel observer narrows defensively via ``isinstance``.
+        "checkpoint_migrated",
+    ]
+    pre_state: Any
     post_state: State | None
     error: RuntimeGraphError | None
     parent_states: tuple[State, ...]
