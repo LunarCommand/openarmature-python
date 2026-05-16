@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Iterable
-from typing import ClassVar
 
 from ..protocol import CheckpointFilter, CheckpointRecord, CheckpointSummary
 
@@ -41,8 +40,12 @@ class InMemoryCheckpointer:
 
     # Per spec §10.12.1: in-memory storage holds live typed-state
     # references, so there's no class-independent intermediate form
-    # the migration registry could consume.
-    supports_state_migration: ClassVar[bool] = False
+    # the migration registry could consume. Declared at the class
+    # level (not as a per-instance attribute) since the answer is
+    # constructor-independent; the Protocol declaration in
+    # ``protocol.py`` types this as ``bool`` (not ``ClassVar[bool]``)
+    # so Pyright accepts a class-attribute override here.
+    supports_state_migration: bool = False
 
     def __init__(self) -> None:
         self._records: dict[str, CheckpointRecord] = {}

@@ -34,7 +34,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from dataclasses import dataclass, field
-from typing import Any, ClassVar, Protocol
+from typing import Any, Protocol
 
 
 # Spec: realizes pipeline-utilities §10.2 NodePosition. Field semantics
@@ -162,7 +162,16 @@ class Checkpointer(Protocol):
     migrations are registered — the registry has no chance to bridge.
     """
 
-    supports_state_migration: ClassVar[bool] = False
+    # Declared as an instance attribute (not ``ClassVar``) so backends
+    # can compute it at construction time when the answer depends on
+    # constructor args. SQLiteCheckpointer is the concrete case:
+    # JSON-mode supports migration, pickle-mode doesn't, and the mode
+    # is a per-instance constructor arg. Backends with a static answer
+    # (InMemoryCheckpointer is always False) override at the class
+    # level with ``ClassVar[bool] = False``; pyright is happy with
+    # either shape because Protocol attribute conformance ignores the
+    # ClassVar marker on subclasses.
+    supports_state_migration: bool = False
 
     async def save(self, invocation_id: str, record: CheckpointRecord) -> None:
         """Persist ``record`` for ``invocation_id``. After return the

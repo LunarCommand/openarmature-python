@@ -14,7 +14,7 @@ test_checkpoint.py's _DEFERRED_FIXTURES note).
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, ClassVar
+from typing import Any
 
 import pytest
 from pydantic import Field
@@ -432,7 +432,7 @@ class _AlwaysFailingCheckpointer:
     as :class:`CheckpointSaveFailed` and raises immediately to the
     caller of ``invoke()`` per the documented save-failure policy."""
 
-    supports_state_migration: ClassVar[bool] = False
+    supports_state_migration: bool = False
 
     async def save(self, invocation_id: str, record: CheckpointRecord) -> None:
         raise RuntimeError("simulated backend failure")
@@ -459,7 +459,7 @@ async def test_save_failure_raises_to_invoke_caller() -> None:
 
 
 class _CapturingCheckpointer:
-    supports_state_migration: ClassVar[bool] = False
+    supports_state_migration: bool = False
 
     def __init__(self) -> None:
         self.saves: list[CheckpointRecord] = []

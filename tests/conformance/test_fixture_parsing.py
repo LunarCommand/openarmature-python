@@ -40,17 +40,10 @@ _DEFERRED_FIXTURES: dict[str, str] = {
     "pipeline-utilities/036-parallel-branches-with-branch-middleware-retry": "0011 parallel branches (PR-5)",
     "pipeline-utilities/037-parallel-branches-determinism": "0011 parallel branches (PR-5)",
     "pipeline-utilities/038-parallel-branches-compose-with-fan-out": "0011 parallel branches (PR-5)",
-    # proposal 0014 — state migration (PR-4)
-    "pipeline-utilities/039-state-migration-additive-field": "0014 state migration (PR-4)",
-    "pipeline-utilities/040-state-migration-chain": "0014 state migration (PR-4)",
-    "pipeline-utilities/041-state-migration-missing": "0014 state migration (PR-4)",
-    "pipeline-utilities/042-state-migration-versions-match-no-op": "0014 state migration (PR-4)",
-    "pipeline-utilities/043-state-migration-parent-states-migrated": "0014 state migration (PR-4)",
-    "pipeline-utilities/044-state-migration-post-migration-deserialization-fails": (
-        "0014 state migration (PR-4)"
-    ),
-    "pipeline-utilities/045-state-migration-no-path-in-registry": "0014 state migration (PR-4)",
-    "pipeline-utilities/046-state-migration-function-raises": "0014 state migration (PR-4)",
+    # proposal 0014's state-migration fixtures (039-046) were removed
+    # from this list as part of PR-4; the CasesFixture model already
+    # parses the seeded_record / migrations shape via its permissive
+    # extras (CaseSpec uses ``model_config = ConfigDict(extra="allow")``).
     # proposal 0015's llm-provider fixtures (009-020) were removed
     # from this list as part of PR-2; the typed harness parses the
     # content-block message shape via LlmCallSpec's permissive
