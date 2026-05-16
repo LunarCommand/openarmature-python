@@ -31,6 +31,7 @@ CAPABILITIES: tuple[str, ...] = (
     "llm-provider",
     "pipeline-utilities",
     "observability",
+    "prompt-management",
 )
 
 CONFORMANCE_ROOT = Path(__file__).resolve().parents[3] / "openarmature-spec" / "spec"

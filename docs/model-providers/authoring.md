@@ -69,7 +69,7 @@ class MyProvider:
         response_schema: dict[str, Any] | type[BaseModel] | None = None,
     ) -> Response:
         # response_schema is part of the Protocol; a skeleton provider
-        # MUST NOT silently ignore it — callers expect either
+        # MUST NOT silently ignore it: callers expect either
         # Response.parsed populated or a StructuredOutputInvalid raise.
         # Until the wire path is implemented, raise
         # ProviderInvalidRequest when response_schema is set. A
@@ -206,8 +206,8 @@ of:
   `ImageSourceInline`) are stable across providers; only the wire
   shape differs. Provider authors targeting non-multimodal models
   MUST surface `ProviderUnsupportedContentBlock` when the request
-  carries blocks the bound model can't serve — pre-send or
-  post-receive per §7.
+  carries blocks the bound model can't serve (pre-send or
+  post-receive per §7).
 - **Structured output.** Threading `response_schema` through the
   request body (native `response_format` if the underlying wire
   supports it; prompt-augmentation fallback otherwise) and validating

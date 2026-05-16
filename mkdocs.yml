@@ -95,6 +95,7 @@ nav:
     - Composition: concepts/composition.md
     - Fan-out: concepts/fan-out.md
     - LLMs: concepts/llms.md
+    - Prompts: concepts/prompts.md
     - Observability: concepts/observability.md
     - Checkpointing: concepts/checkpointing.md
   - Model Providers:
@@ -104,6 +105,7 @@ nav:
     - reference/index.md
     - openarmature.graph: reference/graph.md
     - openarmature.llm: reference/llm.md
+    - openarmature.prompts: reference/prompts.md
     - openarmature.checkpoint: reference/checkpoint.md
     - openarmature.observability: reference/observability.md
 

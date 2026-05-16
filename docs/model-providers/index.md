@@ -89,7 +89,7 @@ in the LLMs concept page for the multimodal contract; see
 
 `OpenAIProvider` detects unsupported-content-block rejections via
 the response body (HTTP 400 with an error code or message indicating
-content rejection) — a post-receive mapping rather than a static
+content rejection): a post-receive mapping rather than a static
 pre-send capability check. Pre-send protection is a userland
 middleware pattern when callers know the bound model's capabilities
 up front.
