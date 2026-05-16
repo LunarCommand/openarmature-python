@@ -64,24 +64,35 @@ class Provider(Protocol):
 
 ## Errors
 
-Eight canonical error categories cover every failure mode:
+Nine canonical error categories cover every failure mode:
 
-| Error                       | Trigger                                                                |
-| --------------------------- | ---------------------------------------------------------------------- |
-| `ProviderAuthentication`    | 401 / 403 (bad key, expired token)                                     |
-| `ProviderUnavailable`       | 5xx, network failure, timeout                                          |
-| `ProviderInvalidModel`      | Bound model doesn't exist on the provider                              |
-| `ProviderModelNotLoaded`    | Model known but not currently serving                                  |
-| `ProviderRateLimit`         | 429 (with `Retry-After` exposed)                                       |
-| `ProviderInvalidResponse`   | 200 OK that fails to parse                                             |
-| `ProviderInvalidRequest`    | Malformed request (per-message or list-level)                          |
-| `StructuredOutputInvalid`   | Response failed to parse as JSON or failed to validate against schema  |
+| Error                              | Trigger                                                                |
+| ---------------------------------- | ---------------------------------------------------------------------- |
+| `ProviderAuthentication`           | 401 / 403 (bad key, expired token)                                     |
+| `ProviderUnavailable`              | 5xx, network failure, timeout                                          |
+| `ProviderInvalidModel`             | Bound model doesn't exist on the provider                              |
+| `ProviderModelNotLoaded`           | Model known but not currently serving                                  |
+| `ProviderRateLimit`                | 429 (with `Retry-After` exposed)                                       |
+| `ProviderInvalidResponse`          | 200 OK that fails to parse                                             |
+| `ProviderInvalidRequest`           | Malformed request (per-message or list-level)                          |
+| `ProviderUnsupportedContentBlock`  | Bound model rejected a content block (image / audio / media-type)      |
+| `StructuredOutputInvalid`          | Response failed to parse as JSON or failed to validate against schema  |
 
 Three of these (`Unavailable`, `RateLimit`, `ModelNotLoaded`) are
 exported in `TRANSIENT_CATEGORIES`, the canonical "safe to retry"
 set used by the default retry-middleware classifier.
-`StructuredOutputInvalid` is non-transient by default; see
-[Structured output](#structured-output) below.
+`StructuredOutputInvalid` and `ProviderUnsupportedContentBlock` are
+non-transient by default. See [Content blocks](../concepts/llms.md#content-blocks-multimodal-user-messages)
+in the LLMs concept page for the multimodal contract; see
+[Structured output](#structured-output) below for the
+`response_schema` path.
+
+`OpenAIProvider` detects unsupported-content-block rejections via
+the response body (HTTP 400 with an error code or message indicating
+content rejection) — a post-receive mapping rather than a static
+pre-send capability check. Pre-send protection is a userland
+middleware pattern when callers know the bound model's capabilities
+up front.
 
 ## Structured output
 

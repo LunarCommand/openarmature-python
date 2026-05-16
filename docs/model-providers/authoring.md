@@ -198,6 +198,16 @@ of:
 - **Tool calls.** Wire-mapping the `tool_calls` array on
   `AssistantMessage` to the Provider's expected shape, parsing tool
   results back from `ToolMessage`s.
+- **Content blocks (multimodal user input).** Wire-mapping the
+  `list[ContentBlock]` form of `UserMessage.content` to the provider's
+  multimodal shape (OpenAI's `image_url` content-array entries,
+  Anthropic's image blocks, Google's `inlineData` parts, etc.). The
+  spec types (`TextBlock`, `ImageBlock`, `ImageSourceURL`,
+  `ImageSourceInline`) are stable across providers; only the wire
+  shape differs. Provider authors targeting non-multimodal models
+  MUST surface `ProviderUnsupportedContentBlock` when the request
+  carries blocks the bound model can't serve — pre-send or
+  post-receive per §7.
 - **Structured output.** Threading `response_schema` through the
   request body (native `response_format` if the underlying wire
   supports it; prompt-augmentation fallback otherwise) and validating
