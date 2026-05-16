@@ -46,10 +46,10 @@ if TYPE_CHECKING:
 from pydantic import ValidationError
 
 from openarmature.checkpoint.errors import (
+    CheckpointError,
     CheckpointNotFound,
     CheckpointRecordInvalid,
     CheckpointSaveFailed,
-    CheckpointStateMigrationChainAmbiguous,
     CheckpointStateMigrationFailed,
     CheckpointStateMigrationMissing,
 )
@@ -274,10 +274,22 @@ def _apply_migration_step(
     """
     try:
         return migration.migrate(value)
+    except CheckpointError:
+        # Preserve canonical category — if a migration raises a
+        # CheckpointError subclass itself (rare; migrations are
+        # spec-mandated pure per §10.12.2), propagate the original
+        # category rather than wrapping it as
+        # CheckpointStateMigrationFailed.
+        raise
     except Exception as exc:
+        # Concise wrap-message intentionally. ``raise ... from exc``
+        # preserves the original exception on ``__cause__``;
+        # Python's traceback formatter surfaces it, so embedding the
+        # underlying ``type/str`` in this message would just
+        # duplicate information (and confuse the output when the
+        # underlying ``__str__`` is multi-line).
         raise CheckpointStateMigrationFailed(
-            f"migration {migration.from_version!r}→{migration.to_version!r} "
-            f"raised while migrating {label}: {type(exc).__name__}: {exc}",
+            f"migration {migration.from_version!r}→{migration.to_version!r} raised while migrating {label}",
             from_version=migration.from_version,
             to_version=migration.to_version,
         ) from exc
@@ -419,24 +431,16 @@ class CompiledGraph[StateT: State]:
                 f"support state migration",
             )
 
-        try:
-            chain = self.migration_registry.resolve_chain(
-                record.schema_version,
-                current_schema_version,
-            )
-        except ValueError as exc:
-            # MigrationRegistry signals multi-shortest-path ambiguity
-            # via ValueError. Per spec §10.10 / §10.12.2 (proposal 0018,
-            # spec v0.16.0), this routes to the canonical
-            # CheckpointStateMigrationChainAmbiguous category. Spec
-            # accepts load-time detection (this is the resume-side
-            # path); the duplicate-pair case raises the same category
-            # directly from MigrationRegistry.register at build time.
-            raise CheckpointStateMigrationChainAmbiguous(
-                str(exc),
-                from_version=record.schema_version,
-                to_version=current_schema_version,
-            ) from exc
+        # resolve_chain raises CheckpointStateMigrationChainAmbiguous
+        # directly on multi-shortest-path detection per spec §10.10
+        # / §10.12.2 (proposal 0018, spec v0.16.0). No except-wrap
+        # needed here — the canonical category propagates straight
+        # through and the registry's exception contract is one type
+        # regardless of when ambiguity surfaces (register vs resolve).
+        chain = self.migration_registry.resolve_chain(
+            record.schema_version,
+            current_schema_version,
+        )
 
         if chain is None:
             raise CheckpointStateMigrationMissing(
@@ -1505,8 +1509,15 @@ class CompiledGraph[StateT: State]:
             ),
         )
 
-    @staticmethod
+    # Instance method (not @staticmethod) so the save-time
+    # schema_version read goes through ``self.state_cls`` — matches
+    # the resume-side check, per spec §10.2's "framework reads
+    # schema_version from the state definition at save time"
+    # wording. Reading from ``type(post_state)`` would let a State
+    # subclass instance shadow the declared graph schema and
+    # trigger spurious migrations on resume.
     async def _maybe_save_checkpoint(
+        self,
         context: _InvocationContext,
         *,
         node_name: str,
@@ -1574,13 +1585,15 @@ class CompiledGraph[StateT: State]:
             # within-invocation order.
             last_saved_at=time.time(),
             # Per spec §10.2 (proposal 0014): read the user's
-            # state-schema version off the state class at save time.
-            # Empty-string sentinel when the user hasn't declared
-            # one — those records are not migration-eligible until
-            # they declare a non-empty version (per §10.2). The
-            # runtime type of ``post_state`` is the authoritative
-            # source (subclasses MAY override the ClassVar).
-            schema_version=cast("type[State]", type(post_state)).schema_version,
+            # state-schema version off the declared state class at
+            # save time. Empty-string sentinel when the user hasn't
+            # declared one — those records are not migration-eligible
+            # until they declare a non-empty version (per §10.2).
+            # ``self.state_cls`` is the authoritative source so the
+            # save-side read symmetrizes with the resume-side check
+            # (subclass schema_versions don't shadow the declared
+            # graph schema).
+            schema_version=self.state_cls.schema_version,
         )
         try:
             await checkpointer.save(context.invocation_id, record)

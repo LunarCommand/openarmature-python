@@ -1,4 +1,4 @@
-"""Run every spec state-migration conformance fixture (039-046) end-to-end.
+"""Run every spec state-migration conformance fixture (039-047) end-to-end.
 
 The fixtures live under
 ``spec/pipeline-utilities/conformance/`` as ``cases`` shapes; each
@@ -8,6 +8,14 @@ was saved at a prior schema version, a ``migrations:`` list (each
 naming one of the harness mock functions), and a ``resume`` block
 specifying either an ``expected`` happy-path or an
 ``expected_error`` raise.
+
+Fixture 047 (``state-migration-chain-ambiguous``, added in spec
+v0.16.0 / proposal 0018) exercises the
+``expected_chain_ambiguity_error`` harness primitive that accepts
+the canonical ``checkpoint_state_migration_chain_ambiguous``
+category at EITHER build time (duplicate-pair registration) or
+resume time (multi-shortest-path detection) per spec §10.12.2's
+compile-time-SHOULD / load-time-acceptable carve-out.
 
 The driver:
 
@@ -26,7 +34,8 @@ The driver:
 5. Calls ``invoke(resume_invocation=<seeded id>)`` and asserts
    against ``resume.expected`` (final state, migrations_run,
    invariants) OR ``resume.expected_error`` (category, carries,
-   cause).
+   cause) OR ``expected_chain_ambiguity_error`` at either case
+   top-level (build-time) or inside ``resume:`` (load-time).
 """
 
 from __future__ import annotations

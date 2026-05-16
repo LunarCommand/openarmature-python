@@ -76,6 +76,21 @@ class MigrationRegistry:
         self._edges: dict[str, list[StateMigration]] = {}
 
     def register(self, migration: StateMigration) -> None:
+        # Per spec §10.2 / proposal 0014: empty ``to_version`` would
+        # route migrations TO the "not declared" sentinel, which
+        # the spec calls out as not migration-eligible — incoherent
+        # as a chain target. Empty ``from_version`` stays valid:
+        # it's the documented bridging path for pre-declaration
+        # records (current class declares ``"v1"``; users register
+        # ``with_state_migration("", "v1", fn)`` to migrate records
+        # saved before the class declared a version). See Q4 in the
+        # proposal-0014 coord-thread plan for the matrix.
+        if not migration.to_version:
+            raise ValueError(
+                f"state migration to_version MUST be non-empty "
+                f"(got from_version={migration.from_version!r}, "
+                f"to_version={migration.to_version!r})"
+            )
         key = (migration.from_version, migration.to_version)
         if key in self._migrations:
             # Per spec §10.10 / §10.12.1 (proposal 0018, spec v0.16.0):
@@ -106,8 +121,13 @@ class MigrationRegistry:
         """Return an ordered chain of migrations bridging the two
         versions, or ``None`` if no chain exists.
 
-        Raises ``ValueError`` if multiple distinct shortest paths
-        exist (ambiguous chain per §10.12.2).
+        Raises ``CheckpointStateMigrationChainAmbiguous`` if
+        multiple distinct shortest paths exist between
+        ``from_version`` and ``to_version`` (ambiguous chain per
+        spec §10.10 / §10.12.2 — proposal 0018 / spec v0.16.0).
+        Same canonical category as the duplicate-pair detection
+        in ``register``; one type for chain ambiguity regardless
+        of when it surfaces.
         """
         if from_version == to_version:
             return []
@@ -162,11 +182,18 @@ class MigrationRegistry:
             return None
         if len(shortest_paths) > 1:
             descriptions = [" → ".join([from_version, *(e.to_version for e in p)]) for p in shortest_paths]
-            raise ValueError(
+            # Per spec §10.10 / §10.12.2 (proposal 0018, v0.16.0):
+            # raise the canonical category directly so the
+            # registry's ambiguity contract is one type regardless
+            # of when it surfaces (duplicate-pair at register time
+            # vs multi-shortest-path at resolve time).
+            raise CheckpointStateMigrationChainAmbiguous(
                 f"ambiguous migration chain from {from_version!r} to "
                 f"{to_version!r}: multiple distinct shortest paths exist "
                 f"({descriptions}); register fewer migrations or pick a "
-                f"single canonical route"
+                f"single canonical route",
+                from_version=from_version,
+                to_version=to_version,
             )
         return shortest_paths[0]
 

@@ -45,6 +45,28 @@ def test_registry_lists_registered_in_order() -> None:
     assert "v2 → v3" in registry.describe()
 
 
+def test_registry_rejects_empty_to_version() -> None:
+    """Per spec §10.2 / proposal 0014, empty to_version routes the
+    chain TO the "not declared" sentinel — incoherent. Registration
+    MUST reject it. Empty from_version stays valid (documented
+    bridging path for pre-declaration records)."""
+    registry = MigrationRegistry()
+    with pytest.raises(ValueError, match="to_version MUST be non-empty"):
+        registry.register(StateMigration(from_version="v1", to_version="", migrate=_id))
+
+
+def test_registry_accepts_empty_from_version_bridging_case() -> None:
+    """Empty from_version is the documented Q4 bridging path: pre-
+    declaration records carrying the empty sentinel migrate forward
+    to a newly-declared schema. The registration MUST succeed; BFS
+    treats the empty sentinel as a valid source node."""
+    registry = MigrationRegistry()
+    registry.register(StateMigration(from_version="", to_version="v1", migrate=_id))
+    chain = registry.resolve_chain("", "v1")
+    assert chain is not None
+    assert len(chain) == 1
+
+
 def test_registry_rejects_duplicate_edge() -> None:
     registry = MigrationRegistry()
     registry.register(StateMigration(from_version="v1", to_version="v2", migrate=_id))
@@ -121,18 +143,20 @@ def test_resolve_chain_picks_shortest_when_unique() -> None:
 
 def test_resolve_chain_ambiguous_shortest_paths_raises() -> None:
     """Diamond with two distinct same-length paths is ambiguous per
-    spec §10.12.2. The registry raises ``ValueError`` internally;
-    ``CompiledGraph._migrate_record`` wraps it as the canonical
-    ``CheckpointStateMigrationChainAmbiguous`` at the resume boundary
-    (see test_registry_ambiguity_routes_to_canonical_category_on_resume
-    in the conformance suite for the boundary wrap)."""
+    spec §10.10 / §10.12.2 (proposal 0018). ``resolve_chain``
+    raises the canonical ``CheckpointStateMigrationChainAmbiguous``
+    directly — no boundary wrap needed at the resume site; the
+    registry's exception contract is one type regardless of when
+    ambiguity surfaces (register vs resolve)."""
     registry = MigrationRegistry()
     registry.register(StateMigration(from_version="v1", to_version="v2", migrate=_id))
     registry.register(StateMigration(from_version="v1", to_version="v3", migrate=_id))
     registry.register(StateMigration(from_version="v2", to_version="v4", migrate=_id))
     registry.register(StateMigration(from_version="v3", to_version="v4", migrate=_id))
-    with pytest.raises(ValueError, match="ambiguous migration chain"):
+    with pytest.raises(CheckpointStateMigrationChainAmbiguous, match="ambiguous migration chain") as exc_info:
         registry.resolve_chain("v1", "v4")
+    assert exc_info.value.from_version == "v1"
+    assert exc_info.value.to_version == "v4"
 
 
 def test_chain_ambiguous_category_string() -> None:
@@ -196,6 +220,44 @@ def test_builder_duplicate_registration_raises() -> None:
     builder.with_state_migration("v0", "v1", _id)
     with pytest.raises(CheckpointStateMigrationChainAmbiguous):
         builder.with_state_migration("v0", "v1", _id)
+
+
+def test_builder_with_state_migrations_atomic_on_duplicate() -> None:
+    """The plural ``with_state_migrations`` pre-validates the full
+    input list before mutating. A duplicate in the middle of the
+    list MUST NOT leave the earlier entries half-registered."""
+    builder = _build_minimal_graph()
+    # Pre-seed one entry so the third in the plural call collides.
+    builder.with_state_migration("v0", "v1", _id)
+
+    with pytest.raises(CheckpointStateMigrationChainAmbiguous):
+        builder.with_state_migrations(
+            StateMigration(from_version="v1", to_version="v2", migrate=_id),
+            StateMigration(from_version="v2", to_version="v3", migrate=_id),
+            # Collides with the pre-seeded v0→v1.
+            StateMigration(from_version="v0", to_version="v1", migrate=_id),
+        )
+    # Registry still has only the pre-seed; the v1→v2 and v2→v3
+    # from the failed call MUST NOT have registered.
+    compiled = builder.compile()
+    keys = [(m.from_version, m.to_version) for m in compiled.migration_registry]
+    assert keys == [("v0", "v1")]
+
+
+def test_builder_with_state_migrations_atomic_on_internal_duplicate() -> None:
+    """A duplicate pair WITHIN the with_state_migrations input list
+    (not against an already-registered entry) also raises before
+    mutating."""
+    builder = _build_minimal_graph()
+    with pytest.raises(CheckpointStateMigrationChainAmbiguous):
+        builder.with_state_migrations(
+            StateMigration(from_version="v1", to_version="v2", migrate=_id),
+            # Same key as the entry above — internal duplicate.
+            StateMigration(from_version="v1", to_version="v2", migrate=_id),
+        )
+    # Nothing registered.
+    compiled = builder.compile()
+    assert list(compiled.migration_registry) == []
 
 
 # ---------------------------------------------------------------------------

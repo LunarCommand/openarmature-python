@@ -160,6 +160,21 @@ class Checkpointer(Protocol):
     backends that cannot expose the intermediate MUST raise
     ``CheckpointRecordInvalid`` on version mismatch even when
     migrations are registered — the registry has no chance to bridge.
+
+    **Attribute-presence contract.** The class-body ``= False``
+    below is a typing-level signal, not a runtime guarantee:
+    ``typing.Protocol`` does not create an instance attribute on
+    a conforming class that doesn't declare it itself. Concrete
+    backends SHOULD declare ``supports_state_migration`` (either
+    at the class level like ``InMemoryCheckpointer`` does, or as
+    an ``__init__``-set instance attribute like
+    ``SQLiteCheckpointer`` does for the mode-dependent case) so
+    Pyright accepts the structural conformance and ``getattr``
+    sees the value. The engine's resume path reads the attribute
+    via ``getattr(checkpointer, "supports_state_migration",
+    False)``, so a third-party backend that omits the attribute
+    entirely is treated as non-migration-eligible without
+    raising — that's the runtime default the engine guarantees.
     """
 
     # Declared as an instance attribute (not ``ClassVar``) so backends
@@ -168,9 +183,11 @@ class Checkpointer(Protocol):
     # JSON-mode supports migration, pickle-mode doesn't, and the mode
     # is a per-instance constructor arg. Backends with a static answer
     # (InMemoryCheckpointer is always False) override at the class
-    # level with ``ClassVar[bool] = False``; pyright is happy with
-    # either shape because Protocol attribute conformance ignores the
-    # ClassVar marker on subclasses.
+    # level. Pyright accepts either shape because Protocol attribute
+    # conformance ignores the ClassVar marker on subclasses. The
+    # class-body default below is for typing only; see the
+    # docstring's "Attribute-presence contract" section for the
+    # runtime ``getattr``-based safety net.
     supports_state_migration: bool = False
 
     async def save(self, invocation_id: str, record: CheckpointRecord) -> None:

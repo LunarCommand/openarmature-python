@@ -14,6 +14,7 @@ from collections.abc import Awaitable, Callable, Iterable, Mapping
 from types import GenericAlias, UnionType
 from typing import Any, Self, cast, get_args, get_origin
 
+from openarmature.checkpoint.errors import CheckpointStateMigrationChainAmbiguous
 from openarmature.checkpoint.migration import MigrationRegistry, StateMigration
 from openarmature.checkpoint.protocol import Checkpointer
 
@@ -274,9 +275,12 @@ class GraphBuilder[StateT: State]:
         state. The framework does not police purity (per §10.12.2),
         but violating it risks non-deterministic resume.
 
-        Raises ``ValueError`` at registration if the
-        ``(from_version, to_version)`` pair is already registered
-        (per §10.12.1 chain-ambiguity rule).
+        Raises ``CheckpointStateMigrationChainAmbiguous`` at
+        registration if the ``(from_version, to_version)`` pair is
+        already registered (per spec §10.10 / §10.12.1 — proposal
+        0018 / spec v0.16.0). Also raises ``ValueError`` if
+        ``to_version`` is the empty-string sentinel (the un-declared
+        marker per §10.2 is not a valid chain target).
         """
         self._migration_registry.register(
             StateMigration(
@@ -290,7 +294,38 @@ class GraphBuilder[StateT: State]:
     def with_state_migrations(self, *migrations: StateMigration) -> Self:
         """Register multiple migrations in one call. Convenience over
         ``with_state_migration``; each entry is registered through the
-        same path and obeys the same ambiguity rule."""
+        same path and obeys the same ambiguity rule.
+
+        Pre-validates the full input list against the existing
+        registry + against earlier entries in the same call before
+        mutating, so a duplicate in the third entry cannot leave
+        the first two half-registered. If any duplicate ``(from,
+        to)`` pair is detected the call raises
+        ``CheckpointStateMigrationChainAmbiguous`` without mutating
+        the registry; otherwise all entries register atomically.
+        """
+        # Pre-validation pass: collect every (from, to) we're about
+        # to add, check both against the existing registry and
+        # against earlier entries in the input. Raise before
+        # mutating if anything collides.
+        seen_in_call: set[tuple[str, str]] = set()
+        for m in migrations:
+            key = (m.from_version, m.to_version)
+            if key in self._migration_registry._migrations:  # noqa: SLF001
+                raise CheckpointStateMigrationChainAmbiguous(
+                    f"duplicate state migration {m.from_version!r}→{m.to_version!r} already registered",
+                    from_version=m.from_version,
+                    to_version=m.to_version,
+                )
+            if key in seen_in_call:
+                raise CheckpointStateMigrationChainAmbiguous(
+                    f"duplicate state migration {m.from_version!r}→"
+                    f"{m.to_version!r} repeated in with_state_migrations call",
+                    from_version=m.from_version,
+                    to_version=m.to_version,
+                )
+            seen_in_call.add(key)
+        # Validation passed — commit them all.
         for migration in migrations:
             self._migration_registry.register(migration)
         return self
