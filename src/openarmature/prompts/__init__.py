@@ -1,6 +1,13 @@
 """Prompt-management capability — fetch, render, and trace named prompts."""
 
 from .backend import PromptBackend
+from .backends import FilesystemPromptBackend
+from .context import (
+    current_prompt_group,
+    current_prompt_result,
+    with_active_prompt,
+    with_active_prompt_group,
+)
 from .errors import (
     PROMPT_NOT_FOUND,
     PROMPT_RENDER_ERROR,
@@ -21,6 +28,7 @@ __all__ = [
     "PROMPT_RENDER_ERROR",
     "PROMPT_STORE_UNAVAILABLE",
     "PROMPT_TRANSIENT_CATEGORIES",
+    "FilesystemPromptBackend",
     "Prompt",
     "PromptBackend",
     "PromptError",
@@ -32,4 +40,8 @@ __all__ = [
     "PromptStoreUnavailable",
     "compute_rendered_hash",
     "compute_template_hash",
+    "current_prompt_group",
+    "current_prompt_result",
+    "with_active_prompt",
+    "with_active_prompt_group",
 ]
