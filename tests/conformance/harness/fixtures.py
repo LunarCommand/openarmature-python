@@ -47,6 +47,7 @@ from .directives import (
     StateSchema,
 )
 from .expectations import ExpectedBlock, LlmProviderExpected
+from .prompt_management import PromptManagementFixture
 
 
 class _ForbidExtras(BaseModel):
@@ -234,13 +235,19 @@ class GraphFixture(_ForbidExtras):
 # ---------------------------------------------------------------------------
 
 
-def _discriminate_fixture(value: Any) -> Literal["llm_provider", "cases", "graph"]:
+def _discriminate_fixture(
+    value: Any,
+) -> Literal["llm_provider", "prompt_management", "cases", "graph"]:
     """Pick the fixture shape from a raw YAML dict.
 
-    Order matters: ``mock_provider`` wins over ``cases`` because some
-    llm-provider fixtures (e.g. 003-message-validation) have BOTH —
-    ``mock_provider`` is the load-bearing discriminator, ``cases`` is just
-    the table style for sub-cases.
+    Order matters:
+
+    - ``mock_provider`` wins over ``cases`` because some llm-provider
+      fixtures (e.g. 003-message-validation) have BOTH — ``mock_provider``
+      is the load-bearing discriminator, ``cases`` is the table style.
+    - ``backends`` at the top level (without ``mock_provider``) picks
+      the prompt-management shape. Spec/prompt-management fixtures
+      always carry ``backends:``.
 
     Also handle the serialization path (where the value is a concrete
     variant) so a future ``model_dump`` through the top-level union
@@ -248,6 +255,8 @@ def _discriminate_fixture(value: Any) -> Literal["llm_provider", "cases", "graph
     """
     if isinstance(value, LlmProviderFixture):
         return "llm_provider"
+    if isinstance(value, PromptManagementFixture):
+        return "prompt_management"
     if isinstance(value, CasesFixture):
         return "cases"
     if isinstance(value, GraphFixture):
@@ -255,6 +264,8 @@ def _discriminate_fixture(value: Any) -> Literal["llm_provider", "cases", "graph
     if isinstance(value, dict):
         if "mock_provider" in value:
             return "llm_provider"
+        if "backends" in value:
+            return "prompt_management"
         if "cases" in value:
             return "cases"
     return "graph"
@@ -262,6 +273,7 @@ def _discriminate_fixture(value: Any) -> Literal["llm_provider", "cases", "graph
 
 Fixture = Annotated[
     Annotated[LlmProviderFixture, Tag("llm_provider")]
+    | Annotated[PromptManagementFixture, Tag("prompt_management")]
     | Annotated[CasesFixture, Tag("cases")]
     | Annotated[GraphFixture, Tag("graph")],
     Discriminator(_discriminate_fixture),
@@ -275,5 +287,6 @@ __all__ = [
     "GraphFixture",
     "LlmProviderExpected",
     "LlmProviderFixture",
+    "PromptManagementFixture",
     "SubgraphDefinition",
 ]
