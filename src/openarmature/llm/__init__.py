@@ -30,6 +30,7 @@ from .errors import (
     PROVIDER_MODEL_NOT_LOADED,
     PROVIDER_RATE_LIMIT,
     PROVIDER_UNAVAILABLE,
+    PROVIDER_UNSUPPORTED_CONTENT_BLOCK,
     STRUCTURED_OUTPUT_INVALID,
     TRANSIENT_CATEGORIES,
     LlmProviderError,
@@ -40,6 +41,7 @@ from .errors import (
     ProviderModelNotLoaded,
     ProviderRateLimit,
     ProviderUnavailable,
+    ProviderUnsupportedContentBlock,
     StructuredOutputInvalid,
 )
 from .messages import (
@@ -69,6 +71,7 @@ __all__ = [
     "PROVIDER_MODEL_NOT_LOADED",
     "PROVIDER_RATE_LIMIT",
     "PROVIDER_UNAVAILABLE",
+    "PROVIDER_UNSUPPORTED_CONTENT_BLOCK",
     "STRUCTURED_OUTPUT_INVALID",
     "TRANSIENT_CATEGORIES",
     "AssistantMessage",
@@ -85,6 +88,7 @@ __all__ = [
     "ProviderModelNotLoaded",
     "ProviderRateLimit",
     "ProviderUnavailable",
+    "ProviderUnsupportedContentBlock",
     "Response",
     "RuntimeConfig",
     "StructuredOutputInvalid",
