@@ -149,6 +149,22 @@ def test_prompt_extra_fields_forbidden() -> None:
         )
 
 
+def test_prompt_result_rejects_empty_messages() -> None:
+    prompt = _make_prompt()
+    with pytest.raises(ValueError):
+        PromptResult(
+            name=prompt.name,
+            version=prompt.version,
+            label=prompt.label,
+            template_hash=prompt.template_hash,
+            rendered_hash="sha256:abc",
+            messages=[],
+            variables={},
+            fetched_at=prompt.fetched_at,
+            rendered_at=datetime.now(UTC),
+        )
+
+
 def test_prompt_group_rejects_zero_members() -> None:
     with pytest.raises(ValueError, match="at least two"):
         PromptGroup(group_name="g", members=[])
@@ -373,6 +389,22 @@ async def test_manager_fetch_first_match_short_circuits() -> None:
     await manager.fetch("greeting", "production")
     assert first.calls == 1
     assert second.calls == 0
+
+
+def test_manager_render_caches_compiled_templates_by_hash() -> None:
+    prompt = _make_prompt()
+
+    class _Backend:
+        async def fetch(self, name: str, label: str = "production") -> Prompt:
+            return prompt
+
+    manager = PromptManager(_Backend())
+    manager.render(prompt, {"user": "Alice"})
+    assert prompt.template_hash in manager._template_cache  # noqa: SLF001
+    cached = manager._template_cache[prompt.template_hash]  # noqa: SLF001
+    # Second render reuses the same compiled Template instance.
+    manager.render(prompt, {"user": "Bob"})
+    assert manager._template_cache[prompt.template_hash] is cached  # noqa: SLF001
 
 
 async def test_manager_render_signature_returns_user_message() -> None:

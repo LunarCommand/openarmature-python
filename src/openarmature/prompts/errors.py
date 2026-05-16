@@ -96,8 +96,11 @@ class PromptStoreUnavailable(PromptError):
     Transient: the same fetch may succeed when the backend recovers.
     ``PromptManager.fetch`` raises this only after ALL composed
     backends raise it; in that aggregate case ``backends_tried``
-    lists the backends consulted (in order) for operator visibility.
-    The ``__cause__`` chain preserves per-backend failure reasons.
+    lists the backends consulted (in order) and ``causes`` carries
+    the per-backend exceptions index-aligned to ``backends_tried``
+    so operators can distinguish "backend A 503 + backend B 503"
+    from "backend A 503 + backend B OSError". The ``__cause__`` chain
+    still points at the last unavailable for stack-trace continuity.
     """
 
     category = PROMPT_STORE_UNAVAILABLE
@@ -105,6 +108,7 @@ class PromptStoreUnavailable(PromptError):
     name: str | None
     label: str | None
     backends_tried: list[str] | None
+    causes: list[BaseException] | None
 
     def __init__(
         self,
@@ -112,8 +116,10 @@ class PromptStoreUnavailable(PromptError):
         name: str | None = None,
         label: str | None = None,
         backends_tried: list[str] | None = None,
+        causes: list[BaseException] | None = None,
     ) -> None:
         super().__init__(*args)
         self.name = name
         self.label = label
         self.backends_tried = backends_tried
+        self.causes = causes

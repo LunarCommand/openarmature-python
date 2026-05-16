@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from openarmature.llm.messages import Message
 
@@ -83,7 +83,7 @@ class PromptResult(BaseModel):
     label: str
     template_hash: str
     rendered_hash: str
-    messages: list[Message]
+    messages: list[Message] = Field(min_length=1)
     variables: dict[str, Any]
     fetched_at: datetime
     rendered_at: datetime

@@ -47,6 +47,13 @@ class PromptManager:
         if not backends:
             raise ValueError("PromptManager requires at least one backend")
         self._backends: tuple[PromptBackend, ...] = backends
+        # template_hash → compiled jinja2 Template. Per-manager,
+        # unbounded. Correct by construction: template_hash is
+        # content-derived, so a backend returning updated content
+        # surfaces a fresh hash and a fresh cache entry. An LRU
+        # eviction policy can land if benchmarks ever show memory
+        # pressure; typical apps have O(10) prompts.
+        self._template_cache: dict[str, jinja2.Template] = {}
 
     async def fetch(self, name: str, label: str = "production") -> Prompt:
         """Consult composed backends in order, applying §8 fallback.
@@ -59,14 +66,14 @@ class PromptManager:
           next. After ALL backends are exhausted with unavailable
           failures, the manager raises ``PromptStoreUnavailable``.
         """
-        last_unavailable: PromptStoreUnavailable | None = None
+        causes: list[BaseException] = []
         for backend in self._backends:
             try:
                 return await backend.fetch(name, label)
             except PromptNotFound:
                 raise
             except PromptStoreUnavailable as exc:
-                last_unavailable = exc
+                causes.append(exc)
                 _log.warning(
                     "prompt backend %r unavailable for (%r, %r); falling back",
                     backend,
@@ -74,13 +81,14 @@ class PromptManager:
                     label,
                 )
                 continue
-        assert last_unavailable is not None
+        assert causes
         raise PromptStoreUnavailable(
             f"all prompt backends unavailable for ({name!r}, {label!r})",
             name=name,
             label=label,
             backends_tried=[type(b).__name__ for b in self._backends],
-        ) from last_unavailable
+            causes=list(causes),
+        ) from causes[-1]
 
     def render(
         self,
@@ -103,7 +111,10 @@ class PromptManager:
 
         rendered_text: str
         try:
-            template = _RENDER_ENV.from_string(prompt.template)
+            template = self._template_cache.get(prompt.template_hash)
+            if template is None:
+                template = _RENDER_ENV.from_string(prompt.template)
+                self._template_cache[prompt.template_hash] = template
             rendered_text = template.render(**variables)
         except jinja2.UndefinedError as exc:
             raise PromptRenderError(
