@@ -26,9 +26,11 @@ from .errors import (
     CheckpointNotFound,
     CheckpointRecordInvalid,
     CheckpointSaveFailed,
+    CheckpointStateMigrationFailed,
+    CheckpointStateMigrationMissing,
 )
+from .migration import MigrationRegistry, StateMigration
 from .protocol import (
-    CHECKPOINT_SCHEMA_VERSION,
     Checkpointer,
     CheckpointFilter,
     CheckpointRecord,
@@ -37,17 +39,20 @@ from .protocol import (
 )
 
 __all__ = [
-    "CHECKPOINT_SCHEMA_VERSION",
     "CheckpointError",
     "CheckpointFilter",
     "CheckpointNotFound",
     "CheckpointRecord",
     "CheckpointRecordInvalid",
     "CheckpointSaveFailed",
+    "CheckpointStateMigrationFailed",
+    "CheckpointStateMigrationMissing",
     "CheckpointSummary",
     "Checkpointer",
     "InMemoryCheckpointer",
+    "MigrationRegistry",
     "NodePosition",
     "SQLiteCheckpointer",
     "SerializationMode",
+    "StateMigration",
 ]

@@ -22,27 +22,19 @@ record per ``completed`` event for outermost-graph nodes and
 subgraph-internal nodes. Fan-out instance internal events do NOT
 produce records in the shipping version (atomic-restart contract).
 
-The :data:`CHECKPOINT_SCHEMA_VERSION` constant is the single source
-of truth for the persisted record shape — bump it whenever the field
-set changes incompatibly so older saved records surface as
-:class:`CheckpointRecordInvalid` on load rather than silently coercing
-to a mismatched shape.
+``CheckpointRecord.schema_version`` carries the user-facing
+state-schema identifier per spec §10.2 (proposal 0014 repurposes
+the field from the original backend-internal record-shape role).
+The framework reads ``type(state).schema_version`` at save time;
+on load, version mismatches route through the migration registry
+(per §10.12) rather than a strict equality check.
 """
 
 from __future__ import annotations
 
 from collections.abc import Iterable
 from dataclasses import dataclass, field
-from typing import Any, Protocol
-
-# Persisted record shape version. Bump when CheckpointRecord's field
-# set or invariants change incompatibly — proposal 0009 (per-instance
-# fan-out resume) is the concrete near-term candidate, since it
-# populates ``fan_out_progress`` and the load path will need to
-# distinguish v1 records (where it's None) from v2 records (where it
-# carries instance-level progress data). Backends that reject mismatches
-# MUST raise CheckpointRecordInvalid per spec §10.10.
-CHECKPOINT_SCHEMA_VERSION = "1"
+from typing import Any, ClassVar, Protocol
 
 
 # Spec: realizes pipeline-utilities §10.2 NodePosition. Field semantics
@@ -108,7 +100,11 @@ class CheckpointRecord:
     completed_positions: tuple[NodePosition, ...]
     parent_states: tuple[Any, ...]
     last_saved_at: float
-    schema_version: str = CHECKPOINT_SCHEMA_VERSION
+    # Per spec §10.2 (proposal 0014): the user's state-schema
+    # version, read off ``type(state).schema_version`` at save time.
+    # Empty-string sentinel for state classes that don't declare a
+    # version; non-empty declares migration-eligibility.
+    schema_version: str = ""
     fan_out_progress: None = field(default=None)
 
 
@@ -154,7 +150,19 @@ class Checkpointer(Protocol):
     access). Each operation MUST be thread-safe (Python) /
     task-coroutine-safe (asyncio); backends with synchronous I/O
     typically wrap their work in ``asyncio.to_thread`` or equivalent.
+
+    ``supports_state_migration`` marks whether the backend can
+    expose a structural intermediate form of the loaded state (a
+    plain dict, JSON tree, or similar) that is independent of the
+    current state class. JSON-encoded backends naturally satisfy
+    this; backends that store live typed state instances or use
+    class-bound serialization (pickle) cannot. Per spec §10.12.1,
+    backends that cannot expose the intermediate MUST raise
+    ``CheckpointRecordInvalid`` on version mismatch even when
+    migrations are registered — the registry has no chance to bridge.
     """
+
+    supports_state_migration: ClassVar[bool] = False
 
     async def save(self, invocation_id: str, record: CheckpointRecord) -> None:
         """Persist ``record`` for ``invocation_id``. After return the
@@ -186,7 +194,6 @@ class Checkpointer(Protocol):
 
 
 __all__ = [
-    "CHECKPOINT_SCHEMA_VERSION",
     "CheckpointFilter",
     "CheckpointRecord",
     "CheckpointSummary",

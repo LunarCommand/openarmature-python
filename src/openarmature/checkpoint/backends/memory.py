@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Iterable
+from typing import ClassVar
 
 from ..protocol import CheckpointFilter, CheckpointRecord, CheckpointSummary
 
@@ -28,7 +29,20 @@ class InMemoryCheckpointer:
     Pydantic state instance the engine produces is what comes back
     from :meth:`load` — no serialization round-trip. (This is the
     feature: tests can assert on the saved state's identity.)
+
+    **State-migration eligibility:** none. Per spec §10.12.1, a
+    backend supports migration only when it can expose a structural
+    intermediate form of the loaded state independent of the current
+    state class. This backend holds live typed instances by
+    reference, so a version mismatch on resume raises
+    ``CheckpointRecordInvalid`` rather than consulting the
+    migration registry.
     """
+
+    # Per spec §10.12.1: in-memory storage holds live typed-state
+    # references, so there's no class-independent intermediate form
+    # the migration registry could consume.
+    supports_state_migration: ClassVar[bool] = False
 
     def __init__(self) -> None:
         self._records: dict[str, CheckpointRecord] = {}
