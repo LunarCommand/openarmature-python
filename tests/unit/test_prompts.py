@@ -354,7 +354,8 @@ async def test_active_prompt_visible_from_nested_async_function() -> None:
         return current_prompt_result()
 
     with with_active_prompt(pr):
-        result = await _read_in_task()
+        task = asyncio.create_task(_read_in_task())
+        result = await task
     assert result is pr
 
 

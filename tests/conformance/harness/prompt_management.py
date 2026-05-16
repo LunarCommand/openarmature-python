@@ -72,10 +72,12 @@ CallTarget = BackendTarget | Literal["manager", "construct_prompt_group"]
 
 class FixtureExpectedRaises(_PermissiveModel):
     category: str
-    # Optional extra carries — fixture 005 uses ``description_mentions``,
-    # ``name``, ``version``, ``label``. fixture 008 uses
-    # ``secondary_backend_call_count``. Permissive on this shape so
-    # fixtures evolve.
+    # Optional extra carries. Fixture 005 surfaces
+    # ``description_mentions`` / ``name`` / ``version`` / ``label``
+    # here. Permissive on this shape so fixtures evolve;
+    # per-backend call-count assertions live on the parent
+    # ``FixtureExpectedPerCall`` (see ``secondary_backend_call_count``
+    # and ``backend_call_counts`` below), not in ``carries``.
     carries: dict[str, Any] | None = None
 
 

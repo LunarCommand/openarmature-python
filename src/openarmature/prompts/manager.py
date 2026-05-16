@@ -81,7 +81,19 @@ class PromptManager:
                     label,
                 )
                 continue
-        assert causes
+        if not causes:
+            # Unreachable under current control flow: the constructor
+            # guarantees ``len(self._backends) >= 1`` and the only
+            # fall-through path from the for-loop appends to
+            # ``causes``. Explicit guard rather than ``assert`` so
+            # the invariant holds under ``python -O`` (asserts get
+            # stripped) — a future change that silently swallowed an
+            # exception in the loop would surface here as a clear
+            # RuntimeError instead of an opaque IndexError on the
+            # next line.
+            raise RuntimeError(
+                "PromptManager.fetch internal invariant violated: no backends consulted but loop exhausted"
+            )
         raise PromptStoreUnavailable(
             f"all prompt backends unavailable for ({name!r}, {label!r})",
             name=name,
