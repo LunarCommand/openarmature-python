@@ -231,11 +231,7 @@ fixed inputs, not to user-supplied variable content.
 import asyncio
 from pathlib import Path
 
-from openarmature.prompts import (
-    FilesystemPromptBackend,
-    PromptManager,
-    with_active_prompt,
-)
+from openarmature.prompts import FilesystemPromptBackend, PromptManager
 
 
 async def main() -> None:
@@ -247,11 +243,6 @@ async def main() -> None:
     )
     print(result.messages[0].content)         # rendered text
     print(result.rendered_hash)               # cache key
-    # Run an LLM call inside the active-prompt context so the
-    # OTel observer can surface prompt.* span attributes.
-    # with with_active_prompt(result):
-    #     response = await provider.complete(result.messages)
-    _ = with_active_prompt  # marker for the snippet above
 
 
 asyncio.run(main())

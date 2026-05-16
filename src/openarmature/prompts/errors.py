@@ -53,6 +53,11 @@ class PromptRenderError(PromptError):
 
     Carries the source prompt's identity plus the variable mapping
     and a description of the render failure.
+
+    Non-transient per spec §10: retrying the same render with the
+    same prompt + variables will not succeed. Callers whose backend
+    serves a fixed template later should re-fetch + re-render rather
+    than relying on retry-middleware to auto-retry the failed render.
     """
 
     category = PROMPT_RENDER_ERROR
@@ -90,7 +95,25 @@ class PromptStoreUnavailable(PromptError):
 
     Transient: the same fetch may succeed when the backend recovers.
     ``PromptManager.fetch`` raises this only after ALL composed
-    backends raise it.
+    backends raise it; in that aggregate case ``backends_tried``
+    lists the backends consulted (in order) for operator visibility.
+    The ``__cause__`` chain preserves per-backend failure reasons.
     """
 
     category = PROMPT_STORE_UNAVAILABLE
+
+    name: str | None
+    label: str | None
+    backends_tried: list[str] | None
+
+    def __init__(
+        self,
+        *args: Any,
+        name: str | None = None,
+        label: str | None = None,
+        backends_tried: list[str] | None = None,
+    ) -> None:
+        super().__init__(*args)
+        self.name = name
+        self.label = label
+        self.backends_tried = backends_tried

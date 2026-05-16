@@ -18,6 +18,18 @@ from .prompt import Prompt, PromptResult
 
 _log = logging.getLogger(__name__)
 
+# Module-level singleton. Stateless given the configuration (no
+# filters, globals, or per-call mutation), and jinja2.Environment is
+# documented as thread-safe for compile + render — so a single
+# shared instance avoids re-parsing the env config on every render
+# call. autoescape disabled by design: render output goes to an LLM
+# API call (plain text), not an HTML response.
+_RENDER_ENV = jinja2.Environment(
+    undefined=jinja2.StrictUndefined,
+    autoescape=False,
+    keep_trailing_newline=True,
+)
+
 
 class PromptManager:
     """Composes one or more PromptBackends and exposes fetch + render.
@@ -64,7 +76,10 @@ class PromptManager:
                 continue
         assert last_unavailable is not None
         raise PromptStoreUnavailable(
-            f"all prompt backends unavailable for ({name!r}, {label!r})"
+            f"all prompt backends unavailable for ({name!r}, {label!r})",
+            name=name,
+            label=label,
+            backends_tried=[type(b).__name__ for b in self._backends],
         ) from last_unavailable
 
     def render(
@@ -85,15 +100,10 @@ class PromptManager:
         list manually.
         """
         variables = variables or {}
-        env = jinja2.Environment(
-            undefined=jinja2.StrictUndefined,
-            autoescape=False,
-            keep_trailing_newline=True,
-        )
 
         rendered_text: str
         try:
-            template = env.from_string(prompt.template)
+            template = _RENDER_ENV.from_string(prompt.template)
             rendered_text = template.render(**variables)
         except jinja2.UndefinedError as exc:
             raise PromptRenderError(

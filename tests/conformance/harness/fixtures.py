@@ -264,7 +264,17 @@ def _discriminate_fixture(
     if isinstance(value, dict):
         if "mock_provider" in value:
             return "llm_provider"
-        if "backends" in value:
+        # PM fixtures uniquely have ``backends:`` AND ``calls:`` and
+        # none of the graph-shape keys. Co-occurrence is the
+        # discriminator until a spec-side ``kind:`` field lands —
+        # checking ``backends:`` alone would silently misroute any
+        # future fixture that introduces a backends list for some
+        # other purpose.
+        if (
+            "backends" in value
+            and "calls" in value
+            and not any(k in value for k in ("nodes", "edges", "state", "entry"))
+        ):
             return "prompt_management"
         if "cases" in value:
             return "cases"

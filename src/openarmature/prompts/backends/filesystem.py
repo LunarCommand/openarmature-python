@@ -22,10 +22,15 @@ class FilesystemPromptBackend:
     suffix"; this backend picks subdirectory.
 
     The ``version`` field is derived from the template content hash
-    (first 12 hex chars of the SHA-256) so two file contents map
-    deterministically to two distinct version strings without
-    needing a sidecar metadata file. Per spec §3, this satisfies
-    the "stable identifier" requirement.
+    (first 16 hex chars of the SHA-256, ~64 bits) so two file
+    contents map deterministically to two distinct version strings
+    without needing a sidecar metadata file. Per spec §3, this
+    satisfies the "stable identifier" requirement. The 16-char
+    prefix puts the birthday-paradox collision boundary at ~4B
+    distinct templates — well past any realistic single-backend
+    exposure. Higher-scale backends should widen further or pick a
+    different stable identifier (semver from a sidecar metadata
+    file, git short-SHAs, etc.).
 
     This backend reads from disk on every fetch — no caching. A
     caching backend (e.g., openarmature-langfuse) that returns
@@ -49,11 +54,13 @@ class FilesystemPromptBackend:
             ) from exc
         except OSError as exc:
             raise PromptStoreUnavailable(
-                f"filesystem I/O error reading ({name!r}, {label!r}): {exc}"
+                f"filesystem I/O error reading ({name!r}, {label!r}): {exc}",
+                name=name,
+                label=label,
             ) from exc
 
         template_hash = compute_template_hash(template_source)
-        version = template_hash.removeprefix("sha256:")[:12]
+        version = template_hash.removeprefix("sha256:")[:16]
         return Prompt(
             name=name,
             version=version,

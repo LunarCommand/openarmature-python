@@ -14,6 +14,7 @@ import asyncio
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 
 import pytest
 
@@ -249,7 +250,7 @@ async def test_filesystem_backend_fetch_success(tmp_path: Path) -> None:
     assert prompt.template == "Hello, {{ user }}!"
     assert prompt.template_hash == compute_template_hash("Hello, {{ user }}!")
     # version derived from first 12 hex chars of template_hash
-    assert prompt.version == prompt.template_hash.removeprefix("sha256:")[:12]
+    assert prompt.version == prompt.template_hash.removeprefix("sha256:")[:16]
 
 
 async def test_filesystem_backend_fetch_missing_file_raises_not_found(tmp_path: Path) -> None:
@@ -262,12 +263,18 @@ async def test_filesystem_backend_fetch_missing_file_raises_not_found(tmp_path: 
 
 
 async def test_filesystem_backend_io_error_raises_store_unavailable(tmp_path: Path) -> None:
-    # Make the label dir a file, not a directory; the read_text path
-    # construction will surface an OSError that is NOT FileNotFoundError.
-    (tmp_path / "production").write_text("not a directory", encoding="utf-8")
+    # Mock ``Path.read_text`` to raise a generic ``OSError`` so the
+    # test isolates the OSError-but-not-FileNotFoundError branch
+    # without depending on platform-specific filesystem semantics
+    # (Linux surfaces NotADirectoryError for "file where directory
+    # expected"; Windows can surface PermissionError or other
+    # OSError subclasses).
+    (tmp_path / "production").mkdir()
+    (tmp_path / "production" / "foo.j2").write_text("template", encoding="utf-8")
     backend = FilesystemPromptBackend(tmp_path)
-    with pytest.raises(PromptStoreUnavailable):
-        await backend.fetch("foo", "production")
+    with patch("pathlib.Path.read_text", side_effect=OSError("simulated I/O error")):
+        with pytest.raises(PromptStoreUnavailable):
+            await backend.fetch("foo", "production")
 
 
 # ---------------------------------------------------------------------------

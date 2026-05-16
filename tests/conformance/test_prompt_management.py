@@ -169,6 +169,21 @@ def _assert_per_call(
     if call.expected is None:
         return
 
+    # Call-count assertions apply regardless of raise / success path —
+    # a future fixture asserting short-circuit on a non-raising call
+    # (e.g., first-backend hit means second-backend isn't consulted)
+    # would have its expectation silently ignored if these checks
+    # only ran inside the ``raises`` branch.
+    if call.expected.secondary_backend_call_count is not None:
+        assert backends["secondary"].call_count == call.expected.secondary_backend_call_count, (
+            f"expected secondary call_count={call.expected.secondary_backend_call_count}, "
+            f"got {backends['secondary'].call_count}"
+        )
+    if call.expected.backend_call_counts is not None:
+        for name, count in call.expected.backend_call_counts.items():
+            actual_count = backends[name].call_count
+            assert actual_count == count, f"expected {name} call_count={count}, got {actual_count}"
+
     if call.expected.raises is not None:
         assert raised is not None, (
             f"expected raise of category {call.expected.raises.category!r}, got result {result!r}"
@@ -190,15 +205,6 @@ def _assert_per_call(
                 assert actual_attr == expected_value, (
                     f"expected {key}={expected_value!r}, got {actual_attr!r}"
                 )
-        if call.expected.secondary_backend_call_count is not None:
-            assert backends["secondary"].call_count == call.expected.secondary_backend_call_count, (
-                f"expected secondary call_count={call.expected.secondary_backend_call_count}, "
-                f"got {backends['secondary'].call_count}"
-            )
-        if call.expected.backend_call_counts is not None:
-            for name, count in call.expected.backend_call_counts.items():
-                actual_count = backends[name].call_count
-                assert actual_count == count, f"expected {name} call_count={count}, got {actual_count}"
         return
 
     assert raised is None, f"unexpected raise: {raised!r}"
@@ -242,6 +248,11 @@ def _assert_result_equivalence(
     eq: FixtureExpectedResultEquivalence,
     captures: dict[str, Any],
 ) -> None:
+    overlap = set(eq.fields_must_match) & set(eq.fields_may_differ)
+    assert not overlap, (
+        f"fixture inconsistency: fields {sorted(overlap)} appear in both "
+        f"fields_must_match and fields_may_differ"
+    )
     members = [captures[ref] for ref in eq.of]
     first = members[0]
     for other in members[1:]:

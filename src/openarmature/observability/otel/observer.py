@@ -93,6 +93,8 @@ from opentelemetry.trace import (
 )
 from opentelemetry.trace.propagation import set_span_in_context
 
+from openarmature.prompts.context import current_prompt_group, current_prompt_result
+
 if TYPE_CHECKING:
     from openarmature.graph.events import NodeEvent
 
@@ -490,11 +492,6 @@ class OTelObserver:
             # Per prompt-management spec §11, surface prompt identity
             # on the LLM-call span when the call fired inside a
             # with_active_prompt / with_active_prompt_group context.
-            from openarmature.prompts.context import (
-                current_prompt_group,
-                current_prompt_result,
-            )
-
             active_prompt = current_prompt_result()
             if active_prompt is not None:
                 attrs["openarmature.prompt.name"] = active_prompt.name
