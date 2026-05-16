@@ -196,7 +196,7 @@ response post-receive against the supplied schema; strict is a
 wire-level optimization, not a correctness requirement.
 
 `strict_mode_supported(schema)` (exported from `openarmature.llm`)
-performs the deep recursive check. The heuristic is conservative —
+performs the deep recursive check. The heuristic is conservative:
 anything not on the list below trips to `strict: false`:
 
 - Top-level schema is `type: "object"`.
@@ -240,7 +240,7 @@ A text block is the array-form equivalent of a text-string message:
 text block is normatively equivalent to one with `content="describe
 this"`.
 
-An image block carries one source — URL or inline base64 — plus an
+An image block carries one source (URL or inline base64) plus an
 optional `detail` hint:
 
 ```python
@@ -302,7 +302,7 @@ fidelity: `"auto"`, `"low"`, or `"high"`. The class default is `None`,
 which **omits the field from the wire** and lets the provider apply
 its own default (conceptually `"auto"`). Setting `detail="auto"`
 explicitly on the spec block forces the wire to carry an explicit
-`"auto"` — usually unnecessary, since the provider's default is the
+`"auto"`, usually unnecessary since the provider's default is the
 same value.
 
 ### When the model can't handle the block
@@ -324,12 +324,12 @@ provider on this category) compose cleanly against it.
 "audio", "video") and `reason` (the provider's human-readable
 message) when those are recoverable from the rejection.
 
-`OpenAIProvider` detects content rejection via the response body —
+`OpenAIProvider` detects content rejection via the response body:
 HTTP 400 with an error code like `image_content_not_supported` or a
 message like "does not support image inputs." Pre-send capability
 checks (failing fast before the wire trip when you know the model
 doesn't support images) live above the provider as userland
-middleware — the provider doesn't ship a static model-capability
+middleware; the provider doesn't ship a static model-capability
 catalog.
 
 ## Routing on parsed fields
