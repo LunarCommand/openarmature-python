@@ -246,6 +246,22 @@ def _no_op_finalize(_edge_error: RuntimeGraphError | None) -> None:
     silently per proposal 0012 + fixture 013."""
 
 
+@dataclass(frozen=True)
+class _MigrationSummary:
+    """Per-resume migration-chain metadata threaded out of
+    ``_migrate_record`` so the engine can dispatch an
+    ``openarmature.checkpoint.migrate`` observer event after the
+    invocation context is built (per spec §6 cross-ref in proposal
+    0014). Carried on the synthetic ``NodeEvent.pre_state``
+    payload for ``phase="checkpoint_migrated"``; the OTel observer
+    reads it to emit the span.
+    """
+
+    from_version: str
+    to_version: str
+    chain_length: int
+
+
 def _apply_migration_step(
     migration: StateMigration,
     value: Any,
@@ -369,15 +385,20 @@ class CompiledGraph[StateT: State]:
         checkpointer: Checkpointer,
         invocation_id: str,
         current_schema_version: str,
-    ) -> CheckpointRecord:
+    ) -> tuple[CheckpointRecord, _MigrationSummary]:
         """Resolve a migration chain for ``record`` and apply it.
 
-        Returns the record with ``state`` + ``parent_states`` mapped
-        through the chain. Caller is responsible for the
-        post-migration deserialization step (§10.12.4): if the
-        migrated state cannot deserialize against the current state
-        class, the resulting failure surfaces as
-        ``CheckpointRecordInvalid``.
+        Returns ``(migrated_record, summary)``. ``migrated_record``
+        has ``state`` + ``parent_states`` mapped through the chain.
+        ``summary`` carries the chain's metadata so the caller can
+        dispatch a ``checkpoint_migrated`` observer event after the
+        invocation context exists (per the spec §6 cross-ref in
+        proposal 0014).
+
+        Caller is responsible for the post-migration deserialization
+        step (§10.12.4): if the migrated state cannot deserialize
+        against the current state class, the resulting failure
+        surfaces as ``CheckpointRecordInvalid``.
 
         Spec §10.12.2 says "parent states MUST be treated as carrying
         the same ``schema_version`` as the outer record." We apply
@@ -433,22 +454,21 @@ class CompiledGraph[StateT: State]:
             for i, parent in enumerate(migrated_parents):
                 migrated_parents[i] = _apply_migration_step(migration, parent, f"parent_states[{i}]")
 
-        # TODO(observability): emit an ``openarmature.checkpoint.migrate``
-        # span per spec §6 cross-ref. Deferred to a follow-on because
-        # ``_migrate_record`` runs before the invocation's
-        # ``_InvocationContext`` is created (the engine needs the
-        # migrated state shape to build the context), so the existing
-        # ``_dispatch``-based observer pathway is not yet available
-        # here. A natural fix is to dispatch a synthetic
-        # ``checkpoint_migrated`` event as the first event of the
-        # invocation after context creation. The chain metadata
-        # captured for that event: ``from_version``, ``to_version``
-        # (final target), ``chain_length = len(chain)``.
-        return dataclass_replace(
+        # Per spec §6 cross-ref, the caller dispatches a synthetic
+        # ``checkpoint_migrated`` observer event using the summary
+        # below as soon as the invocation context exists. We can't
+        # dispatch from here because the context isn't built yet.
+        summary = _MigrationSummary(
+            from_version=record.schema_version,
+            to_version=current_schema_version,
+            chain_length=len(chain),
+        )
+        migrated = dataclass_replace(
             record,
             state=migrated_state,
             parent_states=tuple(migrated_parents),
         )
+        return migrated, summary
 
     async def drain(self) -> None:
         """Await delivery of every observer event produced by prior
@@ -544,6 +564,13 @@ class CompiledGraph[StateT: State]:
         resume_skip_set: frozenset[tuple[str, ...]] = frozenset()
         completed_positions: list[NodePosition] = []
         pending_resume_states: dict[int, Any] = {}
+        # Populated by ``_migrate_record`` during a version-mismatched
+        # resume; left ``None`` for the no-resume + versions-match
+        # paths. Dispatched as a synthetic ``checkpoint_migrated``
+        # observer event after the invocation context is built so
+        # the OTel observer can emit an
+        # ``openarmature.checkpoint.migrate`` span per spec §6.
+        migration_summary: _MigrationSummary | None = None
         if resume_invocation is not None:
             checkpointer = self._checkpointer_slot[0]
             if checkpointer is None:
@@ -570,7 +597,7 @@ class CompiledGraph[StateT: State]:
             # Order matters — do NOT swap eligibility and registry-lookup.
             current_schema_version = self.state_cls.schema_version
             if record.schema_version != current_schema_version:
-                record = await self._migrate_record(
+                record, migration_summary = await self._migrate_record(
                     record,
                     checkpointer,
                     resume_invocation,
@@ -653,6 +680,28 @@ class CompiledGraph[StateT: State]:
         # processed), remove it from the active set so long-running
         # services don't leak Task references between drain() calls.
         worker.add_done_callback(self._active_workers.discard)
+        # Per spec §6 cross-ref in proposal 0014: dispatch the
+        # ``checkpoint_migrated`` event as soon as the delivery
+        # worker is alive but before any node runs, so the OTel
+        # observer can emit an
+        # ``openarmature.checkpoint.migrate`` span ahead of the
+        # invocation's node spans. The synthetic event carries the
+        # ``_MigrationSummary`` on ``pre_state`` mirroring the
+        # ``checkpoint_saved`` convention (state-on-pre, post=None).
+        if migration_summary is not None:
+            _dispatch(
+                context,
+                NodeEvent(
+                    node_name="openarmature.checkpoint.migrate",
+                    namespace=("openarmature.checkpoint.migrate",),
+                    step=-1,
+                    phase="checkpoint_migrated",
+                    pre_state=migration_summary,
+                    post_state=None,
+                    error=None,
+                    parent_states=(),
+                ),
+            )
         try:
             return await self._invoke(starting_state, context)
         finally:

@@ -14,7 +14,7 @@ Frozen dataclass — observers receive a snapshot, not a live handle.
 """
 
 from dataclasses import dataclass
-from typing import Literal
+from typing import Any, Literal
 
 from .errors import RuntimeGraphError
 from .state import State
@@ -127,8 +127,19 @@ class NodeEvent:
     node_name: str
     namespace: tuple[str, ...]
     step: int
-    phase: Literal["started", "completed", "checkpoint_saved"]
-    pre_state: State
+    phase: Literal[
+        "started",
+        "completed",
+        "checkpoint_saved",
+        # Synthetic phase per spec §6 cross-ref in proposal 0014:
+        # fires once at the start of a versioned resume to carry
+        # the migration chain's metadata. ``pre_state`` on this
+        # phase carries a ``_MigrationSummary`` (not a ``State``);
+        # the field type stays permissive on this dataclass and
+        # the OTel observer narrows defensively via ``isinstance``.
+        "checkpoint_migrated",
+    ]
+    pre_state: Any
     post_state: State | None
     error: RuntimeGraphError | None
     parent_states: tuple[State, ...]

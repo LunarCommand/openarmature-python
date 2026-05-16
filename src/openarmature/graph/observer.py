@@ -97,7 +97,7 @@ ALL_PHASES: frozenset[str] = frozenset({"started", "completed"})
 # All phase values the engine produces (per spec graph-engine §6 +
 # pipeline-utilities §10.8). Used by the registration-time validator
 # to reject typos like ``phases={"complete"}``.
-KNOWN_PHASES: frozenset[str] = frozenset({"started", "completed", "checkpoint_saved"})
+KNOWN_PHASES: frozenset[str] = frozenset({"started", "completed", "checkpoint_saved", "checkpoint_migrated"})
 
 
 @dataclass(frozen=True)
