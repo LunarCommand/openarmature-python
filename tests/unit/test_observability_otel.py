@@ -256,6 +256,140 @@ async def test_checkpoint_save_emits_zero_duration_span() -> None:
 # ---------------------------------------------------------------------------
 
 
+async def test_active_prompt_propagates_to_llm_span_attributes() -> None:
+    """Spec prompt-management §11: when an LLM call fires inside a
+    ``with_active_prompt`` context, the OTel observer MUST surface
+    ``openarmature.prompt.*`` attributes on the LLM-call span.
+    ``with_active_prompt_group`` adds ``openarmature.prompt.group_name``."""
+    from datetime import UTC, datetime
+
+    from openarmature.graph.events import NodeEvent
+    from openarmature.llm.messages import UserMessage
+    from openarmature.llm.providers.openai import _LlmEventState
+    from openarmature.observability.correlation import (
+        _reset_invocation_id,
+        _set_invocation_id,
+    )
+    from openarmature.prompts import (
+        Prompt,
+        PromptGroup,
+        PromptResult,
+        with_active_prompt,
+        with_active_prompt_group,
+    )
+
+    exporter = InMemorySpanExporter()
+    observer = OTelObserver(span_processor=SimpleSpanProcessor(exporter))
+
+    now = datetime.now(UTC)
+    prompt = Prompt(
+        name="greeting",
+        version="v1",
+        label="production",
+        template="Hello, {{ user }}!",
+        template_hash="sha256:tpl",
+        fetched_at=now,
+    )
+    result = PromptResult(
+        name=prompt.name,
+        version=prompt.version,
+        label=prompt.label,
+        template_hash=prompt.template_hash,
+        rendered_hash="sha256:rendered",
+        messages=[UserMessage(content="Hello, Alice!")],
+        variables={"user": "Alice"},
+        fetched_at=now,
+        rendered_at=now,
+    )
+    group = PromptGroup(group_name="classifier_chain", members=[result, result])
+
+    token = _set_invocation_id("inv-1")
+    try:
+        with with_active_prompt(result), with_active_prompt_group(group):
+            started = NodeEvent(
+                node_name="openarmature.llm.complete",
+                namespace=("openarmature.llm.complete",),
+                step=-1,
+                phase="started",
+                pre_state=_LlmEventState(call_id="test-call-prompt", model="test-m"),
+                post_state=None,
+                error=None,
+                parent_states=(),
+            )
+            completed = NodeEvent(
+                node_name="openarmature.llm.complete",
+                namespace=("openarmature.llm.complete",),
+                step=-1,
+                phase="completed",
+                pre_state=_LlmEventState(call_id="test-call-prompt", model="test-m", finish_reason="stop"),
+                post_state=None,
+                error=None,
+                parent_states=(),
+            )
+            await observer(started)
+            await observer(completed)
+    finally:
+        _reset_invocation_id(token)
+
+    observer.shutdown()
+    llm_spans = [s for s in exporter.get_finished_spans() if s.name == "openarmature.llm.complete"]
+    assert len(llm_spans) == 1
+    attrs = llm_spans[0].attributes or {}
+    assert attrs.get("openarmature.prompt.name") == "greeting"
+    assert attrs.get("openarmature.prompt.version") == "v1"
+    assert attrs.get("openarmature.prompt.label") == "production"
+    assert attrs.get("openarmature.prompt.template_hash") == "sha256:tpl"
+    assert attrs.get("openarmature.prompt.rendered_hash") == "sha256:rendered"
+    assert attrs.get("openarmature.prompt.group_name") == "classifier_chain"
+
+
+async def test_llm_span_has_no_prompt_attributes_when_no_active_prompt() -> None:
+    """Without ``with_active_prompt``, the LLM-call span MUST NOT carry
+    ``openarmature.prompt.*`` attributes."""
+    from openarmature.graph.events import NodeEvent
+    from openarmature.llm.providers.openai import _LlmEventState
+    from openarmature.observability.correlation import (
+        _reset_invocation_id,
+        _set_invocation_id,
+    )
+
+    exporter = InMemorySpanExporter()
+    observer = OTelObserver(span_processor=SimpleSpanProcessor(exporter))
+
+    token = _set_invocation_id("inv-2")
+    try:
+        started = NodeEvent(
+            node_name="openarmature.llm.complete",
+            namespace=("openarmature.llm.complete",),
+            step=-1,
+            phase="started",
+            pre_state=_LlmEventState(call_id="test-call-noprompt", model="test-m"),
+            post_state=None,
+            error=None,
+            parent_states=(),
+        )
+        completed = NodeEvent(
+            node_name="openarmature.llm.complete",
+            namespace=("openarmature.llm.complete",),
+            step=-1,
+            phase="completed",
+            pre_state=_LlmEventState(call_id="test-call-noprompt", model="test-m", finish_reason="stop"),
+            post_state=None,
+            error=None,
+            parent_states=(),
+        )
+        await observer(started)
+        await observer(completed)
+    finally:
+        _reset_invocation_id(token)
+    observer.shutdown()
+
+    llm_spans = [s for s in exporter.get_finished_spans() if s.name == "openarmature.llm.complete"]
+    assert len(llm_spans) == 1
+    attrs = llm_spans[0].attributes or {}
+    assert not any(k.startswith("openarmature.prompt.") for k in attrs)
+
+
 async def test_disable_llm_spans_skips_llm_provider_span() -> None:
     """Spec §5.5: ``disable_llm_spans=True`` MUST suppress the
     LLM-provider span emission while leaving all other spans intact."""
