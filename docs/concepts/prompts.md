@@ -51,19 +51,19 @@ shape when you want it without removing the separability.
 
 Every `Prompt` carries five identity fields:
 
-- `name` — your stable identifier (`"greeting"`).
-- `version` — the backend's version string. Implementation-defined:
+- `name`: your stable identifier (`"greeting"`).
+- `version`: the backend's version string. Implementation-defined:
   a backend MAY use semver, monotonic integers, content
   hashes, git short-SHAs, or any stable identifier. The
   filesystem backend derives it from the template content
   hash.
-- `label` — the slot the prompt was fetched from
+- `label`: the slot the prompt was fetched from
   (`"production"`, `"latest"`, `"variant-a"`). The label is
   part of the query.
-- `template_hash` — SHA-256 of the raw template source.
+- `template_hash`: SHA-256 of the raw template source.
   Two prompts with different content always have different
   hashes.
-- `fetched_at` — when the prompt was fetched. Cached
+- `fetched_at`: when the prompt was fetched. Cached
   backends preserve the original fetch time, not the
   cache-hit time.
 
@@ -74,14 +74,14 @@ different content under the same `latest` label over time.
 
 A `PromptResult` propagates all of those, plus:
 
-- `rendered_hash` — SHA-256 over the rendered messages.
+- `rendered_hash`: SHA-256 over the rendered messages.
   Same template + same variables → same hash. This is the
   cache-key value a memoization layer wants.
-- `messages` — the rendered output as an LLM-ready
+- `messages`: the rendered output as an LLM-ready
   `list[Message]`. Directly consumable by
   `Provider.complete()`.
-- `variables` — what was applied. Audit-trail friendly.
-- `rendered_at` — when the render happened. Distinct from
+- `variables`: what was applied. Audit-trail friendly.
+- `rendered_at`: when the render happened. Distinct from
   `fetched_at`.
 
 ## Strict variables by default
@@ -91,7 +91,7 @@ raises `PromptRenderError`:
 
 ```python
 prompt = await manager.fetch("greeting", "production")  # "Hello, {{ user }}! Today is {{ day }}."
-manager.render(prompt, {"user": "Alice"})  # raises — "day" is undefined
+manager.render(prompt, {"user": "Alice"})  # raises: "day" is undefined
 ```
 
 This is intentional. Silently substituting empty strings for
@@ -119,14 +119,14 @@ manager = PromptManager(
 ```
 
 - **`PromptStoreUnavailable` from a backend → try the next.**
-  Network's down, vendor API is 5xx-ing, filesystem hiccupped —
-  the manager falls back. This is the "Langfuse is degraded,
+  Network's down, vendor API is 5xx-ing, filesystem hiccupped,
+  so the manager falls back. This is the "Langfuse is degraded,
   use the local copy" case.
 - **`PromptNotFound` from a backend → STOP the chain.** The
-  error propagates. This is the "operator deliberately
-  deleted the prompt from Langfuse to retire it" case —
-  falling back here would silently resurface a stale local
-  copy under a name the operator wanted gone.
+  error propagates. This is the "operator deliberately deleted
+  the prompt from Langfuse to retire it" case; falling back here
+  would silently resurface a stale local copy under a name the
+  operator wanted gone.
 - **All backends `PromptStoreUnavailable` → manager raises
   `PromptStoreUnavailable`.** Everything's down.
 
@@ -144,10 +144,10 @@ Three categories cover every failure mode:
 | `PromptStoreUnavailable`  | Backend infrastructure failure (network, I/O, vendor API)           | Yes       |
 
 `PROMPT_TRANSIENT_CATEGORIES` is exported as a frozenset for
-retry-middleware classifiers — the same pattern
+retry-middleware classifiers, matching the pattern
 `openarmature.llm` uses with its `TRANSIENT_CATEGORIES`.
 
-## PromptGroup — tracing related prompts together
+## PromptGroup: tracing related prompts together
 
 A `PromptGroup` is a structural grouping of two or more
 `PromptResult` instances under a stable `group_name`. The
@@ -170,14 +170,14 @@ with with_active_prompt_group(group):
 
 Canonical patterns the primitive covers:
 
-- **Multi-stage classification** — `[coarse, fine, answer]`.
-- **RAG with reranking** — `[query_rewrite, retrieve, rerank, answer]`.
-- **Self-correction loops** — `[generate, critique, revise]`.
-- **Map-reduce over chunks** — `[chunk_classify_1..N, synthesize]`.
+- **Multi-stage classification**: `[coarse, fine, answer]`.
+- **RAG with reranking**: `[query_rewrite, retrieve, rerank, answer]`.
+- **Self-correction loops**: `[generate, critique, revise]`.
+- **Map-reduce over chunks**: `[chunk_classify_1..N, synthesize]`.
 
 The N=2 case ("classifier + follow-up") is the simplest;
 larger groups work under the same primitive. The group rejects
-empty and single-member shapes — single-prompt tagging is
+empty and single-member shapes; single-prompt tagging is
 already served by the per-prompt observability attributes
 below.
 
@@ -216,7 +216,7 @@ of the inner block.
 
 `render` is deterministic: same `Prompt`, same `variables` →
 bytewise-identical `messages` and `rendered_hash` across
-calls. This is the cache-key contract — `rendered_hash`
+calls. This is the cache-key contract: `rendered_hash`
 gives a downstream memoization layer the right equivalence
 relation for free.
 
@@ -249,30 +249,30 @@ asyncio.run(main())
 ```
 
 The filesystem backend layout is
-`<root>/<label>/<name>.j2` — for the example above,
+`<root>/<label>/<name>.j2`; for the example above,
 `./prompts/production/greeting.j2`.
 
 ## What's out of scope (for now)
 
-- **Specific vendor backends** — Langfuse, PromptLayer, etc.,
+- **Specific vendor backends**: Langfuse, PromptLayer, etc.,
   ship as sibling packages (`openarmature-langfuse`, …). The
   core ships the protocol + a filesystem reference.
-- **Prompt versioning workflows** — how versions are assigned,
+- **Prompt versioning workflows**: how versions are assigned,
   promoted, pinned. Per project. The spec defines the
   `version` field; the discipline is yours.
-- **Cache invalidation policies** — `template_hash` and
+- **Cache invalidation policies**: `template_hash` and
   `rendered_hash` are the keys; the cache itself is a
   separate concern.
-- **Prompt linting / evaluation** — quality checks belong to
+- **Prompt linting / evaluation**: quality checks belong to
   separate tools (or the future eval capability).
-- **Multi-message render decomposition** — v1 emits a single
+- **Multi-message render decomposition**: v1 emits a single
   `UserMessage` carrying the rendered text. If you need
   `system + user` splits, construct the messages list
   manually outside `render()` for now.
 
 ## Where to next
 
-- **[Model Providers](../model-providers/index.md)** —
+- **[Model Providers](../model-providers/index.md)**:
   what to pass `result.messages` into.
-- **[API reference: `openarmature.prompts`](../reference/prompts.md)** —
+- **[API reference: `openarmature.prompts`](../reference/prompts.md)**:
   the full public surface.
