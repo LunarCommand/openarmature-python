@@ -889,6 +889,7 @@ version = "0.5.0"
 source = { editable = "." }
 dependencies = [
     { name = "httpx" },
+    { name = "jinja2" },
     { name = "jsonschema" },
     { name = "pydantic" },
 ]
@@ -926,6 +927,7 @@ examples = [
 [package.metadata]
 requires-dist = [
     { name = "httpx", specifier = ">=0.27" },
+    { name = "jinja2", specifier = ">=3.1" },
     { name = "jsonschema", specifier = ">=4.0" },
     { name = "opentelemetry-api", marker = "extra == 'otel'", specifier = ">=1.27,<3" },
     { name = "opentelemetry-instrumentation-logging", marker = "extra == 'otel'", specifier = ">=0.62.0b1" },
