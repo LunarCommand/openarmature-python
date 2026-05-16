@@ -49,6 +49,7 @@ from openarmature.checkpoint.errors import (
     CheckpointNotFound,
     CheckpointRecordInvalid,
     CheckpointSaveFailed,
+    CheckpointStateMigrationChainAmbiguous,
     CheckpointStateMigrationFailed,
     CheckpointStateMigrationMissing,
 )
@@ -403,16 +404,17 @@ class CompiledGraph[StateT: State]:
                 current_schema_version,
             )
         except ValueError as exc:
-            # MigrationRegistry signals ambiguous chains (multiple
-            # distinct shortest paths) via ValueError. Spec §10.12.2
-            # treats this as a configuration error — surface it
-            # promptly during the resume attempt.
-            raise CheckpointStateMigrationMissing(
+            # MigrationRegistry signals multi-shortest-path ambiguity
+            # via ValueError. Per spec §10.10 / §10.12.2 (proposal 0018,
+            # spec v0.16.0), this routes to the canonical
+            # CheckpointStateMigrationChainAmbiguous category. Spec
+            # accepts load-time detection (this is the resume-side
+            # path); the duplicate-pair case raises the same category
+            # directly from MigrationRegistry.register at build time.
+            raise CheckpointStateMigrationChainAmbiguous(
                 str(exc),
                 from_version=record.schema_version,
                 to_version=current_schema_version,
-                registered_migrations_count=len(self.migration_registry),
-                registry_description=self.migration_registry.describe(),
             ) from exc
 
         if chain is None:
@@ -431,6 +433,17 @@ class CompiledGraph[StateT: State]:
             for i, parent in enumerate(migrated_parents):
                 migrated_parents[i] = _apply_migration_step(migration, parent, f"parent_states[{i}]")
 
+        # TODO(observability): emit an ``openarmature.checkpoint.migrate``
+        # span per spec §6 cross-ref. Deferred to a follow-on because
+        # ``_migrate_record`` runs before the invocation's
+        # ``_InvocationContext`` is created (the engine needs the
+        # migrated state shape to build the context), so the existing
+        # ``_dispatch``-based observer pathway is not yet available
+        # here. A natural fix is to dispatch a synthetic
+        # ``checkpoint_migrated`` event as the first event of the
+        # invocation after context creation. The chain metadata
+        # captured for that event: ``from_version``, ``to_version``
+        # (final target), ``chain_length = len(chain)``.
         return dataclass_replace(
             record,
             state=migrated_state,

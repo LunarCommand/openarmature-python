@@ -26,6 +26,7 @@ from .errors import (
     CheckpointNotFound,
     CheckpointRecordInvalid,
     CheckpointSaveFailed,
+    CheckpointStateMigrationChainAmbiguous,
     CheckpointStateMigrationFailed,
     CheckpointStateMigrationMissing,
 )
@@ -45,6 +46,7 @@ __all__ = [
     "CheckpointRecord",
     "CheckpointRecordInvalid",
     "CheckpointSaveFailed",
+    "CheckpointStateMigrationChainAmbiguous",
     "CheckpointStateMigrationFailed",
     "CheckpointStateMigrationMissing",
     "CheckpointSummary",

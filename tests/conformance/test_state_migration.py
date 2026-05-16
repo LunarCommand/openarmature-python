@@ -41,6 +41,7 @@ from openarmature.checkpoint import (
     CheckpointError,
     CheckpointRecord,
     CheckpointRecordInvalid,
+    CheckpointStateMigrationChainAmbiguous,
     CheckpointStateMigrationFailed,
     CheckpointStateMigrationMissing,
     SQLiteCheckpointer,
@@ -53,7 +54,7 @@ CONFORMANCE_DIR = (
     Path(__file__).resolve().parents[2] / "openarmature-spec" / "spec" / "pipeline-utilities" / "conformance"
 )
 
-_FIXTURE_RANGE = range(39, 47)
+_FIXTURE_RANGE = range(39, 48)
 
 # ---------------------------------------------------------------------------
 # Migration mock library (harness-side; fixtures refer by name)
@@ -213,8 +214,23 @@ async def _seed_record(
 
 
 async def _run_one_case(case: dict[str, Any], tmp_path: Path) -> None:
-    """Run one fixture case end-to-end: build, seed, resume, assert."""
+    """Run one fixture case end-to-end: build, seed, resume, assert.
+
+    Fixture 047 (chain-ambiguous) introduces a new primitive:
+    ``expected_chain_ambiguity_error`` that can land at EITHER the
+    case top level (registration-time detection: the migration set
+    raises on registration so the ``resume:`` block is unreachable)
+    OR inside ``resume:`` (load-time detection: registration
+    succeeds and BFS raises during the resume attempt). The driver
+    wraps both phases in try/except so the canonical category
+    surfaces from either timing per spec §10.12.2's compile-time-
+    SHOULD / load-time-acceptable carve-out.
+    """
     state_cls = _build_state_cls(case["state"], model_name=f"Case_{case['name']}")
+
+    case_level_ambiguity = case.get("expected_chain_ambiguity_error")
+    resume_level_ambiguity = case.get("resume", {}).get("expected_chain_ambiguity_error")
+    expected_ambiguity = case_level_ambiguity or resume_level_ambiguity
 
     # Minimal node body: apply ``update_pure`` to the state.
     nodes_spec = case["nodes"]
@@ -235,12 +251,23 @@ async def _run_one_case(case: dict[str, Any], tmp_path: Path) -> None:
         builder.add_edge(edge["from"], target)
     builder.set_entry(entry)
 
-    # Register migrations + wrap each in the trace recorder.
+    # Register migrations + wrap each in the trace recorder. The
+    # duplicate-pair ambiguity case raises during this loop.
     trace = _MigrationTrace()
-    for m in case.get("migrations", []):
-        mock = _MOCK_LIBRARY[m["migrate"]]
-        wrapped = trace.wrap(m["migrate"], mock, m["from_version"], m["to_version"])
-        builder.with_state_migration(m["from_version"], m["to_version"], wrapped)
+    raised: BaseException | None = None
+    try:
+        for m in case.get("migrations", []):
+            mock = _MOCK_LIBRARY[m["migrate"]]
+            wrapped = trace.wrap(m["migrate"], mock, m["from_version"], m["to_version"])
+            builder.with_state_migration(m["from_version"], m["to_version"], wrapped)
+    except CheckpointError as exc:
+        raised = exc
+
+    if raised is not None:
+        if expected_ambiguity is not None:
+            _assert_ambiguity(expected_ambiguity, raised)
+            return
+        raise AssertionError(f"unexpected build-time raise: {raised!r}")
 
     # Configure the SQLite backend in JSON mode (the migration-eligible
     # backend per spec §10.12.1). One database file per case, isolated
@@ -255,15 +282,24 @@ async def _run_one_case(case: dict[str, Any], tmp_path: Path) -> None:
     if "seeded_record" in case:
         await _seed_record(checkpointer, invocation_id, case["seeded_record"])
 
-    # Resume + assert.
-    resume = case["resume"]
-    # For resume-from-seeded cases the engine loads state from the
-    # checkpoint and never reads ``initial_state``; using
-    # ``model_construct`` skips Pydantic validation so fixtures with
-    # required fields (e.g., 044) can construct a placeholder without
-    # tripping the validator before the resume even starts.
+    # Resume + assert. Some fixtures (047 case 1, the duplicate-pair
+    # registration case) have no ``resume:`` block — the ambiguity
+    # fires at build time, above. For the resume-side cases the
+    # engine loads state from the checkpoint and never reads
+    # ``initial_state``; ``model_construct`` skips Pydantic
+    # validation so fixtures with required fields (044) can construct
+    # a placeholder without tripping the validator before the resume
+    # even starts.
+    resume = case.get("resume")
+    if resume is None:
+        if expected_ambiguity is not None:
+            raise AssertionError(
+                f"expected build-time chain-ambiguity raise ({expected_ambiguity!r}) "
+                f"but registration completed without raising"
+            )
+        return
+
     initial_state = state_cls.model_construct()
-    raised: BaseException | None = None
     final_state: Any = None
     try:
         if resume.get("from_seeded_record"):
@@ -273,11 +309,26 @@ async def _run_one_case(case: dict[str, Any], tmp_path: Path) -> None:
     except CheckpointError as exc:
         raised = exc
 
+    if expected_ambiguity is not None:
+        _assert_ambiguity(expected_ambiguity, raised)
+        return
     if "expected_error" in resume:
         _assert_error(resume["expected_error"], resume.get("invariants", {}), raised)
     elif "expected" in resume:
         assert raised is None, f"expected success, got {raised!r}"
         _assert_success(resume["expected"], resume.get("invariants", {}), final_state, trace)
+
+
+def _assert_ambiguity(expected_category: str, raised: BaseException | None) -> None:
+    """Verify the case raised the canonical chain-ambiguity category
+    at either build time or resume time."""
+    assert raised is not None, (
+        f"expected chain-ambiguity raise of category {expected_category!r}, got no exception"
+    )
+    actual_category = getattr(raised, "category", None)
+    assert actual_category == expected_category, (
+        f"expected category {expected_category!r}, got {actual_category!r} ({raised!r})"
+    )
 
 
 def _assert_error(
@@ -397,4 +448,9 @@ async def test_state_migration_fixture(fixture_path: Path, tmp_path: Path) -> No
 # reference them via the spec-error-category strings inside the
 # fixtures, not by class identity, so the imports are load-bearing
 # for the package-public API surface verification).
-_ = CheckpointRecordInvalid, CheckpointStateMigrationFailed, CheckpointStateMigrationMissing
+_ = (
+    CheckpointRecordInvalid,
+    CheckpointStateMigrationChainAmbiguous,
+    CheckpointStateMigrationFailed,
+    CheckpointStateMigrationMissing,
+)

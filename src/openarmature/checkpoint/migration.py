@@ -15,6 +15,8 @@ from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from typing import Any
 
+from .errors import CheckpointStateMigrationChainAmbiguous
+
 
 @dataclass(frozen=True)
 class StateMigration:
@@ -43,11 +45,14 @@ class MigrationRegistry:
     Registration-time invariants:
 
     - Two migrations with the same ``from_version`` AND
-      ``to_version`` raise ``ValueError`` (chain ambiguity per
-      §10.12.1).
+      ``to_version`` raise ``CheckpointStateMigrationChainAmbiguous``
+      directly per spec §10.10 (proposal 0018) so the canonical
+      category surfaces at the registration boundary without any
+      wrapping by the builder.
     - Two migrations with the same ``from_version`` and different
       ``to_version`` are permitted (branched migration graph;
-      chain resolution picks a path).
+      chain resolution picks a path or raises ambiguity if multiple
+      shortest paths exist).
 
     Resolution-time semantics (per §10.12.2):
 
@@ -59,9 +64,11 @@ class MigrationRegistry:
     - Non-empty registry with no connecting path → same.
     - Found a unique shortest path → return ordered list.
     - Found multiple distinct shortest paths (same edge count,
-      different edge sequences) → raise ``ValueError`` per
-      §10.12.2's ambiguous-chain rule. Spec accepts load-time
-      detection.
+      different edge sequences) → raise ``ValueError`` internally;
+      ``CompiledGraph._migrate_record`` wraps the ``ValueError`` as
+      ``CheckpointStateMigrationChainAmbiguous`` at the resume
+      boundary. The internal ``ValueError`` keeps the registry
+      module dependency-light (no canonical-error import cycle).
     """
 
     def __init__(self) -> None:
@@ -71,9 +78,16 @@ class MigrationRegistry:
     def register(self, migration: StateMigration) -> None:
         key = (migration.from_version, migration.to_version)
         if key in self._migrations:
-            raise ValueError(
+            # Per spec §10.10 / §10.12.1 (proposal 0018, spec v0.16.0):
+            # duplicate-pair detection raises the canonical category
+            # directly at registration time. The category surfaces
+            # before any resume attempt — neither the builder nor the
+            # caller needs to wrap.
+            raise CheckpointStateMigrationChainAmbiguous(
                 f"duplicate state migration {migration.from_version!r}→"
-                f"{migration.to_version!r} registered; chain would be ambiguous"
+                f"{migration.to_version!r} registered; chain would be ambiguous",
+                from_version=migration.from_version,
+                to_version=migration.to_version,
             )
         self._migrations[key] = migration
         self._edges.setdefault(migration.from_version, []).append(migration)
@@ -132,6 +146,12 @@ class MigrationRegistry:
                 # shortest path. Allow re-entry only when the new
                 # arrival is at the same layer as the first arrival
                 # (distinct shortest paths through the same node).
+                # NOTE: the strict-less-than comparison is load-
+                # bearing for multi-shortest-path detection — a
+                # diamond v1→v2→v4 + v1→v3→v4 lets BFS reach v4 via
+                # both v2 and v3 at layer 2, and both paths land in
+                # ``shortest_paths``. Tightening this to ``<=`` would
+                # break the ambiguity check.
                 prior_depth = distances.get(next_version)
                 if prior_depth is not None and prior_depth < depth + 1:
                     continue
@@ -154,6 +174,13 @@ class MigrationRegistry:
         """Human-readable description of the registered set, used
         in the ``CheckpointStateMigrationMissing`` error payload.
         Empty registry returns ``"<no migrations registered>"``.
+
+        Output is registration-order (Python's dict preserves
+        insertion order). Diff-friendly test assertions should
+        not depend on the order across distinct registration
+        sequences; if cross-language conformance ever needs a
+        canonical order, a future change can sort by
+        ``(from_version, to_version)``.
         """
         if not self._migrations:
             return "<no migrations registered>"

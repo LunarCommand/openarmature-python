@@ -203,28 +203,37 @@ migration leading to v2 and another leading to v2-experimental;
 chain resolution picks the path that ends at the current declared
 version.
 
-Two ambiguity cases are configuration errors:
+Two ambiguity cases are configuration errors. Both surface as
+`CheckpointStateMigrationChainAmbiguous`:
 
 - **Duplicate edges.** Registering two migrations with the same
-  `(from_version, to_version)` pair raises `ValueError` at
-  registration. Either delete one or pick distinct version
-  identifiers.
+  `(from_version, to_version)` pair raises at registration time so
+  the configuration error surfaces before any resume attempt.
+  Either delete one or pick distinct version identifiers.
 - **Multiple shortest paths.** A diamond like
   `v1 → v2 → v4` and `v1 → v3 → v4` is ambiguous: both paths have
-  length 2. The engine surfaces this as
-  `CheckpointStateMigrationMissing` on resume so the user can
+  length 2. The engine raises during resume so the user can
   register fewer migrations or pick a single canonical route.
 
-### The two new error categories
+### The three new error categories
 
+- **`CheckpointStateMigrationChainAmbiguous`**: the registered
+  migration graph is ambiguous (duplicate `(from, to)` pair at
+  registration time, OR multiple distinct shortest paths between
+  the saved and current versions at resume time). Surfaces before
+  any migration function runs. Carries `from_version` and
+  `to_version` when known.
 - **`CheckpointStateMigrationMissing`**: the saved version doesn't
-  match the current version, and no chain (or no unambiguous chain)
-  bridges them. Carries `from_version`, `to_version`, a count of
-  registered migrations, and a human-readable `registry_description`
-  so operators see what IS available.
+  match the current version, and no chain bridges them. Carries
+  `from_version`, `to_version`, a count of registered migrations,
+  and a human-readable `registry_description` so operators see what
+  IS available.
 - **`CheckpointStateMigrationFailed`**: a user-supplied migration
   function raised. Subsequent migrations in the chain don't run;
   the resume fails. The migration's exception rides `__cause__`.
+
+Routing precedence on resume: chain-ambiguous → missing → failed →
+record-invalid.
 
 A third category, `CheckpointRecordInvalid`, continues to cover the
 **post**-migration case: a migration ran cleanly but produced

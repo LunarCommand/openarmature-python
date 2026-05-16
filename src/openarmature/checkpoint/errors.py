@@ -111,6 +111,42 @@ class CheckpointStateMigrationMissing(CheckpointError):
         self.registry_description = registry_description
 
 
+class CheckpointStateMigrationChainAmbiguous(CheckpointError):
+    """Raised when the registered migration graph is ambiguous per
+    spec §10.10 / §10.12 (proposal 0018, spec v0.16.0):
+
+    - Duplicate-pair case (§10.12.1): two migrations register with the
+      same ``(from_version, to_version)`` pair. Raised at registration
+      time so the user sees the ambiguity before any resume attempt.
+    - Multi-shortest-path case (§10.12.2): the registered migration
+      graph has multiple distinct shortest paths between the saved
+      and current versions (e.g., a diamond ``v1→v2→v4`` + ``v1→v3→v4``).
+      Spec accepts either compile-time detection (recommended) or
+      load-time detection (this impl runs the check inside BFS at
+      resume time).
+
+    Non-transient: retrying without changing the migration graph
+    will not succeed. Carries ``from_version`` / ``to_version`` when
+    known (always set for the duplicate-pair case, set on the resume
+    side too for multi-shortest-path detection).
+    """
+
+    category = "checkpoint_state_migration_chain_ambiguous"
+
+    from_version: str | None
+    to_version: str | None
+
+    def __init__(
+        self,
+        *args: Any,
+        from_version: str | None = None,
+        to_version: str | None = None,
+    ) -> None:
+        super().__init__(*args)
+        self.from_version = from_version
+        self.to_version = to_version
+
+
 class CheckpointStateMigrationFailed(CheckpointError):
     """Raised on resume when a registered migration function raises
     during chain application (per spec §10.12.2). The migration's
@@ -140,6 +176,7 @@ __all__ = [
     "CheckpointNotFound",
     "CheckpointRecordInvalid",
     "CheckpointSaveFailed",
+    "CheckpointStateMigrationChainAmbiguous",
     "CheckpointStateMigrationFailed",
     "CheckpointStateMigrationMissing",
 ]

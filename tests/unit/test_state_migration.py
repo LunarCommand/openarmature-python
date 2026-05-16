@@ -13,6 +13,7 @@ from __future__ import annotations
 import pytest
 
 from openarmature.checkpoint import (
+    CheckpointStateMigrationChainAmbiguous,
     CheckpointStateMigrationFailed,
     CheckpointStateMigrationMissing,
     MigrationRegistry,
@@ -47,7 +48,12 @@ def test_registry_lists_registered_in_order() -> None:
 def test_registry_rejects_duplicate_edge() -> None:
     registry = MigrationRegistry()
     registry.register(StateMigration(from_version="v1", to_version="v2", migrate=_id))
-    with pytest.raises(ValueError, match="duplicate state migration"):
+    # Per spec §10.10 / §10.12.1 (proposal 0018, v0.16.0), duplicate-
+    # pair detection raises the canonical category directly at
+    # registration time. ``CheckpointStateMigrationChainAmbiguous``
+    # inherits from ``CheckpointError`` (not ``ValueError``), so the
+    # canonical-category assertion is the right shape.
+    with pytest.raises(CheckpointStateMigrationChainAmbiguous, match="duplicate state migration"):
         registry.register(StateMigration(from_version="v1", to_version="v2", migrate=_id))
 
 
@@ -114,7 +120,12 @@ def test_resolve_chain_picks_shortest_when_unique() -> None:
 
 
 def test_resolve_chain_ambiguous_shortest_paths_raises() -> None:
-    """Diamond with two distinct same-length paths is ambiguous per spec §10.12.2."""
+    """Diamond with two distinct same-length paths is ambiguous per
+    spec §10.12.2. The registry raises ``ValueError`` internally;
+    ``CompiledGraph._migrate_record`` wraps it as the canonical
+    ``CheckpointStateMigrationChainAmbiguous`` at the resume boundary
+    (see test_registry_ambiguity_routes_to_canonical_category_on_resume
+    in the conformance suite for the boundary wrap)."""
     registry = MigrationRegistry()
     registry.register(StateMigration(from_version="v1", to_version="v2", migrate=_id))
     registry.register(StateMigration(from_version="v1", to_version="v3", migrate=_id))
@@ -122,6 +133,28 @@ def test_resolve_chain_ambiguous_shortest_paths_raises() -> None:
     registry.register(StateMigration(from_version="v3", to_version="v4", migrate=_id))
     with pytest.raises(ValueError, match="ambiguous migration chain"):
         registry.resolve_chain("v1", "v4")
+
+
+def test_chain_ambiguous_category_string() -> None:
+    """The canonical category string per spec §10.10 (proposal 0018)."""
+    exc = CheckpointStateMigrationChainAmbiguous("boom")
+    assert exc.category == "checkpoint_state_migration_chain_ambiguous"
+
+
+def test_chain_ambiguous_carries_identity_when_set() -> None:
+    exc = CheckpointStateMigrationChainAmbiguous(
+        "duplicate v1→v2 registered",
+        from_version="v1",
+        to_version="v2",
+    )
+    assert exc.from_version == "v1"
+    assert exc.to_version == "v2"
+
+
+def test_chain_ambiguous_carries_none_when_unset() -> None:
+    exc = CheckpointStateMigrationChainAmbiguous("boom")
+    assert exc.from_version is None
+    assert exc.to_version is None
 
 
 # ---------------------------------------------------------------------------
@@ -161,7 +194,7 @@ def test_builder_with_state_migrations_plural() -> None:
 def test_builder_duplicate_registration_raises() -> None:
     builder = _build_minimal_graph()
     builder.with_state_migration("v0", "v1", _id)
-    with pytest.raises(ValueError, match="duplicate state migration"):
+    with pytest.raises(CheckpointStateMigrationChainAmbiguous):
         builder.with_state_migration("v0", "v1", _id)
 
 
