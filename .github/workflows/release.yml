@@ -38,8 +38,11 @@ jobs:
       # ``Unknown`` for every OTel-typed expression in
       # ``tests/{conformance,unit}/test_observability*.py`` and the
       # whole job fails (pyright doesn't honor pytest.importorskip).
+      # ``--group examples`` mirrors ``ci.yml`` so the
+      # ``tests/test_examples_smoke.py`` modules can import ``openai``
+      # at load time (the examples themselves are runnable demos).
       - name: Sync deps
-        run: uv sync --frozen --all-extras
+        run: uv sync --frozen --all-extras --group examples
 
       # Fail fast if pyproject.toml's version doesn't match the pushed
       # tag. Both sides go through `packaging.version.Version` so PEP 440
