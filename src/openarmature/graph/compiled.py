@@ -62,7 +62,6 @@ from openarmature.checkpoint.protocol import (
 from openarmature.observability.correlation import (
     _reset_active_dispatch,
     _reset_active_observers,
-    _reset_attempt_index,
     _reset_correlation_id,
     _reset_fan_out_index,
     _reset_invocation_id,
@@ -70,12 +69,12 @@ from openarmature.observability.correlation import (
     _set_active_dispatch,
     _set_active_observer_span,
     _set_active_observers,
-    _set_attempt_index,
     _set_correlation_id,
     _set_fan_out_index,
     _set_invocation_id,
     _set_namespace_prefix,
     current_active_observer_span,
+    current_attempt_index,
 )
 
 from .edges import END, ConditionalEdge, EndSentinel, StaticEdge
@@ -946,72 +945,72 @@ class CompiledGraph[StateT: State]:
             # the original `category` attribute (timing's
             # exception_category, retry's classifier). The engine wraps
             # any exception that escapes the chain, OUTSIDE this layer.
-            attempt_index = attempt_counter[0]
             attempt_counter[0] += 1
 
-            # Calling-node identity for capability backends emitting
-            # from inside this attempt's scope (e.g., LLM provider's
-            # span hook). Per-attempt scope so retry middleware that
-            # re-enters innermost bumps the visible attempt_index.
-            attempt_token = _set_attempt_index(attempt_index)
+            # Per graph-engine §6 (clarified in v0.16.1): event
+            # emission reads ``attempt_index`` from the ContextVar set
+            # by any enclosing retry middleware — direct (per-node
+            # MW) or transitive (instance / branch MW on a subgraph
+            # the retry re-invokes). The engine itself no longer
+            # writes the var; innermost-wins precedence falls out of
+            # Python's ContextVar token-stack semantics.
+            attempt_index = current_attempt_index()
+
+            self._dispatch_started(context, current, namespace, step, s, attempt_index=attempt_index)
+
+            # Splice the observer-published span (if any) into the
+            # OTel context so logs emitted from the FIRST line of
+            # the node body — before any ``await`` — pick up the
+            # right trace_id/span_id via OTel's LoggingHandler.
+            # Detach in ``finally`` so retries / merge / completed
+            # dispatch don't run with the span still active, and
+            # clear ``current_active_observer_span`` to ``None`` so
+            # the next dispatch that raises or early-returns from
+            # ``prepare_sync`` can't reveal this node's span as a
+            # stale value to the engine's read.
+            otel_token = _attach_active_observer_span()
             try:
-                self._dispatch_started(context, current, namespace, step, s, attempt_index=attempt_index)
-
-                # Splice the observer-published span (if any) into the
-                # OTel context so logs emitted from the FIRST line of
-                # the node body — before any ``await`` — pick up the
-                # right trace_id/span_id via OTel's LoggingHandler.
-                # Detach in ``finally`` so retries / merge / completed
-                # dispatch don't run with the span still active, and
-                # clear ``current_active_observer_span`` to ``None`` so
-                # the next dispatch that raises or early-returns from
-                # ``prepare_sync`` can't reveal this node's span as a
-                # stale value to the engine's read.
-                otel_token = _attach_active_observer_span()
                 try:
-                    try:
-                        partial = await node.run(s)
-                    except Exception as e:
-                        wrapped = NodeException(node_name=current, cause=e, recoverable_state=s)
-                        self._dispatch_completed(
-                            context,
-                            current,
-                            namespace,
-                            step,
-                            s,
-                            error=wrapped,
-                            attempt_index=attempt_index,
-                        )
-                        raise
-                finally:
-                    _detach_active_observer_span(otel_token)
-                    _set_active_observer_span(None)
-
-                try:
-                    merged = _merge_partial(s, partial, self.reducers, current)
-                except (ReducerError, StateValidationError) as e:
+                    partial = await node.run(s)
+                except Exception as e:
+                    wrapped = NodeException(node_name=current, cause=e, recoverable_state=s)
                     self._dispatch_completed(
                         context,
                         current,
                         namespace,
                         step,
                         s,
-                        error=e,
+                        error=wrapped,
                         attempt_index=attempt_index,
                     )
                     raise
-
-                # Defer the success-case completed dispatch to
-                # ``finalize_completed`` per proposal-0012; just
-                # record the info for the outer scope.
-                deferred_info[0] = (attempt_index, cast("StateT", s), cast("StateT", merged))
-                # Return the partial (not the merged state) so middleware sees
-                # the partial-update shape per pipeline-utilities §2. The
-                # engine's canonical merge against the original state happens
-                # below, after the chain returns.
-                return partial
             finally:
-                _reset_attempt_index(attempt_token)
+                _detach_active_observer_span(otel_token)
+                _set_active_observer_span(None)
+
+            try:
+                merged = _merge_partial(s, partial, self.reducers, current)
+            except (ReducerError, StateValidationError) as e:
+                self._dispatch_completed(
+                    context,
+                    current,
+                    namespace,
+                    step,
+                    s,
+                    error=e,
+                    attempt_index=attempt_index,
+                )
+                raise
+
+            # Defer the success-case completed dispatch to
+            # ``finalize_completed`` per proposal-0012; just
+            # record the info for the outer scope.
+            deferred_info[0] = (attempt_index, cast("StateT", s), cast("StateT", merged))
+            # Return the partial (not the merged state) so middleware sees
+            # the partial-update shape per pipeline-utilities §2. The
+            # engine's canonical merge against the original state happens
+            # below, after the chain returns.
+            return partial
 
         chain: ChainCall = compose_chain(
             list(self.middleware) + list(node.middleware),
@@ -1055,23 +1054,27 @@ class CompiledGraph[StateT: State]:
         merged_outer = _merge_partial(state, final_partial, self.reducers, current)
         # Spec §10.3: save fires once the canonical merge succeeds —
         # the LAST attempt's index is what gets recorded (retries
-        # don't multiply saves). attempt_counter[0] is one past the
-        # final attempt; ``max(0, ... - 1)`` covers the
-        # short-circuit case where middleware returns a partial
-        # without ever invoking ``next()`` (counter stays at 0,
-        # subtracting 1 would yield an invalid -1).
+        # don't multiply saves). Per graph-engine §6 v0.16.1, the
+        # recorded value is the wrapping retry MW's attempt counter
+        # (which the inner-node events also reflected via the
+        # ContextVar). ``deferred_info[0]`` captures that value at
+        # the moment of the successful merge, sourced from
+        # ``current_attempt_index()``. When middleware short-
+        # circuited without invoking ``next()``, ``deferred_info[0]``
+        # is None and the save records attempt_index=0.
+        info = deferred_info[0]
+        saved_attempt = info[0] if info is not None else 0
         await self._maybe_save_checkpoint(
             context,
             node_name=current,
             namespace=namespace,
             step=step,
-            attempt_index=max(0, attempt_counter[0] - 1),
+            attempt_index=saved_attempt,
             post_state=merged_outer,
         )
 
         # Build the deferred-dispatch closure for the success-case
         # completed event. ``_invoke`` calls this after edge eval.
-        info = deferred_info[0]
         if info is None:
             # Middleware short-circuited without invoking ``next`` —
             # no started/completed pair fired. Edge errors after this
@@ -1314,72 +1317,43 @@ class CompiledGraph[StateT: State]:
         deferred_info: list[tuple[int, StateT, StateT] | None] = [None]
 
         async def innermost(s: Any) -> Mapping[str, Any]:
-            attempt_index = attempt_counter[0]
             attempt_counter[0] += 1
-            attempt_token = _set_attempt_index(attempt_index)
-            try:
-                self._dispatch_started(
-                    context,
-                    current,
-                    namespace,
-                    step,
-                    s,
-                    attempt_index=attempt_index,
-                    fan_out_config=fan_out_event_config,
-                )
-                # Same OTel attach pattern as ``_step_function_node``'s
-                # ``innermost`` — splice the observer-published span
-                # into the OTel context so logs emitted from inside
-                # the fan-out node's own scope (middleware bodies,
-                # the dispatch machinery) carry the right
-                # trace_id/span_id. Per-instance bodies get their own
-                # attach inside their ``_step_function_node``
-                # innermost when the recursive invocation hits leaf
-                # nodes. ``finally`` clears the ContextVar so a later
-                # dispatch whose ``prepare_sync`` raises or early-
-                # returns can't reveal this fan-out's span as a stale
-                # value to the engine's read.
-                otel_token = _attach_active_observer_span()
-                try:
-                    try:
-                        partial = await node.run_with_context(
-                            s,
-                            context,
-                            pre_resolved_count=item_count,
-                            pre_resolved_concurrency=(concurrency_resolved,),
-                        )
-                    except RuntimeGraphError as e:
-                        self._dispatch_completed(
-                            context,
-                            current,
-                            namespace,
-                            step,
-                            s,
-                            error=e,
-                            attempt_index=attempt_index,
-                            fan_out_config=fan_out_event_config,
-                        )
-                        raise
-                    except Exception as e:
-                        wrapped = NodeException(node_name=current, cause=e, recoverable_state=s)
-                        self._dispatch_completed(
-                            context,
-                            current,
-                            namespace,
-                            step,
-                            s,
-                            error=wrapped,
-                            attempt_index=attempt_index,
-                            fan_out_config=fan_out_event_config,
-                        )
-                        raise wrapped from e
-                finally:
-                    _detach_active_observer_span(otel_token)
-                    _set_active_observer_span(None)
+            # Read from ContextVar — see ``_step_function_node``'s
+            # ``innermost`` comment on the v0.16.1 attempt-index
+            # propagation rule.
+            attempt_index = current_attempt_index()
 
+            self._dispatch_started(
+                context,
+                current,
+                namespace,
+                step,
+                s,
+                attempt_index=attempt_index,
+                fan_out_config=fan_out_event_config,
+            )
+            # Same OTel attach pattern as ``_step_function_node``'s
+            # ``innermost`` — splice the observer-published span
+            # into the OTel context so logs emitted from inside
+            # the fan-out node's own scope (middleware bodies,
+            # the dispatch machinery) carry the right
+            # trace_id/span_id. Per-instance bodies get their own
+            # attach inside their ``_step_function_node``
+            # innermost when the recursive invocation hits leaf
+            # nodes. ``finally`` clears the ContextVar so a later
+            # dispatch whose ``prepare_sync`` raises or early-
+            # returns can't reveal this fan-out's span as a stale
+            # value to the engine's read.
+            otel_token = _attach_active_observer_span()
+            try:
                 try:
-                    merged = _merge_partial(s, partial, self.reducers, current)
-                except (ReducerError, StateValidationError) as e:
+                    partial = await node.run_with_context(
+                        s,
+                        context,
+                        pre_resolved_count=item_count,
+                        pre_resolved_concurrency=(concurrency_resolved,),
+                    )
+                except RuntimeGraphError as e:
                     self._dispatch_completed(
                         context,
                         current,
@@ -1391,13 +1365,42 @@ class CompiledGraph[StateT: State]:
                         fan_out_config=fan_out_event_config,
                     )
                     raise
-
-                # Defer the success-case completed dispatch per
-                # proposal-0012; record the info for the outer scope.
-                deferred_info[0] = (attempt_index, cast("StateT", s), cast("StateT", merged))
-                return partial
+                except Exception as e:
+                    wrapped = NodeException(node_name=current, cause=e, recoverable_state=s)
+                    self._dispatch_completed(
+                        context,
+                        current,
+                        namespace,
+                        step,
+                        s,
+                        error=wrapped,
+                        attempt_index=attempt_index,
+                        fan_out_config=fan_out_event_config,
+                    )
+                    raise wrapped from e
             finally:
-                _reset_attempt_index(attempt_token)
+                _detach_active_observer_span(otel_token)
+                _set_active_observer_span(None)
+
+            try:
+                merged = _merge_partial(s, partial, self.reducers, current)
+            except (ReducerError, StateValidationError) as e:
+                self._dispatch_completed(
+                    context,
+                    current,
+                    namespace,
+                    step,
+                    s,
+                    error=e,
+                    attempt_index=attempt_index,
+                    fan_out_config=fan_out_event_config,
+                )
+                raise
+
+            # Defer the success-case completed dispatch per
+            # proposal-0012; record the info for the outer scope.
+            deferred_info[0] = (attempt_index, cast("StateT", s), cast("StateT", merged))
+            return partial
 
         chain: ChainCall = compose_chain(
             list(self.middleware) + list(node.middleware),
@@ -1434,19 +1437,23 @@ class CompiledGraph[StateT: State]:
         # one record once the fan-out as a whole has finished and
         # results have merged back. Per-instance internal saves are
         # gated off by the fan-out instance descent setting
-        # ``checkpointer=None`` on the inner context. ``max(0, ...)``
-        # guards against the short-circuit case (middleware returns a
-        # partial without ever invoking ``next()``).
+        # ``checkpointer=None`` on the inner context. Per graph-engine
+        # §6 v0.16.1: the saved attempt_index reflects the wrapping
+        # retry MW's counter (sourced from ``deferred_info[0]`` which
+        # captured ``current_attempt_index()`` at the moment of the
+        # successful merge). Short-circuit case (middleware returned
+        # without invoking ``next``) records attempt_index=0.
+        info = deferred_info[0]
+        saved_attempt = info[0] if info is not None else 0
         await self._maybe_save_checkpoint(
             context,
             node_name=current,
             namespace=namespace,
             step=step,
-            attempt_index=max(0, attempt_counter[0] - 1),
+            attempt_index=saved_attempt,
             post_state=merged_outer,
         )
 
-        info = deferred_info[0]
         if info is None:
             return _StepResult(state=merged_outer, finalize_completed=_no_op_finalize)
         final_attempt_index, final_pre_state, final_merged = info
@@ -1508,52 +1515,24 @@ class CompiledGraph[StateT: State]:
         deferred_info: list[tuple[int, StateT, StateT] | None] = [None]
 
         async def innermost(s: Any) -> Mapping[str, Any]:
-            attempt_index = attempt_counter[0]
             attempt_counter[0] += 1
-            attempt_token = _set_attempt_index(attempt_index)
-            try:
-                self._dispatch_started(
-                    context,
-                    current,
-                    namespace,
-                    step,
-                    s,
-                    attempt_index=attempt_index,
-                )
-                otel_token = _attach_active_observer_span()
-                try:
-                    try:
-                        partial = await node.run_with_context(s, context)
-                    except RuntimeGraphError as e:
-                        self._dispatch_completed(
-                            context,
-                            current,
-                            namespace,
-                            step,
-                            s,
-                            error=e,
-                            attempt_index=attempt_index,
-                        )
-                        raise
-                    except Exception as e:
-                        wrapped = NodeException(node_name=current, cause=e, recoverable_state=s)
-                        self._dispatch_completed(
-                            context,
-                            current,
-                            namespace,
-                            step,
-                            s,
-                            error=wrapped,
-                            attempt_index=attempt_index,
-                        )
-                        raise wrapped from e
-                finally:
-                    _detach_active_observer_span(otel_token)
-                    _set_active_observer_span(None)
+            # Read from ContextVar — see ``_step_function_node``'s
+            # ``innermost`` for the v0.16.1 propagation rule.
+            attempt_index = current_attempt_index()
 
+            self._dispatch_started(
+                context,
+                current,
+                namespace,
+                step,
+                s,
+                attempt_index=attempt_index,
+            )
+            otel_token = _attach_active_observer_span()
+            try:
                 try:
-                    merged = _merge_partial(s, partial, self.reducers, current)
-                except (ReducerError, StateValidationError) as e:
+                    partial = await node.run_with_context(s, context)
+                except RuntimeGraphError as e:
                     self._dispatch_completed(
                         context,
                         current,
@@ -1564,11 +1543,38 @@ class CompiledGraph[StateT: State]:
                         attempt_index=attempt_index,
                     )
                     raise
-
-                deferred_info[0] = (attempt_index, cast("StateT", s), cast("StateT", merged))
-                return partial
+                except Exception as e:
+                    wrapped = NodeException(node_name=current, cause=e, recoverable_state=s)
+                    self._dispatch_completed(
+                        context,
+                        current,
+                        namespace,
+                        step,
+                        s,
+                        error=wrapped,
+                        attempt_index=attempt_index,
+                    )
+                    raise wrapped from e
             finally:
-                _reset_attempt_index(attempt_token)
+                _detach_active_observer_span(otel_token)
+                _set_active_observer_span(None)
+
+            try:
+                merged = _merge_partial(s, partial, self.reducers, current)
+            except (ReducerError, StateValidationError) as e:
+                self._dispatch_completed(
+                    context,
+                    current,
+                    namespace,
+                    step,
+                    s,
+                    error=e,
+                    attempt_index=attempt_index,
+                )
+                raise
+
+            deferred_info[0] = (attempt_index, cast("StateT", s), cast("StateT", merged))
+            return partial
 
         chain: ChainCall = compose_chain(
             list(self.middleware) + list(node.middleware),
@@ -1592,16 +1598,17 @@ class CompiledGraph[StateT: State]:
             _reset_active_dispatch(dispatch_token)
             _reset_active_observers(observers_token)
         merged_outer = _merge_partial(state, final_partial, self.reducers, current)
+        info = deferred_info[0]
+        saved_attempt = info[0] if info is not None else 0
         await self._maybe_save_checkpoint(
             context,
             node_name=current,
             namespace=namespace,
             step=step,
-            attempt_index=max(0, attempt_counter[0] - 1),
+            attempt_index=saved_attempt,
             post_state=merged_outer,
         )
 
-        info = deferred_info[0]
         if info is None:
             return _StepResult(state=merged_outer, finalize_completed=_no_op_finalize)
         final_attempt_index, final_pre_state, final_merged = info
