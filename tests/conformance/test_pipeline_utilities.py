@@ -695,16 +695,6 @@ def _check_parallel_branches_invariants(
     obs = next(iter(observer_fixtures.values()))
     events = obs.events
 
-    # Discover the parallel-branches dispatcher node's branch keys from
-    # the spec so the invariant matchers can scope their assertions.
-    pb_branches: dict[str, list[str]] = {}
-    nodes = cast("dict[str, dict[str, Any]]", spec.get("nodes") or {})
-    for node_name, node_spec in nodes.items():
-        pb_cfg = cast("dict[str, Any] | None", node_spec.get("parallel_branches"))
-        if pb_cfg is not None:
-            branches = cast("dict[str, Any]", pb_cfg.get("branches") or {})
-            pb_branches[node_name] = list(branches.keys())
-
     started_events = [ev for ev in events if ev["phase"] == "started"]
 
     # 037 — branches' started events fire in branches insertion order
@@ -764,7 +754,6 @@ def _check_parallel_branches_invariants(
             assert plain_events, (
                 f"expected branch_name={plain_branch!r} inner events without fan_out_index; got none"
             )
-    del pb_branches  # populated for future invariant kinds
 
 
 def _check_trace_records(
