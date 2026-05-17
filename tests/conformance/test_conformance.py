@@ -70,9 +70,8 @@ _STANDARD_RUNTIME_FIXTURES = [
 # passes." Each subsequent PR drops its own rows as it lands the
 # underlying support.
 _DEFERRED_FIXTURES: dict[str, str] = {
-    # proposal 0011 — parallel branches; adds ``branch_name`` to
-    # NodeEvent (PR-5 of the batch)
-    "021-observer-branch-name": "0011 parallel branches (PR-5)",
+    # proposal 0011 — parallel branches; fixture 021 (``branch_name``
+    # field on NodeEvent) runs through this driver as of PR-5.
 }
 
 
@@ -319,6 +318,9 @@ async def _run_runtime_case(spec: Mapping[str, Any], fixture_id: str) -> None:
             f"delivery_order mismatch: actual={delivery}, expected={expected_delivery}"
         )
 
+    if "observer_event_invariants" in expected:
+        _check_event_invariants(expected["observer_event_invariants"], observer_fixtures)
+
     # 018 — registering an observer with an empty `phases` set raises at
     # registration time per spec §6.
     if expected.get("empty_phases_raises_at_registration"):
@@ -351,6 +353,52 @@ async def _run_runtime_case(spec: Mapping[str, Any], fixture_id: str) -> None:
 # directives are spec-defined just for this fixture's two sub-cases. The
 # semantic intent is captured directly here.
 # ---------------------------------------------------------------------------
+
+
+def _check_event_invariants(
+    invariants: Mapping[str, Any],
+    observer_fixtures: Mapping[str, ObserverFixture],
+) -> None:
+    """Verify ``observer_event_invariants`` block contents against the
+    captured observer events. Each named invariant has a recognized
+    shape used by one or more fixtures (021 parallel-branches
+    branch_name on inner-node events).
+
+    Fixtures consult the first observer's events as the canonical
+    stream; multi-observer fixtures author their assertions against the
+    `observer_events` block instead.
+    """
+    if not observer_fixtures:
+        return
+    first_obs = next(iter(observer_fixtures.values()))
+    events = first_obs.events
+
+    no_branch_name_cfg = cast(
+        "dict[str, Any] | None",
+        invariants.get("outermost_events_have_no_branch_name"),
+    )
+    if no_branch_name_cfg is not None:
+        node_names = cast("list[str]", no_branch_name_cfg.get("nodes") or [])
+        for ev in events:
+            if ev["node_name"] in node_names:
+                assert "branch_name" not in ev, (
+                    f"outermost node {ev['node_name']!r} event MUST NOT carry "
+                    f"branch_name; got {ev.get('branch_name')!r}"
+                )
+
+    inner_branch_cfg = cast(
+        "dict[str, str] | None",
+        invariants.get("inner_events_carry_correct_branch_name"),
+    )
+    if inner_branch_cfg is not None:
+        for ev in events:
+            expected_branch = inner_branch_cfg.get(ev["node_name"])
+            if expected_branch is None:
+                continue
+            assert ev.get("branch_name") == expected_branch, (
+                f"inner node {ev['node_name']!r} expected branch_name={expected_branch!r}, "
+                f"got {ev.get('branch_name')!r}"
+            )
 
 
 async def _run_fixture_020(spec: Mapping[str, Any]) -> None:

@@ -31,15 +31,10 @@ _FIXTURES = list(discover_fixtures())
 # branch_name) to succeed; those shapes ship with their respective PRs.
 # Keyed by the test ID format ``<capability>/<stem>``.
 _DEFERRED_FIXTURES: dict[str, str] = {
-    # proposal 0011 — parallel branches (PR-5)
-    "graph-engine/021-observer-branch-name": "0011 parallel branches (PR-5)",
-    "pipeline-utilities/032-parallel-branches-basic": "0011 parallel branches (PR-5)",
-    "pipeline-utilities/033-parallel-branches-fail-fast": "0011 parallel branches (PR-5)",
-    "pipeline-utilities/034-parallel-branches-collect": "0011 parallel branches (PR-5)",
-    "pipeline-utilities/035-parallel-branches-different-state-schemas": "0011 parallel branches (PR-5)",
-    "pipeline-utilities/036-parallel-branches-with-branch-middleware-retry": "0011 parallel branches (PR-5)",
-    "pipeline-utilities/037-parallel-branches-determinism": "0011 parallel branches (PR-5)",
-    "pipeline-utilities/038-parallel-branches-compose-with-fan-out": "0011 parallel branches (PR-5)",
+    # proposal 0011's parallel-branches fixtures (032-038 +
+    # graph-engine/021) were removed from this list as part of
+    # PR-5; the typed harness parses the parallel_branches:
+    # node shape via the new ParallelBranchesSpec directive model.
     # proposal 0014's state-migration fixtures (039-046) were removed
     # from this list as part of PR-4; the CasesFixture model already
     # parses the seeded_record / migrations shape via its permissive

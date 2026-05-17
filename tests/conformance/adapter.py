@@ -10,6 +10,7 @@ against the fixture's `expected` block.
 
 from __future__ import annotations
 
+import asyncio
 import copy
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -19,12 +20,14 @@ from pydantic import Field, create_model
 
 from openarmature.graph import (
     END,
+    BranchSpec,
     CompiledGraph,
     EndSentinel,
     ExplicitMapping,
     FanOutNode,
     FieldNameMatching,
     GraphBuilder,
+    ParallelBranchesNode,
     ProjectionStrategy,
     Reducer,
     State,
@@ -56,6 +59,14 @@ def _parse_type(s: str) -> Any:
         return float
     if s == "bool":
         return bool
+    # Unparameterized container types — parallel-branches fixtures
+    # 034/035/037 use ``dict`` and ``list<dict>`` as state-field types
+    # for accumulator slots (branch_errors, merged_dict, collected_labels)
+    # where the element shape is heterogeneous across branches.
+    if s == "dict":
+        return dict[str, Any]
+    if s == "list<dict>":
+        return list[dict[str, Any]]
     if s.startswith("list<") and s.endswith(">"):
         return list[_parse_type(s[5:-1])]
     if s.startswith("dict<") and s.endswith(">"):
@@ -357,6 +368,23 @@ def _make_flaky_fn(
     return fn
 
 
+def _wrap_with_sleep(
+    fn: Callable[[Any], Awaitable[Mapping[str, Any]]],
+    sleep_ms: int,
+) -> Callable[[Any], Awaitable[Mapping[str, Any]]]:
+    # ``sleep_ms`` companion modifier on a NodeSpec — sleep that many
+    # milliseconds before the wrapped body fires. Used by parallel-branches
+    # fixtures 033 (slow third branch for fail-fast cancellation) and 037
+    # (randomized completion timing to verify insertion-order determinism).
+    delay = sleep_ms / 1000.0
+
+    async def fn_with_sleep(state: Any) -> Mapping[str, Any]:
+        await asyncio.sleep(delay)
+        return await fn(state)
+
+    return fn_with_sleep
+
+
 @dataclass(frozen=True)
 class _TracingFanOutNode(FanOutNode[State, State]):
     """Conformance helper: a FanOutNode that appends its name to a shared
@@ -381,6 +409,24 @@ class _TracingFanOutNode(FanOutNode[State, State]):
             pre_resolved_count=pre_resolved_count,
             pre_resolved_concurrency=pre_resolved_concurrency,
         )
+
+
+@dataclass(frozen=True)
+class _TracingParallelBranchesNode(ParallelBranchesNode[State]):
+    """Conformance helper: a ParallelBranchesNode that appends its name
+    to the shared trace list once when the engine runs it. The
+    parallel-branches dispatcher itself counts as one engine step from
+    the parent's POV per §11.6, mirroring the fan-out tracing wrapper."""
+
+    trace_list: list[str] = field(default_factory=list[str])
+
+    async def run_with_context(
+        self,
+        state: State,
+        context: _InvocationContext,
+    ) -> Mapping[str, Any]:
+        self.trace_list.append(self.name)
+        return await super().run_with_context(state, context)
 
 
 @dataclass(frozen=True)
@@ -457,6 +503,7 @@ def build_graph(
     node_middleware: Mapping[str, Sequence[Any]] | None = None,
     graph_middleware: Sequence[Any] | None = None,
     fan_out_instance_middleware: Mapping[str, Sequence[Any]] | None = None,
+    parallel_branches_branch_middleware: Mapping[str, Mapping[str, Sequence[Any]]] | None = None,
 ) -> BuiltGraph:
     """Translate a graph-shaped fixture block into a `BuiltGraph`.
 
@@ -486,6 +533,7 @@ def build_graph(
     subgraphs = subgraphs or {}
     node_middleware = node_middleware or {}
     fan_out_instance_middleware = fan_out_instance_middleware or {}
+    parallel_branches_branch_middleware = parallel_branches_branch_middleware or {}
 
     for mw in graph_middleware or ():
         builder.add_middleware(mw)
@@ -505,7 +553,8 @@ def build_graph(
                 trace_list=trace,
                 middleware=per_node_mw,
             )
-        elif "fan_out" in node_spec:
+            continue
+        if "fan_out" in node_spec:
             _add_fan_out_node(
                 builder,
                 node_name,
@@ -514,54 +563,46 @@ def build_graph(
                 trace,
                 instance_middleware=fan_out_instance_middleware.get(node_name, ()),
             )
-        elif "raises" in node_spec:
-            builder.add_node(
+            continue
+        if "parallel_branches" in node_spec:
+            _add_parallel_branches_node(
+                builder,
                 node_name,
-                _make_raising_fn(node_name, node_spec["raises"], trace),
-                middleware=per_node_mw,
+                node_spec["parallel_branches"],
+                subgraphs,
+                trace,
+                branch_middleware=parallel_branches_branch_middleware.get(node_name, {}),
             )
+            continue
+
+        body: Callable[[Any], Awaitable[Mapping[str, Any]]]
+        if "raises" in node_spec:
+            body = _make_raising_fn(node_name, node_spec["raises"], trace)
         elif "flaky" in node_spec:
-            builder.add_node(
-                node_name,
-                _make_flaky_fn(node_name, node_spec["flaky"], trace),
-                middleware=per_node_mw,
-            )
+            body = _make_flaky_fn(node_name, node_spec["flaky"], trace)
         elif "flaky_by_index" in node_spec:
-            builder.add_node(
-                node_name,
-                _make_flaky_by_index_fn(node_name, node_spec["flaky_by_index"], trace),
-                middleware=per_node_mw,
-            )
+            body = _make_flaky_by_index_fn(node_name, node_spec["flaky_by_index"], trace)
         elif "flaky_instance_only" in node_spec:
-            builder.add_node(
-                node_name,
-                _make_flaky_instance_only_fn(node_name, node_spec["flaky_instance_only"], trace),
-                middleware=per_node_mw,
-            )
+            body = _make_flaky_instance_only_fn(node_name, node_spec["flaky_instance_only"], trace)
         elif "update" in node_spec:
-            builder.add_node(
-                node_name,
-                _make_update_fn(node_name, node_spec["update"], trace),
-                middleware=per_node_mw,
-            )
+            body = _make_update_fn(node_name, node_spec["update"], trace)
         elif "update_pure" in node_spec:
-            builder.add_node(
-                node_name,
-                _make_pure_update_fn(node_name, node_spec["update_pure"], trace),
-                middleware=per_node_mw,
-            )
+            body = _make_pure_update_fn(node_name, node_spec["update_pure"], trace)
         elif "update_from_field" in node_spec:
-            builder.add_node(
-                node_name,
-                _make_update_from_field_fn(node_name, node_spec["update_from_field"], trace),
-                middleware=per_node_mw,
-            )
+            body = _make_update_from_field_fn(node_name, node_spec["update_from_field"], trace)
         else:
             raise ValueError(
                 f"node {node_name!r} has no recognized directive "
                 "(update / update_pure / update_from_field / raises / flaky / "
-                "flaky_by_index / flaky_instance_only / fan_out / subgraph)"
+                "flaky_by_index / flaky_instance_only / fan_out / parallel_branches / "
+                "subgraph)"
             )
+
+        sleep_ms = node_spec.get("sleep_ms")
+        if sleep_ms is not None:
+            body = _wrap_with_sleep(body, int(sleep_ms))
+
+        builder.add_node(node_name, body, middleware=per_node_mw)
 
     for edge_spec in spec.get("edges", []):
         source = edge_spec["from"]
@@ -623,6 +664,8 @@ def _record_event(event: NodeEvent) -> dict[str, Any]:
         rec["error"] = event.error.category
     if event.fan_out_index is not None:
         rec["fan_out_index"] = event.fan_out_index
+    if event.branch_name is not None:
+        rec["branch_name"] = event.branch_name
     return rec
 
 
@@ -729,6 +772,57 @@ def _add_fan_out_node(
     builder._nodes[node_name] = _TracingFanOutNode(
         name=original.name,
         config=original.config,
+        middleware=original.middleware,
+        trace_list=trace,
+    )
+
+
+def _add_parallel_branches_node(
+    builder: GraphBuilder[Any],
+    node_name: str,
+    cfg: Mapping[str, Any],
+    subgraphs: Mapping[str, CompiledGraph[State]],
+    trace: list[str],
+    *,
+    branch_middleware: Mapping[str, Sequence[Any]],
+) -> None:
+    """Translate a fixture's ``parallel_branches:`` block into a
+    ``builder.add_parallel_branches_node`` call.
+
+    Each branch's ``subgraph`` name resolves against the shared
+    ``subgraphs`` registry (built from the fixture's top-level
+    ``subgraphs:`` block). ``branch_middleware`` maps branch-name to a
+    pre-translated middleware list; the test driver populates it from
+    each branch's ``middleware:`` block.
+    """
+    branches_cfg = cast("dict[str, dict[str, Any]]", cfg["branches"])
+    branches: dict[str, BranchSpec[Any]] = {}
+    for branch_name, branch_cfg in branches_cfg.items():
+        sub_compiled = subgraphs[branch_cfg["subgraph"]]
+        branches[branch_name] = BranchSpec(
+            subgraph=sub_compiled,
+            inputs=dict(branch_cfg.get("inputs") or {}),
+            outputs=dict(branch_cfg.get("outputs") or {}),
+            middleware=tuple(branch_middleware.get(branch_name, ())),
+        )
+
+    builder.add_parallel_branches_node(
+        node_name,
+        branches=branches,
+        error_policy=cfg.get("error_policy", "fail_fast"),
+        errors_field=cfg.get("errors_field"),
+    )
+
+    # Swap the registered node for a tracing variant so the
+    # conformance trace records the dispatcher as one engine step. The
+    # builder's validation has already run; we only replace the stored
+    # Node instance.
+    original = cast("ParallelBranchesNode[State]", builder._nodes[node_name])
+    builder._nodes[node_name] = _TracingParallelBranchesNode(
+        name=original.name,
+        branches=original.branches,
+        error_policy=original.error_policy,
+        errors_field=original.errors_field,
         middleware=original.middleware,
         trace_list=trace,
     )

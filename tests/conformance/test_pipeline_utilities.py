@@ -24,6 +24,7 @@ import yaml
 
 from openarmature.graph import (
     NodeException,
+    ParallelBranchesBranchFailed,
     RuntimeGraphError,
 )
 from openarmature.graph.middleware import (
@@ -35,7 +36,7 @@ from openarmature.graph.middleware import (
     deterministic_backoff,
 )
 
-from .adapter import build_graph
+from .adapter import ObserverFixture, build_graph, make_observer_fn
 from .middleware_seam import (
     ErrorRaiserMiddleware,
     ErrorRecoveryMiddleware,
@@ -69,8 +70,12 @@ def _load(path: Path) -> dict[str, Any]:
 
 
 # Phase 3 target: fan-out (proposal 0005 PU side) covers fixtures 017-023.
-# Phase 5 will pick up the checkpointing fixtures (024-031).
-_PHASE_3_LAST = 23
+# Phase 5 will pick up the checkpointing fixtures (024-031). PR-5
+# (proposal 0011) drives fixtures 032-038 through this same harness.
+# State-migration fixtures 039-047 run via a dedicated runner
+# (``test_state_migration.py``); they need a separate driver because
+# the `cases:` shape carries seeded-record + migrations + resume blocks.
+_LAST_DRIVEN_FIXTURE = 38
 
 
 def _fixture_paths() -> list[Path]:
@@ -81,7 +86,7 @@ def _fixture_paths() -> list[Path]:
             number = int(p.stem.split("-", 1)[0])
         except ValueError:
             continue
-        if number <= _PHASE_3_LAST:
+        if number <= _LAST_DRIVEN_FIXTURE:
             out.append(p)
     return out
 
@@ -96,23 +101,24 @@ def _fixture_id(path: Path) -> str:
 # passes." Each subsequent PR drops its own rows as it lands the
 # underlying support.
 _DEFERRED_FIXTURES: dict[str, str] = {
-    # proposal 0011 — parallel branches (PR-5 of the batch)
-    "032-parallel-branches-basic": "0011 parallel branches (PR-5)",
-    "033-parallel-branches-fail-fast": "0011 parallel branches (PR-5)",
-    "034-parallel-branches-collect": "0011 parallel branches (PR-5)",
-    "035-parallel-branches-different-state-schemas": "0011 parallel branches (PR-5)",
-    "036-parallel-branches-with-branch-middleware-retry": "0011 parallel branches (PR-5)",
-    "037-parallel-branches-determinism": "0011 parallel branches (PR-5)",
-    "038-parallel-branches-compose-with-fan-out": "0011 parallel branches (PR-5)",
-    # proposal 0014 — state migration (PR-4 of the batch)
-    "039-state-migration-additive-field": "0014 state migration (PR-4)",
-    "040-state-migration-chain": "0014 state migration (PR-4)",
-    "041-state-migration-missing": "0014 state migration (PR-4)",
-    "042-state-migration-versions-match-no-op": "0014 state migration (PR-4)",
-    "043-state-migration-parent-states-migrated": "0014 state migration (PR-4)",
-    "044-state-migration-post-migration-deserialization-fails": "0014 state migration (PR-4)",
-    "045-state-migration-no-path-in-registry": "0014 state migration (PR-4)",
-    "046-state-migration-function-raises": "0014 state migration (PR-4)",
+    # proposal 0011 — parallel branches (PR-5 of the batch) — driven
+    # by the harness as of this PR; the 8 fixtures (032-038 +
+    # graph-engine/021) parse + run through the engine.
+    # proposal 0014 — state migration (PR-4 of the batch) — driven
+    # by ``test_state_migration.py`` (a separate runner that handles
+    # the cases-shape seeded_record + migrations + resume blocks).
+    # Checkpointing fixtures (024-031, proposal 0008) — driven by
+    # ``test_checkpoint.py`` because their cases-shape carries
+    # ``first_run_expected_error`` + ``resume:`` blocks that this
+    # driver doesn't recognize.
+    "024-checkpoint-save-on-every-completed-event": "checkpointing (test_checkpoint.py)",
+    "025-checkpoint-resume-from-completed-position": "checkpointing (test_checkpoint.py)",
+    "026-checkpoint-record-shape": "checkpointing (test_checkpoint.py)",
+    "027-checkpoint-attempt-index-resets-on-resume": "checkpointing (test_checkpoint.py)",
+    "028-checkpoint-fan-out-atomic-restart": "checkpointing (test_checkpoint.py)",
+    "029-checkpoint-subgraph-resume": "checkpointing (test_checkpoint.py)",
+    "030-checkpoint-not-found": "checkpointing (test_checkpoint.py)",
+    "031-checkpoint-correlation-id-preserved-across-resume": "checkpointing (test_checkpoint.py)",
 }
 
 
@@ -266,6 +272,35 @@ def _translate_middleware_block(
     return graph_mw, node_mw
 
 
+def _translate_parallel_branches_branch_middleware(
+    spec: Mapping[str, Any],
+    sinks: CaptureSinks,
+    clock: Callable[[], float] | None = None,
+) -> dict[str, dict[str, list[Middleware]]]:
+    """Walk ``spec.nodes`` for parallel_branches blocks with per-branch
+    ``middleware:`` and translate each into a list of Middleware
+    instances. Returned map is keyed by parallel-branches node name
+    then branch name (per spec §11.7 branch middleware) and consumed by
+    build_graph's ``parallel_branches_branch_middleware`` kwarg."""
+    out: dict[str, dict[str, list[Middleware]]] = {}
+    nodes = cast("dict[str, dict[str, Any]]", spec.get("nodes") or {})
+    for node_name, node_spec in nodes.items():
+        pb_cfg_raw = node_spec.get("parallel_branches")
+        if not isinstance(pb_cfg_raw, dict):
+            continue
+        pb_cfg = cast("dict[str, Any]", pb_cfg_raw)
+        branches_cfg = cast("dict[str, dict[str, Any]]", pb_cfg.get("branches") or {})
+        per_branch: dict[str, list[Middleware]] = {}
+        for branch_name, branch_cfg in branches_cfg.items():
+            entries = cast("list[dict[str, Any]]", branch_cfg.get("middleware") or [])
+            if not entries:
+                continue
+            per_branch[branch_name] = [_build_middleware(cfg, sinks, clock) for cfg in entries]
+        if per_branch:
+            out[node_name] = per_branch
+    return out
+
+
 def _translate_fan_out_instance_middleware(
     spec: Mapping[str, Any],
     sinks: CaptureSinks,
@@ -387,6 +422,8 @@ async def _run_one(spec: Mapping[str, Any], monkeypatch: pytest.MonkeyPatch) -> 
     # fixtures 020-022 use one or two named subgraph blocks
     # (``subgraph:``, ``subgraph_with_idx:``) at the top level so the
     # fan-out config can pick which one to dispatch to per case.
+    # Parallel-branches fixtures (032-038) use a plural ``subgraphs:``
+    # block — a dict mapping subgraph-name to graph-spec.
     subgraphs: dict[str, Any] = {}
     for sub_key in ("subgraph", "subgraph_with_idx"):
         sub_spec = spec.get(sub_key)
@@ -401,6 +438,24 @@ async def _run_one(spec: Mapping[str, Any], monkeypatch: pytest.MonkeyPatch) -> 
             node_middleware=sub_node_mw,
         )
         subgraphs[sub_spec["name"]] = sub_built.builder.compile()
+    plural_subgraphs = cast("dict[str, dict[str, Any]] | None", spec.get("subgraphs")) or {}
+    for sub_name, sub_spec in plural_subgraphs.items():
+        sub_graph_mw, sub_node_mw = _translate_middleware_block(sub_spec.get("middleware"), sinks, clock)
+        # Pass ``subgraphs=subgraphs`` so a subgraph that itself contains
+        # a fan_out / parallel_branches dispatch (fixture 038) can resolve
+        # the inner subgraph against entries already compiled in earlier
+        # iterations of this loop. The fixture's authoring order MUST put
+        # dependencies before dependents (the spec author's responsibility).
+        sub_built = build_graph(
+            sub_spec,
+            subgraphs=subgraphs,
+            model_name=f"{sub_name.title()}State",
+            graph_middleware=sub_graph_mw,
+            node_middleware=sub_node_mw,
+        )
+        subgraphs[sub_name] = sub_built.builder.compile()
+
+    branch_middleware = _translate_parallel_branches_branch_middleware(spec, sinks, clock)
 
     expected = cast("dict[str, Any]", spec.get("expected") or {})
     run_count = cast("int", spec.get("run_count", 1))
@@ -417,6 +472,7 @@ async def _run_one(spec: Mapping[str, Any], monkeypatch: pytest.MonkeyPatch) -> 
             graph_middleware=graph_mw,
             node_middleware=node_mw,
             fan_out_instance_middleware=fan_out_inst_mw,
+            parallel_branches_branch_middleware=branch_middleware,
         )
         compiled = built.builder.compile()
         initial = built.initial_state(spec.get("initial_state", {}))
@@ -426,8 +482,27 @@ async def _run_one(spec: Mapping[str, Any], monkeypatch: pytest.MonkeyPatch) -> 
         assert excinfo.value.category == expected_err["category"]
         if "message" in expected_err and isinstance(excinfo.value, NodeException):
             assert str(excinfo.value.__cause__) == expected_err["message"]
+        if "cause_message" in expected_err and isinstance(excinfo.value, NodeException):
+            # ``cause_message`` is the original cause text — the
+            # leaf of the __cause__ chain. For parallel-branches
+            # fail_fast, the chain is:
+            #   ParallelBranchesBranchFailed -> NodeException (branch's inner node) -> RuntimeError("...")
+            # Walk to the deepest non-None __cause__ before
+            # comparing.
+            leaf: BaseException = excinfo.value
+            while leaf.__cause__ is not None:
+                leaf = leaf.__cause__
+            assert str(leaf) == expected_err["cause_message"]
+        if "branch_name" in expected_err and isinstance(excinfo.value, ParallelBranchesBranchFailed):
+            assert excinfo.value.branch_name == expected_err["branch_name"]
+        # ``recoverable_state`` may live nested under ``expected_error``
+        # (legacy fan-out shape) or as a sibling under ``expected`` (per
+        # spec §11.5 for parallel-branches fail_fast fixtures). Both
+        # carry the same buffer-and-apply invariant.
         if "recoverable_state" in expected_err and isinstance(excinfo.value, NodeException):
             assert excinfo.value.recoverable_state.model_dump() == expected_err["recoverable_state"]
+        if "recoverable_state" in expected and isinstance(excinfo.value, NodeException):
+            assert excinfo.value.recoverable_state.model_dump() == expected["recoverable_state"]
         # Some error fixtures still attach trace_records assertions for
         # what fired before the failure.
         _check_trace_records(
@@ -440,6 +515,7 @@ async def _run_one(spec: Mapping[str, Any], monkeypatch: pytest.MonkeyPatch) -> 
     # stateful middleware (retry counters etc.) doesn't leak across runs.
     final_states: list[dict[str, Any]] = []
     traces: list[list[str]] = []
+    observer_fixtures: dict[str, ObserverFixture] = {}
     for run_idx in range(run_count):
         run_sinks = sinks if run_count == 1 else CaptureSinks()
         run_graph_mw, run_node_mw = (
@@ -458,19 +534,39 @@ async def _run_one(spec: Mapping[str, Any], monkeypatch: pytest.MonkeyPatch) -> 
             graph_middleware=run_graph_mw,
             node_middleware=run_node_mw,
             fan_out_instance_middleware=run_fan_out_inst_mw,
+            parallel_branches_branch_middleware=branch_middleware,
         )
         run_compiled = run_built.builder.compile()
         run_initial = run_built.initial_state(spec.get("initial_state", {}))
+        # Observers — graph-attached only (parallel-branches fixtures
+        # 036/037/038 use ``attach: graph, target: outer``). We rebuild
+        # the observer set fresh per run so capture lists don't bleed
+        # across runs in determinism fixtures.
+        run_observer_fixtures: dict[str, ObserverFixture] = {}
+        run_delivery: list[tuple[str, int, str]] = []
+        for o in spec.get("observers", []):
+            phases_list = o.get("phases")
+            phases = frozenset(phases_list) if phases_list is not None else None
+            ofx = ObserverFixture(
+                name=o["name"],
+                attach=o["attach"],
+                target=o["target"],
+                behavior=o["behavior"],
+                phases=phases,
+            )
+            run_observer_fixtures[ofx.name] = ofx
+            obs = make_observer_fn(ofx, run_delivery)
+            if ofx.attach == "graph" and ofx.target == "outer":
+                run_compiled.attach_observer(obs, phases=phases)
         run_final = await run_compiled.invoke(run_initial)
         await run_compiled.drain()
         final_states.append(run_final.model_dump())
         traces.append(list(run_built.trace))
-        del run_idx  # quiet pyright unused-name
+        if run_idx == 0:
+            observer_fixtures = run_observer_fixtures
 
     if "final_state" in expected:
-        assert final_states[0] == expected["final_state"], (
-            f"final_state mismatch: actual={final_states[0]}, expected={expected['final_state']}"
-        )
+        _assert_final_state(final_states[0], expected["final_state"], spec)
     if "execution_order" in expected:
         assert traces[0] == expected["execution_order"], (
             f"execution_order mismatch: actual={traces[0]}, expected={expected['execution_order']}"
@@ -486,6 +582,13 @@ async def _run_one(spec: Mapping[str, Any], monkeypatch: pytest.MonkeyPatch) -> 
         cast("Mapping[str, list[Mapping[str, Any]]] | None", expected.get("trace_records")),
         sinks,
     )
+
+    if "observer_event_invariants" in expected:
+        _check_parallel_branches_invariants(
+            cast("Mapping[str, Any]", expected["observer_event_invariants"]),
+            observer_fixtures,
+            spec,
+        )
 
     # Timing record assertions.
     if "timing_records" in expected:
@@ -509,6 +612,159 @@ async def _run_one(spec: Mapping[str, Any], monkeypatch: pytest.MonkeyPatch) -> 
         # final_state/execution_order. The detailed single-event assertion
         # would need additional harness scaffolding.
         pass
+
+
+def _collect_parallel_branches_errors_fields(spec: Mapping[str, Any]) -> set[str]:
+    """Return the set of parent-state field names used as
+    ``errors_field`` on any parallel_branches node in ``spec``.
+
+    Per spec §11.1 ``errors_field`` carries an implementation-defined
+    record shape; the spec only mandates ``branch_name`` + category. The
+    engine's record carries additional engine-defined keys (``message``,
+    ``cause_type``). Fixtures asserting against ``errors_field`` records
+    use subset semantics — assert the spec-mandated keys are present
+    with the expected values, ignore the rest.
+    """
+    out: set[str] = set()
+    nodes = cast("dict[str, dict[str, Any]]", spec.get("nodes") or {})
+    for node_spec in nodes.values():
+        pb_cfg = cast("dict[str, Any] | None", node_spec.get("parallel_branches"))
+        if pb_cfg is None:
+            continue
+        field_name = pb_cfg.get("errors_field")
+        if isinstance(field_name, str):
+            out.add(field_name)
+    return out
+
+
+def _assert_final_state(
+    actual: Mapping[str, Any],
+    expected: Mapping[str, Any],
+    spec: Mapping[str, Any],
+) -> None:
+    """Compare ``actual`` vs ``expected`` final state. Strict equality
+    everywhere except for parallel-branches ``errors_field`` records,
+    which compare per-element via subset semantics."""
+    errors_fields = _collect_parallel_branches_errors_fields(spec)
+    assert set(actual.keys()) == set(expected.keys()), (
+        f"final_state key mismatch: actual={set(actual.keys())}, expected={set(expected.keys())}"
+    )
+    for key, expected_val in expected.items():
+        actual_val = actual[key]
+        if key in errors_fields and isinstance(expected_val, list) and isinstance(actual_val, list):
+            actual_list = cast("list[Any]", actual_val)
+            expected_list = cast("list[Any]", expected_val)
+            actual_len = len(actual_list)
+            expected_len = len(expected_list)
+            assert actual_len == expected_len, (
+                f"final_state[{key!r}] length mismatch: actual={actual_len}, expected={expected_len}"
+            )
+            for actual_rec, expected_rec in zip(actual_list, expected_list, strict=True):
+                if not isinstance(expected_rec, dict) or not isinstance(actual_rec, dict):
+                    assert actual_rec == expected_rec
+                    continue
+                actual_dict = cast("dict[str, Any]", actual_rec)
+                expected_dict = cast("dict[str, Any]", expected_rec)
+                for sub_key, sub_val in expected_dict.items():
+                    assert sub_key in actual_dict, (
+                        f"final_state[{key!r}] record missing key {sub_key!r}: actual={actual_dict}"
+                    )
+                    actual_sub = actual_dict[sub_key]
+                    assert actual_sub == sub_val, (
+                        f"final_state[{key!r}].{sub_key} mismatch: actual={actual_sub}, expected={sub_val}"
+                    )
+            continue
+        assert actual_val == expected_val, (
+            f"final_state[{key!r}] mismatch: actual={actual_val}, expected={expected_val}"
+        )
+
+
+def _check_parallel_branches_invariants(
+    invariants: Mapping[str, Any],
+    observer_fixtures: Mapping[str, ObserverFixture],
+    spec: Mapping[str, Any],
+) -> None:
+    """Verify parallel-branches observer-event invariants for fixtures
+    036 (branch-middleware retry), 037 (determinism), 038 (compose with
+    fan-out). Each invariant name maps to one of the recognized shapes
+    below; an unknown name is skipped (forward-compat with new
+    fixtures the harness hasn't been taught yet).
+    """
+    if not observer_fixtures:
+        return
+    obs = next(iter(observer_fixtures.values()))
+    events = obs.events
+
+    # Discover the parallel-branches dispatcher node's branch keys from
+    # the spec so the invariant matchers can scope their assertions.
+    pb_branches: dict[str, list[str]] = {}
+    nodes = cast("dict[str, dict[str, Any]]", spec.get("nodes") or {})
+    for node_name, node_spec in nodes.items():
+        pb_cfg = cast("dict[str, Any] | None", node_spec.get("parallel_branches"))
+        if pb_cfg is not None:
+            branches = cast("dict[str, Any]", pb_cfg.get("branches") or {})
+            pb_branches[node_name] = list(branches.keys())
+
+    started_events = [ev for ev in events if ev["phase"] == "started"]
+
+    # 037 — branches' started events fire in branches insertion order
+    # regardless of their inner-node completion timing.
+    expected_order = invariants.get("branch_started_event_order")
+    if isinstance(expected_order, list):
+        seen_order: list[str] = []
+        for ev in started_events:
+            branch = ev.get("branch_name")
+            if branch is None:
+                continue
+            if branch in seen_order:
+                continue
+            seen_order.append(branch)
+        assert seen_order == expected_order, (
+            f"branch_started_event_order mismatch: actual={seen_order}, expected={expected_order}"
+        )
+
+    # 036 — per-branch attempt_index sequence on each branch's inner
+    # node. Authors per-branch via ``<branch>_inner_attempt_indices_seen``.
+    for key, expected_attempts in invariants.items():
+        if not key.endswith("_inner_attempt_indices_seen"):
+            continue
+        branch_name = key.removesuffix("_inner_attempt_indices_seen")
+        attempts = [ev["attempt_index"] for ev in started_events if ev.get("branch_name") == branch_name]
+        assert attempts == expected_attempts, (
+            f"{key} mismatch: actual={attempts}, expected={expected_attempts}"
+        )
+
+    # 038 — composition with fan-out invariants.
+    if invariants.get("fan_out_inner_events_carry_both_branch_name_and_fan_out_index"):
+        fan_out_events = [ev for ev in events if "fan_out_index" in ev]
+        assert fan_out_events, "expected inner-node events carrying fan_out_index, got none"
+        for ev in fan_out_events:
+            assert "branch_name" in ev, f"fan-out inner event missing branch_name: {ev}"
+    fan_out_branch = invariants.get("fan_out_inner_branch_name_seen")
+    if isinstance(fan_out_branch, str):
+        fan_out_branch_names = {ev.get("branch_name") for ev in events if "fan_out_index" in ev}
+        assert fan_out_branch in fan_out_branch_names, (
+            f"fan-out inner events expected to carry branch_name={fan_out_branch!r}; "
+            f"saw branch_names={fan_out_branch_names}"
+        )
+    expected_indices_raw = invariants.get("fan_out_inner_fan_out_indices_seen")
+    if isinstance(expected_indices_raw, list):
+        expected_indices = cast("list[int]", expected_indices_raw)
+        seen_indices = sorted({ev["fan_out_index"] for ev in events if "fan_out_index" in ev})
+        assert seen_indices == sorted(expected_indices), (
+            f"fan_out_inner_fan_out_indices_seen mismatch: actual={seen_indices}, "
+            f"expected={sorted(expected_indices)}"
+        )
+    if invariants.get("plain_inner_events_carry_branch_name_but_no_fan_out_index"):
+        plain_branch = invariants.get("plain_inner_branch_name_seen")
+        if isinstance(plain_branch, str):
+            plain_events = [
+                ev for ev in events if ev.get("branch_name") == plain_branch and "fan_out_index" not in ev
+            ]
+            assert plain_events, (
+                f"expected branch_name={plain_branch!r} inner events without fan_out_index; got none"
+            )
+    del pb_branches  # populated for future invariant kinds
 
 
 def _check_trace_records(
