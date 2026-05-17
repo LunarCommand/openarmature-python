@@ -360,6 +360,50 @@ class _InvocationContext:
             resume_invocation=self.resume_invocation,
         )
 
+    def descend_into_parallel_branch(
+        self,
+        parallel_branches_node_name: str,
+        parent_state: State,
+        sub_attached: tuple[SubscribedObserver, ...],
+    ) -> _InvocationContext:
+        """Build the context for one parallel-branches branch's
+        subgraph invocation.
+
+        Per pipeline-utilities §11.6 the parallel-branches node looks
+        to outer middleware like a single dispatch; inner-branch
+        events come from the branch's subgraph execution. Stamps the
+        namespace prefix with the parallel-branches node name so
+        inner events nest under it (mirrors
+        ``descend_into_fan_out_instance``'s namespace stamping).
+
+        Branch identity lives on the
+        ``observability.correlation._branch_name_var`` ContextVar
+        rather than on the descend context — set inside the
+        branch's task closure so ``copy_context`` inherits it
+        through the subgraph's execution.
+
+        Per §11.9 / §10.7 atomic-restart: drops the checkpointer
+        and pending_resume_states (a crash mid-dispatch re-runs the
+        whole parallel-branches node from scratch on resume; the
+        branches' inner saves wouldn't be useful).
+        """
+        return _InvocationContext(
+            queue=self.queue,
+            graph_attached=self.graph_attached + sub_attached,
+            invocation_scoped=self.invocation_scoped,
+            step_counter=self.step_counter,
+            namespace_prefix=self.namespace_prefix + (parallel_branches_node_name,),
+            parent_states_prefix=self.parent_states_prefix + (parent_state,),
+            fan_out_index=self.fan_out_index,
+            invocation_id=self.invocation_id,
+            correlation_id=self.correlation_id,
+            checkpointer=None,
+            completed_positions=self.completed_positions,
+            resume_skip_set=frozenset(),
+            pending_resume_states={},
+            resume_invocation=self.resume_invocation,
+        )
+
     def take_step(self) -> int:
         """Atomically (single-threaded asyncio) read-and-increment the
         shared step counter. Returns the value to assign to the just-

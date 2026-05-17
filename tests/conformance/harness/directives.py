@@ -235,6 +235,33 @@ class FanOutSpec(_AllowExtras):
     instance_middleware: list[MiddlewareSpec] | None = None
 
 
+class ParallelBranchSpec(_AllowExtras):
+    """One entry inside a ``parallel_branches.branches`` mapping.
+
+    Permissive on extras because fixtures may carry extra knobs
+    (e.g., per-branch annotations the harness ignores).
+    """
+
+    subgraph: str
+    inputs: dict[str, str] | None = None
+    outputs: dict[str, str] | None = None
+    middleware: list[MiddlewareSpec] | None = None
+
+
+class ParallelBranchesSpec(_AllowExtras):
+    """``parallel_branches:`` block on a NodeSpec (pipeline-utilities §11).
+
+    Mirrors :class:`FanOutSpec` but topology-driven: M heterogeneous
+    branches, each referencing a different compiled subgraph by name
+    against the case's top-level ``subgraphs:`` block. Branch insertion
+    order is preserved per §11.8.
+    """
+
+    branches: dict[str, ParallelBranchSpec]
+    error_policy: Literal["fail_fast", "collect"] | None = None
+    errors_field: str | None = None
+
+
 class CallsLlmSpec(_AllowExtras):
     """LLM-using node: sends ``messages`` to the harness's mock provider
     and stores the response (assistant content) in ``stores_response_in``.
@@ -294,6 +321,7 @@ class NodeSpec(_ForbidExtras):
     raises: str | None = None
     subgraph: str | None = None
     fan_out: FanOutSpec | None = None
+    parallel_branches: ParallelBranchesSpec | None = None
     flaky: FlakySpec | None = None
     flaky_by_index: FlakyByIndexSpec | None = None
     flaky_per_index: FlakyPerIndexSpec | None = None
@@ -309,6 +337,13 @@ class NodeSpec(_ForbidExtras):
     also_emits_via_global_tracer: GlobalTracerSpec | None = None
     # Pair with ``raises`` to specify the error category (graph-engine §4).
     error_category: str | None = None
+    # Parallel-branches fixtures (033, 037): the node sleeps this many
+    # milliseconds before its update fires. Used to force deterministic
+    # branch-completion ordering (037 — different branches finish at
+    # different wall-clock times yet final state must be insertion-order
+    # deterministic per §11.8) and to slow a third branch so fail-fast
+    # cancellation has time to land before it finishes (033).
+    sleep_ms: int | None = None
 
     _PRIMARY_FIELDS = (
         "update",
@@ -318,6 +353,7 @@ class NodeSpec(_ForbidExtras):
         "raises",
         "subgraph",
         "fan_out",
+        "parallel_branches",
         "flaky",
         "flaky_by_index",
         "flaky_per_index",

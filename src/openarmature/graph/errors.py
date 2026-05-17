@@ -105,6 +105,18 @@ class FanOutFieldNotList(CompileError):
         self.field_name = field_name
 
 
+class ParallelBranchesNoBranches(CompileError):
+    """Raised at registration when a parallel-branches node's
+    ``branches`` mapping is empty. Per pipeline-utilities §11.9
+    / proposal 0011. Non-transient."""
+
+    category = "parallel_branches_no_branches"
+
+    def __init__(self, node_name: str) -> None:
+        super().__init__(f"parallel-branches node {node_name!r}: branches mapping is empty")
+        self.node_name = node_name
+
+
 # ===== Runtime errors =====
 
 
@@ -125,6 +137,46 @@ class NodeException(RuntimeGraphError):
         self.node_name = node_name
         self.recoverable_state = recoverable_state
         self.__cause__ = cause
+
+
+class ParallelBranchesBranchFailed(NodeException):
+    """Raised when a branch's subgraph raises under
+    ``error_policy: 'fail_fast'``. Per pipeline-utilities §11.9 /
+    proposal 0011.
+
+    Subtype of :class:`NodeException` (per §11.9: "a
+    ``node_exception`` subtype attached at the parallel-branches
+    node's level"). The existing NodeException-classifier path
+    handles transient classification from ``__cause__`` per §6.1
+    — non-transient by default, inherits transient classification
+    from the wrapped exception.
+
+    Carries ``branch_name`` as a structured field per §11.9; the
+    inner exception rides ``__cause__``.
+    """
+
+    category = "parallel_branches_branch_failed"
+
+    branch_name: str
+
+    def __init__(
+        self,
+        node_name: str,
+        cause: BaseException,
+        recoverable_state: Any,
+        *,
+        branch_name: str,
+    ) -> None:
+        # NodeException's __init__ formats the message; override
+        # the message format to surface the branch identity.
+        super().__init__(node_name, cause, recoverable_state)
+        self.branch_name = branch_name
+        # Rewrite the inherited message so trace UIs / logs see
+        # the branch context up front.
+        self.args = (
+            f"parallel-branches node {node_name!r}: "
+            f"branch {branch_name!r} raised {type(cause).__name__}: {cause}",
+        )
 
 
 class EdgeException(RuntimeGraphError):

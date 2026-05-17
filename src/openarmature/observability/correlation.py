@@ -272,6 +272,34 @@ def _reset_fan_out_index(token: Token[int | None]) -> None:
     _fan_out_index_var.reset(token)
 
 
+# Per pipeline-utilities §11 / proposal 0011: when a node runs
+# inside a parallel-branches branch, this carries the branch's
+# name. Mirrors ``_fan_out_index_var`` — set by the parallel-
+# branches dispatcher inside each branch's task ``copy_context``,
+# inherited through the branch's subgraph execution, read by the
+# OTel observer to populate ``openarmature.branch_name`` on
+# inner-node spans.
+_branch_name_var: ContextVar[str | None] = ContextVar("openarmature.branch_name", default=None)
+
+
+def current_branch_name() -> str | None:
+    """Return the branch_name of the node currently executing, or
+    ``None`` outside any parallel-branches branch body (top-level
+    nodes, subgraph dispatch, fan-out instance bodies that aren't
+    themselves inside a branch).
+    """
+    return _branch_name_var.get()
+
+
+def _set_branch_name(value: str | None) -> Token[str | None]:
+    """Set the calling node's branch_name. Internal — engine-only."""
+    return _branch_name_var.set(value)
+
+
+def _reset_branch_name(token: Token[str | None]) -> None:
+    _branch_name_var.reset(token)
+
+
 _attempt_index_var: ContextVar[int] = ContextVar("openarmature.attempt_index", default=0)
 
 
@@ -364,6 +392,7 @@ __all__ = [
     "current_active_observer_span",
     "current_active_observers",
     "current_attempt_index",
+    "current_branch_name",
     "current_correlation_id",
     "current_dispatch",
     "current_fan_out_index",
@@ -377,6 +406,7 @@ __all__ = [
     "_reset_active_observer_span",
     "_reset_active_observers",
     "_reset_attempt_index",
+    "_reset_branch_name",
     "_reset_correlation_id",
     "_reset_fan_out_index",
     "_reset_invocation_id",
@@ -385,6 +415,7 @@ __all__ = [
     "_set_active_observer_span",
     "_set_active_observers",
     "_set_attempt_index",
+    "_set_branch_name",
     "_set_correlation_id",
     "_set_fan_out_index",
     "_set_invocation_id",

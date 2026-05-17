@@ -141,6 +141,12 @@ class PipelineUtilitiesExpected(_ForbidExtras):
     # - dict[recorder_name, list[record]] when multiple recorders (001).
     # - list[record] flat when a single recorder.
     trace_records: Any = None
+    # Parallel-branches fixtures (032-038). On fail_fast,
+    # ``recoverable_state`` carries the pre-entry parent state
+    # snapshot per spec §11.5; the harness asserts it equals the
+    # ``recoverable_state`` attached to the raised
+    # ``ParallelBranchesBranchFailed``.
+    recoverable_state: dict[str, Any] | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -201,6 +207,7 @@ _PIPELINE_UTILITIES_KEYS = frozenset(
         "timing_records",
         "trace_records",
         "expected_observer_event",
+        "recoverable_state",
     }
 )
 _OBSERVABILITY_KEYS = frozenset(

@@ -23,6 +23,7 @@ from collections.abc import Awaitable, Callable, Mapping
 from typing import Any
 
 from openarmature.llm.errors import TRANSIENT_CATEGORIES
+from openarmature.observability.correlation import _reset_attempt_index, _set_attempt_index
 
 from ._core import NextCall
 
@@ -128,18 +129,30 @@ class RetryMiddleware:
     async def __call__(self, state: Any, next_: NextCall) -> Mapping[str, Any]:
         attempt = 0
         while True:
+            # Spec graph-engine §6 (clarified in v0.16.1): the wrapping
+            # retry's attempt counter MUST propagate to events emitted
+            # from any inner node the retry re-invokes — including
+            # nodes inside subgraph / branch / fan-out-instance
+            # invocations the retry wraps transitively. Set on entry,
+            # reset on exit; Python's ContextVar token stack gives
+            # innermost-wins precedence for free when retry middlewares
+            # nest.
+            token = _set_attempt_index(attempt)
             try:
-                return await next_(state)
-            except Exception as exc:
-                # Spec §6.1: cancellation propagates by virtue of
-                # `CancelledError` extending `BaseException`, not
-                # `Exception` — it never enters this branch in Python.
-                if attempt + 1 >= self.max_attempts or not self.classifier(exc, state):
-                    raise
-                if self.on_retry is not None:
-                    await self.on_retry(exc, attempt)
-                await asyncio.sleep(self.backoff(attempt))
-                attempt += 1
+                try:
+                    return await next_(state)
+                except Exception as exc:
+                    # Spec §6.1: cancellation propagates by virtue of
+                    # `CancelledError` extending `BaseException`, not
+                    # `Exception` — it never enters this branch in Python.
+                    if attempt + 1 >= self.max_attempts or not self.classifier(exc, state):
+                        raise
+                    if self.on_retry is not None:
+                        await self.on_retry(exc, attempt)
+                    await asyncio.sleep(self.backoff(attempt))
+                    attempt += 1
+            finally:
+                _reset_attempt_index(token)
 
 
 __all__ = [
