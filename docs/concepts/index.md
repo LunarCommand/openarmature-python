@@ -12,6 +12,9 @@ the framework, or jump to whichever concept you need.
   data seam.
 - [Fan-out](fan-out.md): running the same subgraph many times in
   parallel, results merged back deterministically.
+- [Parallel branches](parallel-branches.md): dispatching M
+  heterogeneous subgraphs concurrently with per-branch state schemas
+  and middleware.
 - [LLMs](llms.md): how LLM calls fit into nodes, structured output,
   routing on parsed fields, errors at the LLM boundary.
 - [Observability](observability.md): node-boundary hooks, OTel mapping,
