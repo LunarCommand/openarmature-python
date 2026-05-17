@@ -115,6 +115,15 @@ class NodeEvent:
     - ``fan_out_config`` carries resolved fan-out configuration on
       events from a fan-out NODE itself. See
       :class:`FanOutEventConfig`. ``None`` on every other event.
+    - ``branch_name`` is the non-empty string name of the
+      parallel-branches branch this event came from. ``None`` for
+      nodes outside any branch. Per graph-engine §6 / pipeline-
+      utilities §11, the combination of ``namespace``,
+      ``branch_name``, ``fan_out_index``, ``attempt_index``, and
+      ``phase`` jointly uniquely identifies an event source.
+      ``branch_name`` and ``fan_out_index`` are independent — both
+      MAY be present when a branch's subgraph contains a fan-out
+      (or a fan-out instance contains a parallel-branches node).
 
     Invariants:
 
@@ -172,6 +181,16 @@ class NodeEvent:
     attempt_index: int = 0
     fan_out_index: int | None = None
     fan_out_config: FanOutEventConfig | None = None
+    # Per pipeline-utilities §11 / graph-engine §6 (proposal 0011):
+    # optional non-empty string populated only on events from nodes
+    # that execute inside a parallel-branches branch. The
+    # combination of ``namespace``, ``branch_name``,
+    # ``fan_out_index``, ``attempt_index``, and ``phase`` jointly
+    # uniquely identifies an event source. ``branch_name`` and
+    # ``fan_out_index`` are independent; both MAY be present
+    # simultaneously when a branch's subgraph contains a fan-out
+    # (and vice versa).
+    branch_name: str | None = None
 
 
 __all__ = ["FanOutEventConfig", "NodeEvent"]

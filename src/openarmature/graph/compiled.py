@@ -167,6 +167,14 @@ def _merge_partial[StateT: State](
     ``ReducerError`` and schema failures as ``StateValidationError``.
     """
 
+    # Lazy import to avoid a textual cycle (parallel_branches has a
+    # TYPE_CHECKING back-reference to this module). _MultiContribution
+    # is the sentinel ParallelBranchesNode uses when multiple branches
+    # write the same parent field — each value flows through the
+    # parent's reducer in branch insertion order per spec §11.4 +
+    # §11.8.
+    from .parallel_branches import _MultiContribution  # noqa: PLC0415
+
     new_values = prior.model_dump()
     for field_name, partial_value in partial.items():
         reducer = reducers.get(field_name)
@@ -175,7 +183,17 @@ def _merge_partial[StateT: State](
             new_values[field_name] = partial_value
             continue
         try:
-            new_values[field_name] = reducer(new_values[field_name], partial_value)
+            if isinstance(partial_value, _MultiContribution):
+                # Per pipeline-utilities §11.4: multi-branch
+                # contributions to one parent field apply in branch
+                # insertion order via the parent's reducer. Fold
+                # each value in sequence.
+                acc = new_values[field_name]
+                for v in partial_value.values:
+                    acc = reducer(acc, v)
+                new_values[field_name] = acc
+            else:
+                new_values[field_name] = reducer(new_values[field_name], partial_value)
         except Exception as e:
             raise ReducerError(
                 field_name=field_name,
@@ -778,6 +796,7 @@ class CompiledGraph[StateT: State]:
             # to this module). Function-scope import is cheap once
             # cached; this branch fires once per fan-out step.
             from .fan_out import FanOutNode  # noqa: PLC0415
+            from .parallel_branches import ParallelBranchesNode  # noqa: PLC0415
 
             if isinstance(node, FanOutNode):
                 # Fan-out nodes are recognized as a distinct node type
@@ -787,6 +806,13 @@ class CompiledGraph[StateT: State]:
                 # concurrency lives inside the FanOutNode itself.
                 fn_node = cast("FanOutNode[StateT, State]", node)
                 step_result = await self._step_fan_out_node(fn_node, current, state, context)
+            elif isinstance(node, ParallelBranchesNode):
+                # Parallel-branches nodes are recognized as a distinct
+                # node type per pipeline-utilities §11. Dispatched
+                # through ``_step_parallel_branches_node`` which wraps
+                # the whole dispatch as one parent unit (per §11.6) —
+                # M heterogeneous subgraphs run concurrently inside.
+                step_result = await self._step_parallel_branches_node(node, current, state, context)
             elif isinstance(node, SubgraphNode):
                 # Subgraph wrappers are transparent to the observer protocol
                 # (per fixture 013): no event is dispatched for the wrapper
@@ -1451,6 +1477,159 @@ class CompiledGraph[StateT: State]:
 
         return _StepResult(state=merged_outer, finalize_completed=finalize_completed)
 
+    async def _step_parallel_branches_node(
+        self,
+        node: Any,  # ParallelBranchesNode[StateT] — lazy import keeps the
+        # textual cycle off the module graph (``parallel_branches`` has a
+        # TYPE_CHECKING back-reference to this module).
+        current: str,
+        state: StateT,
+        context: _InvocationContext,
+    ) -> _StepResult[StateT]:
+        """Run one parallel-branches-as-node step through the parent's
+        middleware chain.
+
+        Per pipeline-utilities §11.6: the parent's per-graph +
+        per-node middleware wraps the parallel-branches dispatch
+        as a SINGLE unit — one started event before dispatch
+        begins, one completed event after all branches complete
+        and fan-in is done. Per-branch internal events come from
+        the branches' subgraph executions and carry ``branch_name``
+        per graph-engine §6.
+
+        Mirrors ``_step_fan_out_node`` minus the eager
+        count/concurrency resolution (parallel branches has no
+        callable resolvers — the branch set is static at compile
+        time).
+        """
+        step = context.take_step()
+        namespace = context.namespace_prefix + (current,)
+        attempt_counter: list[int] = [0]
+        deferred_info: list[tuple[int, StateT, StateT] | None] = [None]
+
+        async def innermost(s: Any) -> Mapping[str, Any]:
+            attempt_index = attempt_counter[0]
+            attempt_counter[0] += 1
+            attempt_token = _set_attempt_index(attempt_index)
+            try:
+                self._dispatch_started(
+                    context,
+                    current,
+                    namespace,
+                    step,
+                    s,
+                    attempt_index=attempt_index,
+                )
+                otel_token = _attach_active_observer_span()
+                try:
+                    try:
+                        partial = await node.run_with_context(s, context)
+                    except RuntimeGraphError as e:
+                        self._dispatch_completed(
+                            context,
+                            current,
+                            namespace,
+                            step,
+                            s,
+                            error=e,
+                            attempt_index=attempt_index,
+                        )
+                        raise
+                    except Exception as e:
+                        wrapped = NodeException(node_name=current, cause=e, recoverable_state=s)
+                        self._dispatch_completed(
+                            context,
+                            current,
+                            namespace,
+                            step,
+                            s,
+                            error=wrapped,
+                            attempt_index=attempt_index,
+                        )
+                        raise wrapped from e
+                finally:
+                    _detach_active_observer_span(otel_token)
+                    _set_active_observer_span(None)
+
+                try:
+                    merged = _merge_partial(s, partial, self.reducers, current)
+                except (ReducerError, StateValidationError) as e:
+                    self._dispatch_completed(
+                        context,
+                        current,
+                        namespace,
+                        step,
+                        s,
+                        error=e,
+                        attempt_index=attempt_index,
+                    )
+                    raise
+
+                deferred_info[0] = (attempt_index, cast("StateT", s), cast("StateT", merged))
+                return partial
+            finally:
+                _reset_attempt_index(attempt_token)
+
+        chain: ChainCall = compose_chain(
+            list(self.middleware) + list(node.middleware),
+            innermost,
+        )
+
+        observers_token = _set_active_observers(context.full_observers())
+        dispatch_token = _set_active_dispatch(lambda event: _dispatch(context, event))
+        namespace_token = _set_namespace_prefix(namespace)
+        fan_out_token = _set_fan_out_index(context.fan_out_index)
+        try:
+            try:
+                final_partial = await chain(state)
+            except RuntimeGraphError:
+                raise
+            except Exception as e:
+                raise NodeException(node_name=current, cause=e, recoverable_state=state) from e
+        finally:
+            _reset_fan_out_index(fan_out_token)
+            _reset_namespace_prefix(namespace_token)
+            _reset_active_dispatch(dispatch_token)
+            _reset_active_observers(observers_token)
+        merged_outer = _merge_partial(state, final_partial, self.reducers, current)
+        await self._maybe_save_checkpoint(
+            context,
+            node_name=current,
+            namespace=namespace,
+            step=step,
+            attempt_index=max(0, attempt_counter[0] - 1),
+            post_state=merged_outer,
+        )
+
+        info = deferred_info[0]
+        if info is None:
+            return _StepResult(state=merged_outer, finalize_completed=_no_op_finalize)
+        final_attempt_index, final_pre_state, final_merged = info
+
+        def finalize_completed(edge_error: RuntimeGraphError | None) -> None:
+            if edge_error is None:
+                self._dispatch_completed(
+                    context,
+                    current,
+                    namespace,
+                    step,
+                    final_pre_state,
+                    post_state=final_merged,
+                    attempt_index=final_attempt_index,
+                )
+            else:
+                self._dispatch_completed(
+                    context,
+                    current,
+                    namespace,
+                    step,
+                    final_pre_state,
+                    error=edge_error,
+                    attempt_index=final_attempt_index,
+                )
+
+        return _StepResult(state=merged_outer, finalize_completed=finalize_completed)
+
     @staticmethod
     def _dispatch_started(
         context: _InvocationContext,
@@ -1462,6 +1641,13 @@ class CompiledGraph[StateT: State]:
         attempt_index: int = 0,
         fan_out_config: FanOutEventConfig | None = None,
     ) -> None:
+        # Per graph-engine §6 + pipeline-utilities §11: read the
+        # active branch_name (set by ParallelBranchesNode inside
+        # each branch's task ``copy_context``) and stamp it on
+        # every event emitted from inside the branch. Outside any
+        # branch, current_branch_name() returns None.
+        from openarmature.observability.correlation import current_branch_name  # noqa: PLC0415
+
         _dispatch(
             context,
             NodeEvent(
@@ -1476,6 +1662,7 @@ class CompiledGraph[StateT: State]:
                 attempt_index=attempt_index,
                 fan_out_index=context.fan_out_index,
                 fan_out_config=fan_out_config,
+                branch_name=current_branch_name(),
             ),
         )
 
@@ -1492,6 +1679,8 @@ class CompiledGraph[StateT: State]:
         attempt_index: int = 0,
         fan_out_config: FanOutEventConfig | None = None,
     ) -> None:
+        from openarmature.observability.correlation import current_branch_name  # noqa: PLC0415
+
         _dispatch(
             context,
             NodeEvent(
@@ -1506,6 +1695,7 @@ class CompiledGraph[StateT: State]:
                 attempt_index=attempt_index,
                 fan_out_index=context.fan_out_index,
                 fan_out_config=fan_out_config,
+                branch_name=current_branch_name(),
             ),
         )
 

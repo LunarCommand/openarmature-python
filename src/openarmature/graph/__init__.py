@@ -27,6 +27,8 @@ from .errors import (
     MultipleOutgoingEdges,
     NoDeclaredEntry,
     NodeException,
+    ParallelBranchesBranchFailed,
+    ParallelBranchesNoBranches,
     ReducerError,
     RoutingError,
     RuntimeGraphError,
@@ -45,6 +47,7 @@ from .middleware import (
 )
 from .nodes import FunctionNode, Node
 from .observer import Observer, RemoveHandle, SubscribedObserver
+from .parallel_branches import BranchSpec, ParallelBranchesNode
 from .projection import ExplicitMapping, FieldNameMatching, ProjectionStrategy
 from .reducers import Reducer, append, last_write_wins, merge
 from .state import State
@@ -79,6 +82,10 @@ __all__ = [
     "NodeException",
     "NoDeclaredEntry",
     "Observer",
+    "ParallelBranchesBranchFailed",
+    "ParallelBranchesNoBranches",
+    "ParallelBranchesNode",
+    "BranchSpec",
     "ProjectionStrategy",
     "Reducer",
     "ReducerError",

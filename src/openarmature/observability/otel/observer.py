@@ -1066,6 +1066,14 @@ class OTelObserver:
         }
         if event.fan_out_index is not None:
             attrs["openarmature.node.fan_out_index"] = event.fan_out_index
+        # Per pipeline-utilities §11 / proposal 0011: surface
+        # branch_name on every inner-node span within a
+        # parallel-branches branch. Independent of fan_out_index —
+        # both MAY be present when a branch's subgraph contains a
+        # fan-out, and the spec §6 uniqueness invariant treats them
+        # as independent identification slots.
+        if event.branch_name is not None:
+            attrs["openarmature.branch_name"] = event.branch_name
         if correlation_id is not None:
             attrs["openarmature.correlation_id"] = correlation_id
         # Per spec §5.4 + proposal 0013 (v0.10.0): fan-out node spans

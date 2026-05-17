@@ -12,7 +12,7 @@ a type-checked `state` parameter on every callback — without `cast(...)` calls
 
 from collections.abc import Awaitable, Callable, Iterable, Mapping
 from types import GenericAlias, UnionType
-from typing import Any, Self, cast, get_args, get_origin
+from typing import Any, Literal, Self, cast, get_args, get_origin
 
 from openarmature.checkpoint.errors import CheckpointStateMigrationChainAmbiguous
 from openarmature.checkpoint.migration import MigrationRegistry, StateMigration
@@ -28,11 +28,13 @@ from .errors import (
     MappingReferencesUndeclaredField,
     MultipleOutgoingEdges,
     NoDeclaredEntry,
+    ParallelBranchesNoBranches,
     UnreachableNode,
 )
 from .fan_out import ConcurrencyResolver, CountResolver, FanOutConfig, FanOutNode
 from .middleware import Middleware
 from .nodes import FunctionNode, Node
+from .parallel_branches import BranchSpec, ParallelBranchesNode
 from .projection import FieldNameMatching, ProjectionStrategy
 from .reducers import Reducer
 from .state import State, field_reducers, resolve_reducer
@@ -242,6 +244,87 @@ class GraphBuilder[StateT: State]:
             ),
         )
         self._nodes[name] = fan_out
+        return self
+
+    def add_parallel_branches_node(
+        self,
+        name: str,
+        *,
+        branches: Mapping[str, BranchSpec[Any]],
+        error_policy: Literal["fail_fast", "collect"] = "fail_fast",
+        errors_field: str | None = None,
+        middleware: Iterable[Middleware] | None = None,
+    ) -> Self:
+        """Register a parallel-branches node per pipeline-utilities §11.
+
+        ``branches`` is a mapping from non-empty branch name to a
+        :class:`BranchSpec`. Insertion order is preserved and is
+        the dispatch + merge order per §11.8.
+
+        Validates at registration:
+
+        - ``branches`` non-empty (raises ``ParallelBranchesNoBranches``).
+        - Each branch name is a non-empty string (raises ``ValueError``).
+        - Each branch's ``inputs`` / ``outputs`` refer only to declared
+          fields on the (parent, branch-subgraph) state schemas
+          (raises ``MappingReferencesUndeclaredField``).
+        - ``errors_field`` (when set) is a declared parent-state field.
+        """
+        if name in self._nodes:
+            raise ValueError(f"node {name!r} already declared")
+        if not branches:
+            raise ParallelBranchesNoBranches(node_name=name)
+
+        parent_fields = self.state_cls.model_fields
+        if errors_field is not None and errors_field not in parent_fields:
+            raise MappingReferencesUndeclaredField(
+                direction="parallel_branches.errors_field",
+                side="parent",
+                field_name=errors_field,
+            )
+
+        for branch_name, spec in branches.items():
+            if not branch_name:
+                raise ValueError(f"parallel-branches node {name!r}: branch_name MUST be non-empty")
+            sub_fields = spec.subgraph.state_cls.model_fields
+            for sub_field, parent_field in spec.inputs.items():
+                if sub_field not in sub_fields:
+                    raise MappingReferencesUndeclaredField(
+                        direction=f"parallel_branches.{branch_name}.inputs",
+                        side="subgraph",
+                        field_name=sub_field,
+                    )
+                if parent_field not in parent_fields:
+                    raise MappingReferencesUndeclaredField(
+                        direction=f"parallel_branches.{branch_name}.inputs",
+                        side="parent",
+                        field_name=parent_field,
+                    )
+            for parent_field, sub_field in spec.outputs.items():
+                if parent_field not in parent_fields:
+                    raise MappingReferencesUndeclaredField(
+                        direction=f"parallel_branches.{branch_name}.outputs",
+                        side="parent",
+                        field_name=parent_field,
+                    )
+                if sub_field not in sub_fields:
+                    raise MappingReferencesUndeclaredField(
+                        direction=f"parallel_branches.{branch_name}.outputs",
+                        side="subgraph",
+                        field_name=sub_field,
+                    )
+
+        pb: Node[StateT] = cast(
+            "Node[StateT]",
+            ParallelBranchesNode[StateT](
+                name=name,
+                branches=dict(branches),
+                error_policy=error_policy,
+                errors_field=errors_field,
+                middleware=tuple(middleware) if middleware is not None else (),
+            ),
+        )
+        self._nodes[name] = pb
         return self
 
     def with_checkpointer(self, checkpointer: Checkpointer) -> Self:
