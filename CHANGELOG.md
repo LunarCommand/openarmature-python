@@ -4,7 +4,13 @@ All notable changes to `openarmature-python` are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). The package follows [Semantic Versioning](https://semver.org/); pre-1.0 minor bumps may carry behavioral changes per [spec governance](https://github.com/LunarCommand/openarmature-spec/blob/main/GOVERNANCE.md).
 
-## [Unreleased]
+## [0.6.0] — 2026-05-16
+
+Consolidated release for the five-PR batch: structured output
+(proposal 0016), image content blocks (proposal 0015), prompt
+management (proposal 0017), state migration for checkpoints
+(proposal 0014), and parallel branches (proposal 0011). Pinned spec
+jumps from v0.10.0 to v0.16.1.
 
 ### Added
 
@@ -35,8 +41,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). The
 
 ### Notes
 
-- **Release gate cleared with PR-5 (proposal 0011).** All five proposals in the batch ({0011, 0014, 0015, 0016, 0017}) are now implemented. Tag the consolidated release once this PR merges.
-- **Pre-1.0 MINOR.** Existing free-form callers (no `response_schema`) see no behavior change — the new field defaults to `None`, the wire body omits `response_format`, and `Response.parsed` remains absent.
+- **Pre-1.0 MINOR.** Two behavioral changes ship in this release:
+  - **Retry-MW attempt-index propagation.** Events from inner nodes of a subgraph wrapped by retry middleware (branch middleware, fan-out `instance_middleware`, or any retry on a wrapping subgraph) now carry the wrapping retry's attempt counter on each re-invocation rather than starting at 0. Per-node retry behavior is unchanged. Matches spec v0.16.1's clarification of the graph-engine §6 contract.
+  - **`CheckpointRecord.schema_version` semantic shift.** Previously a backend-internal record-shape version (the removed `CHECKPOINT_SCHEMA_VERSION = "1"` constant), now the user-facing state-schema version per spec §10.2. Pre-v0.6.0 records carrying `"1"` are reinterpreted as user-facing v1 identifiers; declare `schema_version="1"` on the corresponding state class or discard the records.
+
+  Existing callers who don't wrap subgraphs in retry middleware and don't declare a state-schema version see no behavior change.
 
 ## [0.5.0] — 2026-05-10
 
