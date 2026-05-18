@@ -1,8 +1,8 @@
 # Examples
 
 End-to-end demo projects for `openarmature`. Each is a standalone
-`main.py` you can run against a local OpenAI-compatible LLM endpoint
-(vLLM, LM Studio, llama.cpp server, etc.).
+`main.py` you can run against any OpenAI-compatible LLM endpoint
+(OpenAI's public API, vLLM, LM Studio, llama.cpp server, etc.).
 
 ## Demos
 
@@ -15,38 +15,43 @@ Pydantic class (`response_schema=Classification` → `Response.parsed`
 as a `Classification` instance), conditional routing on a parsed
 field, and a compile-time observer.
 
-Configured via env vars (`LLM_BASE_URL`, `LLM_MODEL`, `LLM_API_KEY`);
-defaults to OpenAI public API with `gpt-4o-mini`.
-
-### [`01-linear-pipeline/`](./01-linear-pipeline/main.py)
-
-Minimal two-node graph (`plan → write`). Demonstrates: typed `State`,
-the `append` reducer, static edges, `END`.
-
-### [`02-routing-and-subgraphs/`](./02-routing-and-subgraphs/main.py)
+### [`01-routing-and-subgraphs/`](./01-routing-and-subgraphs/main.py)
 
 Question-answering assistant — classify, then short-answer or
 research-subgraph, then copy-edit. Demonstrates: conditional edges,
 `SubgraphNode`, custom `ProjectionStrategy`, the `merge` reducer.
 
-### [`03-explicit-subgraph-mapping/`](./03-explicit-subgraph-mapping/main.py)
+### [`02-explicit-subgraph-mapping/`](./02-explicit-subgraph-mapping/main.py)
 
 Compare two topics by running the same analysis subgraph on each.
 Demonstrates: `ExplicitMapping` for reusing one compiled subgraph at
 multiple parent sites with disjoint parent fields.
 
-### [`04-observer-hooks/`](./04-observer-hooks/main.py)
+### [`03-observer-hooks/`](./03-observer-hooks/main.py)
 
 Add observability to a `draft → review → finalize` pipeline without
 changing any node code. Demonstrates: `attach_observer`, `NodeEvent`,
-namespace chaining across subgraph boundaries, both function-shaped
-and class-shaped observers.
+namespace chaining across subgraph boundaries, function-shaped and
+class-shaped observers, plus the `OTelObserver` running alongside
+the plain observer (same hook, different backend).
 
-### [`05-nested-subgraphs/`](./05-nested-subgraphs/main.py)
+### [`04-nested-subgraphs/`](./04-nested-subgraphs/main.py)
 
-Two levels of nested subgraphs (`outer → middle → inner`) with a
-depth-aware observer printing the descent and return. Demonstrates
-spec graph-engine §6 depth invariants.
+Question answering against a tiny baked-in document corpus, with two
+levels of subgraph nesting: outer coordinator → doc-QA subgraph →
+section-extract subgraph. A depth-aware observer prints the descent
+and return.
+
+## Configuration
+
+All demos configure their LLM client via env vars; OpenAI public-API
+defaults shown:
+
+| Env var | Default | Notes |
+| --- | --- | --- |
+| `LLM_BASE_URL` | `https://api.openai.com` | **Host root only** — the provider adds the path. |
+| `LLM_MODEL` | `gpt-4o-mini` | Any model the bound endpoint exposes. |
+| `LLM_API_KEY` | (none) | Required; pass empty for local servers that don't authenticate. |
 
 ## Running
 
@@ -54,10 +59,15 @@ spec graph-engine §6 depth invariants.
 # From the repo root, install the examples dep group:
 uv sync --group examples
 
+# Demo 03 also wants the OTel SDK for its OTelObserver:
+uv sync --group examples --all-extras
+
 # Run any demo:
-uv run python examples/01-linear-pipeline/main.py "the psychology of long walks"
+LLM_API_KEY=sk-... uv run python examples/00-hello-world/main.py
+LLM_API_KEY=sk-... uv run python examples/01-routing-and-subgraphs/main.py "what year did the moon landing happen"
 ```
 
-All five demos expect an OpenAI-compatible LLM endpoint at
-`http://localhost:8000/v1`. Edit `VLLM_BASE_URL` and `MODEL` at the
-top of each `main.py` to point elsewhere.
+For a local OpenAI-compatible server (vLLM, LM Studio, llama.cpp,
+etc.), point `LLM_BASE_URL` at the host root (e.g. `http://localhost:8000`)
+and set `LLM_API_KEY` to whatever value the server expects (often
+empty or a placeholder).
