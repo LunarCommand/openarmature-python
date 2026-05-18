@@ -12,6 +12,9 @@ write a one-sentence summary.
   - Pydantic class (``Classification``, ``Summary``): typed
     instance on ``Response.parsed``.
   - JSON Schema dict (``research``): raw dict on ``Response.parsed``.
+- ``RuntimeConfig`` for per-call sampling knobs — every ``complete()``
+  here passes ``config=RuntimeConfig(temperature=0.0)`` so the run
+  reproduces deterministically.
 - Conditional routing on a parsed field (``route`` reads
   ``state.classification.intent``).
 - ``attach_observer`` for boundary visibility.
@@ -49,7 +52,7 @@ from openarmature.graph import (
     append,
     merge,
 )
-from openarmature.llm import OpenAIProvider, UserMessage
+from openarmature.llm import OpenAIProvider, RuntimeConfig, UserMessage
 
 
 # Pydantic schemas the model is constrained to produce. Passing a
@@ -84,6 +87,15 @@ class PipelineState(State):
 # builders, IDE inspection) import this module without running main().
 _provider_instance: OpenAIProvider | None = None
 
+# Per-call sampling knobs. The demo locks the model at temperature 0
+# so the routing classification (and the rest of the run) reproduces
+# across invocations — useful for tutorial output, less appropriate
+# for production where some sampling variety is desirable.
+# RuntimeConfig also surfaces max_tokens, top_p, and seed; only
+# temperature is set here so the others fall through to provider
+# defaults.
+_DETERMINISTIC = RuntimeConfig(temperature=0.0)
+
 
 def _get_provider() -> OpenAIProvider:
     global _provider_instance
@@ -113,6 +125,7 @@ async def classify(state: PipelineState) -> Mapping[str, Any]:
             )
         ],
         response_schema=Classification,
+        config=_DETERMINISTIC,
     )
     return {"classification": response.parsed, "metadata": {"classified_by": "llm"}}
 
@@ -140,6 +153,7 @@ async def research(state: PipelineState) -> Mapping[str, Any]:
             "required": ["topics", "follow_up_questions"],
             "additionalProperties": False,
         },
+        config=_DETERMINISTIC,
     )
     return {
         "research_plan": response.parsed,
@@ -161,6 +175,7 @@ async def summarize(state: PipelineState) -> Mapping[str, Any]:
             )
         ],
         response_schema=Summary,
+        config=_DETERMINISTIC,
     )
     return {
         "summary": response.parsed,

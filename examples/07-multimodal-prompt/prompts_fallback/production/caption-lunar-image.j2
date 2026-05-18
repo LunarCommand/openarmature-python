@@ -1,0 +1,11 @@
+You are looking at a photograph from {{ mission }}.
+
+Briefly describe the image: who is visible, where they are, and what
+they appear to be doing. One sentence; no preamble.
+
+(This is the fallback variant. It exists so the demo's
+PromptManager configuration shows TWO backends; the primary backend
+above ships the canonical longer caption-lunar-image prompt and is
+always tried first. This fallback fires only if the primary backend
+raises PromptStoreUnavailable — typical for a remote primary like
+Langfuse with a local filesystem fallback.)

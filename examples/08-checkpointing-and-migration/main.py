@@ -191,6 +191,19 @@ def migrate_v1_to_v2(state_dict: dict[str, Any]) -> dict[str, Any]:
     Pure function: takes the saved state as a dict, returns the dict at
     the new schema. The engine reads the v1 record, applies this
     function, and re-deserializes against MissionPlanStateV2.
+
+    Multi-version chains: a third schema (v3) would add a second
+    migration function (``migrate_v2_to_v3``) and a second
+    ``builder.with_state_migration("v2", "v3", migrate_v2_to_v3)``
+    call. The framework's MigrationRegistry runs a BFS over the
+    registered edges to find the shortest chain from the saved
+    record's ``schema_version`` to the current state class's. A v1
+    record loaded under a v3 graph would run v1->v2 then v2->v3
+    automatically; no caller-side composition required. If two
+    distinct edges with the same ``(from, to)`` pair exist, or two
+    distinct shortest paths exist for one resolution, the registry
+    raises ``CheckpointStateMigrationChainAmbiguous`` at registration
+    or resume time.
     """
     return {**state_dict, "risk_assessment": ""}
 

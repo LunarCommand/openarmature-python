@@ -35,6 +35,12 @@ different topologies per branch; one dispatch.
   mapping (not in completion order). The three branches here write
   disjoint parent fields, so the order doesn't affect the result —
   but the property holds and would matter if they overlapped.
+- A ``branch_attribution_observer`` reads ``NodeEvent.branch_name``
+  on inner-node events. ``branch_name`` is populated only for
+  events INSIDE a branch's subgraph; outermost nodes (receive,
+  enrich, present) have ``branch_name=None``. This is the
+  per-event attribution that lets observability backends route
+  metrics / spans by branch.
 
 **Configuration** (env vars; OpenAI defaults shown):
 
@@ -64,6 +70,7 @@ from openarmature.graph import (
     BranchSpec,
     CompiledGraph,
     GraphBuilder,
+    NodeEvent,
     State,
     append,
 )
@@ -233,6 +240,21 @@ async def present(s: ArticleState) -> Mapping[str, Any]:
     return {"trace": ["present"]}
 
 
+async def branch_attribution_observer(event: NodeEvent) -> None:
+    """Print which branch each inner-node event came from.
+
+    NodeEvent carries ``branch_name`` on events from nodes that
+    execute INSIDE a parallel-branches branch — it's the per-event
+    attribution that says "this came from branch X." Outermost-graph
+    nodes (receive, enrich, present) carry no branch_name. The
+    observer skips events with no branch attribution and prints
+    ``(branch=…) node_name`` for the rest.
+    """
+    if event.branch_name is None or event.phase != "started":
+        return
+    print(f"  [observer] (branch={event.branch_name}) inner node {event.node_name!r} started")
+
+
 def build_graph() -> CompiledGraph[ArticleState]:
     summary = build_summary_subgraph()
     sentiment = build_sentiment_subgraph()
@@ -287,6 +309,7 @@ def build_graph() -> CompiledGraph[ArticleState]:
 
 async def main() -> None:
     graph = build_graph()
+    graph.attach_observer(branch_attribution_observer)
 
     print("=" * 72)
     print("Lunar-mission article enrichment — three independent analyses in parallel")
