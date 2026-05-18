@@ -4,9 +4,8 @@ two levels of subgraph nesting.
 **Use case:** Given a question and a small corpus of documents, find the
 answer. Three layers of responsibility:
 
-1. **Outer (coordinator).** Takes the user's question and the corpus,
-   delegates to the doc-QA subgraph, and polishes the final answer for the
-   user.
+1. **Outer (coordinator).** Takes the user's question, delegates to the
+   doc-QA subgraph, and polishes the final answer for the user.
 2. **Doc-QA subgraph (middle).** Picks the single most relevant document
    from the corpus, delegates the section-level work to its own subgraph,
    and synthesizes a clean answer from what came back.
@@ -14,8 +13,8 @@ answer. Three layers of responsibility:
    question, finds the relevant paragraph and extracts the answer text.
 
 Each layer has its own state schema reflecting its scope: the outer cares
-about a question + final answer, the middle cares about a corpus + a
-selected doc, the inner cares about a single doc + an extracted span.
+about a question + final answer, the middle picks one document from CORPUS
+and synthesizes, the inner cares about a single doc + an extracted span.
 That separation is the whole reason the middle and inner pieces are
 subgraphs and not flat nodes — each is a self-contained, reusable
 sub-pipeline with its own inputs and outputs.
@@ -214,13 +213,23 @@ async def pick_doc(s: DocQAState) -> Mapping[str, Any]:
         ),
         user=f"Question: {s.question}\n\nDocuments:\n\n{titles_and_bodies}",
     )
-    title = content.strip().strip('"').strip("'")
-    body = next((d["body"] for d in CORPUS if d["title"].lower() == title.lower()), "")
-    if not body:
-        # If the model paraphrased the title, fall back to the first doc.
-        title = CORPUS[0]["title"]
-        body = CORPUS[0]["body"]
-    return {"selected_title": title, "selected_body": body, "trace": ["pick_doc"]}
+    reply = content.strip().strip('"').strip("'").lower()
+    # Permissive match: the model may paraphrase ("Apollo 11 article") or
+    # return only part of the title. Accept either direction of containment
+    # over the lowercased strings — strict equality is too brittle for
+    # free-form output. A production app would constrain the model with
+    # response_schema (see 00-hello-world) so the reply is guaranteed to be
+    # a valid title.
+    match = next(
+        (d for d in CORPUS if d["title"].lower() in reply or reply in d["title"].lower()),
+        None,
+    )
+    if match is None:
+        raise RuntimeError(
+            f"pick_doc: model returned {content!r} which doesn't match any "
+            f"corpus title ({[d['title'] for d in CORPUS]!r})."
+        )
+    return {"selected_title": match["title"], "selected_body": match["body"], "trace": ["pick_doc"]}
 
 
 async def synthesize(s: DocQAState) -> Mapping[str, Any]:
