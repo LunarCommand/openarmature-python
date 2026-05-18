@@ -47,10 +47,19 @@ and return.
 Summarize a batch of news headlines in parallel. Each per-headline
 run goes through a `summarize → classify` subgraph wrapped in retry
 middleware (transient failures don't tank the batch) and timing
-middleware (per-instance duration captured alongside the fan-out
-index). Demonstrates: `add_fan_out_node` with `items_field` mode,
-`extra_outputs` collecting a parallel list, `instance_middleware`,
-concurrency cap.
+middleware (per-instance duration captured). Demonstrates:
+`add_fan_out_node` with `items_field` mode, `extra_outputs`
+collecting a parallel list, `instance_middleware`, concurrency cap.
+
+### [`06-parallel-branches/`](./06-parallel-branches/main.py)
+
+Enrich an article with three independent analyses (summary,
+sentiment, topic tags) running concurrently. Each analysis is a
+separate subgraph with its own state schema. The sentiment branch
+wraps its subgraph in retry middleware; the other two run bare.
+Demonstrates: `add_parallel_branches_node`, `BranchSpec` per branch
+with input/output projection, heterogeneous branch state schemas,
+per-branch middleware.
 
 ## Configuration
 
