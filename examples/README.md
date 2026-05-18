@@ -84,6 +84,21 @@ invocation. Demonstrates: `SQLiteCheckpointer(serialization="json")`,
 `with_checkpointer`, save-on-completed-event, `State.schema_version`,
 `with_state_migration`, `invoke(resume_invocation=...)`.
 
+### [`09-tool-use/`](./09-tool-use/main.py)
+
+A lunar-mission assistant that calls local Python tools to answer
+questions mixing fact recall and physics arithmetic. Defines two
+tools (`lookup_mission` reading a baked-in record store,
+`compute_delta_v` doing a Hohmann transfer), passes them to the
+model via `complete(tools=...)`, dispatches `assistant.tool_calls`
+to the local functions, and feeds the results back as
+`ToolMessage` entries. The agent loop is a graph cycle:
+`call_llm → dispatch_tools → call_llm` via a conditional edge, with
+a hard turn cap to prevent runaway loops. Demonstrates: `Tool`
+definitions with JSON Schema parameters, `complete(tools=...)`,
+parsing `ToolCall` records, `ToolMessage(tool_call_id=...)` round-
+trip, multi-turn tool-calling loop as a graph cycle.
+
 ## Configuration
 
 All demos configure their LLM client via env vars; OpenAI public-API
