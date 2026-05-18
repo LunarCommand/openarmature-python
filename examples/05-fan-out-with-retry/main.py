@@ -260,6 +260,10 @@ def build_graph() -> CompiledGraph[BatchState]:
 
 
 async def main() -> None:
+    # Reset module-level capture so a REPL or repeated-main() driver
+    # doesn't accumulate timings across invocations.
+    _timings.clear()
+
     graph = build_graph()
 
     initial = BatchState(headlines=HEADLINES)

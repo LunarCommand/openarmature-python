@@ -138,9 +138,13 @@ async def caption(s: CaptionState) -> Mapping[str, Any]:
     # UserMessage. Pull out the text and compose a multimodal user
     # message that also carries the image.
     rendered_msg = rendered.messages[0]
-    assert isinstance(rendered_msg, UserMessage)
+    if not isinstance(rendered_msg, UserMessage) or not isinstance(rendered_msg.content, str):
+        raise RuntimeError(
+            "PromptManager.render() returned an unexpected shape; expected a single "
+            f"UserMessage with str content, got {type(rendered_msg).__name__} "
+            f"with content type {type(rendered_msg.content).__name__}"
+        )
     rendered_text = rendered_msg.content
-    assert isinstance(rendered_text, str)
 
     multimodal_message = UserMessage(
         content=[
