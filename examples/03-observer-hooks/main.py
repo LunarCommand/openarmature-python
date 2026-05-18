@@ -32,7 +32,7 @@ Run with:
     uv sync --group examples --all-extras
     cd examples/03-observer-hooks
     LLM_API_KEY=sk-... uv run python main.py "what year did the moon landing happen"
-    LLM_API_KEY=sk-... uv run python main.py "explain the rise of espresso culture"
+    LLM_API_KEY=sk-... uv run python main.py "explain why NASA is returning to the moon with Artemis"
 
 (``--all-extras`` pulls in ``opentelemetry-sdk`` for the OTel observer.)
 """

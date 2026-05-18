@@ -1,8 +1,9 @@
 """openarmature demo: same compiled subgraph reused at two sites in one parent
 graph, each site with its own ExplicitMapping.
 
-**Use case:** Compare two topics ("rust vs go", "espresso vs drip coffee")
-by running the same analysis subgraph on each, then synthesizing a verdict.
+**Use case:** Compare two topics ("Apollo program vs Artemis program",
+"Apollo 11 vs Apollo 17") by running the same analysis subgraph on each,
+then synthesizing a verdict.
 
 **Demonstrates:** One compiled subgraph reused at two parent sites with
 per-site `ExplicitMapping` — the canonical way to express "run the same
@@ -27,8 +28,8 @@ Run with:
 
     uv sync --group examples
     cd examples/02-explicit-subgraph-mapping
-    LLM_API_KEY=sk-... uv run python main.py "rust" "go"
-    LLM_API_KEY=sk-... uv run python main.py "espresso vs drip coffee"
+    LLM_API_KEY=sk-... uv run python main.py "Apollo 11" "Apollo 17"
+    LLM_API_KEY=sk-... uv run python main.py "Apollo program vs Artemis program"
 """
 
 from __future__ import annotations
@@ -262,7 +263,7 @@ async def main() -> None:
     elif len(args) == 1 and " vs " in args[0].lower():
         topic_a, topic_b = re.split(r" vs ", args[0], maxsplit=1, flags=re.IGNORECASE)
     else:
-        topic_a, topic_b = "rust", "go"
+        topic_a, topic_b = "Apollo 11", "Apollo 17"
 
     graph = build_graph()
     try:

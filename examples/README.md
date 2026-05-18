@@ -42,6 +42,48 @@ levels of subgraph nesting: outer coordinator → doc-QA subgraph →
 section-extract subgraph. A depth-aware observer prints the descent
 and return.
 
+### [`05-fan-out-with-retry/`](./05-fan-out-with-retry/main.py)
+
+Summarize a batch of news headlines in parallel. Each per-headline
+run goes through a `summarize → classify` subgraph wrapped in retry
+middleware (transient failures don't tank the batch) and timing
+middleware (per-instance duration captured). Demonstrates:
+`add_fan_out_node` with `items_field` mode, `extra_outputs`
+collecting a parallel list, `instance_middleware`, concurrency cap.
+
+### [`06-parallel-branches/`](./06-parallel-branches/main.py)
+
+Enrich an article with three independent analyses (summary,
+sentiment, topic tags) running concurrently. Each analysis is a
+separate subgraph with its own state schema. The sentiment branch
+wraps its subgraph in retry middleware; the other two run bare.
+Demonstrates: `add_parallel_branches_node`, `BranchSpec` per branch
+with input/output projection, heterogeneous branch state schemas,
+per-branch middleware.
+
+### [`07-multimodal-prompt/`](./07-multimodal-prompt/main.py)
+
+Caption a historical lunar photograph using a versioned prompt
+template plus a multimodal user message. The prompt text is loaded
+from a Jinja2 template on disk via `FilesystemPromptBackend`; the
+image is passed alongside the rendered text as an `ImageBlock` in a
+multimodal `UserMessage`. Demonstrates: `PromptManager` + filesystem
+backend, prompt fetch + render with template variables,
+`with_active_prompt` context-var propagation for observability,
+multimodal `UserMessage` carrying both text and image content blocks.
+
+### [`08-checkpointing-and-migration/`](./08-checkpointing-and-migration/main.py)
+
+A lunar-mission planning pipeline that checkpoints after every step,
+then resumes the saved record under an upgraded state schema. Phase
+one invokes a v1 graph against `MissionPlanStateV1`; the
+`SQLiteCheckpointer` (JSON mode) writes records to a temp DB. Phase
+two registers a v1→v2 migration backfilling a new `risk_assessment`
+field, builds a v2 graph with one new node, and resumes from the v1
+invocation. Demonstrates: `SQLiteCheckpointer(serialization="json")`,
+`with_checkpointer`, save-on-completed-event, `State.schema_version`,
+`with_state_migration`, `invoke(resume_invocation=...)`.
+
 ## Configuration
 
 All demos configure their LLM client via env vars; OpenAI public-API
