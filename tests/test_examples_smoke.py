@@ -35,6 +35,7 @@ DEMOS = [
     "02-explicit-subgraph-mapping",
     "03-observer-hooks",
     "04-nested-subgraphs",
+    "05-fan-out-with-retry",
 ]
 
 

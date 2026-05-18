@@ -42,6 +42,16 @@ levels of subgraph nesting: outer coordinator → doc-QA subgraph →
 section-extract subgraph. A depth-aware observer prints the descent
 and return.
 
+### [`05-fan-out-with-retry/`](./05-fan-out-with-retry/main.py)
+
+Summarize a batch of news headlines in parallel. Each per-headline
+run goes through a `summarize → classify` subgraph wrapped in retry
+middleware (transient failures don't tank the batch) and timing
+middleware (per-instance duration captured alongside the fan-out
+index). Demonstrates: `add_fan_out_node` with `items_field` mode,
+`extra_outputs` collecting a parallel list, `instance_middleware`,
+concurrency cap.
+
 ## Configuration
 
 All demos configure their LLM client via env vars; OpenAI public-API
