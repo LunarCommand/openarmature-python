@@ -1,13 +1,14 @@
-"""openarmature demo: caption and identify a lunar mission photograph
-using versioned prompt templates, a fallback prompt backend, and a
-multimodal user message.
+"""openarmature demo: two independent analyses of a lunar-mission
+photograph using versioned prompt templates, a fallback prompt
+backend, and a multimodal user message.
 
-**Use case:** Given a photograph from a lunar mission, run two prompts
-in sequence: first describe what's visible (``caption-lunar-image``),
-then use that caption alongside the same image to identify the specific
-mission (``identify-mission``). Both prompts are versioned templates on
-disk; both renders are grouped under one observability ``PromptGroup``
-so a trace UI can render them as a single logical unit.
+**Use case:** Given a photograph from a lunar mission, run two
+independent analyses: describe the lunar surface visible
+(``describe-surface``) and identify the equipment (``describe-equipment``).
+Both prompts take the mission name as their only variable; neither
+depends on the other's output. Both renders are grouped under one
+observability ``PromptGroup`` so a trace UI can render the analyses
+as one logical unit.
 
 The image can come from a public URL (default) or a local file (set
 ``IMAGE_PATH`` to use the inline base64 source instead). The
@@ -25,13 +26,17 @@ configuration; the fallback path fires only when the primary raises
   legitimately missing). The typical production shape is "Langfuse
   primary + local-filesystem fallback".
 - ``FilesystemPromptBackend`` uses the ``<root>/<label>/<name>.j2``
-  layout. The demo ships two prompts (``caption-lunar-image``,
-  ``identify-mission``) under the primary backend's ``production``
-  label, plus a sibling backend rooted at a different folder for the
-  fallback demonstration.
+  layout. The demo ships two prompts (``describe-surface``,
+  ``describe-equipment``) under the primary backend's ``production``
+  label, plus matching variants in the fallback backend so the safety
+  net covers both prompts.
 - ``PromptGroup(group_name=..., members=[result_a, result_b])`` wraps
   two ``PromptResult`` instances under one observability identifier.
-  ``with_active_prompt_group(group)`` propagates the group name via
+  Because the prompts are INDEPENDENT analyses of the same input,
+  both can be rendered upfront with real variables — no placeholder
+  renders, no asymmetric "first call computes the second's input"
+  shape.
+- ``with_active_prompt_group(group)`` propagates the group name via
   ContextVar; OTel observers stamp ``openarmature.prompt.group_name``
   onto every LLM-call span fired inside.
 - ``with_active_prompt(result)`` (inside the group's scope) propagates
@@ -127,11 +132,11 @@ def _get_provider() -> OpenAIProvider:
 # construct, holds no per-call state, and is safe to share across nodes.
 #
 # Two backends are wired here:
-#   - primary: ``prompts/`` — ships caption-lunar-image and
-#     identify-mission.
+#   - primary: ``prompts/`` — ships describe-surface and
+#     describe-equipment.
 #   - fallback: ``prompts_fallback/`` — ships shorter variants of
-#     BOTH prompts so the safety net actually covers the whole
-#     pipeline. The fallback path fires when the primary raises
+#     both prompts so the safety net covers the whole pipeline. The
+#     fallback path fires when the primary raises
 #     ``PromptStoreUnavailable`` (e.g., a remote primary like
 #     Langfuse times out); ``PromptNotFound`` from primary stops the
 #     chain (the name is legitimately missing).
@@ -154,14 +159,14 @@ _PROMPT_MANAGER = PromptManager(
 # ---------------------------------------------------------------------------
 
 
-class CaptionState(State):
+class AnalysisState(State):
     # Exactly one of ``image_url`` / ``image_path`` is set when the
     # demo runs; the helper below picks the right ImageSource shape.
     image_url: str = ""
     image_path: str = ""
     mission: str
-    caption: str = ""
-    identified_mission: str = ""
+    surface_description: str = ""
+    equipment_description: str = ""
     group_name: str = ""
     trace: Annotated[list[str], append] = Field(default_factory=list)
 
@@ -218,11 +223,12 @@ def _extract_rendered_text(rendered: PromptResult) -> str:
     return rendered_msg.content
 
 
-async def caption(s: CaptionState) -> Mapping[str, Any]:
-    # Each node fetches + renders its own prompt. ``get`` is the
-    # convenience shorthand for ``render(await fetch(...))``.
+async def describe_surface(s: AnalysisState) -> Mapping[str, Any]:
+    # Each node fetches + renders its own prompt. Both prompts take
+    # only the ``mission`` variable, so neither depends on the other's
+    # output — the two analyses are independent.
     rendered = await _PROMPT_MANAGER.get(
-        "caption-lunar-image",
+        "describe-surface",
         variables={"mission": s.mission},
     )
     rendered_text = _extract_rendered_text(rendered)
@@ -245,18 +251,15 @@ async def caption(s: CaptionState) -> Mapping[str, Any]:
         response = await _get_provider().complete([multimodal_message])
 
     return {
-        "caption": (response.message.content or "").strip(),
-        "trace": ["caption"],
+        "surface_description": (response.message.content or "").strip(),
+        "trace": ["describe_surface"],
     }
 
 
-async def identify(s: CaptionState) -> Mapping[str, Any]:
-    # Uses the caption produced by the previous node — so the render
-    # happens here, not in main(). Same with_active_prompt wrapping;
-    # the outer group context from main() still applies.
+async def describe_equipment(s: AnalysisState) -> Mapping[str, Any]:
     rendered = await _PROMPT_MANAGER.get(
-        "identify-mission",
-        variables={"caption": s.caption},
+        "describe-equipment",
+        variables={"mission": s.mission},
     )
     rendered_text = _extract_rendered_text(rendered)
 
@@ -270,21 +273,20 @@ async def identify(s: CaptionState) -> Mapping[str, Any]:
     with with_active_prompt(rendered):
         response = await _get_provider().complete([multimodal_message])
 
-    identified = (response.message.content or "").strip().removeprefix("Mission:").strip()
     return {
-        "identified_mission": identified,
-        "trace": ["identify"],
+        "equipment_description": (response.message.content or "").strip(),
+        "trace": ["describe_equipment"],
     }
 
 
-def build_graph() -> CompiledGraph[CaptionState]:
+def build_graph() -> CompiledGraph[AnalysisState]:
     return (
-        GraphBuilder(CaptionState)
-        .add_node("caption", caption)
-        .add_node("identify", identify)
-        .add_edge("caption", "identify")
-        .add_edge("identify", END)
-        .set_entry("caption")
+        GraphBuilder(AnalysisState)
+        .add_node("describe_surface", describe_surface)
+        .add_node("describe_equipment", describe_equipment)
+        .add_edge("describe_surface", "describe_equipment")
+        .add_edge("describe_equipment", END)
+        .set_entry("describe_surface")
         .compile()
     )
 
@@ -300,7 +302,7 @@ async def main() -> None:
     mission = os.environ.get("MISSION", DEFAULT_MISSION)
 
     print("=" * 72)
-    print("Caption + identify a lunar photograph")
+    print("Lunar-mission image analysis (surface + equipment)")
     print("=" * 72)
     print()
     print(f"  mission:   {mission}")
@@ -310,25 +312,21 @@ async def main() -> None:
         print(f"  image:     {image_url} (url)")
     print()
 
-    # Pre-render both prompts with placeholder variables so the
-    # PromptGroup can be built ONCE at invoke entry and set as the
-    # outer observability context for the whole pipeline. The actual
-    # per-call renders happen inside the nodes, picking up the real
-    # ``caption`` variable that's only known after the first node
-    # completes. The group's ``members`` list is a metadata hint
-    # naming the two prompt slots; per-call wrapping inside the
-    # nodes carries the exact-rendered identity for each call.
-    caption_member = await _PROMPT_MANAGER.get(
-        "caption-lunar-image",
+    # Pre-render both prompts with the real ``mission`` variable so
+    # the PromptGroup can be built once at invoke entry. Both renders
+    # are honest — the nodes use the same fetch+render path inside,
+    # so no placeholder identities sneak into the group's metadata.
+    surface_member = await _PROMPT_MANAGER.get(
+        "describe-surface",
         variables={"mission": mission},
     )
-    identify_placeholder = await _PROMPT_MANAGER.get(
-        "identify-mission",
-        variables={"caption": "(provided at runtime)"},
+    equipment_member = await _PROMPT_MANAGER.get(
+        "describe-equipment",
+        variables={"mission": mission},
     )
     group = PromptGroup(
         group_name="lunar-image-analysis",
-        members=[caption_member, identify_placeholder],
+        members=[surface_member, equipment_member],
     )
 
     graph = build_graph()
@@ -340,7 +338,7 @@ async def main() -> None:
         # LLM-call span.
         with with_active_prompt_group(group):
             final = await graph.invoke(
-                CaptionState(
+                AnalysisState(
                     image_url=image_url if not image_path else "",
                     image_path=image_path,
                     mission=mission,
@@ -348,14 +346,15 @@ async def main() -> None:
                 )
             )
 
-        print(f"  group:       {final.group_name}")
-        print(f"  caption-prompt:   {caption_member.name} @ {caption_member.version}")
-        print(f"  identify-prompt:  {identify_placeholder.name} @ {identify_placeholder.version}")
+        print(f"  group:                {final.group_name}")
+        print(f"  describe-surface:     {surface_member.name} @ {surface_member.version}")
+        print(f"  describe-equipment:   {equipment_member.name} @ {equipment_member.version}")
         print()
-        print("  caption:")
-        print(f"    {final.caption}")
+        print("  surface description:")
+        print(f"    {final.surface_description}")
         print()
-        print(f"  identified mission:  {final.identified_mission}")
+        print("  equipment description:")
+        print(f"    {final.equipment_description}")
     finally:
         await graph.drain()
         if _provider_instance is not None:

@@ -63,13 +63,16 @@ per-branch middleware.
 
 ### [`07-multimodal-prompt/`](./07-multimodal-prompt/main.py)
 
-Caption a historical lunar photograph using a versioned prompt
-template plus a multimodal user message. The prompt text is loaded
-from a Jinja2 template on disk via `FilesystemPromptBackend`; the
-image is passed alongside the rendered text as an `ImageBlock` in a
-multimodal `UserMessage`. Demonstrates: `PromptManager` + filesystem
-backend, prompt fetch + render with template variables,
-`with_active_prompt` context-var propagation for observability,
+Two independent analyses of a lunar-mission photograph — describe
+the surface, describe the equipment — using versioned prompt
+templates and a multimodal user message. Templates load from
+`FilesystemPromptBackend` with a primary + fallback chain; both
+renders are grouped under one observability `PromptGroup` so a trace
+UI can render them as one logical unit. Image source switches
+between `ImageSourceURL` and `ImageSourceInline(base64_data=...)`
+via env var. Demonstrates: `PromptManager` with composite backends,
+prompt fetch + render with template variables, `PromptGroup` +
+`with_active_prompt_group`, `with_active_prompt` nesting,
 multimodal `UserMessage` carrying both text and image content blocks.
 
 ### [`08-checkpointing-and-migration/`](./08-checkpointing-and-migration/main.py)

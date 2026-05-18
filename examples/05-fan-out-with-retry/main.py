@@ -33,6 +33,11 @@ its own right — it would also work standalone against a single headline.
   instance runs independently and per-instance failures land in
   ``state.instance_errors`` instead of aborting the batch. The
   ``errors_field="instance_errors"`` knob names where the records go.
+  Under COLLECT_MODE, the demo prepends a sentinel headline
+  (``[FORCE_FAIL] ...``) that ``summarize`` raises
+  ``ProviderUnavailable`` on; retry exhausts, the error lands in
+  ``instance_errors``, and the rest of the batch completes. Without
+  the sentinel, ``COLLECT_MODE`` would have nothing to capture.
 - A ``TimingRecord`` is captured per instance via an ``on_complete``
   callback. ``TimingRecord`` carries the per-call duration but not the
   ``fan_out_index`` — that index lives on observer NodeEvents instead.
@@ -83,7 +88,7 @@ from openarmature.graph.middleware import (
     TimingRecord,
     deterministic_backoff,
 )
-from openarmature.llm import OpenAIProvider, SystemMessage, UserMessage
+from openarmature.llm import OpenAIProvider, ProviderUnavailable, SystemMessage, UserMessage
 
 _provider_instance: OpenAIProvider | None = None
 
@@ -153,6 +158,16 @@ class HeadlineState(State):
 
 
 async def summarize(s: HeadlineState) -> Mapping[str, Any]:
+    # Sentinel for the COLLECT_MODE demo. Raising a transient error
+    # (ProviderUnavailable carries the ``provider_unavailable``
+    # category, which retry's default classifier recognizes as
+    # retryable) lets the retry middleware exhaust its 3 attempts;
+    # the final failure then surfaces according to the fan-out's
+    # error_policy. Under fail_fast (default), the batch aborts.
+    # Under collect, the failure lands in instance_errors and the
+    # batch produces partial results.
+    if "[FORCE_FAIL]" in s.headline:
+        raise ProviderUnavailable("synthetic failure: provider unavailable (COLLECT_MODE demo)")
     content = await _chat(
         system=(
             "Rewrite the headline as one short sentence (~15 words) that would work as a lead. No preamble."
@@ -323,10 +338,23 @@ async def main() -> None:
     graph = build_graph(error_policy=error_policy)
     graph.attach_observer(fan_out_config_observer)
 
-    initial = BatchState(headlines=HEADLINES)
+    # Under COLLECT_MODE, prepend a deliberately-failing headline so
+    # the collect path is exercised end-to-end: retry middleware
+    # exhausts on the sentinel, the failure lands in
+    # state.instance_errors, and the rest of the batch completes.
+    # Default (fail_fast) keeps the headline list clean so the demo's
+    # happy path runs to completion.
+    if error_policy == "collect":
+        headlines = [
+            "[FORCE_FAIL] Synthetic failing headline for the COLLECT_MODE demo",
+            *HEADLINES,
+        ]
+    else:
+        headlines = list(HEADLINES)
+    initial = BatchState(headlines=headlines)
 
     print("=" * 72)
-    print(f"Summarizing {len(HEADLINES)} headlines in parallel (concurrency=3)")
+    print(f"Summarizing {len(headlines)} headlines in parallel (concurrency=3)")
     print(f"error_policy={error_policy!r}")
     print("=" * 72)
     print()
@@ -335,12 +363,23 @@ async def main() -> None:
     try:
         final = await graph.invoke(initial)
         wall_ms = (time.monotonic() - wall_start) * 1000.0
+        # Under collect, failed instances are absent from summaries /
+        # topics (their projections don't fire on failure). Pull the
+        # failed fan_out_indices out of instance_errors so the print
+        # loop can align successes to original positions and mark the
+        # gaps for the reader.
+        failed_indices = {int(e["fan_out_index"]) for e in final.instance_errors}
+        success_iter = iter(zip(final.summaries, final.topics, strict=True))
         print("Results (in input order):")
         print()
-        for i, (h, s, t) in enumerate(zip(final.headlines, final.summaries, final.topics, strict=True)):
-            print(f"  [{i}] {h}")
-            print(f"       summary: {s}")
-            print(f"       topic:   {t}")
+        for i, headline in enumerate(final.headlines):
+            print(f"  [{i}] {headline}")
+            if i in failed_indices:
+                print("       (failed after retries; see instance_errors below)")
+            else:
+                s, t = next(success_iter)
+                print(f"       summary: {s}")
+                print(f"       topic:   {t}")
             print()
         if final.instance_errors:
             print(f"Captured {len(final.instance_errors)} per-instance error(s):")
