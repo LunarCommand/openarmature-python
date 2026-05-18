@@ -13,8 +13,10 @@ write a one-sentence summary.
     instance on ``Response.parsed``.
   - JSON Schema dict (``research``): raw dict on ``Response.parsed``.
 - ``RuntimeConfig`` for per-call sampling knobs — every ``complete()``
-  here passes ``config=RuntimeConfig(temperature=0.0)`` so the run
-  reproduces deterministically.
+  here passes ``config=RuntimeConfig(temperature=0.0)`` to reduce
+  sampling variance across runs. Temperature 0 isn't a strict
+  determinism guarantee (providers vary at the infra level) but it's
+  the standard tuning knob for "as reproducible as the API allows."
 - Conditional routing on a parsed field (``route`` reads
   ``state.classification.intent``).
 - ``attach_observer`` for boundary visibility.
@@ -87,10 +89,11 @@ class PipelineState(State):
 # builders, IDE inspection) import this module without running main().
 _provider_instance: OpenAIProvider | None = None
 
-# Per-call sampling knobs. The demo locks the model at temperature 0
-# so the routing classification (and the rest of the run) reproduces
-# across invocations — useful for tutorial output, less appropriate
-# for production where some sampling variety is desirable.
+# Per-call sampling knobs. The demo sets temperature 0 to reduce
+# variance across invocations — the run is "as reproducible as the
+# API allows" but not strictly deterministic (providers vary at the
+# infra level even at temp 0). Useful for tutorial output; production
+# usually wants some sampling variety.
 # RuntimeConfig also surfaces max_tokens, top_p, and seed; only
 # temperature is set here so the others fall through to provider
 # defaults.

@@ -11,9 +11,9 @@ local tools and lets the model call them.
 
 The agent loops: send messages + tools to the model, dispatch any
 ``tool_calls`` the model emits, feed the results back as
-``ToolMessage`` entries, and call the model again. Loop terminates when
-the model returns content with ``finish_reason="stop"`` (or after a
-hard turn cap).
+``ToolMessage`` entries, and call the model again. Loop terminates
+when the assistant message has no ``tool_calls`` (the model is done
+requesting tools) or after a hard turn cap.
 
 **What's interesting in the implementation:**
 
