@@ -39,6 +39,7 @@ DEMOS = [
     "06-parallel-branches",
     "07-multimodal-prompt",
     "08-checkpointing-and-migration",
+    "09-tool-use",
 ]
 
 
