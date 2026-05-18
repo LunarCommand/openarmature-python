@@ -31,11 +31,10 @@ EXAMPLES_DIR = Path(__file__).parent.parent / "examples"
 
 DEMOS = [
     "00-hello-world",
-    "01-linear-pipeline",
-    "02-routing-and-subgraphs",
-    "03-explicit-subgraph-mapping",
-    "04-observer-hooks",
-    "05-nested-subgraphs",
+    "01-routing-and-subgraphs",
+    "02-explicit-subgraph-mapping",
+    "03-observer-hooks",
+    "04-nested-subgraphs",
 ]
 
 

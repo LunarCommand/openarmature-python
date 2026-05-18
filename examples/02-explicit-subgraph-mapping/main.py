@@ -5,37 +5,41 @@ graph, each site with its own ExplicitMapping.
 by running the same analysis subgraph on each, then synthesizing a verdict.
 
 **Demonstrates:** One compiled subgraph reused at two parent sites with
-per-site `ExplicitMapping` — the case spec v0.2 / proposal 0002 was written
-for, and the only way to express "run the same subgraph twice on disjoint
-parent fields" without per-site projection classes that mirror each other.
+per-site `ExplicitMapping` — the canonical way to express "run the same
+subgraph twice on disjoint parent fields" without writing per-site
+projection classes that mirror each other.
 
-This is the case proposal 0002 was written for. Without explicit input/output
-mapping, both sites would have to read from and write to the same parent
-fields under name matching — making "run the same subgraph twice on different
-inputs" structurally impossible. The two analyze_a/analyze_b sites here share
-the SAME compiled subgraph value but project different parent fields in and
-different parent fields out.
+Without explicit input/output mapping, both sites would have to read from
+and write to the same parent fields under name matching — making "run the
+same subgraph twice on different inputs" structurally impossible. The two
+analyze_a/analyze_b sites here share the SAME compiled subgraph value but
+project different parent fields in and different parent fields out.
+
+LLM calls go through ``openarmature.llm.OpenAIProvider``.
+
+**Configuration** (env vars; OpenAI defaults shown):
+
+- ``LLM_BASE_URL`` defaults to ``https://api.openai.com``. **Host root only.**
+- ``LLM_MODEL`` defaults to ``gpt-4o-mini``.
+- ``LLM_API_KEY`` required (empty for local servers that don't authenticate).
 
 Run with:
-    uv run python main.py "rust" "go"
-    uv run python main.py "espresso vs drip coffee"
-    uv run python main.py                              # → defaults to rust vs go
+
+    uv sync --group examples
+    cd examples/02-explicit-subgraph-mapping
+    LLM_API_KEY=sk-... uv run python main.py "rust" "go"
+    LLM_API_KEY=sk-... uv run python main.py "espresso vs drip coffee"
 """
 
 from __future__ import annotations
 
 import asyncio
+import os
 import re
 import sys
 from collections.abc import Mapping
 from typing import Annotated, Any
 
-from openai import AsyncOpenAI
-from openai.types.chat import (
-    ChatCompletionMessageParam,
-    ChatCompletionSystemMessageParam,
-    ChatCompletionUserMessageParam,
-)
 from pydantic import Field
 
 from openarmature.graph import (
@@ -46,11 +50,20 @@ from openarmature.graph import (
     State,
     append,
 )
+from openarmature.llm import OpenAIProvider, SystemMessage, UserMessage
 
-VLLM_BASE_URL = "http://localhost:8000/v1"
-MODEL = "dark-side-of-the-code/Mistral-Small-24B-Instruct-2501-AWQ"
+_provider_instance: OpenAIProvider | None = None
 
-client = AsyncOpenAI(base_url=VLLM_BASE_URL, api_key="not-needed")
+
+def _get_provider() -> OpenAIProvider:
+    global _provider_instance
+    if _provider_instance is None:
+        _provider_instance = OpenAIProvider(
+            base_url=os.environ.get("LLM_BASE_URL", "https://api.openai.com"),
+            model=os.environ.get("LLM_MODEL", "gpt-4o-mini"),
+            api_key=os.environ.get("LLM_API_KEY") or None,
+        )
+    return _provider_instance
 
 
 # ----------------------------------------------------------------------------
@@ -66,7 +79,7 @@ client = AsyncOpenAI(base_url=VLLM_BASE_URL, api_key="not-needed")
 # parent's per-side fields.
 #
 # This separation is the whole point. If the parent and subgraph shared field
-# names (`summary`, `score`) and we relied on the spec's default field-name
+# names (`summary`, `score`) and we relied on default field-name
 # matching, the two subgraph calls would BOTH write to a single
 # `parent.summary` field — the second call would clobber the first, and the
 # comparator at the end would have no way to see both. With explicit mapping
@@ -96,22 +109,15 @@ class AnalysisState(State):
 
 
 # ----------------------------------------------------------------------------
-# LLM helper (plumbing — not openarmature)
+# LLM helper
 # ----------------------------------------------------------------------------
 
 
 async def _chat(system: str, user: str) -> str:
-    messages: list[ChatCompletionMessageParam] = [
-        ChatCompletionSystemMessageParam(role="system", content=system),
-        ChatCompletionUserMessageParam(role="user", content=user),
-    ]
-    resp = await client.chat.completions.create(
-        model=MODEL,
-        messages=messages,
-        temperature=0.3,
-        stream=False,
+    response = await _get_provider().complete(
+        [SystemMessage(content=system), UserMessage(content=user)],
     )
-    return (resp.choices[0].message.content or "").strip()
+    return (response.message.content or "").strip()
 
 
 # ----------------------------------------------------------------------------
@@ -199,10 +205,10 @@ async def synthesize(s: ComparisonState) -> Mapping[str, Any]:
 #     with no way to express "this site reads A, that site reads B." Both
 #     sites would write `parent.summary` and clobber each other.
 #
-#   - A custom `ProjectionStrategy` (the 02-routing-and-subgraphs approach)
+#   - A custom `ProjectionStrategy` (the 01-routing-and-subgraphs approach)
 #     would have to differ per call site — you'd write two distinct projection
 #     classes that do the same thing in mirror image. That's exactly the
-#     boilerplate proposal 0002 removes.
+#     boilerplate `ExplicitMapping` removes.
 #
 #   - The subgraph can't rename its own fields to avoid the clash: its schema
 #     is fixed at compile time and shared across both call sites. Wrong layer.
@@ -259,19 +265,24 @@ async def main() -> None:
         topic_a, topic_b = "rust", "go"
 
     graph = build_graph()
-    final = await graph.invoke(ComparisonState(topic_a=topic_a, topic_b=topic_b))
+    try:
+        final = await graph.invoke(ComparisonState(topic_a=topic_a, topic_b=topic_b))
 
-    print(f"topic A: {final.topic_a}")
-    print(f"  summary: {final.a_summary}")
-    print(f"  score:   {final.a_score}/10")
-    print()
-    print(f"topic B: {final.topic_b}")
-    print(f"  summary: {final.b_summary}")
-    print(f"  score:   {final.b_score}/10")
-    print()
-    print(f"verdict:\n{final.verdict}")
-    print()
-    print(f"trace: {final.trace}")
+        print(f"topic A: {final.topic_a}")
+        print(f"  summary: {final.a_summary}")
+        print(f"  score:   {final.a_score}/10")
+        print()
+        print(f"topic B: {final.topic_b}")
+        print(f"  summary: {final.b_summary}")
+        print(f"  score:   {final.b_score}/10")
+        print()
+        print(f"verdict:\n{final.verdict}")
+        print()
+        print(f"trace: {final.trace}")
+    finally:
+        await graph.drain()
+        if _provider_instance is not None:
+            await _provider_instance.aclose()
 
 
 if __name__ == "__main__":

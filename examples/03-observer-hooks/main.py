@@ -1,36 +1,51 @@
-"""openarmature demo: observer hooks for structured logging + per-call metrics.
+"""openarmature demo: observer hooks for structured logging, per-call metrics, and OTel spans.
 
 **Use case:** Add observability to a small three-stage answer pipeline (an
 outer `draft → review → finalize` flow where `review` is its own subgraph)
-without changing any node code. A graph-attached console tracer prints
-every node-boundary event to stderr; an invocation-scoped metrics
-collector tallies counts for THIS specific call.
+without changing any node code. Three observer flavors run side-by-side:
 
-**Demonstrates:** Observer hooks (spec v0.3 / proposal 0003) — registering
-graph-attached and invocation-scoped observers, the `NodeEvent` shape,
-namespace chaining across a subgraph boundary, the `drain()` call required
-for short-lived processes, and how observers see structured pre/post state
-without nodes having to log anything themselves.
+  1. A **graph-attached console tracer** that prints every node-boundary event
+     to stderr as a structured one-liner.
+  2. An **invocation-scoped metrics collector** that tallies counts for THIS
+     specific call.
+  3. The **OTel observer** wired to a console span exporter, so the same
+     boundaries surface as OpenTelemetry spans.
+
+**Demonstrates:** Observer hooks — registering graph-attached and
+invocation-scoped observers, the `NodeEvent` shape, namespace chaining
+across a subgraph boundary, the `drain()` call required for short-lived
+processes, and how observers see structured pre/post state without nodes
+having to log anything themselves. Also covers the OTel mapping: the
+`OTelObserver` is just another observer registration; the same events
+turn into spans on its private TracerProvider.
+
+LLM calls go through ``openarmature.llm.OpenAIProvider``.
+
+**Configuration** (env vars; OpenAI defaults shown):
+
+- ``LLM_BASE_URL`` defaults to ``https://api.openai.com``. **Host root only.**
+- ``LLM_MODEL`` defaults to ``gpt-4o-mini``.
+- ``LLM_API_KEY`` required (empty for local servers that don't authenticate).
 
 Run with:
-    uv run python main.py "what year did the moon landing happen"
-    uv run python main.py "explain the rise of espresso culture"
-    uv run python main.py                          # → uses default question
+
+    uv sync --group examples --all-extras
+    cd examples/03-observer-hooks
+    LLM_API_KEY=sk-... uv run python main.py "what year did the moon landing happen"
+    LLM_API_KEY=sk-... uv run python main.py "explain the rise of espresso culture"
+
+(``--all-extras`` pulls in ``opentelemetry-sdk`` for the OTel observer.)
 """
 
 from __future__ import annotations
 
 import asyncio
+import os
 import sys
 from collections.abc import Mapping
 from typing import Annotated, Any
 
-from openai import AsyncOpenAI
-from openai.types.chat import (
-    ChatCompletionMessageParam,
-    ChatCompletionSystemMessageParam,
-    ChatCompletionUserMessageParam,
-)
+from opentelemetry.sdk.trace.export import ConsoleSpanExporter, SimpleSpanProcessor
 from pydantic import Field
 
 from openarmature.graph import (
@@ -43,11 +58,21 @@ from openarmature.graph import (
     State,
     append,
 )
+from openarmature.llm import OpenAIProvider, SystemMessage, UserMessage
+from openarmature.observability.otel import OTelObserver
 
-VLLM_BASE_URL = "http://localhost:8000/v1"
-MODEL = "dark-side-of-the-code/Mistral-Small-24B-Instruct-2501-AWQ"
+_provider_instance: OpenAIProvider | None = None
 
-client = AsyncOpenAI(base_url=VLLM_BASE_URL, api_key="not-needed")
+
+def _get_provider() -> OpenAIProvider:
+    global _provider_instance
+    if _provider_instance is None:
+        _provider_instance = OpenAIProvider(
+            base_url=os.environ.get("LLM_BASE_URL", "https://api.openai.com"),
+            model=os.environ.get("LLM_MODEL", "gpt-4o-mini"),
+            api_key=os.environ.get("LLM_API_KEY") or None,
+        )
+    return _provider_instance
 
 
 # ----------------------------------------------------------------------------
@@ -57,7 +82,7 @@ client = AsyncOpenAI(base_url=VLLM_BASE_URL, api_key="not-needed")
 # fields we want to flow across the boundary (`draft`, `revised`, `trace`)
 # and each adds its own (`question` outside, `critique` inside). Keeping
 # the fields aligned by name lets the subgraph's outputs flow back through
-# the spec's default field-name matching — except for `draft`, which we
+# default field-name matching — except for `draft`, which we
 # DO need to project IN. Hence the `inputs={"draft": "draft"}` mapping
 # below; absent `outputs` falls back to field-name matching for the way
 # back, projecting `revised` and `trace`.
@@ -82,22 +107,15 @@ class ReviewState(State):
 
 
 # ----------------------------------------------------------------------------
-# LLM helper (plumbing — not openarmature)
+# LLM helper
 # ----------------------------------------------------------------------------
 
 
 async def _chat(system: str, user: str) -> str:
-    messages: list[ChatCompletionMessageParam] = [
-        ChatCompletionSystemMessageParam(role="system", content=system),
-        ChatCompletionUserMessageParam(role="user", content=user),
-    ]
-    resp = await client.chat.completions.create(
-        model=MODEL,
-        messages=messages,
-        temperature=0.3,
-        stream=False,
+    response = await _get_provider().complete(
+        [SystemMessage(content=system), UserMessage(content=user)],
     )
-    return (resp.choices[0].message.content or "").strip()
+    return (response.message.content or "").strip()
 
 
 # ----------------------------------------------------------------------------
@@ -259,21 +277,40 @@ def build_graph() -> CompiledGraph[AnswerState]:
 # The shape of an observer-aware run:
 #
 #   1. Build the graph.
-#   2. Attach graph-level observers (console_tracer here) — these fire on
-#      every invoke of this compiled graph.
+#   2. Attach graph-level observers (console_tracer + OTelObserver here)
+#      — these fire on every invoke of this compiled graph.
 #   3. For each invoke, optionally pass invocation-scoped observers
 #      (metrics here) — they fire only for THAT invocation.
 #   4. await drain() before exiting. The graph dispatches events to a
 #      background queue; without drain, a short-lived process can exit
 #      before the queue's worker has delivered them. In a long-running
 #      service this isn't necessary because the event loop keeps running.
+#
+# The OTel observer is just another observer registration. It speaks the
+# same `Observer` Protocol; the difference is what it does with each event:
+# it opens / closes spans on a private TracerProvider, threading parent /
+# child / fan-out relationships. Wiring it next to the bare async function
+# above shows the point: observability backends are pluggable behind one
+# uniform hook.
 
 
 async def main() -> None:
     question = " ".join(sys.argv[1:]) or "what year did the moon landing happen"
 
+    # OTel observer with a console span exporter — every span prints to
+    # stdout as a JSON blob when it closes. SimpleSpanProcessor exports
+    # synchronously which is right for a short-lived demo; production
+    # would use BatchSpanProcessor against a real OTLP exporter. The
+    # provider here is PRIVATE to the observer; the global
+    # TracerProvider is untouched, so this won't pollute any OTel
+    # setup the surrounding application already has.
+    otel_observer = OTelObserver(
+        span_processor=SimpleSpanProcessor(ConsoleSpanExporter()),
+    )
+
     graph = build_graph()
     graph.attach_observer(console_tracer)
+    graph.attach_observer(otel_observer)
 
     metrics = InvocationMetrics()
     try:
@@ -285,11 +322,13 @@ async def main() -> None:
         # Required for short-lived processes: invoke() returns when the
         # graph reaches END regardless of whether the observer queue has
         # finished. The try/finally also matters on the failure path —
-        # per spec v0.3 §6, the engine dispatches a failure event with
-        # `error` populated BEFORE propagating, and that event is exactly
-        # what a debugging user would want to see. Without `finally`, an
-        # invoke that raises would lose those late events.
+        # the engine dispatches a failure event with `error` populated
+        # BEFORE propagating, and that event is exactly what a debugging
+        # user would want to see. Without `finally`, an invoke that
+        # raises would lose those late events.
         await graph.drain()
+        if _provider_instance is not None:
+            await _provider_instance.aclose()
 
     print()
     print(f"question: {final.question}")
