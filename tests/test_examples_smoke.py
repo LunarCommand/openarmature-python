@@ -38,6 +38,7 @@ DEMOS = [
     "05-fan-out-with-retry",
     "06-parallel-branches",
     "07-multimodal-prompt",
+    "08-checkpointing-and-migration",
 ]
 
 

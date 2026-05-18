@@ -72,6 +72,18 @@ backend, prompt fetch + render with template variables,
 `with_active_prompt` context-var propagation for observability,
 multimodal `UserMessage` carrying both text and image content blocks.
 
+### [`08-checkpointing-and-migration/`](./08-checkpointing-and-migration/main.py)
+
+A lunar-mission planning pipeline that checkpoints after every step,
+then resumes the saved record under an upgraded state schema. Phase
+one invokes a v1 graph against `MissionPlanStateV1`; the
+`SQLiteCheckpointer` (JSON mode) writes records to a temp DB. Phase
+two registers a v1→v2 migration backfilling a new `risk_assessment`
+field, builds a v2 graph with one new node, and resumes from the v1
+invocation. Demonstrates: `SQLiteCheckpointer(serialization="json")`,
+`with_checkpointer`, save-on-completed-event, `State.schema_version`,
+`with_state_migration`, `invoke(resume_invocation=...)`.
+
 ## Configuration
 
 All demos configure their LLM client via env vars; OpenAI public-API
