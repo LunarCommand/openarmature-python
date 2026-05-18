@@ -205,7 +205,7 @@ async def main() -> None:
     graph = build_graph()
     graph.attach_observer(trace)
     try:
-        final = await graph.invoke(PipelineState(query="what is RAG?"))
+        final = await graph.invoke(PipelineState(query="why did Apollo 13 abort its lunar landing?"))
         print(f"\nclassification: {final.classification}")
         if final.research_plan is not None:
             print(f"research_plan: {final.research_plan}")

@@ -37,7 +37,7 @@ Run with:
     uv sync --group examples
     cd examples/01-routing-and-subgraphs
     LLM_API_KEY=sk-... uv run python main.py "what year did the moon landing happen"
-    LLM_API_KEY=sk-... uv run python main.py "is espresso actually more caffeinated than drip?"
+    LLM_API_KEY=sk-... uv run python main.py "why is the lunar south pole strategically important?"
 """
 
 from __future__ import annotations
@@ -454,7 +454,7 @@ def build_graph() -> CompiledGraph[AssistantState]:
 
 
 async def main() -> None:
-    question = " ".join(sys.argv[1:]) or "is espresso actually more caffeinated than drip coffee?"
+    question = " ".join(sys.argv[1:]) or "why is the lunar south pole strategically important?"
     graph = build_graph()
     try:
         final = await graph.invoke(AssistantState(question=question))

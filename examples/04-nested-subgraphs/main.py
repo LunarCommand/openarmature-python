@@ -30,7 +30,8 @@ Run with:
     uv sync --group examples
     cd examples/04-nested-subgraphs
     LLM_API_KEY=sk-... uv run python main.py "what year did humans first land on the moon?"
-    LLM_API_KEY=sk-... uv run python main.py "how is espresso different from drip coffee?"
+    LLM_API_KEY=sk-... uv run python main.py "what happened on Apollo 13?"
+    LLM_API_KEY=sk-... uv run python main.py "who was on the Artemis II crew?"
 """
 
 from __future__ import annotations
@@ -93,23 +94,26 @@ CORPUS: list[dict[str, str]] = [
         ),
     },
     {
-        "title": "Espresso",
+        "title": "Apollo 13",
         "body": (
-            "Espresso is a coffee brewing method of Italian origin. It is made by forcing pressurized "
-            "hot water through finely ground coffee. The resulting shot is more concentrated than coffee "
-            "brewed by other methods, with a layer of crema on top. Espresso has more caffeine per "
-            "unit volume than most coffee beverages but a typical serving is one-tenth the volume of a "
-            "drip coffee, so a single espresso usually contains less total caffeine than a drip cup."
+            "Apollo 13 was the seventh crewed mission in the Apollo program and the third intended "
+            "to land on the Moon. The lunar landing was aborted after an oxygen tank in the service "
+            "module ruptured two days after launch in April 1970, crippling power and life support. "
+            "The crew of Jim Lovell, Jack Swigert, and Fred Haise used the lunar module Aquarius as "
+            "a lifeboat and looped around the Moon on a free-return trajectory before splashing down "
+            "safely in the Pacific. The mission is remembered as a successful failure."
         ),
     },
     {
-        "title": "Walking",
+        "title": "Artemis II",
         "body": (
-            "Walking is the most common form of human locomotion and is associated with a range of "
-            "health benefits including reduced risk of cardiovascular disease, improved mood, and "
-            "lower mortality. A moderate pace of around 100 steps per minute is often cited as a "
-            "useful threshold. Walking as a deliberate practice has long been associated with "
-            "thinking and writing — many writers credit long walks as part of their creative process."
+            "Artemis II was the first crewed mission of NASA's Artemis program, launching from "
+            "Kennedy Space Center on April 1, 2026 atop the Space Launch System rocket. The "
+            "ten-day flight carried astronauts Reid Wiseman, Victor Glover, Christina Koch, and "
+            "Jeremy Hansen aboard the Orion spacecraft Integrity on a free-return trajectory around "
+            "the Moon and back. It was the first crewed flight beyond low Earth orbit since Apollo "
+            "17 in 1972. The capsule splashed down in the Pacific Ocean on April 10, 2026, marking "
+            "a successful test flight ahead of the Artemis III lunar landing mission."
         ),
     },
 ]

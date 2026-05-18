@@ -1,12 +1,13 @@
-"""openarmature demo: summarize a batch of news headlines in parallel, with
-per-headline retries and timing.
+"""openarmature demo: summarize a batch of lunar-mission headlines in
+parallel, with per-headline retries and timing.
 
-**Use case:** Given a list of news headlines, produce a one-sentence
-summary and a topic tag for each one. The headlines are independent, so
-fan them out and let them run concurrently. Each per-headline run hits
-the LLM, which can transiently fail (rate-limit, timeout, transient 5xx);
-wrap each instance in retry middleware so a flaky call doesn't tank the
-whole batch. A timing middleware records how long each instance took.
+**Use case:** Given a list of lunar-mission news headlines, produce a
+one-sentence summary and a topic tag for each one. The headlines are
+independent, so fan them out and let them run concurrently. Each
+per-headline run hits the LLM, which can transiently fail (rate-limit,
+timeout, transient 5xx); wrap each instance in retry middleware so a
+flaky call doesn't tank the whole batch. A timing middleware records how
+long each instance took.
 
 This is the canonical fan-out shape: N similar tasks, N runtime-determined
 from state, the work independent enough to run concurrently. The
@@ -98,11 +99,11 @@ async def _chat(system: str, user: str) -> str:
 # ---------------------------------------------------------------------------
 
 HEADLINES: list[str] = [
-    "City council approves new bike-lane network spanning downtown",
-    "Researchers report unexpected results from fusion-reactor test run",
-    "Local bakery wins national award for sourdough loaf",
-    "Stock market dips after central bank signals slower rate cuts",
-    "Marathon runner sets new course record under heavy rainfall",
+    "Artemis II splashes down in Pacific after ten-day lunar flyby",
+    "NASA pauses Lunar Gateway program in favor of crewed surface base",
+    "Intuitive Machines prepares IM-3 lander for Reiner Gamma touchdown",
+    "Lunar Reconnaissance Orbiter spots fresh impact crater on far side",
+    "Researchers confirm abundant water ice in permanently shadowed south-pole craters",
 ]
 
 
@@ -148,8 +149,8 @@ async def summarize(s: HeadlineState) -> Mapping[str, Any]:
 async def classify(s: HeadlineState) -> Mapping[str, Any]:
     content = await _chat(
         system=(
-            "Tag the topic of the headline below with ONE word from this set: "
-            "politics, science, business, sports, food, technology, other. "
+            "Tag the topic of the lunar-mission headline below with ONE word "
+            "from this set: crew, lander, orbiter, science, hardware, policy, other. "
             "Reply with just the word, lowercase, no punctuation."
         ),
         user=s.headline,
