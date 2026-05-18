@@ -37,6 +37,7 @@ DEMOS = [
     "04-nested-subgraphs",
     "05-fan-out-with-retry",
     "06-parallel-branches",
+    "07-multimodal-prompt",
 ]
 
 

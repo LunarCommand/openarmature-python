@@ -61,6 +61,17 @@ Demonstrates: `add_parallel_branches_node`, `BranchSpec` per branch
 with input/output projection, heterogeneous branch state schemas,
 per-branch middleware.
 
+### [`07-multimodal-prompt/`](./07-multimodal-prompt/main.py)
+
+Caption a historical lunar photograph using a versioned prompt
+template plus a multimodal user message. The prompt text is loaded
+from a Jinja2 template on disk via `FilesystemPromptBackend`; the
+image is passed alongside the rendered text as an `ImageBlock` in a
+multimodal `UserMessage`. Demonstrates: `PromptManager` + filesystem
+backend, prompt fetch + render with template variables,
+`with_active_prompt` context-var propagation for observability,
+multimodal `UserMessage` carrying both text and image content blocks.
+
 ## Configuration
 
 All demos configure their LLM client via env vars; OpenAI public-API
