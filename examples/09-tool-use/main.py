@@ -289,7 +289,20 @@ async def dispatch_tools(s: AgentState) -> Mapping[str, Any]:
         raise RuntimeError("dispatch_tools entered without a tool-calling assistant message")
     tool_messages: list[Message] = []
     for tc in last.tool_calls:
-        result_text = dispatch(tc.name, tc.arguments or {})
+        # ToolCall.arguments is None only under provider-reported
+        # finish_reason="error" (unparseable args). In a real agent the
+        # model sees the error string and either retries or bails;
+        # either way the loop doesn't crash.
+        if tc.arguments is None:
+            result_text = (
+                f"Tool {tc.name!r} could not be invoked: arguments were "
+                f"unparseable. Retry with valid JSON arguments."
+            )
+        else:
+            try:
+                result_text = dispatch(tc.name, tc.arguments)
+            except (KeyError, ValueError, TypeError) as exc:
+                result_text = f"Tool {tc.name!r} failed with {type(exc).__name__}: {exc}"
         tool_messages.append(ToolMessage(content=result_text, tool_call_id=tc.id))
     return {
         "messages": [*s.messages, *tool_messages],

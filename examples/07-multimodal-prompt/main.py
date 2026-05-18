@@ -129,11 +129,12 @@ def _get_provider() -> OpenAIProvider:
 # Two backends are wired here:
 #   - primary: ``prompts/`` — ships caption-lunar-image and
 #     identify-mission.
-#   - fallback: ``prompts_fallback/`` — ships a backup
-#     caption-lunar-image only. The fallback path fires when the
-#     primary raises ``PromptStoreUnavailable`` (e.g., a remote
-#     primary like Langfuse times out); ``PromptNotFound`` from
-#     primary stops the chain (the name is legitimately missing).
+#   - fallback: ``prompts_fallback/`` — ships shorter variants of
+#     BOTH prompts so the safety net actually covers the whole
+#     pipeline. The fallback path fires when the primary raises
+#     ``PromptStoreUnavailable`` (e.g., a remote primary like
+#     Langfuse times out); ``PromptNotFound`` from primary stops the
+#     chain (the name is legitimately missing).
 #
 # In this demo both prompts live in primary, so the fallback path
 # isn't exercised at runtime. The construction-time setup is the

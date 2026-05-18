@@ -127,7 +127,7 @@ HEADLINES: list[str] = [
 
 class BatchState(State):
     """Outer graph: list of headlines goes in, parallel lists of summaries
-    and topic tags come out. ``branch_errors`` only populates under
+    and topic tags come out. ``instance_errors`` only populates under
     ``error_policy="collect"`` — each failed instance contributes one
     record naming its ``fan_out_index`` and the exception category."""
 
