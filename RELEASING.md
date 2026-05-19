@@ -2,9 +2,12 @@
 
 How to cut a release of `openarmature`. For maintainers.
 
-Every release goes through TestPyPI before PyPI. The release workflow
-(`.github/workflows/release.yml`) is tag-driven: tag pushes are the only
-trigger; nothing else publishes.
+Releases go through TestPyPI before PyPI **by convention**. The
+workflow (`.github/workflows/release.yml`) is tag-driven and dispatches
+by tag name; it does not enforce that an rc preceded a real-release
+tag. Pushing `v0.7.0` directly publishes to PyPI without consulting
+any prior `-rc` tag, so the rc-first flow is a maintainer-side
+discipline carried by the pre-release checklist below.
 
 ## The release path: rc first, then real
 
