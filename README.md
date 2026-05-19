@@ -10,7 +10,7 @@
 
 ### OpenArmature is a workflow framework for LLM pipelines and tool-calling agents.
 
-Typed state, compile-time topology checks, and observability and crash-safe checkpoints are baked into the engine. The graph layer itself has no concept of LLMs or tools, so the same primitives drive deterministic ETL pipelines and tool-calling agents alike.
+Typed state, compile-time topology checks, observability, and crash-safe checkpoints are baked into the engine. The graph layer itself has no concept of LLMs or tools, so the same primitives drive deterministic ETL pipelines and tool-calling agents alike.
 
 This Python package is the reference implementation. The behavioral contract is specified in [openarmature-spec](https://github.com/LunarCommand/openarmature-spec) and verified by conformance fixtures.
 
@@ -187,8 +187,8 @@ A few things to notice:
 ## Next steps
 
 - **Quickstart**: build your first graph end-to-end. [openarmature.ai/getting-started](https://openarmature.ai/getting-started/)
-- **Concepts**: typed state, reducers, composition, fan-out, checkpointing, observability. [openarmature.ai/concepts](https://openarmature.ai/concepts/)
+- **Concepts**: typed state, reducers, graphs, composition, fan-out, parallel branches, LLMs, prompts, observability, checkpointing. [openarmature.ai/concepts](https://openarmature.ai/concepts/)
 - **Model Providers**: implement the Provider Protocol for a custom LLM backend. [openarmature.ai/model-providers/authoring](https://openarmature.ai/model-providers/authoring/)
 - **API reference**: auto-generated from docstrings. [openarmature.ai/reference](https://openarmature.ai/reference/)
-- **Examples**: runnable demos. [openarmature-python/examples/](https://github.com/LunarCommand/openarmature-python/tree/main/examples)
+- **Examples**: ten runnable demos with walk-throughs. [openarmature.ai/examples](https://openarmature.ai/examples/) (source at [./examples/](./examples/))
 - **Spec**: behavioral contract this implementation conforms to. [LunarCommand/openarmature-spec](https://github.com/LunarCommand/openarmature-spec)

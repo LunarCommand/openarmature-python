@@ -221,6 +221,58 @@ on every object. Pydantic-derived schemas may need `model_config =
 ConfigDict(extra="forbid")` on the class to get the
 `additionalProperties: false` in the generated JSON Schema.
 
+## Tool calling
+
+Beyond producing typed text, an LLM call can request work from local
+Python functions and resume with their results. The wire shape is a
+turn-based loop driven entirely from the same `complete()` call: the
+model emits `tool_calls`, the caller dispatches them to local
+functions, appends `ToolMessage` responses, and re-calls. The graph
+engine has no special concept of tools; the loop fits as a
+conditional-edge cycle.
+
+```python
+from openarmature.llm import Tool
+
+lookup_mission = Tool(
+    name="lookup_mission",
+    description="Look up factual records for a named lunar mission.",
+    parameters={
+        "type": "object",
+        "properties": {
+            "name": {"type": "string"},
+        },
+        "required": ["name"],
+        "additionalProperties": False,
+    },
+)
+
+response = await provider.complete(messages, tools=[lookup_mission, ...])
+```
+
+When the model decides to use one or more tools, the response carries
+`finish_reason="tool_calls"` and `response.message.tool_calls` is a
+list of `ToolCall(id, name, arguments)` records. `arguments` is a
+parsed dict whose shape matches the corresponding tool's `parameters`
+schema. The single edge case where `arguments` is `None` is
+`finish_reason="error"` for unparseable model output.
+
+The caller dispatches each call to its local function, appends one
+`ToolMessage(content=..., tool_call_id=...)` per call to the message
+list, and re-calls. The `tool_call_id` field MUST match the
+`ToolCall.id` the model emitted so the model can pair its requests
+with the responses. The next turn either emits more `tool_calls` or
+returns a normal assistant content message signaling completion.
+
+Wiring the loop as a graph cycle: a `call_llm` node, a
+`dispatch_tools` node that resolves calls and appends
+`ToolMessage`s, a conditional edge from `call_llm` that routes back
+to `call_llm` when `tool_calls` are present and forward to a
+termination node when they aren't. A turn cap on the routing function
+prevents runaway loops on a model that stays in tool-calling forever.
+See [`09 - Tool use`](../examples/09-tool-use.md) for the runnable
+shape.
+
 ## Content blocks (multimodal user messages)
 
 User messages carry content in one of two shapes: a plain text string,
@@ -434,6 +486,10 @@ classifier won't do this for them.
 - [API reference: `openarmature.llm`](../reference/llm.md) for the
   full surface: message types, `Response`, `RuntimeConfig`, every
   error class, validation helpers.
-- [Examples: `00-hello-world`](https://github.com/LunarCommand/openarmature-python/tree/main/examples/00-hello-world)
-  for a runnable graph exercising both `response_schema` forms in one
+- [Examples: 00 - Hello, world](../examples/00-hello-world.md) for a
+  runnable graph exercising both `response_schema` forms in one
   pipeline.
+- [Examples: 09 - Tool use](../examples/09-tool-use.md) for the
+  agent-loop pattern with two local tools.
+- [Examples: 07 - Multimodal prompt](../examples/07-multimodal-prompt.md)
+  for content blocks alongside versioned prompts.

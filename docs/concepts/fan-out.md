@@ -18,36 +18,29 @@ A fan-out can dispatch instances driven by a list in state
 **`items_field` mode**: one instance per item in a parent list field:
 
 ```python
-from openarmature.graph import FanOutConfig, FanOutNode
-
-scrape_all = FanOutNode(
-    name="scrape_all",
-    config=FanOutConfig(
-        subgraph=scrape_subgraph,        # CompiledGraph[ScrapeState]
-        items_field="urls",              # parent list field, one instance per item
-        item_field="url",                # subgraph field that receives each item
-        collect_field="content",         # subgraph field whose value is collected
-        target_field="contents",         # parent list field that receives the collection
-        concurrency=4,
-        error_policy="fail_fast",        # or "collect"
-        on_empty="raise",                # or "noop"
-    ),
+builder.add_fan_out_node(
+    "scrape_all",
+    subgraph=scrape_subgraph,        # CompiledGraph[ScrapeState]
+    items_field="urls",              # parent list field, one instance per item
+    item_field="url",                # subgraph field that receives each item
+    collect_field="content",         # subgraph field whose value is collected
+    target_field="contents",         # parent list field that receives the collection
+    concurrency=4,
+    error_policy="fail_fast",        # or "collect"
+    on_empty="raise",                # or "noop"
 )
-builder.add_node("scrape_all", scrape_all)
 ```
 
 **`count` mode**: fixed-or-dynamic instance count, no list field:
 
 ```python
-fan_out = FanOutNode(
-    name="sample",
-    config=FanOutConfig(
-        subgraph=sample_subgraph,
-        count=8,                          # int or callable: state -> int
-        collect_field="reading",
-        target_field="readings",
-        concurrency=4,
-    ),
+builder.add_fan_out_node(
+    "sample",
+    subgraph=sample_subgraph,
+    count=8,                          # int or callable: state -> int
+    collect_field="reading",
+    target_field="readings",
+    concurrency=4,
 )
 ```
 

@@ -132,7 +132,7 @@ A walk-through:
 
 - **`attempt_index`**: 0-based retry attempt counter. `0` for nodes
   not wrapped by retry middleware; `1+` for retries. Retry middleware
-  may wrap transitively — a retry on a [parallel-branches
+  may wrap transitively. A retry on a [parallel-branches
   branch](parallel-branches.md) or fan-out `instance_middleware`
   re-runs the whole subgraph; events from inner nodes carry the
   wrapping retry's attempt counter.
@@ -148,7 +148,7 @@ A walk-through:
 - **`branch_name`**: populated on events from nodes inside a
   [parallel-branches branch](parallel-branches.md), carrying the
   branch's name as declared on the dispatcher. `None` outside.
-  Independent of `fan_out_index` — both may be present simultaneously
+  Independent of `fan_out_index`; both may be present simultaneously
   when a parallel-branches branch contains a fan-out (or a fan-out
   instance contains a parallel-branches node). The combination
   `(namespace, branch_name, fan_out_index, attempt_index, phase)`

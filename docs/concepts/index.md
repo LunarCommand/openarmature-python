@@ -16,11 +16,14 @@ the framework, or jump to whichever concept you need.
   heterogeneous subgraphs concurrently with per-branch state schemas
   and middleware.
 - [LLMs](llms.md): how LLM calls fit into nodes, structured output,
-  routing on parsed fields, errors at the LLM boundary.
+  multimodal content blocks, tool definitions, routing on parsed
+  fields, errors at the LLM boundary.
+- [Prompts](prompts.md): versioned templates, composite backends,
+  prompt-group observability propagation.
 - [Observability](observability.md): node-boundary hooks, OTel mapping,
   log correlation.
 - [Checkpointing](checkpointing.md): save state at each node boundary,
-  resume from a prior point.
+  resume from a prior point, schema migration across versions.
 
 If you're brand-new, [Quickstart](../getting-started/index.md) is the
 faster entry; under a minute to a running graph. Come back here when
