@@ -106,7 +106,7 @@ Lunar-mission assistant - tool-calling loop
   (384,400 km above Earth's surface), roughly how much delta-v would
   that take?
 
-  turns:     3
+  turns:     2
   tools used: 2
 
   trace:
@@ -124,11 +124,11 @@ Lunar-mission assistant - tool-calling loop
     [continues with delta-v values from the tool]
 ```
 
-- **`turns: 3`** means `call_llm` ran 3 times. Turn 1 produced
-  tool_calls (the model decided to use both tools); turn 2 produced
-  the final answer with no tool_calls; turn 3 is the no-op call
-  that detects the absence of tool_calls and routes to `present`.
-  (The cap of 5 is never hit on the happy path.)
+- **`turns: 2`** means `call_llm` ran twice. Turn 1 produced
+  tool_calls (the model decided to use both tools); turn 2
+  produced the final answer with no tool_calls, and the conditional
+  edge routed directly to `present`. (The cap of 5 is never hit on
+  the happy path.)
 - **`tools used: 2`** counts `ToolMessage`s appended. The model
   emitted two `ToolCall`s in one assistant turn (one for
   `lookup_mission`, one for `compute_delta_v`); the dispatcher

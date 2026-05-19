@@ -80,10 +80,13 @@ carries `draft` IN; the default field-name matching brings
 
 ## Reading the output
 
-The console tracer prints one line per boundary to **stderr** in
-`[step=N] namespace → fields_changed` form, interleaved with the
-OTel exporter's JSON spans on **stdout**, followed by the final
-state printout. A trimmed run looks like:
+Both observers subscribe to `started` and `completed` events by
+default, so for each node the engine fires two events sharing the
+same `step`. The console tracer prints one line per event to
+**stderr** in `[step=N] namespace → fields_changed` form; `started`
+events print as `→ {}` since `post_state` isn't populated yet. The
+trimmed sample below shows only the completed lines for
+readability, interleaved with OTel JSON spans on **stdout**:
 
 ```
 [step=1] draft → {'draft': '...', 'trace': ['draft']}
@@ -97,9 +100,9 @@ draft:   <two or three sentence draft>
 revised: <copy-edited version>
 
 per-invocation metrics:
-  events seen:        4
+  events seen:        8
   errors observed:    0
-  unique namespaces:  3
+  unique namespaces:  4
   trace order:        ['draft', 'critique', 'revise', 'finalize']
 ```
 

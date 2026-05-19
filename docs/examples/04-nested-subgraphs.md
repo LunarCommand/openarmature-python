@@ -31,7 +31,7 @@ extracts a span.
   compiled subgraph, recursively.
 - Layer-scoped state schemas. Each compiled subgraph has its own
   `State` subclass. Boundaries between layers are explicit
-  projections, not aliased name spaces.
+  projections, not aliased namespaces.
 - [`ExplicitMapping`](../concepts/composition.md) at every
   parent ↔ child boundary, plumbing the question down through three
   layers and the answer back up.
