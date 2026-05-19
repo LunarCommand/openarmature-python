@@ -117,6 +117,17 @@ The methods you'll use:
 - **`.add_subgraph_node(name, compiled, projection=None)`**: register
   a compiled graph as a node inside this graph (see
   [Composition](composition.md)).
+- **`.add_fan_out_node(name, subgraph=..., ...)`**: dispatch N copies
+  of one subgraph in parallel (see [Fan-out](fan-out.md)).
+- **`.add_parallel_branches_node(name, branches=...)`**: dispatch M
+  heterogeneous subgraphs concurrently (see
+  [Parallel branches](parallel-branches.md)).
+- **`.with_checkpointer(checkpointer)`**: wire a `Checkpointer`; the
+  engine saves a record after every `completed` event (see
+  [Checkpointing](checkpointing.md)).
+- **`.with_state_migration(from_version, to_version, migrate)`**:
+  register one edge of the state-migration chain used when resuming
+  an older saved invocation (see [Checkpointing](checkpointing.md)).
 - **`.set_entry(name)`**: declare where execution begins.
 - **`.compile()`**: validate and return `CompiledGraph`.
 

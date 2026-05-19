@@ -277,3 +277,17 @@ the shape or it doesn't; the type checker verifies at use sites. If
 you have Java instincts ("where's the `implements` keyword?"), reach
 for TypeScript or Go interface instincts instead; that's the same
 family.
+
+## Related composition primitives
+
+Subgraphs run once per outer-graph entry into them. Two related
+primitives run subgraphs multiple times or in parallel; both use
+the same projection machinery at their boundaries.
+
+- [Fan-out](fan-out.md): dispatch N copies of *one* compiled subgraph
+  against an input collection. Use when you have a list of similar
+  items to process independently.
+- [Parallel branches](parallel-branches.md): dispatch M *heterogeneous*
+  subgraphs concurrently against the same parent state, each with its
+  own state schema and (optional) middleware. Use when several
+  independent analyses share a single input.

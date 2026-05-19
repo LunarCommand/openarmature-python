@@ -69,9 +69,10 @@ assert final.log == ["hello", "world"]
 
 ## Next
 
-- [Concepts](../concepts/index.md): deeper on state, reducers,
-  projections, fan-out, subgraphs, observability.
-- [Examples](https://github.com/LunarCommand/openarmature-python/tree/main/examples):
-  five runnable demos, each driving a local OpenAI-compatible LLM
-  endpoint to do real work.
+- [Concepts](../concepts/index.md): deeper on state, reducers, graphs,
+  composition, fan-out, parallel branches, LLMs, prompts,
+  observability, checkpointing.
+- [Examples](../examples/index.md): ten runnable demos with
+  walk-throughs, each driving an OpenAI-compatible LLM endpoint to
+  do real work.
 - [API reference](../reference/index.md): auto-generated from docstrings.
