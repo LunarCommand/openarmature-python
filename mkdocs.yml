@@ -65,6 +65,10 @@ plugins:
           - getting-started/*.md
         Concepts:
           - concepts/*.md
+        Examples:
+          - examples/*.md
+        Model Providers:
+          - model-providers/*.md
         Reference:
           - reference/*.md
 
@@ -80,7 +84,11 @@ markdown_extensions:
   - pymdownx.emoji:
       emoji_index: !!python/name:material.extensions.emoji.twemoji
       emoji_generator: !!python/name:material.extensions.emoji.to_svg
-  - pymdownx.superfences
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
   - pymdownx.highlight:
       anchor_linenums: true
   - pymdownx.inlinehilite
@@ -104,6 +112,18 @@ nav:
     - Prompts: concepts/prompts.md
     - Observability: concepts/observability.md
     - Checkpointing: concepts/checkpointing.md
+  - Examples:
+    - examples/index.md
+    - Hello, world: examples/00-hello-world.md
+    - Routing and subgraphs: examples/01-routing-and-subgraphs.md
+    - Explicit subgraph mapping: examples/02-explicit-subgraph-mapping.md
+    - Observer hooks: examples/03-observer-hooks.md
+    - Nested subgraphs: examples/04-nested-subgraphs.md
+    - Fan-out with retry: examples/05-fan-out-with-retry.md
+    - Parallel branches: examples/06-parallel-branches.md
+    - Multimodal prompt: examples/07-multimodal-prompt.md
+    - Checkpointing and migration: examples/08-checkpointing-and-migration.md
+    - Tool use: examples/09-tool-use.md
   - Model Providers:
     - model-providers/index.md
     - Authoring a Provider: model-providers/authoring.md

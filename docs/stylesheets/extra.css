@@ -197,6 +197,17 @@
   display: none;
 }
 
+/* Indent nested nav items so section hierarchy reads at a glance.
+ * Material's ``navigation.sections`` layout renders section labels
+ * and their children flush-left at the same horizontal position;
+ * fine for short sections but hard to scan when one runs long (the
+ * Examples section has 11 entries). A small left-pad on the nested
+ * links shows the hierarchy without altering typography. Scoped to
+ * the primary nav so the right-hand TOC sidebar is untouched. */
+.md-nav--primary .md-nav .md-nav__link {
+  padding-left: 0.375rem;
+}
+
 [data-md-color-scheme="slate"] .md-header,
 [data-md-color-scheme="slate"] .md-footer-meta {
   background-color: var(--md-footer-bg-color);
