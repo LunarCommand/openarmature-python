@@ -66,7 +66,7 @@ buy-in from every node.
 
 ## Open specification
 
-openarmature is defined by a public, language-agnostic specification —
+OpenArmature is defined by a public, language-agnostic specification,
 not a Python-shaped opinion exported to other languages. Reference
 implementations share conformance fixtures, so behavior stays identical
 across languages, runtimes, and tooling stacks.

@@ -1,16 +1,25 @@
 {#-
   Local override of material/partials/header.html.
 
-  Sole change vs. the upstream partial: the "site_name" topic in
-  ``.md-header__title`` is wrapped in an anchor pointing at the site
-  root, so clicking the visible "OpenArmature" wordmark navigates
-  home. Upstream's default leaves that topic as a plain ``<div>`` —
-  the only header-area link is the icon-style ``md-logo`` button,
-  which our extra.css hides because we want the wordmark on its own.
+  Local modifications vs. the upstream partial:
 
-  Re-sync this file when bumping mkdocs-material; everything below is
-  copied verbatim from the upstream partial except the marked ``<a>``
-  wrap on the site-name topic.
+  1. The site-name topic in ``.md-header__title`` is rendered as an
+     ``<a>`` (carrying the ``md-header__topic`` class) so the visible
+     "OpenArmature" wordmark navigates home. Upstream's default leaves
+     that topic as a plain ``<div>``; the only header-area link is the
+     icon-style ``md-logo`` button, which our extra.css hides because
+     we want the wordmark on its own.
+  2. On the homepage (``page.is_homepage``), the ``.md-header__title``
+     element gets an extra ``md-header__title--pinned`` class and the
+     second ``.md-header__topic`` (the page-title topic) is not
+     rendered. A paired rule in extra.css pins the wordmark in place
+     regardless of ``data-md-state="topic"`` so the scroll animation
+     doesn't fire; we omit the page-title topic because on the
+     homepage it would just be an un-bold copy of "OpenArmature".
+
+  Re-sync this file when bumping mkdocs-material; preserve both
+  modifications. Everything below is otherwise verbatim from the
+  upstream partial.
 -#}
 {% set class = "md-header" %}
 {% if "navigation.tabs.sticky" in features %}
