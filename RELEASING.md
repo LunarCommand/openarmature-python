@@ -1,0 +1,175 @@
+# Releasing
+
+How to cut a release of `openarmature`. For maintainers.
+
+Every release goes through TestPyPI before PyPI. The release workflow
+(`.github/workflows/release.yml`) is tag-driven: tag pushes are the only
+trigger; nothing else publishes.
+
+## The release path: rc first, then real
+
+A release happens in two tag steps:
+
+1. **`vX.Y.Z-rc1`** publishes to **TestPyPI only**. No PyPI upload, no
+   GitHub Release. Use the rc to verify the artifact installs, the
+   examples still run, and the docs reflect what shipped.
+2. **`vX.Y.Z`** publishes to **PyPI** and creates a **GitHub Release**
+   with auto-generated notes. Fires only after the rc is good.
+
+Tag dispatch is by name:
+
+- Tags containing `-rc` route to TestPyPI.
+- Tags with no `-` suffix route to PyPI + GitHub Release.
+- Any other suffix (`-beta`, `-alpha`, `-dev`, ...) is a no-op by design;
+  a typo in the rc suffix cannot accidentally hit PyPI.
+
+The workflow validates that `pyproject.toml`'s `version` field matches
+the tag (modulo PEP 440 normalization: `0.7.0-rc1` ≡ `0.7.0rc1`).
+Mismatches fail the test job before any publishing step runs.
+
+## Pre-release checklist
+
+Run through this before tagging the first rc. Everything here is human
+judgment; the workflow can't catch a stale doc reference or a missing
+changelog entry.
+
+- [ ] **`CHANGELOG.md` is current.** Every commit since the previous
+      release that changed user-visible behavior is reflected in the
+      upcoming version's section. The date matches the day the rc tag
+      is pushed (refresh it again at the real-release step).
+- [ ] **Docs sweep for stale references.** For each behavior change in
+      the upcoming release, grep the docs for the old wording, file
+      paths, and flag descriptions; reconcile in the same PR as the
+      version bump. Common spots: `README.md`, `docs/concepts/*`,
+      `docs/getting-started/index.md`, `docs/reference/index.md`,
+      in-code help text.
+- [ ] **`pyproject.toml` version pinned.** Set `project.version` to the
+      target version, e.g. `0.7.0`. The PEP 440 form (`0.7.0rc1` or
+      `0.7.0`) and the tag form (`v0.7.0-rc1` or `v0.7.0`) are
+      normalized to the same value, so either is accepted in the
+      `pyproject` field; the tag uses the dash form for readability.
+- [ ] **Branch state.** On `main`, clean working tree, latest pulled.
+      Release tags should point at commits already on `main`.
+- [ ] **CI is green on `main`.** The release workflow's `test` job
+      re-runs the suite, but a red `main` is a sign to investigate
+      before tagging anything.
+
+Land the version bump + changelog refresh as one commit before tagging.
+Convention: `chore(release): vX.Y.Z`.
+
+## Tagging the rc
+
+After the prep commit is on `main`:
+
+```bash
+git tag v0.7.0-rc1
+git push origin v0.7.0-rc1
+```
+
+Watch the workflow run at <https://github.com/LunarCommand/openarmature-python/actions>.
+On success, the artifact lands at <https://test.pypi.org/project/openarmature/>.
+
+The `testpypi` GitHub Environment owns the OIDC trust for the upload;
+no secrets to plumb manually.
+
+## Verifying the rc
+
+Install from TestPyPI into a fresh venv and exercise the package the
+way a downstream user would.
+
+```bash
+python -m venv /tmp/oa-rc-verify
+source /tmp/oa-rc-verify/bin/activate
+
+# --extra-index-url is required: TestPyPI does not mirror the
+# transitive dependency graph, so dependencies pull from real PyPI.
+pip install \
+  --index-url https://test.pypi.org/simple/ \
+  --extra-index-url https://pypi.org/simple/ \
+  'openarmature==0.7.0rc1'
+
+python -c "import openarmature; print(openarmature.__version__)"
+```
+
+Minimum smoke set:
+
+- [ ] Version string matches the rc tag.
+- [ ] At least one example runs to completion against a real LLM
+      endpoint (`examples/00-hello-world/main.py` is the quickest).
+- [ ] The optional `[otel]` extra installs cleanly and
+      `import openarmature.observability.otel` succeeds.
+- [ ] If any docs changed in this release, the live docs site
+      (<https://openarmature.ai/>) builds without warnings.
+
+If any of these fail, see *Iterating on an rc* below. Do not proceed
+to the real-release tag with an unverified rc.
+
+## Tagging the real release
+
+After the rc is verified, the real release is one tag away:
+
+```bash
+git tag v0.7.0
+git push origin v0.7.0
+```
+
+The workflow runs the same test job, builds the artifact, publishes to
+PyPI through the `pypi` GitHub Environment, and creates a GitHub
+Release with notes auto-generated from commits since the previous tag.
+
+The `pypi` environment is the right place to attach a **required
+reviewers** protection rule so the publish step pauses for explicit
+manual approval before any real-PyPI upload. Configure it in repo
+settings under *Environments → pypi → Required reviewers*.
+
+After the workflow finishes:
+
+- [ ] The new version appears on <https://pypi.org/project/openarmature/>.
+- [ ] A GitHub Release exists at
+      <https://github.com/LunarCommand/openarmature-python/releases>
+      with the wheel and sdist attached.
+- [ ] `pip install openarmature` in a fresh venv resolves the new
+      version.
+
+## Iterating on an rc
+
+If the rc reveals an issue, **never move the existing rc tag**. PyPI
+and TestPyPI treat versions as immutable; bump the rc counter instead.
+
+```bash
+# Fix the bug, commit it.
+git tag v0.7.0-rc2
+git push origin v0.7.0-rc2
+```
+
+Repeat verification against the new rc. Two or three rc iterations is
+fine. If the same issue keeps recurring, that's a signal to step back
+and address the design rather than spin more rc tags.
+
+## Rollback
+
+PyPI does not allow re-uploading the same version. If a real release
+ships and turns out to be broken:
+
+1. **Yank the version** via the PyPI web UI
+   (<https://pypi.org/manage/project/openarmature/release/X.Y.Z/>).
+   Yanking marks the version as not-installable-by-default; existing
+   pinned dependencies still resolve, but a fresh install skips it.
+2. **Cut a patch.** Fix the bug, run through the full rc → real cycle
+   for `X.Y.(Z+1)`. The yanked version stays in place as a historical
+   record; the new patch supersedes it.
+
+Do not try to delete a release. Yanking + patching is the supported
+path and what downstream tooling expects.
+
+## Reference
+
+- `.github/workflows/release.yml` — the release workflow; authoritative
+  on what happens when each tag shape is pushed.
+- `CHANGELOG.md` — release notes go here, in
+  [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) format.
+- `pyproject.toml` — `project.version` must match the tag (normalized
+  per PEP 440).
+- GitHub Environments — `testpypi` and `pypi` own the OIDC trust to
+  the respective indexes. Configure required-reviewer rules on `pypi`
+  for an extra approval gate before real publishes.
