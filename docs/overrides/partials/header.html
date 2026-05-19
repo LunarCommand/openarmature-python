@@ -1,0 +1,94 @@
+{#-
+  Local override of material/partials/header.html.
+
+  Sole change vs. the upstream partial: the "site_name" topic in
+  ``.md-header__title`` is wrapped in an anchor pointing at the site
+  root, so clicking the visible "OpenArmature" wordmark navigates
+  home. Upstream's default leaves that topic as a plain ``<div>`` —
+  the only header-area link is the icon-style ``md-logo`` button,
+  which our extra.css hides because we want the wordmark on its own.
+
+  Re-sync this file when bumping mkdocs-material; everything below is
+  copied verbatim from the upstream partial except the marked ``<a>``
+  wrap on the site-name topic.
+-#}
+{% set class = "md-header" %}
+{% if "navigation.tabs.sticky" in features %}
+  {% set class = class ~ " md-header--shadow md-header--lifted" %}
+{% elif "navigation.tabs" not in features %}
+  {% set class = class ~ " md-header--shadow" %}
+{% endif %}
+<header class="{{ class }}" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="{{ lang.t('header') }}">
+    <a href="{{ config.extra.homepage | d(nav.homepage.url, true) | url }}" title="{{ config.site_name | e }}" class="md-header__button md-logo" aria-label="{{ config.site_name }}" data-md-component="logo">
+      {% include "partials/logo.html" %}
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      {% set icon = config.theme.icon.menu or "material/menu" %}
+      {% include ".icons/" ~ icon ~ ".svg" %}
+    </label>
+    {#- LOCAL OVERRIDE: pin the wordmark on the homepage. The page title
+        there is also "OpenArmature", so Material's default scroll
+        animation flips between the bold wordmark and the un-bold page
+        title of the same text, which reads as a glitch. On the
+        homepage we tag the title element so extra.css can suppress the
+        swap, and we skip rendering the page-title topic entirely. -#}
+    <div class="md-header__title{% if page.is_homepage %} md-header__title--pinned{% endif %}" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        {# LOCAL OVERRIDE: render the site-name topic as an <a> so the
+           wordmark is clickable. Material's default markup is a plain
+           <div class="md-header__topic">; we substitute an anchor that
+           carries the same .md-header__topic class so the theme's
+           positioning rules (which target direct children of
+           .md-header__ellipsis) still apply. #}
+        <a href="{{ config.extra.homepage | d(nav.homepage.url, true) | url }}" class="md-header__topic md-header__topic-link" aria-label="{{ config.site_name }}">
+          <span class="md-ellipsis">
+            {{ config.site_name }}
+          </span>
+        </a>
+        {% if not page.is_homepage %}
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            {% if page.meta and page.meta.title %}
+              {{ page.meta.title }}
+            {% else %}
+              {{ page.title }}
+            {% endif %}
+          </span>
+        </div>
+        {% endif %}
+      </div>
+    </div>
+    {% if config.theme.palette %}
+      {% if not config.theme.palette is mapping %}
+        {% include "partials/palette.html" %}
+      {% endif %}
+    {% endif %}
+    {% if not config.theme.palette is mapping %}
+      {% include "partials/javascripts/palette.html" %}
+    {% endif %}
+    {% if config.extra.alternate %}
+      {% include "partials/alternate.html" %}
+    {% endif %}
+    {% if "material/search" in config.plugins %}
+      {% set search = config.plugins["material/search"] | attr("config") %}
+      {% if search.enabled %}
+        <label class="md-header__button md-icon" for="__search">
+          {% set icon = config.theme.icon.search or "material/magnify" %}
+          {% include ".icons/" ~ icon ~ ".svg" %}
+        </label>
+        {% include "partials/search.html" %}
+      {% endif %}
+    {% endif %}
+    {% if config.repo_url %}
+      <div class="md-header__source">
+        {% include "partials/source.html" %}
+      </div>
+    {% endif %}
+  </nav>
+  {% if "navigation.tabs.sticky" in features %}
+    {% if "navigation.tabs" in features %}
+      {% include "partials/tabs.html" %}
+    {% endif %}
+  {% endif %}
+</header>

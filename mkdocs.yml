@@ -9,6 +9,11 @@ dev_addr: "127.0.0.1:8765"
 
 theme:
   name: material
+  # Override directory for theme partials. ``docs/overrides/`` carries
+  # the customized ``partials/header.html`` that makes the
+  # "OpenArmature" wordmark clickable (Material's default leaves it
+  # as a plain ``<div>``).
+  custom_dir: docs/overrides
   palette:
     - media: "(prefers-color-scheme: light)"
       scheme: default
@@ -94,6 +99,7 @@ nav:
     - Graphs: concepts/graphs.md
     - Composition: concepts/composition.md
     - Fan-out: concepts/fan-out.md
+    - Parallel branches: concepts/parallel-branches.md
     - LLMs: concepts/llms.md
     - Prompts: concepts/prompts.md
     - Observability: concepts/observability.md

@@ -1,6 +1,5 @@
 ---
 hide:
-  - navigation
   - toc
 ---
 
@@ -65,7 +64,11 @@ buy-in from every node.
 
 ---
 
-Built around an open, language-agnostic
-[specification](https://github.com/LunarCommand/openarmature-spec){target="_blank" rel="noopener"}.
-A TypeScript implementation is on the roadmap; behaviour stays
-identical across implementations via spec conformance fixtures.
+## Open specification
+
+openarmature is defined by a public, language-agnostic specification —
+not a Python-shaped opinion exported to other languages. Reference
+implementations share conformance fixtures, so behavior stays identical
+across languages, runtimes, and tooling stacks.
+
+[Read the spec →](https://openarmature.org){target="_blank" rel="noopener"}
