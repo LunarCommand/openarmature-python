@@ -157,11 +157,37 @@
   color: #cd8bf4;
 }
 
-/* Hide the default Material book-icon logo next to the site name; the
- * "OpenArmature" wordmark stands on its own and already links to the
- * site root. */
+/* Hide the default Material book-icon logo next to the site name. The
+ * "OpenArmature" wordmark itself is made clickable by the local
+ * ``docs/overrides/partials/header.html`` override, which wraps the
+ * site-name topic in an ``<a>`` pointing at the site root. */
 .md-header__button.md-logo {
   display: none;
+}
+
+/* Inherit header text colors on the wordmark anchor introduced by the
+ * partial override, so it reads as the wordmark rather than a styled
+ * link. */
+.md-header__topic-link,
+.md-header__topic-link:hover,
+.md-header__topic-link:focus,
+.md-header__topic-link:visited {
+  color: inherit;
+  text-decoration: none;
+}
+
+/* Suppress the wordmark/page-title scroll animation on the homepage.
+ * The homepage's page title is also "OpenArmature", so Material's
+ * default swap flips between the bold wordmark and the un-bold
+ * page-title of the same text — reads as a render glitch. The
+ * ``--pinned`` modifier is added by the partial override when
+ * ``page.is_homepage`` is true, and we don't render the second topic
+ * at all in that case; this rule keeps the wordmark visible regardless
+ * of the ``data-md-state="topic"`` toggle Material adds on scroll. */
+.md-header__title--pinned .md-header__topic {
+  opacity: 1;
+  pointer-events: auto;
+  transform: none;
 }
 
 /* Hide Material's auto-generated site-name header at the top of the
