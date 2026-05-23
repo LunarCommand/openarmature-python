@@ -1972,10 +1972,7 @@ def _materialize_messages(
                 content,
                 record_base64_prefix=record_base64_prefix,
             )
-            if isinstance(materialized, str):
-                out.append(UserMessage(content=materialized))
-            else:
-                out.append(UserMessage(content=materialized))
+            out.append(UserMessage(content=materialized))
         elif role == "system":
             from openarmature.llm.messages import SystemMessage
 

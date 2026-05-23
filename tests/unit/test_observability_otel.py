@@ -503,11 +503,11 @@ async def test_llm_span_has_no_prompt_attributes_when_no_active_prompt() -> None
     """Without ``with_active_prompt``, the LLM-call span MUST NOT carry
     ``openarmature.prompt.*`` attributes."""
     from openarmature.graph.events import NodeEvent
-    from openarmature.llm.providers.openai import _LlmEventState
     from openarmature.observability.correlation import (
         _reset_invocation_id,
         _set_invocation_id,
     )
+    from openarmature.observability.llm_event import LlmEventPayload
 
     exporter = InMemorySpanExporter()
     observer = OTelObserver(span_processor=SimpleSpanProcessor(exporter))
@@ -519,7 +519,7 @@ async def test_llm_span_has_no_prompt_attributes_when_no_active_prompt() -> None
             namespace=("openarmature.llm.complete",),
             step=-1,
             phase="started",
-            pre_state=_LlmEventState(call_id="test-call-noprompt", model="test-m"),
+            pre_state=LlmEventPayload(call_id="test-call-noprompt", model="test-m"),
             post_state=None,
             error=None,
             parent_states=(),
@@ -529,7 +529,7 @@ async def test_llm_span_has_no_prompt_attributes_when_no_active_prompt() -> None
             namespace=("openarmature.llm.complete",),
             step=-1,
             phase="completed",
-            pre_state=_LlmEventState(call_id="test-call-noprompt", model="test-m", finish_reason="stop"),
+            pre_state=LlmEventPayload(call_id="test-call-noprompt", model="test-m", finish_reason="stop"),
             post_state=None,
             error=None,
             parent_states=(),
@@ -555,7 +555,7 @@ async def test_disable_llm_spans_skips_llm_provider_span() -> None:
     # LLM event through the observer's __call__ and assert no span was
     # produced. This isolates the disable_llm_spans branch from the
     # provider's own queue-dispatch wiring.
-    from openarmature.llm.providers.openai import _LlmEventState
+    from openarmature.observability.llm_event import LlmEventPayload
 
     exporter = InMemorySpanExporter()
     observer = OTelObserver(
@@ -570,7 +570,7 @@ async def test_disable_llm_spans_skips_llm_provider_span() -> None:
         namespace=("openarmature.llm.complete",),
         step=-1,
         phase="started",
-        pre_state=_LlmEventState(call_id="test-call-1", model="test-m"),
+        pre_state=LlmEventPayload(call_id="test-call-1", model="test-m"),
         post_state=None,
         error=None,
         parent_states=(),
@@ -580,7 +580,7 @@ async def test_disable_llm_spans_skips_llm_provider_span() -> None:
         namespace=("openarmature.llm.complete",),
         step=-1,
         phase="completed",
-        pre_state=_LlmEventState(call_id="test-call-1", model="test-m", finish_reason="stop"),
+        pre_state=LlmEventPayload(call_id="test-call-1", model="test-m", finish_reason="stop"),
         post_state=None,
         error=None,
         parent_states=(),
@@ -1364,9 +1364,12 @@ async def test_prompt_context_propagates_cross_task_via_provider_complete() -> N
         GraphBuilder(_S).add_node("ask_llm", ask_llm).add_edge("ask_llm", END).set_entry("ask_llm")
     ).compile()
     graph.attach_observer(observer)
-    await graph.invoke(_S())
-    await graph.drain()
-    observer.shutdown()
+    try:
+        await graph.invoke(_S())
+        await graph.drain()
+    finally:
+        observer.shutdown()
+        await provider.aclose()
 
     spans = exporter.get_finished_spans()
     llm_spans = [s for s in spans if s.name == "openarmature.llm.complete"]

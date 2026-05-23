@@ -1,7 +1,3 @@
-# LlmEventPayload subclasses State so the NodeEvent.pre_state: State
-# contract holds (observers calling event.pre_state.model_dump() work
-# without the raw-dict overload that previously violated the schema).
-#
 # Backend mappings (the OTel observer in this repo, future Langfuse /
 # Datadog adapters) recognize the LLM_NAMESPACE sentinel and read these
 # fields directly via attribute access.
@@ -43,6 +39,17 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict
 
+# Sentinel namespace the LLM provider emits to signal "this is an LLM
+# event, not a regular node event." Backend mappings (the OTel observer
+# in this repo, future Langfuse / Datadog adapters) recognise this
+# value on ``NodeEvent.namespace`` and route to their LLM-specific
+# span path. Lives here rather than under ``otel/observer.py`` so the
+# core observability package doesn't pull the OTel backend into its
+# import chain — anyone consuming ``LlmEventPayload`` from a custom
+# provider needs the namespace value too, and shouldn't have to
+# install the ``[otel]`` extra just for the constant.
+LLM_NAMESPACE: tuple[str, ...] = ("openarmature.llm.complete",)
+
 
 # LlmEventPayload uses plain Pydantic BaseModel (not openarmature.graph.State)
 # so importing it doesn't transitively load the entire graph package.
@@ -62,9 +69,8 @@ class LlmEventPayload(BaseModel):
     field; third-party providers populate the subset they support.
     """
 
-    # Matches the strictness profile the v0.7.0 ``_LlmEventState``
-    # inherited via the State base class — extra fields rejected,
-    # instance frozen after construction.
+    # Extra fields rejected at construction; instance frozen so
+    # observers can't mutate payload data after dispatch.
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     call_id: str
@@ -108,4 +114,4 @@ class LlmEventPayload(BaseModel):
     genai_system: str = "openai"
 
 
-__all__ = ["LlmEventPayload"]
+__all__ = ["LLM_NAMESPACE", "LlmEventPayload"]

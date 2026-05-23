@@ -96,7 +96,7 @@ from opentelemetry.trace import (
 )
 from opentelemetry.trace.propagation import set_span_in_context
 
-from openarmature.observability.llm_event import LlmEventPayload
+from openarmature.observability.llm_event import LLM_NAMESPACE, LlmEventPayload
 
 if TYPE_CHECKING:
     from openarmature.graph.events import NodeEvent
@@ -108,13 +108,12 @@ if TYPE_CHECKING:
 _StackKey = tuple[tuple[str, ...], int, int | None]
 
 
-# Sentinel namespace the LLM provider emits to signal "this is an LLM
-# event, not a regular node event." The public surface lives at
-# :data:`openarmature.observability.LLM_NAMESPACE` (per the v0.17.0
-# friction-roundup #9 — publishing the LLM event contract); the
-# private alias here is retained for backwards compatibility within
-# the observer module.
-LLM_NAMESPACE: tuple[str, ...] = ("openarmature.llm.complete",)
+# Re-export the LLM-event namespace sentinel under the same name the
+# observer module has historically used. The canonical home is
+# ``openarmature.observability.llm_event`` (backend-agnostic — pulling
+# the constant from there avoids forcing core-observability imports to
+# load the OTel backend). ``_LLM_NAMESPACE`` is retained for backwards
+# compatibility within this module.
 _LLM_NAMESPACE = LLM_NAMESPACE
 
 
@@ -323,7 +322,7 @@ class OTelObserver:
     # span.end() the observer issues. NodeEvent is None on synthetic
     # close sites (subgraph dispatch, detached root, fan-out instance,
     # invocation span, shutdown drain).
-    attribute_enrichers: Sequence[Callable[[Span, NodeEvent], None]] = ()
+    attribute_enrichers: Sequence[Callable[[Span, NodeEvent | None], None]] = ()
     # Read from the package's ``__spec_version__`` (one of the three
     # places the spec version is pinned per CLAUDE.md). Bumping the
     # spec submodule + the two version fields automatically updates
@@ -393,7 +392,7 @@ class OTelObserver:
 
         for enricher in self.attribute_enrichers:
             try:
-                enricher(span, cast("Any", event))
+                enricher(span, event)
             except Exception as e:  # noqa: BLE001
                 warnings.warn(
                     f"attribute_enricher raised {type(e).__name__}: {e}",

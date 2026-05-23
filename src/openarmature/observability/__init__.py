@@ -35,13 +35,11 @@ from .correlation import (
 
 # v0.17.0 (proposal 0024 / friction-roundup #9): publish the LLM event
 # contract so third-party Provider implementations and custom observers
-# can interoperate against a stable shape. The namespace constant lives
-# on the otel observer module (canonical site for the sentinel value);
-# LlmEventPayload lives in its own module under observability so the
-# dependency direction stays one-way (providers depend on observability
-# primitives, not the reverse).
-from .llm_event import LlmEventPayload
-from .otel.observer import LLM_NAMESPACE  # noqa: E402
+# can interoperate against a stable shape. Both names live in
+# ``observability.llm_event`` — backend-agnostic — so importing the
+# core observability package never drags the OTel backend (and its
+# ``opentelemetry-sdk`` dependency) along.
+from .llm_event import LLM_NAMESPACE, LlmEventPayload
 
 __all__ = [
     "LLM_NAMESPACE",

@@ -1004,14 +1004,6 @@ def _looks_like_model_not_loaded(message: object) -> bool:
 # ---------------------------------------------------------------------------
 
 
-# Backwards-compat alias. ``_LlmEventState`` was the v0.7.0 private
-# label; v0.17.0 promotes the type to ``LlmEventPayload`` and moves
-# its canonical home to ``openarmature.observability.llm_event``.
-# Keeping the old name available for one release lets any external
-# consumer that reached into the private symbol find it.
-_LlmEventState = LlmEventPayload
-
-
 # Inline image sources are redacted in this step per observability
 # §5.5.5: ImageSourceInline → {"type": "inline_redacted",
 # "byte_count": N} where N is the byte length of the original base64
