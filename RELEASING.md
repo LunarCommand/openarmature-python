@@ -46,11 +46,17 @@ changelog entry.
       version bump. Common spots: `README.md`, `docs/concepts/*`,
       `docs/getting-started/index.md`, `docs/reference/index.md`,
       in-code help text.
-- [ ] **`pyproject.toml` version pinned.** Set `project.version` to the
-      target version, e.g. `0.7.0`. The PEP 440 form (`0.7.0rc1` or
-      `0.7.0`) and the tag form (`v0.7.0-rc1` or `v0.7.0`) are
-      normalized to the same value, so either is accepted in the
-      `pyproject` field; the tag uses the dash form for readability.
+- [ ] **`pyproject.toml` version pinned to the tag we're about to push.**
+      The release workflow validates that the pyproject version equals
+      the tag after PEP 440 normalization. Concretely:
+      - For an rc tag like `v0.7.0-rc1`, set `project.version =
+        "0.7.0rc1"` (or `"0.7.0-rc1"`; both normalize to `0.7.0rc1`).
+      - For the real-release tag `v0.7.0`, set `project.version =
+        "0.7.0"`.
+      The rc and real-release pyproject bumps are SEPARATE COMMITS —
+      one before each tag — because the normalized forms differ.
+      Also update `src/openarmature/__init__.py`'s `__version__` and
+      `tests/test_smoke.py`'s version assertion in the same commit.
 - [ ] **Branch state.** On `main`, clean working tree, latest pulled.
       Release tags should point at commits already on `main`.
 - [ ] **CI is green on `main`.** The release workflow's `test` job
@@ -109,9 +115,18 @@ to the real-release tag with an unverified rc.
 
 ## Tagging the real release
 
-After the rc is verified, the real release is one tag away:
+After the rc is verified, bump the pyproject version from the rc form
+to the real form, land it as its own commit, then tag:
 
 ```bash
+# Update pyproject.toml: version = "0.7.0"
+# Update src/openarmature/__init__.py: __version__ = "0.7.0"
+# Update tests/test_smoke.py: assert openarmature.__version__ == "0.7.0"
+# Refresh CHANGELOG.md date to today if it drifted.
+git commit -am "chore(release): bump to v0.7.0"
+
+# Push the bump through CI first; the workflow's version-match check
+# would otherwise fail the test job before any publishing step runs.
 git tag v0.7.0
 git push origin v0.7.0
 ```
@@ -136,11 +151,18 @@ After the workflow finishes:
 
 ## Iterating on an rc
 
-If the rc reveals an issue, **never move the existing rc tag**. PyPI
-and TestPyPI treat versions as immutable; bump the rc counter instead.
+If the rc reveals an issue **after it has published to TestPyPI**,
+never move the existing rc tag. PyPI and TestPyPI treat versions as
+immutable; bump the rc counter instead. Each rc bump is its own
+commit because the pyproject version has to track the new tag:
 
 ```bash
-# Fix the bug, commit it.
+# Fix the bug, then bump the version pins:
+# pyproject.toml: version = "0.7.0rc2"
+# src/openarmature/__init__.py: __version__ = "0.7.0rc2"
+# tests/test_smoke.py: assert ... == "0.7.0rc2"
+git commit -am "chore(release): v0.7.0-rc2"
+
 git tag v0.7.0-rc2
 git push origin v0.7.0-rc2
 ```
@@ -148,6 +170,13 @@ git push origin v0.7.0-rc2
 Repeat verification against the new rc. Two or three rc iterations is
 fine. If the same issue keeps recurring, that's a signal to step back
 and address the design rather than spin more rc tags.
+
+If an rc tag fails the release workflow's pre-publish checks (e.g.,
+the version-match validator) so that nothing was uploaded to
+TestPyPI, the tag is recoverable: nothing is immutable on PyPI yet.
+Land the fix on `main`, delete the tag from origin (`git push origin
+:refs/tags/v0.7.0-rcN`), and re-tag the fix commit. Only do this when
+you're certain the workflow did not reach a publish step.
 
 ## Rollback
 
