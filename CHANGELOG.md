@@ -4,7 +4,7 @@ All notable changes to `openarmature-python` are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). The package follows [Semantic Versioning](https://semver.org/); pre-1.0 minor bumps may carry behavioral changes per [spec governance](https://github.com/LunarCommand/openarmature-spec/blob/main/GOVERNANCE.md).
 
-## [Unreleased]
+## [0.8.0] — 2026-05-23
 
 LLM-provider span payload and GenAI semconv release. Pinned spec
 jumps from v0.16.1 to v0.17.0 (proposal 0024 / observability §5.5
