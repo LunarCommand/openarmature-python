@@ -4,6 +4,31 @@ All notable changes to `openarmature-python` are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). The package follows [Semantic Versioning](https://semver.org/); pre-1.0 minor bumps may carry behavioral changes per [spec governance](https://github.com/LunarCommand/openarmature-spec/blob/main/GOVERNANCE.md).
 
+## [0.7.0] — 2026-05-23
+
+Docs-and-examples release. Pinned spec stays at v0.16.1; no
+proposals implemented this cycle. The focus was bringing the
+docs site, README, and examples up to par with the v0.6.0
+implementation and filling reference-doc gaps that mkdocstrings
+was silently dropping.
+
+### Added
+
+- **`openarmature.graph.NextCall` and `openarmature.graph.default_classifier` exports.** Promoted from the `openarmature.graph.middleware` submodule. `NextCall` is the Protocol describing the `next_` callable a middleware receives; `default_classifier` is the retry classifier's default predicate (matches `category` against `TRANSIENT_CATEGORIES`). Users writing custom middleware can type their `next_` parameter and extend the default classifier without reaching into the submodule.
+- **Middleware concept page.** New `docs/concepts/middleware.md` covering the protocol shape, four registration sites (per-node, per-graph, per-branch, per-fan-out-instance), composition order, subgraph boundary, error semantics, and the built-in `RetryMiddleware` and `TimingMiddleware`.
+- **Complete reference docs.** Added docstrings to 35 previously-undocumented public members across `graph`, `prompts`, and `checkpoint`. mkdocstrings silently omits entries without a docstring, which meant the most fundamental builder methods (`add_node`, `add_edge`, `set_entry`, `compile`) and the entire `Checkpointer` backend method surface were invisible in the rendered reference. Every name in each subpackage's `__all__` now renders.
+- **Examples 05–09.** New examples covering fan-out with retry, parallel branches, multimodal prompts, checkpointing with state migration, and tool use. Per-example docs pages with mermaid diagrams under `docs/examples/`. Examples 00–04 were scrubbed and standardized for consistency with the new set.
+- **`RELEASING.md`.** Documents the rc-first release flow (TestPyPI then PyPI), the tag-name dispatch rules, the pre-release checklist, rc iteration, and rollback via PyPI yank.
+- **Docs site UX, nav, and reference cleanup.** Sweep of nav structure, internal links, and reference page organization to match the v0.6.0 surface.
+
+### Changed
+
+- **`FanOutNode.run` and `ParallelBranchesNode.run` raise `NotImplementedError` instead of `RuntimeError`.** Both methods exist only to satisfy the `Node` protocol; the engine dispatches these node types through `run_with_context`. `NotImplementedError` is the right signal and stays backwards-compatible since it subclasses `RuntimeError` (existing `except RuntimeError` catches still work).
+
+### Notes
+
+- **Pinned spec version unchanged at v0.16.1.** No proposals landed this cycle; the release is docs- and examples-focused. The next functional release will resume with new spec proposals.
+
 ## [0.6.0] — 2026-05-16
 
 Consolidated release for the five-PR batch: structured output
