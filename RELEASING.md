@@ -115,18 +115,18 @@ to the real-release tag with an unverified rc.
 
 ## Tagging the real release
 
-After the rc is verified, bump the pyproject version from the rc form
-to the real form, land it as its own commit, then tag:
+After the rc is verified, prepare the real-release bump as a
+separate PR. Update:
+
+- `pyproject.toml`: `version = "0.7.0"`
+- `src/openarmature/__init__.py`: `__version__ = "0.7.0"`
+- `tests/test_smoke.py`: the version assertion
+- `CHANGELOG.md`: refresh the date if it drifted from today
+
+Commit as `chore(release): v0.7.0`, open a PR, and merge once CI is
+green. Then from a freshly-pulled `main`:
 
 ```bash
-# Update pyproject.toml: version = "0.7.0"
-# Update src/openarmature/__init__.py: __version__ = "0.7.0"
-# Update tests/test_smoke.py: assert openarmature.__version__ == "0.7.0"
-# Refresh CHANGELOG.md date to today if it drifted.
-git commit -am "chore(release): bump to v0.7.0"
-
-# Push the bump through CI first; the workflow's version-match check
-# would otherwise fail the test job before any publishing step runs.
 git tag v0.7.0
 git push origin v0.7.0
 ```
@@ -153,16 +153,18 @@ After the workflow finishes:
 
 If the rc reveals an issue **after it has published to TestPyPI**,
 never move the existing rc tag. PyPI and TestPyPI treat versions as
-immutable; bump the rc counter instead. Each rc bump is its own
-commit because the pyproject version has to track the new tag:
+immutable; bump the rc counter instead. Each rc bump is its own PR
+because the pyproject version has to track the new tag. Fix the
+bug, then update:
+
+- `pyproject.toml`: `version = "0.7.0rc2"`
+- `src/openarmature/__init__.py`: `__version__ = "0.7.0rc2"`
+- `tests/test_smoke.py`: the version assertion
+
+Commit as `chore(release): v0.7.0-rc2`, open a PR, and merge once
+CI is green. Then from a freshly-pulled `main`:
 
 ```bash
-# Fix the bug, then bump the version pins:
-# pyproject.toml: version = "0.7.0rc2"
-# src/openarmature/__init__.py: __version__ = "0.7.0rc2"
-# tests/test_smoke.py: assert ... == "0.7.0rc2"
-git commit -am "chore(release): v0.7.0-rc2"
-
 git tag v0.7.0-rc2
 git push origin v0.7.0-rc2
 ```
