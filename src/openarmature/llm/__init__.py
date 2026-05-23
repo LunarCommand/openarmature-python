@@ -1,7 +1,7 @@
 # Spec: this package implements the llm-provider capability (spec
 # proposal 0006).
 
-"""openarmature.llm — LLM provider abstraction.
+"""openarmature.llm: LLM provider abstraction.
 
 Public surface: typed ``Message`` / ``Tool`` / ``Response``, the
 ``Provider`` Protocol, the canonical error categories, and an

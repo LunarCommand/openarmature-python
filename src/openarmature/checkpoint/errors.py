@@ -10,7 +10,7 @@
 Three canonical categories. None inherits from
 :class:`openarmature.graph.errors.RuntimeGraphError` because checkpoint
 errors are raised outside a node's execution scope (during resume
-load, during a save call, or during record-shape validation) — they
+load, during a save call, or during record-shape validation); they
 don't fit the runtime-error contract that mandates a
 ``recoverable_state`` attribute.
 """
@@ -30,9 +30,9 @@ class CheckpointError(Exception):
 
 class CheckpointNotFound(CheckpointError):
     """Raised when ``invoke(resume_invocation=X)`` is called and
-    ``Checkpointer.load(X)`` returns ``None``. Non-transient — the
-    record genuinely does not exist; retrying without changing the
-    invocation_id will never succeed."""
+    ``Checkpointer.load(X)`` returns ``None``. Non-transient: the
+    record genuinely does not exist, and retrying without changing
+    the invocation_id will never succeed."""
 
     category = "checkpoint_not_found"
 
@@ -81,7 +81,7 @@ class CheckpointStateMigrationMissing(CheckpointError):
     """Raised on resume when the saved record's ``schema_version``
     does not match the current state class's ``schema_version`` AND
     no chain of registered migrations bridges the two. Non-transient
-    per spec §10.10 — the user MUST register a migration (or pin
+    per spec §10.10; the user MUST register a migration (or pin
     their state to the saved version) for the resume to succeed.
 
     Carries the saved-from / current-to versions and a description

@@ -56,7 +56,7 @@ class TimingMiddleware:
     Records wall-clock duration of the wrapped chain via the host
     language's monotonic clock (Python's ``time.monotonic``). The
     callback fires inline before the chain's result returns to the
-    caller — slow callbacks add to the apparent node duration, so
+    caller; slow callbacks add to the apparent node duration, so
     users SHOULD keep them fast (queue work, defer I/O).
 
     Errors raised by ``on_complete`` propagate to the engine as a

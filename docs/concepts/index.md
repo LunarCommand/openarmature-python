@@ -10,6 +10,9 @@ the framework, or jump to whichever concept you need.
 - [Composition: conditional edges, subgraphs, projection](composition.md):
   routing decisions, encapsulated sub-pipelines, the parent ↔ subgraph
   data seam.
+- [Middleware](middleware.md): wrap node dispatch with retries,
+  timing, logging, error transformation; per-node, per-graph,
+  per-branch, and per-fan-out-instance registration.
 - [Fan-out](fan-out.md): running the same subgraph many times in
   parallel, results merged back deterministically.
 - [Parallel branches](parallel-branches.md): dispatching M

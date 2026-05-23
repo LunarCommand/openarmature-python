@@ -7,7 +7,7 @@ field with more than one declared reducer.
 `GraphBuilder[StateT]` is parameterized on the graph's state type. Node
 functions, conditional-edge functions, and the returned `CompiledGraph[StateT]`
 all carry `StateT` forward so consumers get typed `invoke()` return values and
-a type-checked `state` parameter on every callback — without `cast(...)` calls.
+a type-checked `state` parameter on every callback, without `cast(...)` calls.
 """
 
 from collections.abc import Awaitable, Callable, Iterable, Mapping
@@ -67,6 +67,21 @@ class GraphBuilder[StateT: State]:
         *,
         middleware: Iterable[Middleware] | None = None,
     ) -> Self:
+        """Register a function node.
+
+        ``fn`` is an async callable taking the current state and
+        returning a partial update (a mapping from declared state-field
+        names to new values). The merge into parent state happens
+        through the field reducers; ``fn`` itself does not see or touch
+        the merge.
+
+        ``middleware`` is an optional per-node middleware tuple,
+        outer-to-inner. Per-graph middleware (see
+        :meth:`add_middleware`) wraps these.
+
+        Raises ``ValueError`` if ``name`` is already declared on this
+        builder.
+        """
         if name in self._nodes:
             raise ValueError(f"node {name!r} already declared")
         self._nodes[name] = FunctionNode[StateT](
@@ -84,6 +99,23 @@ class GraphBuilder[StateT: State]:
         *,
         middleware: Iterable[Middleware] | None = None,
     ) -> Self:
+        """Register a subgraph as a node.
+
+        ``compiled`` is a child :class:`CompiledGraph` (parameterized
+        on its own state type). On entry the parent's state is
+        translated to the child's via ``projection.project_in``; on
+        exit the child's final state is folded back via
+        ``projection.project_out``. The default projection is
+        :class:`FieldNameMatching`; pass an :class:`ExplicitMapping`
+        for declarative ``inputs``/``outputs`` instead.
+
+        ``middleware`` wraps the whole subgraph dispatch as one atomic
+        call from the parent's perspective. Per-graph middleware on
+        the parent does NOT propagate into the child; child middleware
+        is configured on the child's own builder.
+
+        Raises ``ValueError`` if ``name`` is already declared.
+        """
         if name in self._nodes:
             raise ValueError(f"node {name!r} already declared")
         proj: ProjectionStrategy[StateT, ChildT] = (
@@ -360,7 +392,7 @@ class GraphBuilder[StateT: State]:
 
         Raises ``CheckpointStateMigrationChainAmbiguous`` at
         registration if the ``(from_version, to_version)`` pair is
-        already registered (per spec §10.10 / §10.12.1 — proposal
+        already registered (per spec §10.10 / §10.12.1; proposal
         0018 / spec v0.16.0). Also raises ``ValueError`` if
         ``to_version`` is the empty-string sentinel (the un-declared
         marker per §10.2 is not a valid chain target).
@@ -417,7 +449,7 @@ class GraphBuilder[StateT: State]:
         """Register a per-graph middleware applied to every node in this graph.
 
         Per-graph middleware composes OUTSIDE per-node middleware.
-        Calling order is preserved (outer-to-inner) — earlier
+        Calling order is preserved (outer-to-inner); earlier
         ``add_middleware`` calls produce outer layers in the runtime
         chain.
         """
@@ -425,6 +457,14 @@ class GraphBuilder[StateT: State]:
         return self
 
     def add_edge(self, source: str, target: str | EndSentinel) -> Self:
+        """Register a static edge from ``source`` to ``target``.
+
+        ``target`` is either the name of another declared node or the
+        :data:`END` sentinel. A node may have at most one outgoing
+        static edge; declaring two raises
+        :class:`MultipleOutgoingEdges` at ``compile()``. For
+        state-dependent branching use :meth:`add_conditional_edge`.
+        """
         self._edges.append(StaticEdge(source=source, target=target))
         return self
 
@@ -433,14 +473,52 @@ class GraphBuilder[StateT: State]:
         source: str,
         fn: Callable[[StateT], str | EndSentinel],
     ) -> Self:
+        """Register a conditional edge from ``source``.
+
+        ``fn`` is a synchronous callable that receives the merged
+        post-node state and returns either the name of the next node
+        or the :data:`END` sentinel. Returning any other value raises
+        :class:`RoutingError` at runtime; an exception inside ``fn``
+        becomes an :class:`EdgeException`.
+
+        Like static edges, a node has at most one outgoing edge;
+        declaring both a static and a conditional edge from the same
+        source raises :class:`MultipleOutgoingEdges` at ``compile()``.
+        """
         self._edges.append(ConditionalEdge[StateT](source=source, fn=fn))
         return self
 
     def set_entry(self, name: str) -> Self:
+        """Declare which registered node the graph starts at.
+
+        Calling ``set_entry`` again replaces the previously set entry.
+        ``compile()`` raises :class:`NoDeclaredEntry` if no entry was
+        set, and :class:`DanglingEdge` if the entry name was never
+        declared with ``add_*_node``.
+        """
         self._entry = name
         return self
 
     def compile(self) -> CompiledGraph[StateT]:
+        """Validate the builder and return an immutable
+        :class:`CompiledGraph`.
+
+        Runs structural checks in order:
+
+        - ``conflicting_reducers`` (state-field reducer conflicts)
+        - declarative projection ``validate`` hooks (e.g.
+          :class:`ExplicitMapping`)
+        - ``no_declared_entry`` / ``dangling_edge`` (entry pointer)
+        - ``dangling_edge`` (edge endpoints reference declared nodes)
+        - ``multiple_outgoing_edges`` (one edge per source)
+        - ``unreachable_node`` (every node reachable from entry)
+
+        The first failing check raises its specific
+        :class:`CompileError` subclass; passing means the returned
+        graph is ready for :meth:`CompiledGraph.invoke`. A previously
+        attached :class:`Checkpointer` is forwarded onto the compiled
+        graph.
+        """
         # 1. ConflictingReducers — state schema check.
         per_field = field_reducers(self.state_cls)
         for fname, declared in per_field.items():

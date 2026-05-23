@@ -10,7 +10,7 @@ to halt execution.
 
 `ConditionalEdge` is generic on the outer graph's state type so the
 routing function's parameter is typed against the user's `State`
-subclass — not `Any` — at type-check time.
+subclass, not `Any`, at type-check time.
 """
 
 from collections.abc import Callable

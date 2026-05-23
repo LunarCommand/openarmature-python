@@ -3,13 +3,13 @@
 # (OTel here) realize §4-§7. Split mirrors charter §3.1 principle 5
 # (core defines contracts; specific backends implement them).
 
-"""openarmature.observability — cross-backend observability surface.
+"""openarmature.observability: cross-backend observability surface.
 
 Two layers:
 
 - **Core** (this module + ``correlation.py``): always available, no
   extra dependencies. Exposes :func:`current_correlation_id` and
-  :func:`current_active_observers` — the ``ContextVar`` primitives
+  :func:`current_active_observers`; the ``ContextVar`` primitives
   that every backend mapping consumes.
 - **Backend mappings** (under ``observability.otel`` and future
   ``observability.langfuse`` etc.): gated behind optional
@@ -18,7 +18,7 @@ Two layers:
   ``ImportError`` pointing the caller at the install command.
 
 At v1.0 launch the backend mappings will lift into sibling packages
-(``openarmature-otel``, ``openarmature-langfuse``) — until then they
+(``openarmature-otel``, ``openarmature-langfuse``); until then they
 live here under per-backend subpackages so the layering is
 established up front.
 """

@@ -29,6 +29,9 @@ class CompileError(GraphError):
 
 
 class NoDeclaredEntry(CompileError):
+    """Raised at ``compile()`` when the graph has no entry node set.
+    Call :meth:`GraphBuilder.set_entry` before compiling."""
+
     category = "no_declared_entry"
 
     def __init__(self) -> None:
@@ -36,6 +39,9 @@ class NoDeclaredEntry(CompileError):
 
 
 class UnreachableNode(CompileError):
+    """Raised at ``compile()`` when a declared node cannot be reached
+    from the entry by following static or conditional edges."""
+
     category = "unreachable_node"
 
     def __init__(self, node_name: str) -> None:
@@ -44,6 +50,9 @@ class UnreachableNode(CompileError):
 
 
 class DanglingEdge(CompileError):
+    """Raised at ``compile()`` when an edge (static or the entry pointer)
+    names a node that was never declared on the builder."""
+
     category = "dangling_edge"
 
     def __init__(self, source: str, target: str) -> None:
@@ -53,6 +62,11 @@ class DanglingEdge(CompileError):
 
 
 class MultipleOutgoingEdges(CompileError):
+    """Raised at ``compile()`` when a single source node has more than
+    one outgoing static edge. To branch from one node, use
+    :meth:`GraphBuilder.add_conditional_edge` instead of multiple
+    ``add_edge`` calls."""
+
     category = "multiple_outgoing_edges"
 
     def __init__(self, source: str) -> None:
@@ -61,6 +75,10 @@ class MultipleOutgoingEdges(CompileError):
 
 
 class ConflictingReducers(CompileError):
+    """Raised at ``compile()`` when a state field has more than one
+    distinct reducer attached across its declarations. Each field
+    accepts at most one reducer."""
+
     category = "conflicting_reducers"
 
     def __init__(self, field_name: str) -> None:
@@ -128,6 +146,11 @@ class RuntimeGraphError(GraphError):
 
 
 class NodeException(RuntimeGraphError):
+    """Raised when a node's function (or innermost middleware) raises
+    an uncaught exception during ``invoke()``. The original exception
+    is attached as ``__cause__``; ``recoverable_state`` carries the
+    state as it was just before the failing node ran."""
+
     category = "node_exception"
     node_name: str
     recoverable_state: Any
@@ -147,8 +170,8 @@ class ParallelBranchesBranchFailed(NodeException):
     Subtype of :class:`NodeException` (per §11.9: "a
     ``node_exception`` subtype attached at the parallel-branches
     node's level"). The existing NodeException-classifier path
-    handles transient classification from ``__cause__`` per §6.1
-    — non-transient by default, inherits transient classification
+    handles transient classification from ``__cause__`` per §6.1:
+    non-transient by default, inheriting transient classification
     from the wrapped exception.
 
     Carries ``branch_name`` as a structured field per §11.9; the
@@ -180,6 +203,11 @@ class ParallelBranchesBranchFailed(NodeException):
 
 
 class EdgeException(RuntimeGraphError):
+    """Raised when a conditional-edge callable raises an uncaught
+    exception during ``invoke()``. The original exception is attached
+    as ``__cause__``; ``recoverable_state`` carries the merged state
+    that the callable was evaluating."""
+
     category = "edge_exception"
     source_node: str
     recoverable_state: Any
@@ -192,6 +220,10 @@ class EdgeException(RuntimeGraphError):
 
 
 class ReducerError(RuntimeGraphError):
+    """Raised when a field reducer raises while merging a node's
+    partial update. ``__cause__`` is the original exception;
+    ``recoverable_state`` is the pre-merge state."""
+
     category = "reducer_error"
     field_name: str
     reducer_name: str
@@ -219,6 +251,9 @@ class ReducerError(RuntimeGraphError):
 
 
 class RoutingError(RuntimeGraphError):
+    """Raised when a conditional-edge callable returns a value that is
+    neither the name of a declared node nor the :data:`END` sentinel."""
+
     category = "routing_error"
     source_node: str
     returned: object
@@ -291,7 +326,7 @@ class StateValidationError(RuntimeGraphError):
     """State failed schema validation at a graph boundary.
 
     Unlike the other runtime errors, this category does NOT carry
-    ``recoverable_state`` — at entry there is no prior state to
+    ``recoverable_state``: at entry there is no prior state to
     recover; at exit the failing state IS the final state.
     """
 

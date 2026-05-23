@@ -1,6 +1,6 @@
 # Spec: realizes pipeline-utilities §11 (parallel branches).
 
-"""Parallel branches — concurrent dispatch of M heterogeneous compiled subgraphs.
+"""Parallel branches: concurrent dispatch of M heterogeneous compiled subgraphs.
 
 Counterpart to :mod:`.fan_out`. Fan-out is data-driven (N items,
 one subgraph, instantiated N times); parallel branches is
@@ -101,8 +101,14 @@ class ParallelBranchesNode[ParentT: State]:
     middleware: tuple[Middleware, ...] = ()
 
     async def run(self, state: ParentT) -> Mapping[str, Any]:
+        """Not implemented at this level. Dispatching parallel branches
+        requires the engine's invocation context so each branch gets
+        observer attribution and a namespaced descent; the engine
+        calls :meth:`run_with_context` instead. This method exists
+        only to satisfy the :class:`Node` Protocol and always raises
+        :class:`NotImplementedError`."""
         del state
-        raise RuntimeError(
+        raise NotImplementedError(
             "ParallelBranchesNode is dispatched by the graph engine; if you're "
             "seeing this, you've likely instantiated it outside an engine "
             "context (e.g., calling node.run(state) directly instead of "

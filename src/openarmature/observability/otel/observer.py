@@ -13,7 +13,7 @@
 #   global-provider auto-instrumentation libraries from emitting
 #   duplicate spans alongside ours).
 
-"""OTelObserver — observer-driven span lifecycle.
+"""OTelObserver: observer-driven span lifecycle.
 
 The observer subscribes to all three node-event phases (``started``,
 ``completed``, ``checkpoint_saved``) plus the LLM-provider events the
@@ -30,14 +30,14 @@ across concurrent invocations (e.g., an ASGI service running
 ``asyncio.gather([invoke(), invoke()])`` on one observer); each
 invocation's spans live in their own sub-dict, lazy-allocated on
 first event. The ``correlation_id`` is the cross-run join key set as
-the ``openarmature.correlation_id`` attribute on every span — it is
+the ``openarmature.correlation_id`` attribute on every span; it is
 *not* the state-scoping key, because resume runs preserve the
 correlation_id and would (incorrectly) cause the resumed run's spans
 to inherit the prior invocation's trace.
 
 **No cross-event OTel context tokens.** Parent spans are resolved
 from the observer's own internal maps within a single event
-handler's scope — never from ``opentelemetry.context.get_current()``.
+handler's scope; never from ``opentelemetry.context.get_current()``.
 Spans are opened with ``context=set_span_in_context(parent_span)``
 directly rather than ``attach()``-ing tokens that would have to be
 ``detach()``-ed on the matching completed event. This eliminates
@@ -47,20 +47,20 @@ the observer robust to dispatch ordering.
 Subtree isolation lives in dedicated dicts rather than the leaf-span
 key:
 
-- ``subgraph_spans`` — synthetic subgraph dispatch spans (the engine
+- ``subgraph_spans``: synthetic subgraph dispatch spans (the engine
   wrapper is transparent but the observer mints a span anyway).
   Keyed by namespace prefix. Open lazily on the first deeper-
   namespace event, close when subsequent events leave the prefix.
-- ``detached_roots`` — root spans for detached subgraphs and per-
+- ``detached_roots``: root spans for detached subgraphs and per-
   instance detached fan-out roots. Each lives in its own fresh
   ``trace_id``; the parent's dispatch span carries an OTel
   :class:`Link` to the detached trace.
-- ``_invocation_span`` — root invocation span keyed by
+- ``_invocation_span``: root invocation span keyed by
   ``invocation_id``. Closed via :meth:`close_invocation` /
   :meth:`shutdown`.
 
 Spans are emitted through a **private** :class:`TracerProvider`
-constructed by this observer — never the OTel global. Registering
+constructed by this observer; never the OTel global. Registering
 globally would cause every auto-instrumentation library that writes
 to the global provider (OpenInference,
 opentelemetry-instrumentation-openai, LiteLLM, etc.) to emit
@@ -176,27 +176,27 @@ class OTelObserver:
     :class:`BatchSpanProcessor` wrapping a real exporter, or a
     :class:`SimpleSpanProcessor` wrapping :class:`InMemorySpanExporter`
     for tests). The observer instantiates its own private
-    :class:`TracerProvider` from the supplied processor — callers
+    :class:`TracerProvider` from the supplied processor; callers
     MUST NOT pre-register the provider globally.
 
     Constructor knobs:
 
-    - ``detached_subgraphs`` — set of subgraph wrapper node names
+    - ``detached_subgraphs``: set of subgraph wrapper node names
       that should run in their own trace (§4.4). One detached trace
       per such subgraph.
-    - ``detached_fan_outs`` — set of fan-out node names whose
+    - ``detached_fan_outs``: set of fan-out node names whose
       INSTANCES each get their own trace. One detached trace per
       instance.
-    - ``disable_llm_spans`` — when ``True`` the observer skips the
+    - ``disable_llm_spans``: when ``True`` the observer skips the
       §5.5 LLM provider span. All other spans (node, subgraph,
       fan-out, etc.) emit normally. Useful when an external
       auto-instrumentation library (OpenInference, etc.) is the
       canonical source of LLM spans.
-    - ``spec_version`` — string surfaced as
+    - ``spec_version``: string surfaced as
       ``openarmature.graph.spec_version`` on the invocation span.
 
     Safe to share across concurrent invocations and across
-    resumes of the same correlation_id — every internal span map is
+    resumes of the same correlation_id; every internal span map is
     outer-keyed by ``invocation_id``, and parent resolution stays
     within a single event handler's scope.
     """
@@ -286,7 +286,7 @@ class OTelObserver:
         the span already in ``inv_state.open_spans`` and short-circuits.
 
         Skipped for non-``"started"`` phases and for the LLM sentinel
-        namespace — only graph-node started events participate in the
+        namespace; only graph-node started events participate in the
         engine-side attach. Errors don't leak: ``_dispatch`` wraps this
         call in try/except + ``warnings.warn`` matching the async path.
         """
@@ -1096,7 +1096,7 @@ class OTelObserver:
 
     def close_invocation(self, invocation_id: str) -> None:
         """Close the invocation span for ``invocation_id`` and drain
-        the per-invocation state. Idempotent — calling twice (or for
+        the per-invocation state. Idempotent; calling twice (or for
         an invocation_id with no open span) is a no-op.
 
         Drains any still-open spans in the per-invocation state in
@@ -1113,7 +1113,7 @@ class OTelObserver:
         from a checkpoint record's ``invocation_id`` field.
 
         For typical production lifecycle on long-lived observers,
-        prefer :meth:`shutdown` — it drains every in-flight
+        prefer :meth:`shutdown`; it drains every in-flight
         invocation in one call without needing to track ids
         externally. A first-class engine-level signal that lets
         observers auto-drain per-invocation state on completion is

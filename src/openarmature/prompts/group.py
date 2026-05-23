@@ -1,4 +1,4 @@
-"""PromptGroup — composition pattern for tracing related prompts together."""
+"""PromptGroup; composition pattern for tracing related prompts together."""
 
 from __future__ import annotations
 

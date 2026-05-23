@@ -13,7 +13,7 @@ engine dispatches the started event before invoking the wrapped node
 function and the completed event after the reducer merge succeeds
 (with ``post_state`` populated) or after the node, reducer, or state
 validation fails (with ``error`` populated). Routing errors do NOT
-produce their own event pair — they land on the preceding node's
+produce their own event pair; they land on the preceding node's
 ``completed`` event with ``error`` populated.
 
 ``CompiledGraph[StateT]`` and ``_merge_partial[StateT]`` carry the
@@ -317,8 +317,8 @@ class CompiledGraph[StateT: State]:
     """An immutable, executable graph produced by `GraphBuilder.compile()`.
 
     The compile-time topology (state class, entry, nodes, edges, reducers) is
-    immutable. Two mutable lists ride alongside for observer plumbing —
-    `_attached_observers` and `_active_workers` — neither of which affect the
+    immutable. Two mutable lists ride alongside for observer plumbing
+    (`_attached_observers` and `_active_workers`), neither of which affect the
     compiled topology and both of which are scoped to the same instance.
     """
 
@@ -361,7 +361,7 @@ class CompiledGraph[StateT: State]:
         """Register a graph-attached observer.
 
         Graph-attached observers fire on every invocation of this
-        graph until removed — including when this graph runs as a
+        graph until removed; including when this graph runs as a
         subgraph inside a parent. Returns a ``RemoveHandle`` whose
         ``.remove()`` method detaches the observer; idempotent.
 
@@ -507,8 +507,8 @@ class CompiledGraph[StateT: State]:
 
         **Unbounded by design.** Drain blocks until every queued event has
         been delivered to every subscribed observer. A slow, hung, or
-        misbehaving observer can therefore hold drain — and the calling
-        process — indefinitely. If you need a bounded wait, wrap the call
+        misbehaving observer can therefore hold drain, and the calling
+        process, indefinitely. If you need a bounded wait, wrap the call
         in `asyncio.wait_for` and accept that events still queued when the
         deadline elapses will not be delivered::
 
@@ -536,7 +536,7 @@ class CompiledGraph[StateT: State]:
         """Run the graph from ``initial_state`` to END and return the
         final state.
 
-        Optional ``observers`` are invocation-scoped — they fire only
+        Optional ``observers`` are invocation-scoped; they fire only
         for this run, after all graph-attached observers (including
         subgraph-attached ones for events originating in subgraphs).
 
@@ -560,7 +560,7 @@ class CompiledGraph[StateT: State]:
           ``CheckpointNotFound`` when the backend has no record for
           the supplied id, ``CheckpointRecordInvalid`` when the
           loaded record's schema is incompatible. Resume mints a NEW
-          ``invocation_id`` — each attempt is its own invocation in
+          ``invocation_id``; each attempt is its own invocation in
           the observability sense; the ``correlation_id`` is the
           cross-attempt join key.
         - **Save-failure policy.** This implementation raises

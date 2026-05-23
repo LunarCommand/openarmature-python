@@ -55,7 +55,7 @@ class ProjectionStrategy[ParentT: State, ChildT: State](Protocol):
       match the supplied schemas. Declarative strategies like
       `ExplicitMapping` use this to catch field-name typos before any
       node runs. Imperative custom projections typically have nothing
-      declarative to check and can simply omit the method — the engine
+      declarative to check and can simply omit the method; the engine
       uses duck typing (`getattr`) to find it.
     """
 
@@ -84,6 +84,8 @@ class FieldNameMatching[ParentT: State, ChildT: State]:
     """
 
     def project_in(self, parent_state: ParentT, subgraph_state_cls: type[ChildT]) -> ChildT:
+        """No-projection-in: the subgraph starts from its schema's
+        field defaults, ignoring the parent state entirely."""
         return subgraph_state_cls()
 
     def project_out(
@@ -92,6 +94,9 @@ class FieldNameMatching[ParentT: State, ChildT: State]:
         parent_state: ParentT,
         subgraph_state_cls: type[ChildT],
     ) -> Mapping[str, Any]:
+        """Project shared field names back to the parent. Subgraph
+        fields whose names match a parent field are folded through the
+        parent's reducer; non-matching subgraph fields are discarded."""
         return _field_name_match_projection(subgraph_final_state, parent_state, subgraph_state_cls)
 
 
@@ -99,15 +104,15 @@ class ExplicitMapping[ParentT: State, ChildT: State]:
     """Explicit input/output mapping between parent and subgraph
     state.
 
-    ``inputs``: subgraph_field → parent_field. At entry, the named
+    ``inputs``: subgraph_field to parent_field. At entry, the named
     parent field's current value is copied into the named subgraph
     field. Subgraph fields not listed receive their schema-declared
-    defaults — there is NO field-name fallback (additive over the
+    defaults; there is NO field-name fallback (additive over the
     default no-projection-in).
 
-    ``outputs``: parent_field → subgraph_field. At exit, the named
+    ``outputs``: parent_field to subgraph_field. At exit, the named
     subgraph field's value is merged into the named parent field via
-    the parent's reducer. Subgraph fields not listed are discarded —
+    the parent's reducer. Subgraph fields not listed are discarded;
     ``outputs`` REPLACES field-name matching for projection-out.
 
     The two directions are independent: pass either, both, or
@@ -131,6 +136,10 @@ class ExplicitMapping[ParentT: State, ChildT: State]:
         self.outputs: dict[str, str] | None = dict(outputs) if outputs is not None else None
 
     def project_in(self, parent_state: ParentT, subgraph_state_cls: type[ChildT]) -> ChildT:
+        """Construct the subgraph's initial state from ``inputs``.
+        Each declared ``subgraph_field → parent_field`` pair copies
+        the parent's current value into the subgraph kwarg; subgraph
+        fields not listed get their schema defaults."""
         kwargs: dict[str, Any] = {
             sub_field: getattr(parent_state, parent_field) for sub_field, parent_field in self.inputs.items()
         }
@@ -142,8 +151,11 @@ class ExplicitMapping[ParentT: State, ChildT: State]:
         parent_state: ParentT,
         subgraph_state_cls: type[ChildT],
     ) -> Mapping[str, Any]:
+        """Project back per ``outputs``: each declared
+        ``parent_field → subgraph_field`` pair folds the subgraph
+        value into the parent's reducer. When ``outputs`` was not
+        provided, falls back to field-name matching."""
         if self.outputs is None:
-            # Outputs absent → spec default of field-name matching applies.
             return _field_name_match_projection(subgraph_final_state, parent_state, subgraph_state_cls)
         return {
             parent_field: getattr(subgraph_final_state, sub_field)
@@ -151,6 +163,10 @@ class ExplicitMapping[ParentT: State, ChildT: State]:
         }
 
     def validate(self, parent_cls: type[ParentT], subgraph_state_cls: type[ChildT]) -> None:
+        """Compile-time check that every field name in ``inputs`` and
+        ``outputs`` exists on the relevant state schema. Called once
+        per subgraph node from the parent's ``compile()``. Raises
+        :class:`MappingReferencesUndeclaredField` on the first typo."""
         parent_fields = set(parent_cls.model_fields.keys())
         sub_fields = set(subgraph_state_cls.model_fields.keys())
 

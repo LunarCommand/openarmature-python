@@ -6,7 +6,7 @@
 #   internal + fan-out nodes per §10.3.
 # - Resume via ``invoke(resume_invocation=...)`` restores per §10.4.
 
-"""openarmature.checkpoint — checkpointing capability.
+"""openarmature.checkpoint: checkpointing capability.
 
 Public surface: the typed :class:`Checkpointer` Protocol,
 :class:`CheckpointRecord` / :class:`NodePosition` /

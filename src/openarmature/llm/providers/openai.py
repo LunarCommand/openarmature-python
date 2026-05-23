@@ -98,7 +98,7 @@ class OpenAIProvider:
 
     Construct with a base URL, model identifier, and optional API key
     + transport (an :class:`httpx.AsyncBaseTransport`). The
-    ``transport`` parameter is the test seam — ``httpx.MockTransport``
+    ``transport`` parameter is the test seam; ``httpx.MockTransport``
     drives the conformance fixtures by intercepting HTTP calls and
     returning canned responses, exercising the same wire-mapping
     code production traffic would.
@@ -143,7 +143,7 @@ class OpenAIProvider:
         return self._force_prompt_augmentation_fallback
 
     async def aclose(self) -> None:
-        """Close the underlying HTTP client. Optional — async clients
+        """Close the underlying HTTP client. Optional; async clients
         garbage-collect cleanly, but explicit close is RECOMMENDED in
         long-lived services to release the connection pool promptly."""
         await self._client.aclose()
@@ -227,7 +227,7 @@ class OpenAIProvider:
         Pre-send validation runs first (per-message Pydantic +
         list-level invariants + response_schema shape check). HTTP
         errors map to canonical provider-error categories. The
-        successful 200 body is parsed into a :class:`Response` —
+        successful 200 body is parsed into a :class:`Response`;
         failure to parse raises ``provider_invalid_response``; failure
         to validate the response content against ``response_schema``
         raises ``structured_output_invalid``.
@@ -776,7 +776,7 @@ def classify_http_error(resp: httpx.Response) -> LlmProviderError:
 
     Reusable by third-party Provider implementations targeting any
     OpenAI-compatible endpoint (vLLM, LM Studio, llama.cpp server,
-    etc.) — the wire shape is stable across these and the helper
+    etc.); the wire shape is stable across these and the helper
     saves implementers from reimplementing the mapping table.
     """
     status = resp.status_code

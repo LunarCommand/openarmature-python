@@ -10,7 +10,7 @@ and the completed event after the reducer merge succeeds (with
 ``post_state`` populated) or after the node, reducer, or state
 validation fails (with ``error`` populated).
 
-Frozen dataclass — observers receive a snapshot, not a live handle.
+Frozen dataclass; observers receive a snapshot, not a live handle.
 """
 
 from dataclasses import dataclass
@@ -37,24 +37,24 @@ class FanOutEventConfig:
     spans with the right ``parent_node_name``.
 
     Populated ONLY on ``started`` and ``completed`` events for a
-    fan-out node itself (partition by node type, not event category —
+    fan-out node itself (partition by node type, not event category;
     INCLUDES retried attempts of a fan-out node when retry middleware
     wraps it). All other events leave ``NodeEvent.fan_out_config``
     null.
 
     Field shapes:
 
-    - ``item_count`` — non-negative int. The resolved instance count
+    - ``item_count``: non-negative int. The resolved instance count
       (matches ``count_field`` value when configured; matches
       ``len(items_field)`` in items_field mode).
-    - ``concurrency`` — positive int OR ``None`` (unbounded). Zero or
+    - ``concurrency``: positive int OR ``None`` (unbounded). Zero or
       negative is rejected at config resolution time as
       ``fan_out_invalid_concurrency``. Backend mappings may translate
       ``None`` to a sentinel at the attribute layer (e.g.,
-      ``openarmature.fan_out.concurrency = 0``) — that translation is
+      ``openarmature.fan_out.concurrency = 0``); that translation is
       observer-internal, not engine-internal.
-    - ``error_policy`` — one of ``"fail_fast"`` or ``"collect"``.
-    - ``parent_node_name`` — the fan-out node's name in the parent
+    - ``error_policy``: one of ``"fail_fast"`` or ``"collect"``.
+    - ``parent_node_name``: the fan-out node's name in the parent
       graph. Carried here for caching by backend observers when
       attributing per-instance spans.
 
@@ -82,7 +82,7 @@ class NodeEvent:
       and the merge runs/fails). Each node attempt produces exactly
       one of each in that order. The engine ALSO dispatches a
       ``"checkpoint_saved"`` event on the same shape after a
-      successful ``Checkpointer.save`` call — observers MUST opt in
+      successful ``Checkpointer.save`` call; observers MUST opt in
       explicitly via ``phases={"checkpoint_saved"}`` to receive these
       (default subscription is ``{"started", "completed"}`` only, so
       legacy observers don't see them).
@@ -121,7 +121,7 @@ class NodeEvent:
       utilities §11, the combination of ``namespace``,
       ``branch_name``, ``fan_out_index``, ``attempt_index``, and
       ``phase`` jointly uniquely identifies an event source.
-      ``branch_name`` and ``fan_out_index`` are independent — both
+      ``branch_name`` and ``fan_out_index`` are independent; both
       MAY be present when a branch's subgraph contains a fan-out
       (or a fan-out instance contains a parallel-branches node).
 
@@ -135,7 +135,7 @@ class NodeEvent:
     **Synthetic phases.** ``"checkpoint_saved"`` (pipeline-utilities
     §10.8) and ``"checkpoint_migrated"`` (proposal 0014 §6
     cross-ref) repurpose this dataclass for non-node events. Both
-    are opt-in via ``phases={...}`` on observer registration —
+    are opt-in via ``phases={...}`` on observer registration;
     default subscriptions are ``{"started", "completed"}`` only, so
     legacy observers never see them. Conventions on synthetic
     events:
@@ -145,7 +145,7 @@ class NodeEvent:
       phase), ``post_state`` is ``None``. ``step`` matches the
       saving node's step.
     - ``checkpoint_migrated``: ``step=-1`` (no graph-step
-      sequencing — migrations run before any node fires).
+      sequencing; migrations run before any node fires).
       ``node_name="openarmature.checkpoint.migrate"`` and
       ``namespace=("openarmature.checkpoint.migrate",)`` are
       dotted-pseudo identifiers, not real node names. ``pre_state``

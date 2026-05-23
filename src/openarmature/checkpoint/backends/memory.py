@@ -3,7 +3,7 @@
 """In-memory Checkpointer.
 
 Keeps records in a Python ``dict`` keyed by ``invocation_id``. NOT
-durable across process crashes — useful for tests, short-lived runs,
+durable across process crashes; useful for tests, short-lived runs,
 and development. Accepts any state shape (the dict holds the
 :class:`CheckpointRecord` directly; nothing is serialized).
 """
@@ -26,7 +26,7 @@ class InMemoryCheckpointer:
 
     **State shape:** any. The record is held by reference, so the
     Pydantic state instance the engine produces is what comes back
-    from :meth:`load` — no serialization round-trip. (This is the
+    from :meth:`load`; no serialization round-trip. (This is the
     feature: tests can assert on the saved state's identity.)
 
     **State-migration eligibility:** none. Per spec §10.12.1, a
@@ -52,14 +52,23 @@ class InMemoryCheckpointer:
         self._lock = asyncio.Lock()
 
     async def save(self, invocation_id: str, record: CheckpointRecord) -> None:
+        """Store ``record`` under ``invocation_id``, replacing any
+        previous record for the same id. Not durable across process
+        restarts."""
         async with self._lock:
             self._records[invocation_id] = record
 
     async def load(self, invocation_id: str) -> CheckpointRecord | None:
+        """Return the saved record for ``invocation_id`` or ``None``
+        if nothing has been saved under that id."""
         async with self._lock:
             return self._records.get(invocation_id)
 
     async def list(self, filter: CheckpointFilter | None = None) -> Iterable[CheckpointSummary]:
+        """Enumerate stored invocations as :class:`CheckpointSummary`
+        rows. With ``filter.correlation_id`` set, restricts the
+        results to invocations carrying that correlation id;
+        otherwise returns all rows."""
         async with self._lock:
             records = list(self._records.values())
         summaries = [
@@ -76,6 +85,8 @@ class InMemoryCheckpointer:
         return [s for s in summaries if s.correlation_id == filter.correlation_id]
 
     async def delete(self, invocation_id: str) -> None:
+        """Remove the record for ``invocation_id``. No-op when nothing
+        is saved under that id (no error)."""
         async with self._lock:
             self._records.pop(invocation_id, None)
 

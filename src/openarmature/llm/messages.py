@@ -2,7 +2,7 @@
 # validation timing) and §4 (Tool definition). Tool-call ids preserved
 # verbatim — no rewrite or normalization, per spec §3.
 
-"""Message, Tool, ToolCall — the typed conversation surface.
+"""Message, Tool, ToolCall: the typed conversation surface.
 
 A conversation is an ordered list of messages, one of four kinds
 discriminated by ``role``: ``system``, ``user``, ``assistant``,
@@ -11,13 +11,13 @@ need non-empty content, assistant carries optional tool_calls, tool
 needs a tool_call_id matching an earlier assistant ToolCall).
 
 Pydantic enforces the per-role constraints at message construction
-time. List-level invariants — like "every tool message's
-``tool_call_id`` matches an earlier assistant ``ToolCall.id``" — are
+time. List-level invariants (like "every tool message's
+``tool_call_id`` matches an earlier assistant ``ToolCall.id``") are
 checked at the ``complete()`` boundary, not at construction (a
 single Message can't see the rest of the list). Both layers are
 required.
 
-Tool-call ids are preserved verbatim — implementations MUST NOT
+Tool-call ids are preserved verbatim; implementations MUST NOT
 rewrite or normalize provider-supplied ids. The ``id`` field is a
 plain ``str`` with no normalizer, so a UUID with hyphens, a
 vendor-prefixed id (``bifrost_abc-def``), or any other string shape
@@ -35,7 +35,7 @@ class ToolCall(BaseModel):
     """An assistant's request to invoke a named tool.
 
     ``id`` is an opaque correlator within a single message list.
-    Implementations MUST preserve provider-supplied ids verbatim —
+    Implementations MUST preserve provider-supplied ids verbatim;
     neither rewriting nor normalizing.
     """
 
@@ -56,7 +56,7 @@ class Tool(BaseModel):
     ``parameters`` is a JSON Schema (object schema) describing the
     argument record. Kept as a plain ``dict[str, Any]`` rather than a
     typed schema class so the "JSON Schema, not language-native
-    types" intent surfaces directly — implementations may offer
+    types" intent surfaces directly; implementations may offer
     ergonomic constructors that compile from native types (Pydantic
     ``model_json_schema()``) but the surface is JSON Schema.
     """

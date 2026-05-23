@@ -1,4 +1,4 @@
-"""Middleware subpackage — protocol + canonical implementations.
+"""Middleware subpackage: protocol + canonical implementations.
 
 The ``Middleware`` Protocol and chain-composition machinery live in
 :mod:`._core`; the canonical middleware (Retry, Timing) live in their
