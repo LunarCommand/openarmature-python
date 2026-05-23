@@ -9,7 +9,7 @@ import openarmature
 
 def test_package_versions() -> None:
     assert openarmature.__version__ == "0.7.0"
-    assert openarmature.__spec_version__ == "0.16.1"
+    assert openarmature.__spec_version__ == "0.17.0"
 
 
 def test_spec_version_matches_pyproject() -> None:
