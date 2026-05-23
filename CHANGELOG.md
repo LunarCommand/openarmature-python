@@ -4,6 +4,39 @@ All notable changes to `openarmature-python` are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). The package follows [Semantic Versioning](https://semver.org/); pre-1.0 minor bumps may carry behavioral changes per [spec governance](https://github.com/LunarCommand/openarmature-spec/blob/main/GOVERNANCE.md).
 
+## [Unreleased]
+
+LLM-provider span payload and GenAI semconv release. Pinned spec
+jumps from v0.16.1 to v0.17.0 (proposal 0024 / observability §5.5
+expansion). The trigger was a friction report from a downstream
+agent integrating OA with Langfuse over OTLP: LLM spans rendered
+"naked" (model + tokens only), prompt linkage silently dropped at
+the dispatch-worker task boundary, and every backend needed a
+per-service attribute-mapping shim. This release clears all eight
+items in that report.
+
+### Added
+
+- **`openarmature.llm.input.messages` / `openarmature.llm.output.content` / `openarmature.llm.request.extras` span attributes (spec §5.5.1).** When the OTel observer is constructed with `disable_llm_payload=False`, LLM spans carry the messages sent, the assistant response content, and the `RuntimeConfig` extras bag — JSON-encoded with sorted keys, no insignificant whitespace, UTF-8. Default-off (the flag is `disable_llm_payload: bool = True`) because the payload may contain PII the user hasn't audited; opt in deliberately. Subject to the §5.5.5 truncation contract.
+- **GenAI semantic-conventions attributes (spec §5.5.2 + §5.5.3).** LLM spans now carry `gen_ai.system`, `gen_ai.request.model`, `gen_ai.response.model`, `gen_ai.usage.input_tokens`, `gen_ai.usage.output_tokens`, `gen_ai.response.finish_reasons` (single-element string array), `gen_ai.response.id`, and per-set `gen_ai.request.{temperature,max_tokens,top_p,seed}` (only set fields — absence is meaningful per §5.5.2). The existing `openarmature.llm.*` attribute set is preserved alongside; both namespaces emit. Default-on (`disable_genai_semconv: bool = False`); opt out when an external auto-instrumentation library (OpenInference, opentelemetry-instrumentation-openai, etc.) is the canonical source of GenAI attributes for your stack.
+- **`OTelObserver(resource=...)` constructor argument.** Optional `opentelemetry.sdk.resources.Resource` passed to the private `TracerProvider`. Lets callers set `service.name` / `service.version` directly rather than via `OTEL_SERVICE_NAME` / `OTEL_RESOURCE_ATTRIBUTES` environment variables (which had to be set BEFORE constructing the observer to take effect — a footgun the explicit kwarg avoids).
+- **Multi-processor support on `OTelObserver`.** The `span_processor` constructor argument now accepts a `SpanProcessor | Sequence[SpanProcessor]`. Multi-destination export (e.g., HyperDX + Langfuse on one observer) becomes a one-line constructor call instead of a per-service `CompoundSpanProcessor` workaround.
+- **`OTelObserver(attribute_enrichers=...)` hook.** Sequence of `Callable[[Span, NodeEvent | None], None]` invoked just before the observer ends each span. Lets users add backend-specific attributes (custom `langfuse.*` keys, vendor span kinds, etc.) without subclassing or mutating `span._attributes` post-`on_end`. The event is `None` on synthetic close sites (subgraph dispatch, detached root, fan-out instance, invocation span, shutdown drain); enrichers that need per-event context short-circuit on `None`. Exceptions are caught and warned, never propagated to the dispatch worker.
+- **`OTelObserver(payload_max_bytes=...)` truncation cap.** Per-attribute byte cap for the §5.5.1 payload attributes. Default 65,536 (64 KiB) per attribute; minimum 256 bytes (rejected at construction). The truncation algorithm (spec §5.5.5) emits the largest UTF-8 code-point-aligned prefix that fits within `cap - len(marker)` bytes followed by the marker `…[truncated, M bytes total]`. Inline image bytes are unconditionally redacted at the provider before any cap applies (see Image redaction below).
+- **`OpenAIProvider(genai_system="openai")` constructor argument.** Default `"openai"`; override for non-OpenAI endpoints that speak the OpenAI Chat Completions wire format (vLLM, LM Studio, llama.cpp, sglang). Surfaces as the `gen_ai.system` span attribute. No base-URL sniffing happens — the same host:port could be any of several servers, and a wrong inference is worse than the explicit opt-in.
+- **`openarmature.observability.LLM_NAMESPACE` and `openarmature.observability.LlmEventPayload` public exports.** The `("openarmature.llm.complete",)` sentinel namespace used by the LLM-provider hook and the payload shape backend observers consume. Third-party `Provider` implementations can dispatch their own LLM events via `current_dispatch()(NodeEvent(..., namespace=LLM_NAMESPACE, pre_state=LlmEventPayload(...)))`; custom observers can recognize the same sentinel and read attributes off the payload. Previously private (`_LLM_NAMESPACE`, `_LlmEventState`); the old underscore-prefixed names are no longer exported.
+- **`Response.response_id` and `Response.response_model` typed fields.** Mirror the wire response's `id` and `model` fields when the provider returns them. Surface as `gen_ai.response.id` and `gen_ai.response.model` per spec §5.5.3; also useful for downstream cross-referencing with provider-side billing or audit logs without reaching into `Response.raw`.
+
+### Changed
+
+- **Prompt-context attribute propagation now survives the dispatch-worker task boundary.** Previously the OTel observer read `current_prompt_result()` / `current_prompt_group()` from inside `_handle_llm_event`, which runs in the engine's delivery-worker task. `asyncio.create_task(deliver_loop(queue))` snapshots the current Context at task creation, before any node body runs — so the ContextVars set by `with_active_prompt(...)` were never visible to the worker. `openarmature.prompt.*` attributes silently went missing on the LLM span. Fixed by capturing both ContextVars at dispatch time inside the `OpenAIProvider.complete()` call (which runs in the node task, where `with_active_prompt` IS active) and threading the snapshots through the `LlmEventPayload`. The observer reads from the payload, not the ContextVar.
+- **Inline image bytes are redacted at the provider, not the observer.** Image content blocks with `ImageSourceInline` are serialized with `source` replaced by `{type: "inline_redacted", byte_count: N}` per §5.5.5 *before* the payload reaches the observability dispatch queue. Defense-in-depth: bytes never leave the provider in event form, so custom observers subscribing to the LLM event (enabled by `LlmEventPayload` being public) cannot accidentally leak raw image bytes regardless of their implementation. `media_type` and `detail` are preserved at the image-block level per llm-provider §3.1.2. URL-form images pass through unchanged.
+- **`OTelObserver.shutdown()` docstring documents the `BatchSpanProcessor` flush gotcha.** Under fast or unusual teardown orderings (e.g., FastAPI TestClient teardown that closes the event loop before the batch processor's export thread finishes), spans can appear dropped. Documented workarounds: call `provider.force_flush(timeout_millis=…)` explicitly before `shutdown()`, or use `SimpleSpanProcessor` in tests.
+
+### Notes
+
+- **Pinned spec version bumped to v0.17.0.** Per the additive-only governance rule (proposal 0024 adds; never renames), implementations passing v0.16.1 conformance fixtures continue to pass under v0.17.0; the new fixtures (012-021) add cases without modifying existing ones.
+
 ## [0.7.0] — 2026-05-23
 
 Docs-and-examples release. Pinned spec stays at v0.16.1; no

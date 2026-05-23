@@ -333,3 +333,226 @@ join semantics survive even when trace boundaries don't.
 The non-detached default is what you want most of the time: one
 trace per outermost invocation, with subgraphs and fan-out instances
 as nested spans.
+
+### LLM provider spans
+
+When an `OpenAIProvider` (or any [custom Provider](../model-providers/authoring.md)
+that wires the dispatch hook) is used inside a graph with `OTelObserver`
+attached, each `provider.complete()` call emits a dedicated span named
+`openarmature.llm.complete`, parented under the calling node's span.
+The span carries two attribute families.
+
+**`openarmature.llm.*` (always on).** The framework's canonical
+namespace: model identifier, finish reason, token counts, prompt
+identity from `with_active_prompt(...)`, error category on failure.
+Set unconditionally whenever the LLM span itself emits.
+
+**`gen_ai.*` (OpenTelemetry GenAI semantic conventions, default on).**
+Cross-vendor attribute names every LLM-aware backend reads
+(Langfuse, Phoenix, Honeycomb's LLM lens, OpenInference-aware
+tools). Emitted alongside the OA namespace:
+
+- `gen_ai.system` — `"openai"` by default; override per provider
+  instance to `"vllm"` / `"lm_studio"` / `"llama_cpp"` / etc. when
+  the OpenAI Chat Completions wire format is hitting a non-OpenAI
+  endpoint:
+
+  ```python
+  provider = OpenAIProvider(
+      base_url="http://vllm.internal:8000",
+      model="meta-llama/Llama-3-8B-Instruct",
+      genai_system="vllm",
+  )
+  ```
+
+- `gen_ai.request.model` / `gen_ai.response.model` — the bound
+  model and (when the provider returns one) the more-specific
+  identifier in the response body.
+- `gen_ai.request.temperature` / `max_tokens` / `top_p` / `seed`
+  — only emitted for fields the caller actually set; absence on
+  the span means "not supplied," distinct from a zero value.
+- `gen_ai.usage.input_tokens` / `output_tokens` — token counts.
+- `gen_ai.response.finish_reasons` — single-element string array.
+- `gen_ai.response.id` — when the provider returns one.
+
+Disable the GenAI semconv set with `OTelObserver(disable_genai_semconv=True)`
+when an external auto-instrumentation library (OpenInference,
+`opentelemetry-instrumentation-openai`) is already the canonical
+source on your stack.
+
+### LLM payload attributes
+
+By default, LLM spans do **not** carry the messages sent or the
+response content. Opt in with `disable_llm_payload=False`:
+
+```python
+observer = OTelObserver(
+    span_processor=SimpleSpanProcessor(exporter),
+    disable_llm_payload=False,
+)
+```
+
+This surfaces three attributes:
+
+- `openarmature.llm.input.messages` — JSON-encoded message array
+  (the spec §3 message shape: `{role, content, tool_calls?, …}`).
+- `openarmature.llm.output.content` — the assistant's response
+  content string verbatim. Omitted for tool-call-only responses
+  with empty content.
+- `openarmature.llm.request.extras` — JSON-encoded `RuntimeConfig`
+  extras bag (provider-specific pass-through fields like
+  `frequency_penalty`). Omitted when empty.
+
+**Default-off is deliberate.** The payload may contain PII the user
+hasn't audited; opting in is a separate decision from opting into
+observability. The flag name keeps symmetry with `disable_llm_spans`:
+the default value (`True`) reads as "the observer disables payload
+emission by default."
+
+#### Truncation
+
+Each payload attribute is capped at `payload_max_bytes` UTF-8 bytes
+(default 64 KiB, minimum 256). When the serialized value exceeds the
+cap, the observer emits the largest UTF-8-code-point-aligned prefix
+that fits within `cap - len(marker)` bytes followed by the marker:
+
+```
+…[truncated, M bytes total]
+```
+
+where M is the pre-truncation byte length. The marker is appended
+outside any JSON encoding — a truncated attribute is *not* parseable
+JSON, which is the clean signal backend code can use to detect
+truncation without a separate flag.
+
+#### Inline image redaction (always on)
+
+Image content blocks with `ImageSourceInline` are redacted at the
+provider, *before* the payload reaches the observer:
+
+```json
+{
+  "type": "image",
+  "source": {"type": "inline_redacted", "byte_count": 4096},
+  "media_type": "image/png",
+  "detail": "auto"
+}
+```
+
+The `media_type` and `detail` fields are preserved at the image-block
+level (per llm-provider §3.1.2); only `source` is replaced. URL-form
+images pass through unchanged — the URL is a short string and is
+informative for trace readers.
+
+Redaction is **not** gated by `disable_llm_payload` and is **not**
+configurable. Inline image bytes never leave the provider in event
+form, so custom observers consuming
+[`LlmEventPayload`](#publishing-llm-events-for-custom-observers)
+cannot accidentally leak raw bytes regardless of how they're
+written.
+
+### Identifying the service: `Resource`
+
+Pass an `opentelemetry.sdk.resources.Resource` to set
+`service.name` / `service.version` / etc. without relying on the
+`OTEL_SERVICE_NAME` / `OTEL_RESOURCE_ATTRIBUTES` environment
+variables (which had to be set *before* `OTelObserver()`
+construction to take effect):
+
+```python
+from opentelemetry.sdk.resources import Resource
+
+observer = OTelObserver(
+    span_processor=SimpleSpanProcessor(exporter),
+    resource=Resource.create({"service.name": "claims-pipeline"}),
+)
+```
+
+### Fanning out to multiple backends
+
+The `span_processor` argument accepts either a single processor or
+a sequence. Multi-destination export (HyperDX + Langfuse from one
+observer) is a one-line construct:
+
+```python
+observer = OTelObserver(
+    span_processor=[
+        BatchSpanProcessor(OTLPSpanExporter(endpoint=HYPERDX_URL)),
+        BatchSpanProcessor(OTLPSpanExporter(endpoint=LANGFUSE_URL)),
+    ],
+)
+```
+
+Every registered processor receives every span.
+
+### Adding backend-specific attributes: `attribute_enrichers`
+
+When a backend needs attributes the framework doesn't emit
+(custom `langfuse.observation.*` keys, Honeycomb derived fields,
+etc.), the `attribute_enrichers` hook fires just before every
+`span.end()` call:
+
+```python
+def langfuse_observation_kind(span, event):
+    if span.name == "openarmature.llm.complete":
+        span.set_attribute("langfuse.observation.type", "generation")
+
+observer = OTelObserver(
+    span_processor=processor,
+    attribute_enrichers=[langfuse_observation_kind],
+)
+```
+
+Each enricher receives the live `Span` plus the `NodeEvent` that
+triggered the close (or `None` on synthetic close sites — subgraph
+dispatch, detached root, fan-out instance, invocation span,
+shutdown drain). Setting attributes inside this hook works
+correctly; doing it from a `SpanProcessor.on_end` callback does
+not, because the framework has already called `span.end()` and the
+OTel SDK silently drops `set_attribute` on ended spans.
+
+Exceptions raised by an enricher are caught and warned, never
+propagated.
+
+### Publishing LLM events for custom observers
+
+`openarmature.observability.LLM_NAMESPACE` and
+`openarmature.observability.LlmEventPayload` are part of the public
+API. A custom observer subscribing to the dispatch stream can
+recognize the LLM-event sentinel namespace and read the typed
+payload directly:
+
+```python
+from openarmature.observability import LLM_NAMESPACE, LlmEventPayload
+
+async def my_llm_observer(event):
+    if event.namespace != LLM_NAMESPACE:
+        return
+    payload = event.pre_state
+    if not isinstance(payload, LlmEventPayload):
+        return
+    # payload.model, payload.input_messages (already image-redacted),
+    # payload.output_content, payload.request_params,
+    # payload.response_id, payload.active_prompt, ...
+```
+
+A custom `Provider` that wants to participate in the same span
+emission protocol dispatches `NodeEvent(namespace=LLM_NAMESPACE,
+pre_state=LlmEventPayload(...))` via `current_dispatch()`. See
+[Authoring providers](../model-providers/authoring.md) for the
+full pattern.
+
+### Flushing under fast teardown
+
+`OTelObserver.shutdown()` calls `provider.shutdown()` on the private
+`TracerProvider`, which per OTel SDK contract flushes every
+registered span processor. Under unusual teardown orderings — for
+example, FastAPI's `TestClient` teardown that closes the event loop
+before a `BatchSpanProcessor`'s export thread finishes — spans can
+appear dropped. Two workarounds:
+
+- Call `observer._provider.force_flush(timeout_millis=...)`
+  explicitly before `shutdown()`.
+- Use `SimpleSpanProcessor` instead of `BatchSpanProcessor` in
+  tests; it exports synchronously and is unaffected by teardown
+  timing.

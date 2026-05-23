@@ -51,6 +51,29 @@ from openarmature.observability.otel import OTelObserver  # noqa: E402
 
 from .adapter import build_graph  # noqa: E402
 
+
+# OTel SDK 1.x makes ``set_tracer_provider`` one-shot: once a non-default
+# provider is set, subsequent calls are no-ops (the SDK logs a warning
+# and returns). The set is guarded by a ``Once`` primitive at
+# ``opentelemetry.trace._TRACER_PROVIDER_SET_ONCE``, not just by the
+# value of ``_TRACER_PROVIDER``. Restoring via the public API silently
+# fails after a prior set, leaking the test's global provider into
+# subsequent tests that also touch the OTel global. This helper resets
+# BOTH the value and the Once via the SDK's private API so a sibling
+# test running after this one starts from a clean global state.
+def _reset_otel_global_tracer_provider(restore_to: object) -> None:
+    from opentelemetry import trace as otel_trace
+
+    once = otel_trace._TRACER_PROVIDER_SET_ONCE  # type: ignore[attr-defined]
+    with once._lock:  # pyright: ignore[reportPrivateUsage]
+        if isinstance(restore_to, otel_trace.ProxyTracerProvider):
+            otel_trace._TRACER_PROVIDER = None  # type: ignore[attr-defined]
+            once._done = False  # pyright: ignore[reportPrivateUsage]
+        else:
+            otel_trace._TRACER_PROVIDER = restore_to  # type: ignore[attr-defined]
+            once._done = True  # pyright: ignore[reportPrivateUsage]
+
+
 CONFORMANCE_DIR = (
     Path(__file__).resolve().parents[2] / "openarmature-spec" / "spec" / "observability" / "conformance"
 )
@@ -69,6 +92,17 @@ _SUPPORTED_FIXTURES = frozenset(
         "009-otel-correlation-id-cross-cutting",
         "010-otel-log-correlation",
         "011-otel-determinism",
+        # v0.17.0 — proposal 0024 (friction-roundup #1, #2, #6).
+        "012-otel-llm-payload-default-off",
+        "013-otel-llm-payload-enabled",
+        "014-otel-llm-payload-truncation",
+        "015-otel-llm-payload-image-redaction",
+        "016-otel-llm-request-params",
+        "017-otel-llm-request-params-partial",
+        "018-otel-llm-request-extras",
+        "019-otel-llm-genai-semconv",
+        "020-otel-llm-genai-system-override",
+        "021-otel-llm-disable-genai-semconv",
     }
 )
 
@@ -132,6 +166,19 @@ async def test_observability_fixture(fixture_path: Path) -> None:
         await _run_fixture_010(spec)
     elif fixture_id == "011-otel-determinism":
         await _run_fixture_011(spec)
+    elif fixture_id in {
+        "012-otel-llm-payload-default-off",
+        "013-otel-llm-payload-enabled",
+        "014-otel-llm-payload-truncation",
+        "015-otel-llm-payload-image-redaction",
+        "016-otel-llm-request-params",
+        "017-otel-llm-request-params-partial",
+        "018-otel-llm-request-extras",
+        "019-otel-llm-genai-semconv",
+        "020-otel-llm-genai-system-override",
+        "021-otel-llm-disable-genai-semconv",
+    }:
+        await _run_llm_payload_fixture(spec)
     else:
         raise AssertionError(f"no driver for supported fixture {fixture_id!r}")
 
@@ -1002,7 +1049,11 @@ async def _run_fixture_005_case(case: Mapping[str, Any]) -> None:
                 )
     finally:
         if caller_global_active and prior_global is not None:
-            otel_trace.set_tracer_provider(prior_global)
+            # OTel SDK 1.x makes set_tracer_provider one-shot: once a
+            # non-default provider is set, subsequent calls are no-ops.
+            # Restore by resetting the private Once + state directly so
+            # the global doesn't leak into subsequent tests.
+            _reset_otel_global_tracer_provider(prior_global)
 
     # Common assertions: the LLM span presence/absence + (when
     # present) attributes + parent-child to the calling node.
@@ -1734,3 +1785,351 @@ def _build_observer_with_detached(detached_subgraphs: frozenset[str]) -> tuple[O
         detached_subgraphs=detached_subgraphs,
     )
     return observer, exporter
+
+
+# ---------------------------------------------------------------------------
+# v0.17.0 LLM-payload + GenAI-semconv fixtures (012-021)
+# ---------------------------------------------------------------------------
+
+
+async def _run_llm_payload_fixture(spec: Mapping[str, Any]) -> None:
+    """Generic driver for the ten v0.17.0 LLM-attribute fixtures.
+
+    Each fixture is single-case (GraphFixture shape) with a top-level
+    ``cases:`` list of one entry; the case carries the graph + the
+    ``calls_llm`` config + the optional observer/provider flags.
+    """
+    cases = cast("list[dict[str, Any]]", spec["cases"])
+    for case in cases:
+        try:
+            await _run_llm_payload_case(case)
+        except AssertionError as e:
+            raise AssertionError(f"case {case.get('name')!r}: {e}") from e
+
+
+async def _run_llm_payload_case(case: Mapping[str, Any]) -> None:
+    """Build + invoke the graph, then walk the expected span tree
+    asserting via the LLM-attribute helpers (parse-shape, truncation,
+    redaction-substring-absence)."""
+    import json
+    from collections.abc import Sequence
+
+    import httpx
+    from opentelemetry.sdk.trace.export import SimpleSpanProcessor  # noqa: PLC0415
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import (  # noqa: PLC0415
+        InMemorySpanExporter,
+    )
+
+    from openarmature.graph import END, GraphBuilder
+    from openarmature.llm import OpenAIProvider
+    from openarmature.llm.response import RuntimeConfig
+
+    from .adapter import build_state_cls
+    from .harness.llm_attribute_assertions import (
+        assert_attribute_does_not_contain,
+        assert_attribute_parses_as_messages,
+        assert_attribute_parses_as_object,
+        assert_attribute_truncation,
+        assert_attributes_absent,
+        record_synthesized_base64_prefix,
+        reset_synthesized_base64_prefixes,
+    )
+
+    reset_synthesized_base64_prefixes()
+
+    # ---- Resolve harness primitives (content_repeat, base64_data_synthetic)
+    nodes_spec = cast("dict[str, Any]", case["nodes"])
+    entry_name = cast("str", case["entry"])
+    calls_llm_spec = cast("dict[str, Any]", nodes_spec[entry_name]["calls_llm"])
+    raw_messages = cast("list[dict[str, Any]]", calls_llm_spec.get("messages", []))
+    materialized_messages, full_input_serialization = _materialize_messages(
+        raw_messages,
+        record_base64_prefix=record_synthesized_base64_prefix,
+    )
+
+    # ---- RuntimeConfig from the calls_llm.config block
+    config_spec = cast("dict[str, Any] | None", calls_llm_spec.get("config"))
+    runtime_config: RuntimeConfig | None = None
+    if config_spec:
+        extras = cast("dict[str, Any]", config_spec.get("extras") or {})
+        runtime_config_kwargs: dict[str, Any] = {
+            k: v for k, v in config_spec.items() if k in {"temperature", "max_tokens", "top_p", "seed"}
+        }
+        runtime_config_kwargs.update(extras)
+        runtime_config = RuntimeConfig(**runtime_config_kwargs)
+
+    # ---- Provider knobs (provider.genai_system override)
+    provider_spec = cast("dict[str, Any] | None", case.get("provider"))
+    genai_system = "openai"
+    if provider_spec and isinstance(provider_spec.get("genai_system"), str):
+        genai_system = cast("str", provider_spec["genai_system"])
+
+    # ---- Mock LLM transport
+    mock_responses = list(cast("list[dict[str, Any]]", case.get("mock_llm") or []))
+
+    def _handler(_request: httpx.Request) -> httpx.Response:
+        if not mock_responses:
+            raise AssertionError("mock_llm queue exhausted")
+        spec_resp = mock_responses.pop(0)
+        body = cast("dict[str, Any]", spec_resp.get("body") or {})
+        return httpx.Response(
+            int(spec_resp.get("status", 200)),
+            content=json.dumps(body).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+        )
+
+    provider = OpenAIProvider(
+        base_url="http://mock-llm.test",
+        model="test-model",
+        api_key="test",
+        transport=httpx.MockTransport(_handler),
+        genai_system=genai_system,
+    )
+
+    # ---- State + node body
+    state_fields = cast("dict[str, dict[str, Any]]", case["state"]["fields"])
+    state_cls = build_state_cls("LlmPayloadFixtureState", state_fields)
+    stores_in = cast("str", calls_llm_spec.get("stores_response_in", "msg"))
+
+    async def ask_llm_body(_s: Any) -> dict[str, str]:
+        response = await provider.complete(
+            cast("Sequence[Any]", materialized_messages),
+            config=runtime_config,
+        )
+        return {stores_in: response.message.content or ""}
+
+    builder = (
+        GraphBuilder(state_cls)
+        .add_node(entry_name, ask_llm_body)
+        .add_edge(entry_name, END)
+        .set_entry(entry_name)
+    )
+    graph = builder.compile()
+
+    # ---- Observer
+    exporter = InMemorySpanExporter()
+    observer_kwargs: dict[str, Any] = {"span_processor": SimpleSpanProcessor(exporter)}
+    if "disable_llm_payload" in case:
+        observer_kwargs["disable_llm_payload"] = bool(case["disable_llm_payload"])
+    if "disable_genai_semconv" in case:
+        observer_kwargs["disable_genai_semconv"] = bool(case["disable_genai_semconv"])
+    if "disable_llm_spans" in case:
+        observer_kwargs["disable_llm_spans"] = bool(case["disable_llm_spans"])
+    observer = OTelObserver(**observer_kwargs)
+    graph.attach_observer(observer)
+
+    # ---- Run + collect spans
+    initial_state_cls = graph.state_cls
+    await graph.invoke(initial_state_cls())
+    await graph.drain()
+    observer.shutdown()
+    spans = exporter.get_finished_spans()
+
+    # ---- Walk expected.span_tree and check per-span assertions
+    expected = cast("dict[str, Any]", case["expected"])
+    expected_tree = cast("list[dict[str, Any]]", expected.get("span_tree") or [])
+    _check_payload_span_tree(
+        spans,
+        expected_tree,
+        full_input_serialization=full_input_serialization,
+        assert_attributes_absent=assert_attributes_absent,
+        assert_attribute_parses_as_messages=assert_attribute_parses_as_messages,
+        assert_attribute_parses_as_object=assert_attribute_parses_as_object,
+        assert_attribute_does_not_contain=assert_attribute_does_not_contain,
+        assert_attribute_truncation=assert_attribute_truncation,
+    )
+
+
+def _materialize_messages(
+    raw_messages: list[dict[str, Any]],
+    *,
+    record_base64_prefix: Any,
+) -> tuple[list[Any], str | None]:
+    """Resolve harness directives (``content_repeat``,
+    ``base64_data_synthetic``) into real ``Message`` instances.
+
+    Returns the message list AND the canonical full-serialization
+    string for the materialized payload — the truncation fixture
+    needs the latter for its ``prefix_of_full_serialization`` check.
+    """
+    from openarmature.llm.messages import UserMessage
+
+    out: list[Any] = []
+    full_serial_target: str | None = None
+    for msg in raw_messages:
+        role = msg.get("role")
+        # ``content_repeat`` may live at the message level (fixture 014:
+        # ``{role: user, content_repeat: {char, bytes}}``) — no ``content``
+        # key in that case; synthesize a string of N repeated chars.
+        content: Any
+        if "content_repeat" in msg:
+            repeat = cast("dict[str, Any]", msg["content_repeat"])
+            content = cast("str", repeat["char"]) * int(repeat["bytes"])
+        else:
+            content = msg.get("content")
+        if role == "user":
+            materialized = _materialize_user_content(
+                content,
+                record_base64_prefix=record_base64_prefix,
+            )
+            out.append(UserMessage(content=materialized))
+        elif role == "system":
+            from openarmature.llm.messages import SystemMessage
+
+            out.append(SystemMessage(content=cast("str", content)))
+        else:
+            raise AssertionError(f"unsupported role in payload fixture: {role!r}")
+
+    # Compute the full serialization (what the observer would emit
+    # before truncation). The provider's _serialize_messages_for_payload
+    # is the canonical encoder; mirror its shape via the same import.
+    from openarmature.llm.providers.openai import _serialize_messages_for_payload
+
+    plain = _serialize_messages_for_payload(out)
+    import json
+
+    full_serial_target = json.dumps(plain, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return out, full_serial_target
+
+
+def _materialize_user_content(content: Any, *, record_base64_prefix: Any) -> Any:
+    """Resolve the user message's content. Strings pass through; lists
+    of blocks materialize the harness directives in each block.
+
+    ``content_repeat: {char, bytes}`` on a string-only message synthesizes
+    a repeated-character string of N bytes. ``base64_data_synthetic:
+    {bytes}`` on an inline image source synthesizes a deterministic
+    base64 blob; the prefix is recorded via the supplied callable so
+    the ``attribute_does_not_contain`` assertion can verify absence.
+    """
+    from openarmature.llm.messages import (
+        ImageBlock,
+        ImageSourceInline,
+        ImageSourceURL,
+        TextBlock,
+    )
+
+    # Compact form: ``content`` is a dict with ``content_repeat`` —
+    # synthesize a string of N repeated chars.
+    if isinstance(content, dict) and "content_repeat" in content:
+        repeat = cast("dict[str, Any]", content["content_repeat"])
+        char = cast("str", repeat["char"])
+        nbytes = int(repeat["bytes"])
+        return char * nbytes
+    if isinstance(content, str):
+        return content
+    # List of content blocks.
+    blocks: list[Any] = []
+    for block in cast("list[dict[str, Any]]", content):
+        btype = block.get("type")
+        if btype == "text":
+            blocks.append(TextBlock(text=cast("str", block["text"])))
+        elif btype == "image":
+            source_spec = cast("dict[str, Any]", block["source"])
+            stype = source_spec.get("type")
+            if stype == "inline":
+                synth = cast("dict[str, Any] | None", source_spec.get("base64_data_synthetic"))
+                if synth is not None:
+                    nbytes = int(synth["bytes"])
+                    blob = _synth_base64(nbytes)
+                    record_base64_prefix(blob)
+                    source = ImageSourceInline(base64_data=blob)
+                else:
+                    source = ImageSourceInline(base64_data=cast("str", source_spec["base64_data"]))
+            elif stype == "url":
+                source = ImageSourceURL(url=cast("str", source_spec["url"]))
+            else:
+                raise AssertionError(f"unsupported image source type: {stype!r}")
+            blocks.append(
+                ImageBlock(
+                    source=source,
+                    media_type=cast("str | None", block.get("media_type")),
+                    detail=cast("Any", block.get("detail")),
+                )
+            )
+        else:
+            raise AssertionError(f"unsupported content block type: {btype!r}")
+    # Compact form: a single ``content_repeat`` entry inside a list.
+    return blocks
+
+
+def _synth_base64(nbytes: int) -> str:
+    """Synthesize a deterministic base64 blob of exactly ``nbytes`` bytes.
+
+    Fixture 015 uses 4096 bytes; deterministic so the synthesized prefix
+    can be recorded once and the ``attribute_does_not_contain`` helper
+    verifies the same prefix is absent from the redacted attribute.
+    """
+    # Repeated-letter base64 — valid base64 chars, deterministic, length
+    # exactly nbytes.
+    alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+    # Use a single character so the prefix-check signal is strong; the
+    # bytes are not a real PNG (the redaction rule is about SHAPE).
+    return alphabet[0] * nbytes
+
+
+def _check_payload_span_tree(
+    spans: Any,
+    expected_tree: list[dict[str, Any]],
+    *,
+    full_input_serialization: str | None,
+    assert_attributes_absent: Any,
+    assert_attribute_parses_as_messages: Any,
+    assert_attribute_parses_as_object: Any,
+    assert_attribute_does_not_contain: Any,
+    assert_attribute_truncation: Any,
+) -> None:
+    """Walk ``expected_tree`` and verify each expected span's attribute
+    block matches the spans in ``spans``."""
+    spans_by_name: dict[str, list[Any]] = {}
+    for s in spans:
+        spans_by_name.setdefault(s.name, []).append(s)
+
+    def _walk(expected_entries: list[dict[str, Any]]) -> None:
+        for entry in expected_entries:
+            name = cast("str", entry["name"])
+            candidates = spans_by_name.get(name, [])
+            assert candidates, f"expected a span named {name!r}; got {sorted(spans_by_name.keys())}"
+            # The fixtures we cover have unique span names in each tree.
+            span = candidates[0]
+            attrs = dict(span.attributes or {})
+            # ``attributes:`` block — exact match per key.
+            for k, v in cast("dict[str, Any]", entry.get("attributes") or {}).items():
+                actual: Any = attrs.get(k)
+                # OTel attribute arrays come back as tuples; normalize.
+                if isinstance(v, list) and isinstance(actual, tuple):
+                    actual = list(cast("tuple[Any, ...]", actual))
+                assert actual == v, f"span {name!r} attribute {k!r} mismatch: expected {v!r}, got {actual!r}"
+            # ``attributes_absent:`` list of names that MUST NOT appear.
+            absent = entry.get("attributes_absent")
+            if absent:
+                assert_attributes_absent(attrs, cast("list[str]", absent))
+            # ``attribute_parses_as_messages:`` shape assertion.
+            parses_as_messages = entry.get("attribute_parses_as_messages")
+            if parses_as_messages:
+                assert_attribute_parses_as_messages(attrs, cast("dict[str, Any]", parses_as_messages))
+            # ``attribute_parses_as_object:`` shape assertion.
+            parses_as_object = entry.get("attribute_parses_as_object")
+            if parses_as_object:
+                assert_attribute_parses_as_object(attrs, cast("dict[str, Any]", parses_as_object))
+            # ``attribute_does_not_contain:`` substring absence.
+            does_not_contain = entry.get("attribute_does_not_contain")
+            if does_not_contain:
+                assert_attribute_does_not_contain(attrs, cast("dict[str, Any]", does_not_contain))
+            # ``attribute_truncation:`` §5.5.5 contract.
+            truncation = entry.get("attribute_truncation")
+            if truncation:
+                full_map: dict[str, str] = {}
+                # The fixture is single-attribute; supply the full
+                # serialization under the same key for the
+                # prefix_of_full_serialization clause.
+                if full_input_serialization is not None:
+                    for attr_name in cast("dict[str, Any]", truncation):
+                        full_map[attr_name] = full_input_serialization
+                assert_attribute_truncation(attrs, cast("dict[str, Any]", truncation), full_map)
+            # Recurse into children.
+            children = cast("list[dict[str, Any]] | None", entry.get("children"))
+            if children:
+                _walk(children)
+
+    _walk(expected_tree)

@@ -53,6 +53,9 @@ The engine awaits each save before advancing. A crash immediately after a `compl
 **Observability that doesn't double-export.**<br>
 The OpenTelemetry mapping mandates a private `TracerProvider`. That prevents the trap where global-provider auto-instrumentation libraries (OpenInference, Langfuse v3, etc.) emit duplicate spans alongside the framework's. Your spans flow exactly where you point them; no surprise fan-out to vendor backends you didn't configure.
 
+**LLM spans LLM-aware backends can actually read.**<br>
+Each `provider.complete()` call emits a dedicated `openarmature.llm.complete` span carrying both the framework's `openarmature.llm.*` attributes and the cross-vendor OpenTelemetry GenAI semantic conventions (`gen_ai.system`, `gen_ai.request.*`, `gen_ai.response.*`, `gen_ai.usage.*`). Langfuse, Phoenix, Honeycomb's LLM lens — they render generations correctly out of the box, no per-service attribute-mapping shim required. Input/output payload emission is opt-in (`disable_llm_payload=False`), default-off because the payload may contain PII; image bytes are unconditionally redacted at the provider so they never enter the observability stream.
+
 ## Hello World
 
 About a hundred lines that show the engine in action. Three reducer policies declared on one state class. Three LLM calls each returning typed structured output (Pydantic class on two, raw JSON Schema dict on the third). Conditional routing as a pure function of state, not a hidden state machine. An observer attached at compile time that sees every node boundary the engine emits. Requires Python 3.12 or later and an OpenAI-compatible endpoint (defaults to OpenAI public API; works against any local server too).

@@ -262,13 +262,36 @@ class ParallelBranchesSpec(_AllowExtras):
     errors_field: str | None = None
 
 
+class RuntimeConfigSpec(_AllowExtras):
+    """``calls_llm.config`` block — mirrors ``RuntimeConfig`` (llm-provider
+    §6). Used by observability fixtures 016-018 (request-parameter and
+    extras emission) and by the GenAI semconv set.
+
+    Each field maps one-to-one to ``openarmature.llm.response.RuntimeConfig``
+    on the source side. ``extras`` is the ``extra="allow"`` pass-through
+    bag for provider-specific parameters (frequency_penalty, etc.).
+    """
+
+    temperature: float | None = None
+    max_tokens: int | None = None
+    top_p: float | None = None
+    seed: int | None = None
+    extras: dict[str, Any] | None = None
+
+
 class CallsLlmSpec(_AllowExtras):
     """LLM-using node: sends ``messages`` to the harness's mock provider
     and stores the response (assistant content) in ``stores_response_in``.
-    Used by observability fixtures to verify LLM-provider span emission."""
+    Used by observability fixtures to verify LLM-provider span emission.
+
+    ``config`` (proposal 0024, fixtures 016-018) carries the optional
+    ``RuntimeConfig`` field set for the call — temperature, max_tokens,
+    top_p, seed, and a provider-specific ``extras`` bag.
+    """
 
     messages: list[dict[str, Any]]
     stores_response_in: str
+    config: RuntimeConfigSpec | None = None
 
 
 class EmitsLogSpec(_AllowExtras):
@@ -555,6 +578,7 @@ __all__ = [
     "NodeSpec",
     "ObserverSpec",
     "RetryMiddleware",
+    "RuntimeConfigSpec",
     "ShortCircuitMiddleware",
     "StateFieldSpec",
     "StateSchema",

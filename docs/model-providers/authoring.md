@@ -218,6 +218,69 @@ of:
   `openarmature.llm` to share the provider-agnostic boundary checks.
 - **Observability spans.** Opt-in `started`/`completed` events
   around the wire call so the OTel observer can build LLM spans.
+  Dispatch via the public `openarmature.observability.LLM_NAMESPACE`
+  sentinel and the typed `LlmEventPayload`. The sketch below is
+  what lives around the wire call inside `complete()`; the
+  `OpenAIProvider`'s `_make_llm_event` helper is the reference
+  implementation:
+
+  ```python
+  import uuid
+  from typing import Any
+
+  from openarmature.graph.events import NodeEvent
+  from openarmature.observability import LLM_NAMESPACE, LlmEventPayload
+  from openarmature.observability.correlation import current_dispatch
+
+
+  def dispatch_llm_event(
+      phase: str,
+      *,
+      call_id: str,
+      model: str,
+      **extra: Any,
+  ) -> None:
+      """Emit one half of the started/completed pair. The same
+      ``call_id`` MUST appear on both events so observers can match
+      them under concurrency."""
+      dispatch = current_dispatch()
+      if dispatch is None:
+          return
+      dispatch(NodeEvent(
+          node_name="openarmature.llm.complete",
+          namespace=LLM_NAMESPACE,
+          step=-1,
+          phase=phase,
+          pre_state=LlmEventPayload(
+              call_id=call_id,
+              model=model,
+              genai_system="my-provider",
+              **extra,
+          ),
+          post_state=None,
+          error=None,
+          parent_states=(),
+      ))
+
+
+  # Inside Provider.complete(), the call_id is minted once per call:
+  call_id = str(uuid.uuid4())
+  dispatch_llm_event("started", call_id=call_id, model="my-model")
+  # ... wire call here, populating finish_reason / usage / output ...
+  dispatch_llm_event(
+      "completed",
+      call_id=call_id,
+      model="my-model",
+      finish_reason="stop",
+  )
+  ```
+
+  Inline image bytes MUST be redacted in the provider's
+  serialization step before reaching the payload (see
+  [Observability — Inline image
+  redaction](../concepts/observability.md#inline-image-redaction-always-on))
+  so custom observers consuming `LlmEventPayload` cannot leak raw
+  bytes.
 - **Lenient response parsing** under `finish_reason="error"`.
   Degraded responses surface what they can; tool-call arguments that
   fail to parse populate `arguments=None` instead of raising.

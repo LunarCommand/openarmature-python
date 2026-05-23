@@ -93,6 +93,18 @@ class Response(BaseModel):
     usage: Usage
     raw: dict[str, Any]
     parsed: ParsedValue = None
+    # The provider's response id (e.g., OpenAI's ``chatcmpl-…``).
+    # Surface as a typed field rather than asking callers to reach into
+    # ``raw["id"]``; mirrors the gen_ai.response.id semconv attribute
+    # the observability mapping (spec §5.5.3) emits onto the LLM span.
+    # ``None`` when the provider didn't return one.
+    response_id: str | None = None
+    # The model identifier the provider returned (the ``model`` field
+    # on the response body). May be more specific than the bound
+    # request model — e.g., bound ``gpt-4o``, response carries
+    # ``gpt-4o-2024-08-06``. Mirrors gen_ai.response.model per §5.5.3.
+    # ``None`` when the provider didn't return one.
+    response_model: str | None = None
 
 
 class RuntimeConfig(BaseModel):

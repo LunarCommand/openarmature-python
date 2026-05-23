@@ -33,7 +33,17 @@ from .correlation import (
     current_namespace_prefix,
 )
 
+# v0.17.0 (proposal 0024 / friction-roundup #9): publish the LLM event
+# contract so third-party Provider implementations and custom observers
+# can interoperate against a stable shape. Both names live in
+# ``observability.llm_event`` — backend-agnostic — so importing the
+# core observability package never drags the OTel backend (and its
+# ``opentelemetry-sdk`` dependency) along.
+from .llm_event import LLM_NAMESPACE, LlmEventPayload
+
 __all__ = [
+    "LLM_NAMESPACE",
+    "LlmEventPayload",
     "current_active_observers",
     "current_attempt_index",
     "current_correlation_id",

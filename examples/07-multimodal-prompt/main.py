@@ -37,13 +37,16 @@ configuration; the fallback path fires only when the primary raises
   renders, no asymmetric "first call computes the second's input"
   shape.
 - ``with_active_prompt_group(group)`` propagates the group name via
-  ContextVar; OTel observers stamp ``openarmature.prompt.group_name``
-  onto every LLM-call span fired inside.
+  ContextVar; the attached ``OTelObserver`` stamps
+  ``openarmature.prompt.group_name`` onto every LLM-call span fired
+  inside the block. Confirm in the console output — the two
+  ``openarmature.llm.complete`` spans both carry
+  ``openarmature.prompt.group_name = "lunar-image-analysis"``.
 - ``with_active_prompt(result)`` (inside the group's scope) propagates
   the per-call prompt identifiers — name, version, label,
-  template_hash, rendered_hash. The two layers compose: spans inside
-  the group see both the group identifier AND the per-call prompt
-  identifiers.
+  template_hash, rendered_hash. The two layers compose: each LLM
+  span carries the group identifier AND the per-call prompt
+  identifiers. The console output makes both visible.
 - The rendered text becomes a ``TextBlock`` inside a multimodal
   ``UserMessage``; the image is a sibling ``ImageBlock``. The image
   source is ``ImageSourceURL(url=...)`` by default; setting
@@ -62,10 +65,12 @@ configuration; the fallback path fires only when the primary raises
 
 Run with:
 
-    uv sync --group examples
+    uv sync --group examples --all-extras
     cd examples/07-multimodal-prompt
     LLM_API_KEY=sk-... uv run python main.py
     LLM_API_KEY=sk-... IMAGE_PATH=./my-photo.jpg uv run python main.py
+
+(``--all-extras`` pulls in ``opentelemetry-sdk`` for the OTel observer.)
 """
 
 from __future__ import annotations
@@ -77,6 +82,8 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Annotated, Any
 
+from opentelemetry.sdk.resources import Resource
+from opentelemetry.sdk.trace.export import ConsoleSpanExporter, SimpleSpanProcessor
 from pydantic import Field
 
 from openarmature.graph import (
@@ -95,6 +102,7 @@ from openarmature.llm import (
     TextBlock,
     UserMessage,
 )
+from openarmature.observability.otel import OTelObserver
 from openarmature.prompts import (
     FilesystemPromptBackend,
     PromptGroup,
@@ -329,13 +337,27 @@ async def main() -> None:
         members=[surface_member, equipment_member],
     )
 
+    # Attach an OTel observer with a console exporter so the prompt-
+    # context attributes the ``with_active_prompt`` / ``_group``
+    # blocks below propagate become visible. Every LLM-call span
+    # printed to stdout will carry ``openarmature.prompt.group_name``
+    # (from the group context) plus the per-call
+    # ``openarmature.prompt.{name, version, label, template_hash,
+    # rendered_hash}`` attributes. A production setup would point a
+    # ``BatchSpanProcessor`` at a real OTLP endpoint instead.
+    otel_observer = OTelObserver(
+        span_processor=SimpleSpanProcessor(ConsoleSpanExporter()),
+        resource=Resource.create({"service.name": "openarmature-demo-multimodal"}),
+    )
+
     graph = build_graph()
+    graph.attach_observer(otel_observer)
     try:
         # ``with_active_prompt_group`` propagates the group_name to
         # observers for the duration of the invoke. Inside the nodes,
         # ``with_active_prompt`` adds the per-call prompt identifiers
         # alongside it — both layers stamp attributes on the same
-        # LLM-call span.
+        # LLM-call span. The OTel observer above captures both.
         with with_active_prompt_group(group):
             final = await graph.invoke(
                 AnalysisState(

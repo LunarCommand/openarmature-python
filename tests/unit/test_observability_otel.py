@@ -95,15 +95,39 @@ def _build_linear_graph(
 # ---------------------------------------------------------------------------
 
 
+# OTel SDK 1.x makes ``set_tracer_provider`` one-shot: once a non-default
+# provider is set, subsequent ``set_tracer_provider`` calls are no-ops
+# (the SDK logs a warning and returns). The set is guarded by a ``Once``
+# primitive at ``opentelemetry.trace._TRACER_PROVIDER_SET_ONCE``, not
+# just by the value of ``_TRACER_PROVIDER``. Restoring via the public
+# API silently fails after a prior set, leaking the test's global
+# provider into subsequent tests that also touch the OTel global (e.g.,
+# the conformance fixture 005 sub-case verifying private/global
+# isolation). Tests that need to manipulate the global provider use
+# this helper to reset BOTH the value and the Once.
+def _reset_otel_global_tracer_provider(restore_to: object) -> None:
+    once = otel_trace._TRACER_PROVIDER_SET_ONCE  # type: ignore[attr-defined]
+    with once._lock:  # pyright: ignore[reportPrivateUsage]
+        if isinstance(restore_to, otel_trace.ProxyTracerProvider):
+            # No real provider was set before this test; return the
+            # global to "unset" state so the next set_tracer_provider
+            # call works as if it were the first.
+            otel_trace._TRACER_PROVIDER = None  # type: ignore[attr-defined]
+            once._done = False  # pyright: ignore[reportPrivateUsage]
+        else:
+            otel_trace._TRACER_PROVIDER = restore_to  # type: ignore[attr-defined]
+            once._done = True  # pyright: ignore[reportPrivateUsage]
+
+
 async def test_observer_uses_private_provider_not_global() -> None:
     """Spec §6 TracerProvider isolation: the OTelObserver MUST use a
     PRIVATE TracerProvider; spans MUST NOT appear on the OTel global
     provider's exporter (this is the load-bearing guarantee against
     duplicate spans from external auto-instrumentation libraries)."""
-    # Save the prior global provider so we can restore it after the
-    # test — pytest fixture-scoping doesn't cover OTel global state.
+    # Save prior global state and install a separate exporter on the
+    # OTel global provider. Pytest fixture-scoping doesn't cover the
+    # OTel global, so we restore it manually in the finally block.
     prior_global = otel_trace.get_tracer_provider()
-    # Install a separate exporter on the OTel global provider.
     global_exporter = InMemorySpanExporter()
     global_provider = TracerProvider()
     global_provider.add_span_processor(SimpleSpanProcessor(global_exporter))
@@ -125,7 +149,7 @@ async def test_observer_uses_private_provider_not_global() -> None:
             f"global provider MUST NOT receive openarmature spans; got {[s.name for s in global_spans]}"
         )
     finally:
-        otel_trace.set_tracer_provider(prior_global)
+        _reset_otel_global_tracer_provider(prior_global)
 
 
 # ---------------------------------------------------------------------------
@@ -380,7 +404,7 @@ async def test_active_prompt_propagates_to_llm_span_attributes() -> None:
 
     from openarmature.graph.events import NodeEvent
     from openarmature.llm.messages import UserMessage
-    from openarmature.llm.providers.openai import _LlmEventState
+    from openarmature.llm.providers.openai import LlmEventPayload
     from openarmature.observability.correlation import (
         _reset_invocation_id,
         _set_invocation_id,
@@ -389,8 +413,6 @@ async def test_active_prompt_propagates_to_llm_span_attributes() -> None:
         Prompt,
         PromptGroup,
         PromptResult,
-        with_active_prompt,
-        with_active_prompt_group,
     )
 
     exporter = InMemorySpanExporter()
@@ -420,29 +442,48 @@ async def test_active_prompt_propagates_to_llm_span_attributes() -> None:
 
     token = _set_invocation_id("inv-1")
     try:
-        with with_active_prompt(result), with_active_prompt_group(group):
-            started = NodeEvent(
-                node_name="openarmature.llm.complete",
-                namespace=("openarmature.llm.complete",),
-                step=-1,
-                phase="started",
-                pre_state=_LlmEventState(call_id="test-call-prompt", model="test-m"),
-                post_state=None,
-                error=None,
-                parent_states=(),
-            )
-            completed = NodeEvent(
-                node_name="openarmature.llm.complete",
-                namespace=("openarmature.llm.complete",),
-                step=-1,
-                phase="completed",
-                pre_state=_LlmEventState(call_id="test-call-prompt", model="test-m", finish_reason="stop"),
-                post_state=None,
-                error=None,
-                parent_states=(),
-            )
-            await observer(started)
-            await observer(completed)
+        # Proposal 0024 / friction-roundup #3: the provider captures
+        # ``current_prompt_result()`` and ``current_prompt_group()``
+        # at dispatch time and puts them on the LLM event payload.
+        # The observer reads from the payload, NOT from the live
+        # ContextVar — that ContextVar is unreachable from the
+        # dispatch worker's task-local Context. This test verifies
+        # the observer correctly surfaces prompt attributes when the
+        # payload carries them; the cross-task regression case is
+        # covered separately by an end-to-end test.
+        started = NodeEvent(
+            node_name="openarmature.llm.complete",
+            namespace=("openarmature.llm.complete",),
+            step=-1,
+            phase="started",
+            pre_state=LlmEventPayload(
+                call_id="test-call-prompt",
+                model="test-m",
+                active_prompt=result,
+                active_prompt_group=group,
+            ),
+            post_state=None,
+            error=None,
+            parent_states=(),
+        )
+        completed = NodeEvent(
+            node_name="openarmature.llm.complete",
+            namespace=("openarmature.llm.complete",),
+            step=-1,
+            phase="completed",
+            pre_state=LlmEventPayload(
+                call_id="test-call-prompt",
+                model="test-m",
+                finish_reason="stop",
+                active_prompt=result,
+                active_prompt_group=group,
+            ),
+            post_state=None,
+            error=None,
+            parent_states=(),
+        )
+        await observer(started)
+        await observer(completed)
     finally:
         _reset_invocation_id(token)
 
@@ -462,11 +503,11 @@ async def test_llm_span_has_no_prompt_attributes_when_no_active_prompt() -> None
     """Without ``with_active_prompt``, the LLM-call span MUST NOT carry
     ``openarmature.prompt.*`` attributes."""
     from openarmature.graph.events import NodeEvent
-    from openarmature.llm.providers.openai import _LlmEventState
     from openarmature.observability.correlation import (
         _reset_invocation_id,
         _set_invocation_id,
     )
+    from openarmature.observability.llm_event import LlmEventPayload
 
     exporter = InMemorySpanExporter()
     observer = OTelObserver(span_processor=SimpleSpanProcessor(exporter))
@@ -478,7 +519,7 @@ async def test_llm_span_has_no_prompt_attributes_when_no_active_prompt() -> None
             namespace=("openarmature.llm.complete",),
             step=-1,
             phase="started",
-            pre_state=_LlmEventState(call_id="test-call-noprompt", model="test-m"),
+            pre_state=LlmEventPayload(call_id="test-call-noprompt", model="test-m"),
             post_state=None,
             error=None,
             parent_states=(),
@@ -488,7 +529,7 @@ async def test_llm_span_has_no_prompt_attributes_when_no_active_prompt() -> None
             namespace=("openarmature.llm.complete",),
             step=-1,
             phase="completed",
-            pre_state=_LlmEventState(call_id="test-call-noprompt", model="test-m", finish_reason="stop"),
+            pre_state=LlmEventPayload(call_id="test-call-noprompt", model="test-m", finish_reason="stop"),
             post_state=None,
             error=None,
             parent_states=(),
@@ -514,7 +555,7 @@ async def test_disable_llm_spans_skips_llm_provider_span() -> None:
     # LLM event through the observer's __call__ and assert no span was
     # produced. This isolates the disable_llm_spans branch from the
     # provider's own queue-dispatch wiring.
-    from openarmature.llm.providers.openai import _LlmEventState
+    from openarmature.observability.llm_event import LlmEventPayload
 
     exporter = InMemorySpanExporter()
     observer = OTelObserver(
@@ -529,7 +570,7 @@ async def test_disable_llm_spans_skips_llm_provider_span() -> None:
         namespace=("openarmature.llm.complete",),
         step=-1,
         phase="started",
-        pre_state=_LlmEventState(call_id="test-call-1", model="test-m"),
+        pre_state=LlmEventPayload(call_id="test-call-1", model="test-m"),
         post_state=None,
         error=None,
         parent_states=(),
@@ -539,7 +580,7 @@ async def test_disable_llm_spans_skips_llm_provider_span() -> None:
         namespace=("openarmature.llm.complete",),
         step=-1,
         phase="completed",
-        pre_state=_LlmEventState(call_id="test-call-1", model="test-m", finish_reason="stop"),
+        pre_state=LlmEventPayload(call_id="test-call-1", model="test-m", finish_reason="stop"),
         post_state=None,
         error=None,
         parent_states=(),
@@ -1214,3 +1255,130 @@ async def test_log_on_first_line_of_node_body_carries_node_span() -> None:
         root.filters[:] = prior_filters
         logging.setLogRecordFactory(prior_factory)
         test_logger.setLevel(prior_test_level)
+
+
+# ---------------------------------------------------------------------------
+# Friction-roundup #3 regression: prompt context propagates across the
+# dispatch-worker task boundary
+# ---------------------------------------------------------------------------
+
+
+async def test_prompt_context_propagates_cross_task_via_provider_complete() -> None:
+    """End-to-end #3 regression: open ``with_active_prompt`` inside a
+    node body, call ``provider.complete()``, and assert the LLM span
+    carries ``openarmature.prompt.name``.
+
+    Pre-fix this test failed because:
+
+    - ``invoke()`` calls ``asyncio.create_task(deliver_loop(queue))``
+      BEFORE any node body runs. The worker's Context is snapshotted
+      at task-creation time, so it never sees ContextVars set later
+      inside a node body.
+    - The observer used to read ``current_prompt_result()`` from the
+      worker task — it returned ``None`` because the worker's snapshot
+      doesn't have ``_active_prompt`` set.
+
+    Post-fix the provider captures ``current_prompt_result()`` at
+    dispatch time (in the node task's Context, where
+    ``with_active_prompt`` IS active) and puts the snapshot on the
+    ``LlmEventPayload``. The observer reads from the payload, not from
+    a ContextVar.
+    """
+    import json
+    from datetime import UTC, datetime
+
+    import httpx
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import (
+        InMemorySpanExporter,
+    )
+
+    from openarmature.graph import END, GraphBuilder, State
+    from openarmature.llm import OpenAIProvider, UserMessage
+    from openarmature.prompts import (
+        Prompt,
+        PromptResult,
+        with_active_prompt,
+    )
+
+    def _handler(_request: httpx.Request) -> httpx.Response:
+        body = {
+            "id": "cc-test",
+            "object": "chat.completion",
+            "model": "test-model",
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {"role": "assistant", "content": "hi back"},
+                    "finish_reason": "stop",
+                }
+            ],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        }
+        return httpx.Response(
+            200,
+            content=json.dumps(body).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+        )
+
+    provider = OpenAIProvider(
+        base_url="http://mock.test",
+        model="test-model",
+        api_key="k",
+        transport=httpx.MockTransport(_handler),
+    )
+
+    now = datetime.now(UTC)
+    prompt = Prompt(
+        name="greeting",
+        version="v1",
+        label="production",
+        template="Hello, {{ user }}!",
+        template_hash="sha256:tpl",
+        fetched_at=now,
+    )
+    rendered = PromptResult(
+        name=prompt.name,
+        version=prompt.version,
+        label=prompt.label,
+        template_hash=prompt.template_hash,
+        rendered_hash="sha256:rendered",
+        messages=[UserMessage(content="Hello, Alice!")],
+        variables={"user": "Alice"},
+        fetched_at=now,
+        rendered_at=now,
+    )
+
+    class _S(State):
+        reply: str = ""
+
+    async def ask_llm(_s: _S) -> dict[str, str]:
+        # The ContextVar set here lives in the node task. Pre-fix, the
+        # dispatch worker (a separate task) could not see this set.
+        with with_active_prompt(rendered):
+            response = await provider.complete(rendered.messages)
+        return {"reply": response.message.content}
+
+    exporter = InMemorySpanExporter()
+    observer = OTelObserver(span_processor=SimpleSpanProcessor(exporter))
+    graph = (
+        GraphBuilder(_S).add_node("ask_llm", ask_llm).add_edge("ask_llm", END).set_entry("ask_llm")
+    ).compile()
+    graph.attach_observer(observer)
+    try:
+        await graph.invoke(_S())
+        await graph.drain()
+    finally:
+        observer.shutdown()
+        await provider.aclose()
+
+    spans = exporter.get_finished_spans()
+    llm_spans = [s for s in spans if s.name == "openarmature.llm.complete"]
+    assert len(llm_spans) == 1, f"expected one LLM span; got {len(llm_spans)}"
+    attrs = dict(llm_spans[0].attributes or {})
+    # Pre-fix these were all None; post-fix all populated from the
+    # dispatch-time PromptResult snapshot.
+    assert attrs.get("openarmature.prompt.name") == "greeting"
+    assert attrs.get("openarmature.prompt.version") == "v1"
+    assert attrs.get("openarmature.prompt.label") == "production"
+    assert attrs.get("openarmature.prompt.template_hash") == "sha256:tpl"
+    assert attrs.get("openarmature.prompt.rendered_hash") == "sha256:rendered"

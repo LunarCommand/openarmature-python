@@ -225,6 +225,19 @@ class GraphFixture(_ForbidExtras):
     detached_subgraphs: list[str] | None = None
     detached_fan_outs: list[str] | None = None
     disable_llm_spans: bool | None = None
+    # Proposal 0024 (v0.17.0): observer-level opt-outs for the new
+    # §5.5.1 payload and §5.5.2/§5.5.3 GenAI semconv attribute sets.
+    # ``disable_llm_payload`` defaults to True per §5.5.4 — fixtures
+    # that EXERCISE payload emission set it false explicitly (013-018).
+    # ``disable_genai_semconv`` defaults to False — fixture 021 sets
+    # it true to verify the opt-out.
+    disable_llm_payload: bool | None = None
+    disable_genai_semconv: bool | None = None
+    # Proposal 0024 (v0.17.0, fixture 020): provider-level configuration
+    # overrides — ``provider.genai_system`` overrides the default
+    # ``"openai"`` value of ``gen_ai.system`` for OpenAI-compatible
+    # providers serving non-OpenAI endpoints (vLLM, LM Studio, …).
+    provider: dict[str, Any] | None = None
     mock_llm: list[MockResponse] | None = None
     caller_global_otel_active: bool | None = None
     invocations: int | None = None
