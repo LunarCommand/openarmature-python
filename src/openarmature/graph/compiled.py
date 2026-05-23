@@ -317,8 +317,8 @@ class CompiledGraph[StateT: State]:
     """An immutable, executable graph produced by `GraphBuilder.compile()`.
 
     The compile-time topology (state class, entry, nodes, edges, reducers) is
-    immutable. Two mutable lists ride alongside for observer plumbing;
-    `_attached_observers` and `_active_workers`; neither of which affect the
+    immutable. Two mutable lists ride alongside for observer plumbing
+    (`_attached_observers` and `_active_workers`), neither of which affect the
     compiled topology and both of which are scoped to the same instance.
     """
 

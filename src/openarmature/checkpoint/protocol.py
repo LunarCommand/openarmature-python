@@ -87,7 +87,7 @@ class NodePosition:
 class CheckpointRecord:
     """One invocation's progress at one save point.
 
-    Frozen; backends MUST treat the record as immutable; the engine
+    Frozen: backends MUST treat the record as immutable. The engine
     builds a fresh record per ``completed`` event rather than mutating
     a shared one. The ``fan_out_progress`` field is reserved for a
     future per-instance fan-out resume mode; in the shipping version

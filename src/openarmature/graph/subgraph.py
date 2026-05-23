@@ -14,8 +14,8 @@ called without it (e.g., direct test invocation), SubgraphNode falls back to
 a fresh subgraph-only invocation.
 
 Parameterized on both the parent's state type (`ParentT`) and the subgraph's
-state type (`ChildT`). The outer graph only ever sees `run(state: ParentT)`
-; the `ChildT` lives on the `compiled` and `projection` fields and is
+state type (`ChildT`). The outer graph only ever sees `run(state: ParentT)`; the
+`ChildT` lives on the `compiled` and `projection` fields and is
 invisible at the outer graph's node dispatch site.
 """
 

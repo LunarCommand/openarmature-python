@@ -11,8 +11,8 @@ need non-empty content, assistant carries optional tool_calls, tool
 needs a tool_call_id matching an earlier assistant ToolCall).
 
 Pydantic enforces the per-role constraints at message construction
-time. List-level invariants; like "every tool message's
-``tool_call_id`` matches an earlier assistant ``ToolCall.id``"; are
+time. List-level invariants (like "every tool message's
+``tool_call_id`` matches an earlier assistant ``ToolCall.id``") are
 checked at the ``complete()`` boundary, not at construction (a
 single Message can't see the rest of the list). Both layers are
 required.

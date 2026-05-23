@@ -88,8 +88,8 @@ def install_log_bridge(
     The factory placement matters: log records emitted from
     anywhere within an invocation MUST carry
     ``openarmature.correlation_id``. Filters added to the root
-    logger fire only for records originating on root; Python's
-    propagation walks ancestor handlers but not ancestor filters;
+    logger fire only for records originating on root (Python's
+    propagation walks ancestor handlers but not ancestor filters),
     so a root-logger filter misses every child-logger record. The
     factory hook fires at record construction time, before any
     logger or handler dispatch, so every record gets the attribute
