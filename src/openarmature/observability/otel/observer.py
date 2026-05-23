@@ -74,11 +74,14 @@ carries an OTel :class:`Link` to the detached trace.
 
 from __future__ import annotations
 
+import json
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, cast
 
 from opentelemetry import context as otel_context
 from opentelemetry import trace as otel_trace
+from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace import SpanProcessor, TracerProvider
 from opentelemetry.sdk.trace.id_generator import RandomIdGenerator
 from opentelemetry.trace import (
@@ -93,7 +96,7 @@ from opentelemetry.trace import (
 )
 from opentelemetry.trace.propagation import set_span_in_context
 
-from openarmature.prompts.context import current_prompt_group, current_prompt_result
+from openarmature.observability.llm_event import LlmEventPayload
 
 if TYPE_CHECKING:
     from openarmature.graph.events import NodeEvent
@@ -106,8 +109,35 @@ _StackKey = tuple[tuple[str, ...], int, int | None]
 
 
 # Sentinel namespace the LLM provider emits to signal "this is an LLM
-# event, not a regular node event."
-_LLM_NAMESPACE = ("openarmature.llm.complete",)
+# event, not a regular node event." The public surface lives at
+# :data:`openarmature.observability.LLM_NAMESPACE` (per the v0.17.0
+# friction-roundup #9 — publishing the LLM event contract); the
+# private alias here is retained for backwards compatibility within
+# the observer module.
+LLM_NAMESPACE: tuple[str, ...] = ("openarmature.llm.complete",)
+_LLM_NAMESPACE = LLM_NAMESPACE
+
+
+# §5.5.5 truncation marker. The leading character is U+2026 HORIZONTAL
+# ELLIPSIS (3 bytes UTF-8); the marker is a fixed UTF-8 string and is
+# appended as a whole unit so no boundary backtracking is needed past
+# the prefix cut.
+_TRUNCATION_MARKER_TEMPLATE = "…[truncated, {m} bytes total]"
+
+
+# §5.5.5 minimum-cap rule: any payload byte cap configuration below
+# 256 bytes is rejected at observer construction time. Rationale (spec
+# verbatim): "256 bytes leaves room for the worst-case marker (~36
+# bytes) plus a diagnostically useful payload preview; caps below this
+# would produce attributes that are almost entirely marker with little
+# or no preview value."
+_PAYLOAD_MIN_BYTES = 256
+
+
+# §5.5 default truncation cap — 64 KiB per the spec's preferred
+# default. Implementations MAY configure; ours sits on a constructor
+# field.
+_PAYLOAD_DEFAULT_BYTES = 65536
 
 
 def _read_spec_version() -> str:
@@ -133,6 +163,53 @@ class _OpenSpan:
     events."""
 
     span: Span
+
+
+# Sorted object keys, no insignificant whitespace, UTF-8 output (per
+# observability §5.5.1 / §5.5.6). Within-impl determinism for identical
+# inputs is required; cross-impl bytewise stability is NOT required by
+# v0.17.0 — conformance fixtures use parse-shape assertions, not
+# bytewise equality.
+def _serialize_for_attribute(value: Any) -> str:
+    """JSON-encode ``value`` for emission as an OTel string attribute."""
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+
+
+# §5.5.5 truncation algorithm:
+#   1. Compute M, the pre-truncation byte length.
+#   2. Format the marker with M substituted; compute L_marker.
+#   3. Compute target prefix size N = cap_bytes - L_marker.
+#   4. Backtrack to a UTF-8 code-point boundary ≤ N (avoid splitting
+#      multi-byte sequences — CJK, emoji, combining marks).
+#   5. Emit first N' bytes + marker.
+# The resulting string is at most cap_bytes UTF-8 bytes (may be strictly
+# less due to step-4 backtracking). The marker leading char is U+2026
+# HORIZONTAL ELLIPSIS (3 bytes UTF-8); appended as a whole unit so no
+# further boundary concerns beyond step 4.
+def _truncate_for_attribute(serialized: str, cap_bytes: int) -> str:
+    """Truncate ``serialized`` to fit within ``cap_bytes`` UTF-8 bytes,
+    returning the original string unchanged if it already fits."""
+    encoded = serialized.encode("utf-8")
+    full_length = len(encoded)
+    if full_length <= cap_bytes:
+        return serialized
+    marker = _TRUNCATION_MARKER_TEMPLATE.format(m=full_length)
+    marker_bytes = marker.encode("utf-8")
+    target = cap_bytes - len(marker_bytes)
+    if target <= 0:
+        # Cap is smaller than the marker itself — the __post_init__
+        # validation guards against this (256-byte minimum allows a
+        # ~36-byte marker plus preview), but be defensive.
+        return marker
+    # UTF-8 lead-byte detection: a byte is a continuation byte when its
+    # top two bits are 10. Backtrack from ``target`` until we land on a
+    # lead byte (or hit 0). This is the cheapest correct way to find
+    # the largest code-point boundary ≤ target without round-tripping
+    # through ``str``.
+    boundary = target
+    while boundary > 0 and (encoded[boundary] & 0b1100_0000) == 0b1000_0000:
+        boundary -= 1
+    return encoded[:boundary].decode("utf-8", errors="strict") + marker
 
 
 @dataclass
@@ -181,30 +258,72 @@ class OTelObserver:
 
     Constructor knobs:
 
-    - ``detached_subgraphs``: set of subgraph wrapper node names
-      that should run in their own trace (§4.4). One detached trace
-      per such subgraph.
-    - ``detached_fan_outs``: set of fan-out node names whose
-      INSTANCES each get their own trace. One detached trace per
-      instance.
-    - ``disable_llm_spans``: when ``True`` the observer skips the
-      §5.5 LLM provider span. All other spans (node, subgraph,
-      fan-out, etc.) emit normally. Useful when an external
-      auto-instrumentation library (OpenInference, etc.) is the
-      canonical source of LLM spans.
+    - ``span_processor``: a single :class:`SpanProcessor` or a sequence
+      of them. Every processor is registered on the private
+      :class:`TracerProvider`; spans flow to each.
+    - ``resource``: optional :class:`Resource` passed to the private
+      :class:`TracerProvider`. Sets ``service.name`` / ``service.version``
+      / etc. without relying on environment variables.
+    - ``detached_subgraphs``: set of subgraph wrapper node names that
+      run in their own trace. One detached trace per such subgraph.
+    - ``detached_fan_outs``: set of fan-out node names whose instances
+      each get their own trace. One detached trace per instance.
+    - ``disable_llm_spans``: when ``True`` the observer skips the LLM
+      provider span; all other spans emit normally.
+    - ``disable_llm_payload``: default ``True``. Gates the LLM input/
+      output payload attributes (``openarmature.llm.input.messages``,
+      ``openarmature.llm.output.content``,
+      ``openarmature.llm.request.extras``).
+    - ``disable_genai_semconv``: default ``False``. Gates the
+      ``gen_ai.*`` attribute set on the LLM span.
+    - ``payload_max_bytes``: per-attribute byte cap for the LLM payload
+      attributes. Default 64 KiB; minimum 256 bytes (rejected at
+      construction time below that).
+    - ``attribute_enrichers``: optional sequence of callables run just
+      before the observer ends each span. Each receives the live
+      :class:`Span` plus the :class:`NodeEvent` that triggered the
+      close (or ``None`` on synthetic close sites). Exceptions are
+      caught and warned; never propagated.
     - ``spec_version``: string surfaced as
       ``openarmature.graph.spec_version`` on the invocation span.
 
-    Safe to share across concurrent invocations and across
-    resumes of the same correlation_id; every internal span map is
-    outer-keyed by ``invocation_id``, and parent resolution stays
-    within a single event handler's scope.
+    Safe to share across concurrent invocations and across resumes of
+    the same correlation_id; every internal span map is outer-keyed by
+    ``invocation_id``, and parent resolution stays within a single
+    event handler's scope.
     """
 
-    span_processor: SpanProcessor
+    # span_processor accepts a single processor or a sequence per
+    # observability friction-roundup #5. The dataclass field type is
+    # the union; ``__post_init__`` normalizes to a tuple internally.
+    span_processor: SpanProcessor | Sequence[SpanProcessor]
+    # Optional Resource per friction-roundup #4. Default behavior
+    # (resource=None) falls through to OTel's default Resource (reads
+    # OTEL_SERVICE_NAME / OTEL_RESOURCE_ATTRIBUTES env vars at
+    # construction time).
+    resource: Resource | None = None
     detached_subgraphs: frozenset[str] = field(default_factory=_empty_str_frozenset)
     detached_fan_outs: frozenset[str] = field(default_factory=_empty_str_frozenset)
     disable_llm_spans: bool = False
+    # disable_llm_payload defaults to True per observability §5.5.4.
+    # Default-off because the payload may contain PII the user hasn't
+    # audited — opting in is a deliberate second choice. Naming inverts
+    # the natural reading ("default-off via True") to keep symmetry
+    # with the existing disable_llm_spans parameter family.
+    disable_llm_payload: bool = True
+    # disable_genai_semconv defaults to False (emit) per §5.5.4. The
+    # value proposition of installing the OTel observer is that
+    # LLM-aware backends (Langfuse, Phoenix, Honeycomb's LLM lens)
+    # render correctly out of the box, which keys off gen_ai.*.
+    disable_genai_semconv: bool = False
+    # Per-attribute byte cap for the §5.5.1 payload attributes. Default
+    # 64 KiB; minimum 256 bytes (§5.5.5), validated in __post_init__.
+    payload_max_bytes: int = _PAYLOAD_DEFAULT_BYTES
+    # attribute_enrichers per friction-roundup #7p2 — runs before every
+    # span.end() the observer issues. NodeEvent is None on synthetic
+    # close sites (subgraph dispatch, detached root, fan-out instance,
+    # invocation span, shutdown drain).
+    attribute_enrichers: Sequence[Callable[[Span, NodeEvent], None]] = ()
     # Read from the package's ``__spec_version__`` (one of the three
     # places the spec version is pinned per CLAUDE.md). Bumping the
     # spec submodule + the two version fields automatically updates
@@ -226,11 +345,60 @@ class OTelObserver:
     )
 
     def __post_init__(self) -> None:
+        # §5.5.5 minimum-cap validation. Reject misconfigurations at
+        # construction time rather than emitting silently broken
+        # attributes.
+        if self.payload_max_bytes < _PAYLOAD_MIN_BYTES:
+            raise ValueError(
+                f"payload_max_bytes={self.payload_max_bytes} below the spec §5.5.5 "
+                f"minimum cap of {_PAYLOAD_MIN_BYTES} bytes"
+            )
         # Private provider per spec §6 TracerProvider isolation —
-        # MUST NOT be registered globally.
-        self._provider = TracerProvider()
-        self._provider.add_span_processor(self.span_processor)
+        # MUST NOT be registered globally. Resource set on the
+        # provider when supplied; otherwise OTel's default Resource
+        # (which reads OTEL_SERVICE_NAME / OTEL_RESOURCE_ATTRIBUTES
+        # env vars at construction time) applies.
+        if self.resource is not None:
+            self._provider = TracerProvider(resource=self.resource)
+        else:
+            self._provider = TracerProvider()
+        # Multi-processor: a sequence registers every entry; a single
+        # processor wraps in a 1-tuple. ``SpanProcessor`` is itself a
+        # class so we can't use isinstance against ``Sequence`` first
+        # (Sequence matches strings too); compare against the explicit
+        # union arms.
+        if isinstance(self.span_processor, SpanProcessor):
+            processors: Sequence[SpanProcessor] = (self.span_processor,)
+        else:
+            processors = tuple(self.span_processor)
+        for proc in processors:
+            self._provider.add_span_processor(proc)
         self._tracer = self._provider.get_tracer("openarmature")
+
+    # ------------------------------------------------------------------
+    # Enricher invocation (friction-roundup #7p2)
+    # ------------------------------------------------------------------
+
+    # Exception isolation mirrors the observer-error-isolation contract
+    # in ``openarmature.graph.observer`` — enricher raises are caught +
+    # warned, never propagated to the dispatch worker.
+    # ``event`` is None on synthetic close sites (subgraph dispatch,
+    # detached root, fan-out instance, invocation span, orphan drain).
+    def _run_enrichers(self, span: Span, event: NodeEvent | None) -> None:
+        """Invoke configured enrichers against ``span`` before
+        ``span.end()`` is called."""
+        if not self.attribute_enrichers:
+            return
+        import warnings
+
+        for enricher in self.attribute_enrichers:
+            try:
+                enricher(span, cast("Any", event))
+            except Exception as e:  # noqa: BLE001
+                warnings.warn(
+                    f"attribute_enricher raised {type(e).__name__}: {e}",
+                    stacklevel=2,
+                )
 
     # ------------------------------------------------------------------
     # Per-invocation state lookup
@@ -423,6 +591,7 @@ class OTelObserver:
                 inv_open.span.set_status(Status(StatusCode.ERROR, description=event.error.category))
         else:
             span.set_status(Status(StatusCode.OK))
+        self._run_enrichers(span, event)
         span.end()
         # If this was a detached root prefix, drop the root entry so a
         # subsequent re-entry mints a fresh trace.
@@ -485,6 +654,7 @@ class OTelObserver:
             attributes=attrs,
         )
         span.set_status(Status(StatusCode.OK))
+        self._run_enrichers(span, event)
         span.end()
 
     def _emit_checkpoint_save_span(self, event: NodeEvent) -> None:
@@ -517,22 +687,38 @@ class OTelObserver:
             attributes=attrs,
         )
         span.set_status(Status(StatusCode.OK))
+        self._run_enrichers(span, event)
         span.end()
 
+    # LLM provider span per observability §5.5 — parented to the
+    # calling node's span via the calling-node identity carried on
+    # the LlmEventPayload (namespace_prefix + attempt_index +
+    # fan_out_index). Lookup hits the per-invocation_id open_spans
+    # so concurrent fan-out instances each find their own calling
+    # node, not a sibling's.
+    #
+    # v0.17.0 attribute set (proposal 0024):
+    #   - Baseline openarmature.llm.* attributes (preserved)
+    #   - §5.5.1 payload (input.messages, output.content,
+    #     request.extras) gated by disable_llm_payload
+    #   - §5.5.2 gen_ai.request.* request params
+    #   - §5.5.3 gen_ai.* response semconv set
+    #   - §5.5.4 opt-out flags
+    #   - §5.5.5 truncation contract on payload attributes
+    #
+    # Prompt-identity attributes come from the LlmEventPayload
+    # active_prompt / active_prompt_group snapshots taken at dispatch
+    # time — NOT the ContextVar. The dispatch worker's task-local
+    # Context doesn't see node-body ContextVar writes.
     def _handle_llm_event(self, event: NodeEvent) -> None:
-        """LLM provider span per spec §5.5 — parented to the calling
-        node's span via the calling-node identity carried on the
-        ``_LlmEventState`` payload (namespace_prefix + attempt_index
-        + fan_out_index). Lookup hits the per-invocation_id
-        ``open_spans`` so concurrent fan-out instances each find
-        their own calling node, not a sibling's."""
-        from openarmature.llm.providers.openai import _LlmEventState
+        """Build and close the ``openarmature.llm.complete`` span for an
+        LLM provider event pair."""
         from openarmature.observability.correlation import (
             current_correlation_id,
             current_invocation_id,
         )
 
-        if not isinstance(event.pre_state, _LlmEventState):
+        if not isinstance(event.pre_state, LlmEventPayload):
             # Defensive — callers other than the OpenAIProvider hook
             # shouldn't dispatch through the LLM_NAMESPACE sentinel.
             return
@@ -547,19 +733,53 @@ class OTelObserver:
             cid = current_correlation_id()
             if cid is not None:
                 attrs["openarmature.correlation_id"] = cid
-            # Per prompt-management spec §11, surface prompt identity
-            # on the LLM-call span when the call fired inside a
-            # with_active_prompt / with_active_prompt_group context.
-            active_prompt = current_prompt_result()
+            # Prompt-identity attributes: sourced from the dispatch-
+            # time snapshot on the payload. Reading the ContextVar
+            # here would return None because the dispatch worker
+            # task's Context was snapshotted at ``invoke()`` entry,
+            # before any node body opened a ``with_active_prompt``
+            # block.
+            active_prompt = payload.active_prompt
             if active_prompt is not None:
                 attrs["openarmature.prompt.name"] = active_prompt.name
                 attrs["openarmature.prompt.version"] = active_prompt.version
                 attrs["openarmature.prompt.label"] = active_prompt.label
                 attrs["openarmature.prompt.template_hash"] = active_prompt.template_hash
                 attrs["openarmature.prompt.rendered_hash"] = active_prompt.rendered_hash
-            active_group = current_prompt_group()
+            active_group = payload.active_prompt_group
             if active_group is not None:
                 attrs["openarmature.prompt.group_name"] = active_group.group_name
+            # §5.5.2 + §5.5.3 GenAI semconv attributes (gated by
+            # ``disable_genai_semconv``). Emit gen_ai.system,
+            # gen_ai.request.model (mirrors openarmature.llm.model),
+            # and per-set gen_ai.request.* params (only fields the
+            # caller supplied — absence is meaningful).
+            if not self.disable_genai_semconv:
+                attrs["gen_ai.system"] = payload.genai_system
+                attrs["gen_ai.request.model"] = payload.model
+                request_params = payload.request_params or {}
+                if "temperature" in request_params:
+                    attrs["gen_ai.request.temperature"] = request_params["temperature"]
+                if "max_tokens" in request_params:
+                    attrs["gen_ai.request.max_tokens"] = request_params["max_tokens"]
+                if "top_p" in request_params:
+                    attrs["gen_ai.request.top_p"] = request_params["top_p"]
+                if "seed" in request_params:
+                    attrs["gen_ai.request.seed"] = request_params["seed"]
+            # §5.5.1 payload attributes (gated by ``disable_llm_payload``).
+            # ``input.messages`` and ``request.extras`` go on the started
+            # span; ``output.content`` lands on the completed branch.
+            if not self.disable_llm_payload:
+                if payload.input_messages:
+                    serialized = _serialize_for_attribute(payload.input_messages)
+                    attrs["openarmature.llm.input.messages"] = _truncate_for_attribute(
+                        serialized, self.payload_max_bytes
+                    )
+                if payload.request_extras:
+                    serialized_extras = _serialize_for_attribute(payload.request_extras)
+                    attrs["openarmature.llm.request.extras"] = _truncate_for_attribute(
+                        serialized_extras, self.payload_max_bytes
+                    )
             span = self._tracer.start_span(
                 name="openarmature.llm.complete",
                 context=cast("Any", parent_ctx),
@@ -572,6 +792,7 @@ class OTelObserver:
             if open_span is None:
                 return
             span = open_span.span
+            # Baseline §5.5 attributes (preserved from v0.7.0).
             if payload.finish_reason is not None:
                 span.set_attribute("openarmature.llm.finish_reason", payload.finish_reason)
             if payload.prompt_tokens is not None:
@@ -580,6 +801,30 @@ class OTelObserver:
                 span.set_attribute("openarmature.llm.usage.completion_tokens", payload.completion_tokens)
             if payload.total_tokens is not None:
                 span.set_attribute("openarmature.llm.usage.total_tokens", payload.total_tokens)
+            # §5.5.3 GenAI semconv response attributes (gated by
+            # ``disable_genai_semconv``). Tokens mirror the baseline
+            # OA-prefixed usage attributes; finish_reasons wraps the
+            # scalar in a single-element array per semconv;
+            # response.{id,model} emit only when the provider
+            # returned non-null values.
+            if not self.disable_genai_semconv:
+                if payload.prompt_tokens is not None:
+                    span.set_attribute("gen_ai.usage.input_tokens", payload.prompt_tokens)
+                if payload.completion_tokens is not None:
+                    span.set_attribute("gen_ai.usage.output_tokens", payload.completion_tokens)
+                if payload.finish_reason is not None:
+                    span.set_attribute("gen_ai.response.finish_reasons", [payload.finish_reason])
+                if payload.response_id is not None:
+                    span.set_attribute("gen_ai.response.id", payload.response_id)
+                if payload.response_model is not None:
+                    span.set_attribute("gen_ai.response.model", payload.response_model)
+            # §5.5.1 output payload. Assistant messages with empty
+            # content (tool-call-only responses) MUST NOT emit this
+            # attribute per spec — ``output_content`` on the payload
+            # is already None in that case (see provider.py).
+            if not self.disable_llm_payload and payload.output_content:
+                attrs_out = _truncate_for_attribute(payload.output_content, self.payload_max_bytes)
+                span.set_attribute("openarmature.llm.output.content", attrs_out)
             if payload.error_type is not None:
                 span.set_status(
                     Status(
@@ -591,6 +836,7 @@ class OTelObserver:
                     span.set_attribute("openarmature.error.category", payload.error_category)
             else:
                 span.set_status(Status(StatusCode.OK))
+            self._run_enrichers(span, event)
             span.end()
 
     def _resolve_llm_parent(
@@ -849,6 +1095,7 @@ class OTelObserver:
         if open_span is None:
             return
         open_span.span.set_status(Status(StatusCode.OK))
+        self._run_enrichers(open_span.span, None)
         open_span.span.end()
 
     def _open_detached_subgraph_root(
@@ -1024,6 +1271,7 @@ class OTelObserver:
         if open_span is None:
             return
         open_span.span.set_status(Status(StatusCode.OK))
+        self._run_enrichers(open_span.span, None)
         open_span.span.end()
 
     def _close_detached_root(self, inv_state: _InvState, prefix: tuple[str, ...]) -> None:
@@ -1032,14 +1280,16 @@ class OTelObserver:
         if open_span is None:
             return
         open_span.span.set_status(Status(StatusCode.OK))
+        self._run_enrichers(open_span.span, None)
         open_span.span.end()
 
-    @staticmethod
-    def _drain_open_span(open_span: _OpenSpan) -> None:
+    def _drain_open_span(self, open_span: _OpenSpan) -> None:
         """Close an open span as an orphan during shutdown: OK
         status, end. No paired completed event will arrive, so we
-        don't have an error category to record."""
+        don't have an error category to record. Enrichers run with
+        ``event=None`` — they can no-op when event context matters."""
         open_span.span.set_status(Status(StatusCode.OK))
+        self._run_enrichers(open_span.span, None)
         open_span.span.end()
 
     def _find_fan_out_node_span(self, inv_state: _InvState, prefix: tuple[str, ...]) -> _OpenSpan | None:
@@ -1182,14 +1432,29 @@ class OTelObserver:
         # exporters map UNSET to OK by convention, and the explicit
         # ERROR-set in ``_handle_completed`` handles the failure
         # path.
+        self._run_enrichers(open_span.span, None)
         open_span.span.end()
 
     def shutdown(self) -> None:
-        """Close any still-open spans across all in-flight
-        invocations and shut down the underlying provider. Each
-        per-invocation state is drained in child→parent order (LLM
-        spans → leaf spans → detached roots → subgraph dispatch);
-        invocation spans drain last. Idempotent."""
+        """Close any still-open spans across all in-flight invocations
+        and shut down the underlying provider. Each per-invocation
+        state is drained in child→parent order (LLM spans → leaf spans
+        → detached roots → subgraph dispatch); invocation spans drain
+        last. Idempotent.
+
+        **BatchSpanProcessor flush note.** ``self._provider.shutdown()``
+        flushes every registered processor. Under fast or unusual
+        teardown orderings (e.g., FastAPI ``TestClient`` teardown that
+        closes the event loop before the BatchSpanProcessor's export
+        thread finishes), the flush may not complete in time and spans
+        can appear dropped. Workarounds:
+
+        - Call ``observer._provider.force_flush(timeout_millis=…)``
+          explicitly before this method.
+        - Use :class:`SimpleSpanProcessor` instead of
+          :class:`BatchSpanProcessor` in tests; it exports synchronously
+          and is unaffected by teardown timing.
+        """
         for invocation_id in list(self._inv_states.keys()):
             inv_state = self._inv_states.pop(invocation_id)
             self._drain_inv_state(inv_state)

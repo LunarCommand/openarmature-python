@@ -52,13 +52,14 @@ import jsonschema
 from pydantic import BaseModel, ValidationError
 
 from openarmature.graph.events import NodeEvent
-from openarmature.graph.state import State
 from openarmature.observability.correlation import (
     current_attempt_index,
     current_dispatch,
     current_fan_out_index,
     current_namespace_prefix,
 )
+from openarmature.observability.llm_event import LlmEventPayload
+from openarmature.prompts.context import current_prompt_group, current_prompt_result
 
 from ..errors import (
     LlmProviderError,
@@ -113,6 +114,7 @@ class OpenAIProvider:
         transport: httpx.AsyncBaseTransport | None = None,
         timeout: float = 60.0,
         force_prompt_augmentation_fallback: bool = False,
+        genai_system: str = "openai",
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.model = model
@@ -122,6 +124,15 @@ class OpenAIProvider:
         # servers (some vLLM/LM Studio/llama.cpp versions) that reject
         # or silently ignore response_format.
         self._force_prompt_augmentation_fallback = force_prompt_augmentation_fallback
+        # ``genai_system`` surfaces as the ``gen_ai.system`` span attribute
+        # per observability §5.5.3. The OpenAI Chat Completions wire format
+        # is the de facto standard for vLLM, LM Studio, llama.cpp,
+        # sglang, etc. — callers using this provider against a non-OpenAI
+        # endpoint pass the appropriate identifier (e.g. ``"vllm"``).
+        # No base_url-sniffing happens: the same host:port could be any of
+        # those servers, and a wrong inference is worse than the explicit
+        # opt-in.
+        self._genai_system = genai_system
         self._headers: dict[str, str] = {"Content-Type": "application/json"}
         if api_key is not None:
             self._headers["Authorization"] = f"Bearer {api_key}"
@@ -277,14 +288,58 @@ class OpenAIProvider:
         # constant ``("openarmature.llm.complete",)`` sentinel.
         dispatch = current_dispatch()
         call_id = str(uuid.uuid4())
+        # Capture prompt context AT DISPATCH TIME (in the node task's
+        # context). The delivery worker (asyncio.create_task'd at
+        # ``invoke()`` entry, before any node body runs) has a stale
+        # ContextVar snapshot — reading ``current_prompt_result()``
+        # from inside the observer in the worker task returns ``None``
+        # even when a node body opened a ``with_active_prompt`` block.
+        # Snapshot here; the observer reads from the event payload.
+        active_prompt = current_prompt_result()
+        active_prompt_group = current_prompt_group()
+        # Payload data the §5.5.1 / §5.5.2 / §5.5.3 attributes are
+        # sourced from. Image redaction (per §5.5.5) happens inside
+        # ``_serialize_messages_for_payload`` — image bytes never
+        # leave the provider in event form. ``input_messages`` mirrors
+        # the messages list the caller supplied; the wire-side body
+        # may be augmented (schema directive on the fallback path),
+        # but the OBSERVED messages are the spec-§3 logical inputs.
+        serialized_messages = _serialize_messages_for_payload(messages)
+        request_params = _request_params_from_config(config)
+        request_extras = _request_extras_from_config(config)
         if dispatch is not None:
-            dispatch(_make_llm_event("started", call_id=call_id, model=self.model))
+            dispatch(
+                _make_llm_event(
+                    "started",
+                    call_id=call_id,
+                    model=self.model,
+                    genai_system=self._genai_system,
+                    input_messages=serialized_messages,
+                    request_params=request_params,
+                    request_extras=request_extras,
+                    active_prompt=active_prompt,
+                    active_prompt_group=active_prompt_group,
+                )
+            )
 
         try:
             response = await self._do_complete(body, schema_dict, schema_class)
         except Exception as exc:
             if dispatch is not None:
-                dispatch(_make_llm_event("completed", call_id=call_id, model=self.model, error=exc))
+                dispatch(
+                    _make_llm_event(
+                        "completed",
+                        call_id=call_id,
+                        model=self.model,
+                        genai_system=self._genai_system,
+                        error=exc,
+                        input_messages=serialized_messages,
+                        request_params=request_params,
+                        request_extras=request_extras,
+                        active_prompt=active_prompt,
+                        active_prompt_group=active_prompt_group,
+                    )
+                )
             raise
 
         if dispatch is not None:
@@ -293,8 +348,17 @@ class OpenAIProvider:
                     "completed",
                     call_id=call_id,
                     model=self.model,
+                    genai_system=self._genai_system,
                     finish_reason=response.finish_reason,
                     usage=response.usage,
+                    input_messages=serialized_messages,
+                    output_content=response.message.content or None,
+                    request_params=request_params,
+                    request_extras=request_extras,
+                    response_id=response.response_id,
+                    response_model=response.response_model,
+                    active_prompt=active_prompt,
+                    active_prompt_group=active_prompt_group,
                 )
             )
         return response
@@ -451,12 +515,23 @@ class OpenAIProvider:
         if schema_dict is not None and finish_reason_typed != "tool_calls":
             parsed = _parse_and_validate(assistant_msg.content, schema_dict, schema_class)
 
+        # gen_ai.response.id / gen_ai.response.model semconv (spec
+        # §5.5.3) read these off the Response. The wire fields are
+        # optional — providers MAY omit either or both. ``None`` when
+        # absent or not a string.
+        response_id_raw = payload.get("id")
+        response_id: str | None = response_id_raw if isinstance(response_id_raw, str) else None
+        response_model_raw = payload.get("model")
+        response_model: str | None = response_model_raw if isinstance(response_model_raw, str) else None
+
         return Response(
             message=assistant_msg,
             finish_reason=finish_reason_typed,
             usage=usage,
             raw=payload,
             parsed=parsed,
+            response_id=response_id,
+            response_model=response_model,
         )
 
 
@@ -929,80 +1004,126 @@ def _looks_like_model_not_loaded(message: object) -> bool:
 # ---------------------------------------------------------------------------
 
 
-class _LlmEventState(State):
-    """Typed payload for LLM-provider span events. Subclasses
-    :class:`openarmature.graph.state.State` so the
-    ``NodeEvent.pre_state: State`` contract holds — observers
-    calling ``event.pre_state.model_dump()`` (or any other
-    Pydantic-on-State method) work without the raw-dict overload
-    that previously violated the schema.
-
-    Backend mappings (the OTel observer in this repo, future
-    Langfuse / Datadog adapters) recognize the
-    ``("openarmature.llm.complete",)`` namespace sentinel and read
-    these fields directly via attribute access.
-
-    ``call_id`` is the per-call disambiguator: a UUIDv4 minted in
-    ``OpenAIProvider.complete`` and shared between the started /
-    completed event pair. Backend observers key their in-flight
-    LLM-span maps by it so concurrent ``complete()`` calls (e.g.,
-    fan-out instances each calling the provider) don't collide on
-    a single sentinel-namespace key.
-
-    ``calling_namespace_prefix``, ``calling_attempt_index``, and
-    ``calling_fan_out_index`` carry the calling node's identity so
-    the OTel observer can resolve the §5.5 "parent under calling
-    node" contract correctly under concurrent fan-out and retry.
-    Populated from the engine's ContextVars (set in
-    ``_step_*_node`` around node-body execution); fall back to
-    sentinel defaults (empty tuple, 0, ``None``) when the LLM
-    provider is called outside any node body.
-    """
-
-    call_id: str
-    model: str
-    finish_reason: str | None = None
-    prompt_tokens: int | None = None
-    completion_tokens: int | None = None
-    total_tokens: int | None = None
-    # On error responses the provider caller doesn't have a
-    # graph-engine §4 ``RuntimeGraphError`` to put in
-    # ``NodeEvent.error``, so we surface the failure detail through
-    # these fields instead. ``error_category`` is the canonical §7
-    # llm-provider category (``provider_unavailable``, etc.) when
-    # the failed exception carries one.
-    error_type: str | None = None
-    error_message: str | None = None
-    error_category: str | None = None
-    # Calling-node identity captured at dispatch time. The OTel
-    # observer reads these to look up the calling node's span in
-    # its (now-invocation_id-scoped) ``_open_spans`` map without relying on
-    # the OTel current-span context (which under concurrent fan-out
-    # can yield a sibling instance's span).
-    calling_namespace_prefix: tuple[str, ...] = ()
-    calling_attempt_index: int = 0
-    calling_fan_out_index: int | None = None
+# Backwards-compat alias. ``_LlmEventState`` was the v0.7.0 private
+# label; v0.17.0 promotes the type to ``LlmEventPayload`` and moves
+# its canonical home to ``openarmature.observability.llm_event``.
+# Keeping the old name available for one release lets any external
+# consumer that reached into the private symbol find it.
+_LlmEventState = LlmEventPayload
 
 
+# Inline image sources are redacted in this step per observability
+# §5.5.5: ImageSourceInline → {"type": "inline_redacted",
+# "byte_count": N} where N is the byte length of the original base64
+# string. media_type stays at the image-block level per llm-provider
+# §3.1.2; detail is preserved when present.
+#
+# Redaction lives here (provider-side) rather than observer-side so
+# inline image bytes never leave the provider in event form —
+# defense-in-depth that applies to every observer consuming the
+# payload, not just OA's own. URL-form images pass through unchanged.
+def _serialize_messages_for_payload(messages: Sequence[Message]) -> list[dict[str, Any]]:
+    """Render a list of typed :class:`Message` instances into the
+    plain-dict shape carried on ``LlmEventPayload.input_messages``."""
+    out: list[dict[str, Any]] = []
+    for msg in messages:
+        if isinstance(msg, SystemMessage):
+            out.append({"role": "system", "content": msg.content})
+        elif isinstance(msg, UserMessage):
+            if isinstance(msg.content, str):
+                out.append({"role": "user", "content": msg.content})
+            else:
+                rendered_blocks: list[dict[str, Any]] = []
+                for block in msg.content:
+                    if isinstance(block, TextBlock):
+                        rendered_blocks.append({"type": "text", "text": block.text})
+                    else:  # ImageBlock
+                        # The ImageBlock validator already guarantees
+                        # media_type when source is inline.
+                        if isinstance(block.source, ImageSourceInline):
+                            byte_count = len(block.source.base64_data)
+                            source_record: dict[str, Any] = {
+                                "type": "inline_redacted",
+                                "byte_count": byte_count,
+                            }
+                        else:
+                            source_record = {"type": "url", "url": block.source.url}
+                        image_record: dict[str, Any] = {
+                            "type": "image",
+                            "source": source_record,
+                        }
+                        if block.media_type is not None:
+                            image_record["media_type"] = block.media_type
+                        if block.detail is not None:
+                            image_record["detail"] = block.detail
+                        rendered_blocks.append(image_record)
+                out.append({"role": "user", "content": rendered_blocks})
+        elif isinstance(msg, AssistantMessage):
+            entry: dict[str, Any] = {"role": "assistant", "content": msg.content}
+            if msg.tool_calls:
+                entry["tool_calls"] = [
+                    {"id": tc.id, "name": tc.name, "arguments": tc.arguments} for tc in msg.tool_calls
+                ]
+            out.append(entry)
+        else:  # ToolMessage
+            out.append({"role": "tool", "content": msg.content, "tool_call_id": msg.tool_call_id})
+    return out
+
+
+# Only set fields appear in the result. Absence is meaningful per
+# observability §5.5.2: "the field was not supplied for this call"
+# — distinct from "supplied with a zero value."
+def _request_params_from_config(config: RuntimeConfig | None) -> dict[str, Any]:
+    """Extract the cross-vendor request parameters from a
+    ``RuntimeConfig`` for emission as ``gen_ai.request.*`` attributes."""
+    if config is None:
+        return {}
+    out: dict[str, Any] = {}
+    if config.temperature is not None:
+        out["temperature"] = config.temperature
+    if config.max_tokens is not None:
+        out["max_tokens"] = config.max_tokens
+    if config.top_p is not None:
+        out["top_p"] = config.top_p
+    if config.seed is not None:
+        out["seed"] = config.seed
+    return out
+
+
+def _request_extras_from_config(config: RuntimeConfig | None) -> dict[str, Any]:
+    """Return the ``RuntimeConfig`` extras pass-through bag as a plain
+    dict; empty when no extras are set or when ``config`` is None."""
+    if config is None:
+        return {}
+    return dict(config.model_extra or {})
+
+
+# call_id MUST be the same string on the started/completed pair so
+# the observer can match them under concurrency. The OTel observer
+# (or any backend mapping) recognises the sentinel node_name +
+# namespace and emits an LLM-specific span instead of a node span;
+# backend-specific attribute extraction reads payload fields from
+# pre_state directly.
 def _make_llm_event(
     phase: Literal["started", "completed"],
     *,
     call_id: str,
     model: str,
+    genai_system: str,
     finish_reason: FinishReason | None = None,
     usage: Usage | None = None,
     error: BaseException | None = None,
+    input_messages: list[dict[str, Any]] | None = None,
+    output_content: str | None = None,
+    request_params: dict[str, Any] | None = None,
+    request_extras: dict[str, Any] | None = None,
+    response_id: str | None = None,
+    response_model: str | None = None,
+    active_prompt: Any = None,
+    active_prompt_group: Any = None,
 ) -> NodeEvent:
-    """Build a NodeEvent-shaped record for the engine's delivery
-    queue. The OTel observer (or any backend mapping) recognises the
-    sentinel ``node_name`` and ``namespace`` and emits an LLM-specific
-    span instead of a node span. Backend-specific attribute extraction
-    reads ``model``, ``finish_reason``, and ``usage`` from
-    ``pre_state`` directly via attribute access.
-
-    ``call_id`` MUST be the same string on the started/completed
-    pair so the observer can match them under concurrency.
-    """
+    """Build a ``NodeEvent``-shaped record for the engine's delivery
+    queue, populated as an ``openarmature.llm.complete`` event."""
     error_type: str | None = None
     error_message: str | None = None
     error_category: str | None = None
@@ -1012,7 +1133,7 @@ def _make_llm_event(
         category = getattr(error, "category", None)
         if isinstance(category, str):
             error_category = category
-    payload = _LlmEventState(
+    payload = LlmEventPayload(
         call_id=call_id,
         model=model,
         finish_reason=finish_reason,
@@ -1025,6 +1146,15 @@ def _make_llm_event(
         calling_namespace_prefix=current_namespace_prefix(),
         calling_attempt_index=current_attempt_index(),
         calling_fan_out_index=current_fan_out_index(),
+        active_prompt=active_prompt,
+        active_prompt_group=active_prompt_group,
+        input_messages=input_messages,
+        output_content=output_content,
+        request_params=request_params,
+        request_extras=request_extras,
+        response_id=response_id,
+        response_model=response_model,
+        genai_system=genai_system,
     )
     return NodeEvent(
         node_name="openarmature.llm.complete",

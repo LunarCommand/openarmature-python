@@ -1,0 +1,111 @@
+# LlmEventPayload subclasses State so the NodeEvent.pre_state: State
+# contract holds (observers calling event.pre_state.model_dump() work
+# without the raw-dict overload that previously violated the schema).
+#
+# Backend mappings (the OTel observer in this repo, future Langfuse /
+# Datadog adapters) recognize the LLM_NAMESPACE sentinel and read these
+# fields directly via attribute access.
+#
+# call_id is the per-call disambiguator: a UUIDv4 minted by the
+# provider and shared across the started / completed event pair.
+# Backend observers key their in-flight LLM-span maps by it so
+# concurrent complete() calls (e.g., fan-out instances each calling
+# the provider) don't collide on the single sentinel-namespace key.
+#
+# calling_namespace_prefix / calling_attempt_index /
+# calling_fan_out_index carry the calling node's identity so the OTel
+# observer can resolve §5.5 "parent under calling node" correctly
+# under concurrent fan-out and retry. Populated from the engine's
+# ContextVars at dispatch time; sentinel defaults when the provider
+# is called outside any node body.
+#
+# active_prompt / active_prompt_group are dispatch-time snapshots of
+# the prompts-context ContextVars (per friction-roundup #3). The
+# delivery-worker task cannot read these ContextVars — its Context is
+# snapshotted at invoke()-entry, before any node body opens a
+# with_active_prompt block — so the snapshot has to travel on the
+# payload.
+#
+# input_messages / output_content / request_params / request_extras
+# source the §5.5.1 + §5.5.2 attributes. input_messages is the message
+# list serialized to §3 plain-dict shape with ImageSourceInline already
+# redacted (per §5.5.5 — inline bytes never leave the provider in
+# event form, regardless of any observer-side flag). response_id /
+# response_model source the §5.5.3 gen_ai.response.{id,model}
+# attributes. genai_system sources gen_ai.system per §5.5.3 (default
+# "openai"; overridable on the OpenAI-compatible provider).
+
+"""LLM event payload exchanged between providers and observability backends."""
+
+from __future__ import annotations
+
+from typing import Any
+
+from pydantic import BaseModel, ConfigDict
+
+
+# LlmEventPayload uses plain Pydantic BaseModel (not openarmature.graph.State)
+# so importing it doesn't transitively load the entire graph package.
+# That lets providers in openarmature.llm import this type cleanly even
+# though graph.middleware.retry imports from openarmature.llm.errors —
+# subclassing State would create a circular load order. NodeEvent.pre_state
+# is typed Any (per the comment in graph.events) so the State-subclass
+# constraint isn't load-bearing here.
+class LlmEventPayload(BaseModel):
+    """Typed payload carried on ``NodeEvent.pre_state`` for the
+    ``openarmature.llm.complete`` event pair an LLM provider emits
+    around each ``complete()`` call.
+
+    Observers subscribing to events with namespace
+    :data:`openarmature.observability.LLM_NAMESPACE` read attributes
+    directly off this payload. The OpenAI provider populates every
+    field; third-party providers populate the subset they support.
+    """
+
+    # Matches the strictness profile the v0.7.0 ``_LlmEventState``
+    # inherited via the State base class — extra fields rejected,
+    # instance frozen after construction.
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    call_id: str
+    model: str
+    finish_reason: str | None = None
+    prompt_tokens: int | None = None
+    completion_tokens: int | None = None
+    total_tokens: int | None = None
+    # error_category is the canonical llm-provider §7 category
+    # (provider_unavailable, etc.) when the failed exception carried
+    # one — the provider caller doesn't have a graph-engine §4
+    # RuntimeGraphError to attach to NodeEvent.error, so failure
+    # detail surfaces through these fields instead.
+    error_type: str | None = None
+    error_message: str | None = None
+    error_category: str | None = None
+    # Calling-node identity captured at dispatch time. The OTel
+    # observer reads these to look up the calling node's span in its
+    # invocation_id-scoped _open_spans map without relying on the
+    # OTel current-span context (which under concurrent fan-out can
+    # yield a sibling instance's span).
+    calling_namespace_prefix: tuple[str, ...] = ()
+    calling_attempt_index: int = 0
+    calling_fan_out_index: int | None = None
+    # Prompt-context snapshot captured at dispatch time. ``Any``
+    # because the prompts package imports State indirectly; the typed
+    # shapes are PromptResult / PromptGroup from openarmature.prompts.
+    # Observers cast back at the read site.
+    active_prompt: Any = None
+    active_prompt_group: Any = None
+    # Payload + request-config carrier. input_messages is already
+    # image-redacted by the provider before reaching this struct;
+    # request_params carries only the gen_ai.request.* fields;
+    # request_extras carries the RuntimeConfig extras pass-through bag.
+    input_messages: list[dict[str, Any]] | None = None
+    output_content: str | None = None
+    request_params: dict[str, Any] | None = None
+    request_extras: dict[str, Any] | None = None
+    response_id: str | None = None
+    response_model: str | None = None
+    genai_system: str = "openai"
+
+
+__all__ = ["LlmEventPayload"]
