@@ -66,7 +66,7 @@ server expects.
 # Install the examples dep group.
 uv sync --group examples
 
-# Demo 03 also wants the OTel SDK for its OTelObserver.
+# Demos 03 and 07 also want the OTel SDK for their OTelObserver.
 uv sync --group examples --all-extras
 
 # Run any demo.

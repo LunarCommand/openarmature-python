@@ -45,6 +45,7 @@ import sys
 from collections.abc import Mapping
 from typing import Annotated, Any
 
+from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace.export import ConsoleSpanExporter, SimpleSpanProcessor
 from pydantic import Field
 
@@ -304,8 +305,25 @@ async def main() -> None:
     # provider here is PRIVATE to the observer; the global
     # TracerProvider is untouched, so this won't pollute any OTel
     # setup the surrounding application already has.
+    #
+    # ``resource`` stamps ``service.name`` on every emitted span so
+    # downstream backends (Honeycomb, Tempo, HyperDX, Langfuse) can
+    # filter by service. Setting it on the observer is the explicit
+    # path — the OTel SDK alternative (reading the
+    # ``OTEL_SERVICE_NAME`` / ``OTEL_RESOURCE_ATTRIBUTES`` env vars)
+    # has to be set BEFORE the observer constructs, which is easy
+    # to get wrong.
+    #
+    # LLM-call spans (one per ``provider.complete()``) carry the
+    # OpenTelemetry GenAI semantic conventions automatically:
+    # ``gen_ai.system``, ``gen_ai.request.model``,
+    # ``gen_ai.response.{model,id,finish_reasons}``,
+    # ``gen_ai.usage.{input,output}_tokens``. Cross-vendor backends
+    # (Langfuse, Phoenix, Honeycomb's LLM lens) render them
+    # correctly without a per-service attribute-mapping shim.
     otel_observer = OTelObserver(
         span_processor=SimpleSpanProcessor(ConsoleSpanExporter()),
+        resource=Resource.create({"service.name": "openarmature-demo-answers"}),
     )
 
     graph = build_graph()
