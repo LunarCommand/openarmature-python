@@ -12,7 +12,7 @@
 The :class:`Checkpointer` Protocol is the persistence seam between the
 engine's save/resume machinery and a concrete backend (in-memory,
 SQLite, Temporal, DBOS, etc.). Backends receive structured records,
-not state-class instances directly — this lets them serialize, batch,
+not state-class instances directly; this lets them serialize, batch,
 or hand off to a durable backend without taking a hard dependency on
 the user's Pydantic state schema.
 
@@ -48,25 +48,25 @@ class NodePosition:
     """A single completed-node coordinate in the resume map.
 
     Frozen + automatically hashable (no mutable fields), so positions
-    can live in sets and dict keys — the engine's resume-entry
+    can live in sets and dict keys; the engine's resume-entry
     derivation relies on ``set`` membership to skip nodes that have
     already completed.
 
     Fields:
 
-    - ``namespace`` — chain of containing-graph node names from
+    - ``namespace``: chain of containing-graph node names from
       outermost down to (but **not including**) this node. Empty for
       outermost-graph nodes; one entry for subgraph-internal nodes;
       two entries when nested two deep, and so on. Distinct from
-      ``NodeEvent.namespace`` which includes the node's own name —
+      ``NodeEvent.namespace`` which includes the node's own name;
       ``NodeEvent.namespace == NodePosition.namespace +
       (NodePosition.node_name,)``.
-    - ``node_name`` — the node's local name in its containing graph.
-    - ``step`` — the monotonic step counter at the time the node
+    - ``node_name``: the node's local name in its containing graph.
+    - ``step``: the monotonic step counter at the time the node
       completed (shared with ``NodeEvent.step``).
-    - ``attempt_index`` — 0-based retry attempt index. The final
+    - ``attempt_index``: 0-based retry attempt index. The final
       successful attempt's index is what gets recorded.
-    - ``fan_out_index`` — populated only for events from inside a
+    - ``fan_out_index``: populated only for events from inside a
       fan-out instance. Those events do NOT produce records in the
       shipping version; the field is part of the position shape so a
       future per-instance fan-out resume can populate it without a
@@ -87,7 +87,7 @@ class NodePosition:
 class CheckpointRecord:
     """One invocation's progress at one save point.
 
-    Frozen — backends MUST treat the record as immutable; the engine
+    Frozen; backends MUST treat the record as immutable; the engine
     builds a fresh record per ``completed`` event rather than mutating
     a shared one. The ``fan_out_progress`` field is reserved for a
     future per-instance fan-out resume mode; in the shipping version
@@ -131,7 +131,7 @@ class CheckpointFilter:
     """Predicate for :meth:`Checkpointer.list`. v1 ships two narrow
     fields; richer query DSLs are deferred to follow-on work.
 
-    - ``correlation_id`` — match records whose ``correlation_id``
+    - ``correlation_id``: match records whose ``correlation_id``
       equals the supplied value. ``None`` matches every record
       (the "list all" case).
     """
@@ -159,7 +159,7 @@ class Checkpointer(Protocol):
     class-bound serialization (pickle) cannot. Per spec §10.12.1,
     backends that cannot expose the intermediate MUST raise
     ``CheckpointRecordInvalid`` on version mismatch even when
-    migrations are registered — the registry has no chance to bridge.
+    migrations are registered; the registry has no chance to bridge.
 
     **Attribute-presence contract.** The class-body ``= False``
     below is a typing-level signal, not a runtime guarantee:
@@ -174,7 +174,7 @@ class Checkpointer(Protocol):
     via ``getattr(checkpointer, "supports_state_migration",
     False)``, so a third-party backend that omits the attribute
     entirely is treated as non-migration-eligible without
-    raising — that's the runtime default the engine guarantees.
+    raising; that's the runtime default the engine guarantees.
     """
 
     # Declared as an instance attribute (not ``ClassVar``) so backends

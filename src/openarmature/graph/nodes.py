@@ -5,7 +5,7 @@
 """Graph nodes.
 
 A node is a named unit of work. Nodes are asynchronous and don't
-mutate the state they receive — they return a partial update which
+mutate the state they receive; they return a partial update which
 the engine merges via reducers.
 
 The `Node` Protocol exists so subgraphs can compose as nodes
@@ -53,4 +53,7 @@ class FunctionNode[StateT: State]:
     middleware: tuple[Middleware, ...] = field(default_factory=tuple[Middleware, ...])
 
     async def run(self, state: StateT) -> Mapping[str, Any]:
+        """Invoke the wrapped async callable and return its partial
+        update. Called by the engine inside any per-node and per-graph
+        middleware chain."""
         return await self.fn(state)

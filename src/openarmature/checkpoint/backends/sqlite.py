@@ -4,20 +4,20 @@
 
 Persists records to a SQLite database with WAL mode enabled. Durable
 across process crashes within a single host. One row per
-``invocation_id`` (upsert retention — overwritten on every save).
+``invocation_id`` (upsert retention; overwritten on every save).
 
 **Serialization knobs:**
 
-- ``"pickle"`` (default) — accepts any pickleable state shape.
+- ``"pickle"`` (default): accepts any pickleable state shape.
   Python-only on the read side; a TypeScript reimplementation cannot
   decode pickle blobs.
-- ``"json"`` — accepts only JSON-native state shapes (Pydantic
+- ``"json"``: accepts only JSON-native state shapes (Pydantic
   ``model_dump(mode="json")`` output). Cross-language portable; if
   the user wants to read python-written records from a TypeScript
   consumer (or vice versa), this is the choice.
 
 Choose deliberately at construction time; the same database file
-MUST be read with the same serialization mode it was written with —
+MUST be read with the same serialization mode it was written with;
 mismatches surface as :class:`CheckpointRecordInvalid` on
 :meth:`load`.
 
@@ -87,7 +87,7 @@ def _to_json_native(obj: Any) -> Any:
 class SQLiteCheckpointer:
     """SQLite Checkpointer with WAL-mode durability.
 
-    **Retention:** upsert — one row per ``invocation_id``, overwritten
+    **Retention:** upsert; one row per ``invocation_id``, overwritten
     on every save. Saved records are NOT historical: only the most
     recent save for any given ``invocation_id`` is retained.
 
@@ -167,6 +167,11 @@ class SQLiteCheckpointer:
     # ------------------------------------------------------------------
 
     async def save(self, invocation_id: str, record: CheckpointRecord) -> None:
+        """Upsert ``record`` under ``invocation_id``. The state,
+        completed positions, and parent-state stack are serialized via
+        the configured :class:`SerializationMode` and written in a
+        single statement. Writes are durable on return (WAL mode,
+        per-write fsync at the SQLite layer)."""
         await self._ensure_initialized()
         state_blob = self._encode(record.state)
         positions_blob = self._encode([asdict(p) for p in record.completed_positions])
@@ -207,6 +212,11 @@ class SQLiteCheckpointer:
             await asyncio.to_thread(_do)
 
     async def load(self, invocation_id: str) -> CheckpointRecord | None:
+        """Return the saved record for ``invocation_id`` or ``None``
+        when no row exists. The serialization mode stored with the
+        row is used to decode the blobs back, so a database written
+        with one mode can still be loaded after the backend has been
+        reconfigured."""
         await self._ensure_initialized()
 
         def _do() -> tuple[Any, ...] | None:
@@ -266,6 +276,11 @@ class SQLiteCheckpointer:
         )
 
     async def list(self, filter: CheckpointFilter | None = None) -> Iterable[CheckpointSummary]:
+        """Enumerate saved invocations as :class:`CheckpointSummary`
+        rows, ordered by ``last_saved_at`` ascending. With
+        ``filter.correlation_id`` set the SQL query is constrained at
+        the database (indexed lookup); without a filter the full
+        table is returned."""
         await self._ensure_initialized()
 
         def _do() -> list[tuple[Any, ...]]:
@@ -308,6 +323,8 @@ class SQLiteCheckpointer:
         return summaries
 
     async def delete(self, invocation_id: str) -> None:
+        """Remove the row for ``invocation_id``. No-op when no row
+        exists (no error). The delete is durable on return."""
         await self._ensure_initialized()
 
         def _do() -> None:

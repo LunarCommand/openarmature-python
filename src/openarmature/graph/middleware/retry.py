@@ -4,14 +4,14 @@
 
 Wraps a node's chain with retry-on-transient-error logic. Each retry
 attempt produces its own ``started``/``completed`` event pair from the
-engine — retry middleware does NOT dispatch directly. With N attempts
+engine; retry middleware does NOT dispatch directly. With N attempts
 the engine emits 2N events tagged with ``attempt_index`` 0..N-1, the
 first 2(N-1) ending in ``error`` and the final pair ending in either
 ``post_state`` (success) or ``error`` (terminal failure).
 
 Cancellation MUST propagate. Python's ``asyncio.CancelledError`` extends
 ``BaseException`` (not ``Exception``), so the ``except Exception`` here
-does not catch it — cancellation falls straight through to the caller,
+does not catch it; cancellation falls straight through to the caller,
 preserving the host's intent to abort.
 """
 
@@ -33,7 +33,7 @@ from ._core import NextCall
 
 
 def default_classifier(exc: Exception, _state: Any) -> bool:
-    """Default classifier — purely category-based, ignores state.
+    """Default classifier; purely category-based, ignores state.
 
     Returns True if either the exception itself or its ``__cause__``
     carries a ``category`` attribute matching ``TRANSIENT_CATEGORIES``.
@@ -66,7 +66,7 @@ def exponential_jitter_backoff(
 ) -> float:
     """Default backoff: ``random.uniform(0, min(cap, base * 2**attempt))``.
 
-    Jitter is mandatory — fixed exponential backoff causes
+    Jitter is mandatory; fixed exponential backoff causes
     synchronized retries from many concurrent callers, amplifying
     rate-limit storms. ``base`` and ``cap`` are configurable; the
     defaults are 1.0 and 30.0 seconds.
@@ -75,7 +75,7 @@ def exponential_jitter_backoff(
 
 
 def deterministic_backoff(seconds: float) -> Callable[[int], float]:
-    """Constant-N seconds backoff factory — for deterministic testing.
+    """Constant-N seconds backoff factory, for deterministic testing.
 
     The conformance fixtures use this form via ``backoff: {type:
     deterministic, seconds: N}`` so retry timing is reproducible across

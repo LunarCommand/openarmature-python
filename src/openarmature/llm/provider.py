@@ -3,14 +3,14 @@
 
 """Provider Protocol + list-level message validation.
 
-A ``Provider`` is stateless — every call carries the full message
+A ``Provider`` is stateless; every call carries the full message
 list. It does not loop on tool calls (the caller is responsible for
 executing tools and making a follow-on ``complete()`` with results)
 and it does not retry on transient errors (that's middleware's job).
 
 A provider MUST expose two operations:
 
-- ``async ready() -> None`` — verifies the bound model is reachable.
+- ``async ready() -> None``: verifies the bound model is reachable.
   A successful return implies the next ``complete()`` would not
   raise errors that surface mismatched configuration or unloaded
   state.

@@ -15,7 +15,7 @@ a fresh subgraph-only invocation.
 
 Parameterized on both the parent's state type (`ParentT`) and the subgraph's
 state type (`ChildT`). The outer graph only ever sees `run(state: ParentT)`
-— the `ChildT` lives on the `compiled` and `projection` fields and is
+; the `ChildT` lives on the `compiled` and `projection` fields and is
 invisible at the outer graph's node dispatch site.
 """
 
@@ -39,7 +39,7 @@ class SubgraphNode[ParentT: State, ChildT: State]:
     """A node backed by a compiled subgraph.
 
     The parent's per-node middleware on a SubgraphNode wraps the
-    subgraph dispatch as a single atomic call — parent middleware
+    subgraph dispatch as a single atomic call; parent middleware
     does NOT cross into the subgraph's internal nodes (those are
     wrapped by the subgraph's own middleware independently).
     """
@@ -60,7 +60,7 @@ class SubgraphNode[ParentT: State, ChildT: State]:
 
         When `context` is None (e.g., direct invocation in tests, or a parent
         call that doesn't thread a context), the subgraph runs via its own
-        public `invoke()` — a fresh root invocation with no parent observer
+        public `invoke()`; a fresh root invocation with no parent observer
         chain.
 
         When `context` is provided (the engine's normal path during

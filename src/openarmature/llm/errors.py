@@ -77,19 +77,19 @@ class LlmProviderError(Exception):
 
 
 class ProviderAuthentication(LlmProviderError):
-    """Auth failed — invalid key, expired token, missing credentials."""
+    """Auth failed: invalid key, expired token, missing credentials."""
 
     category = PROVIDER_AUTHENTICATION
 
 
 class ProviderUnavailable(LlmProviderError):
-    """Provider is unreachable — network failure, 5xx error, DNS, timeout."""
+    """Provider is unreachable: network failure, 5xx error, DNS, timeout."""
 
     category = PROVIDER_UNAVAILABLE
 
 
 class ProviderInvalidModel(LlmProviderError):
-    """The bound model does not exist on this provider. Terminal —
+    """The bound model does not exist on this provider. Terminal:
     retry will not succeed without changing the bound model."""
 
     category = PROVIDER_INVALID_MODEL

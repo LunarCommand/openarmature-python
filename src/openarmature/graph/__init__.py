@@ -39,9 +39,11 @@ from .events import NodeEvent
 from .fan_out import FanOutConfig, FanOutNode
 from .middleware import (
     Middleware,
+    NextCall,
     RetryMiddleware,
     TimingMiddleware,
     TimingRecord,
+    default_classifier,
     deterministic_backoff,
     exponential_jitter_backoff,
 )
@@ -77,6 +79,7 @@ __all__ = [
     "MappingReferencesUndeclaredField",
     "Middleware",
     "MultipleOutgoingEdges",
+    "NextCall",
     "Node",
     "NodeEvent",
     "NodeException",
@@ -102,6 +105,7 @@ __all__ = [
     "TimingRecord",
     "UnreachableNode",
     "append",
+    "default_classifier",
     "deterministic_backoff",
     "exponential_jitter_backoff",
     "last_write_wins",

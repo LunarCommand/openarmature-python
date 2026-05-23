@@ -3,7 +3,7 @@
 Each provider talks to a specific LLM backend's wire format and
 satisfies the :class:`openarmature.llm.Provider` Protocol. The current
 catalog ships :class:`OpenAIProvider` (OpenAI Chat Completions wire
-format — also covers vLLM, LM Studio, llama.cpp). Anthropic / Bedrock /
+format; also covers vLLM, LM Studio, llama.cpp). Anthropic / Bedrock /
 gateway-shaped providers will land here in later phases.
 
 Users typically import from the package root::

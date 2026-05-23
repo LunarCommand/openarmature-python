@@ -1,4 +1,4 @@
-"""PromptManager — user-facing fetch + render + composite-fallback."""
+"""PromptManager; user-facing fetch + render + composite-fallback."""
 
 from __future__ import annotations
 
@@ -37,10 +37,10 @@ class PromptManager:
     Users interact with the manager; backends are an implementation
     detail of construction. The manager owns:
 
-    - ``fetch`` — consults backends in order per §8 fallback semantics.
-    - ``render`` — synchronous local string transform; produces a
+    - ``fetch``: consults backends in order per §8 fallback semantics.
+    - ``render``: synchronous local string transform; produces a
       ``PromptResult``.
-    - ``get`` — convenience: ``render(await fetch(...), variables)``.
+    - ``get``: convenience: ``render(await fetch(...), variables)``.
     """
 
     def __init__(self, *backends: PromptBackend) -> None:
@@ -59,7 +59,7 @@ class PromptManager:
         """Consult composed backends in order, applying §8 fallback.
 
         - First successful fetch wins; further backends are not consulted.
-        - ``PromptNotFound`` from any backend STOPS the chain — the
+        - ``PromptNotFound`` from any backend STOPS the chain: the
           error propagates. Logical absence MUST NOT silently
           substitute a stale alternative.
         - ``PromptStoreUnavailable`` from a backend continues to the
@@ -109,7 +109,7 @@ class PromptManager:
     ) -> PromptResult:
         """Apply ``variables`` to ``prompt.template`` and return a PromptResult.
 
-        Render is synchronous — no I/O. Variables are strict by
+        Render is synchronous; no I/O. Variables are strict by
         default per §7: a template reference to a name not in
         ``variables`` raises ``PromptRenderError``.
 

@@ -9,12 +9,12 @@ Two ``ContextVar``-backed primitives that any observability backend
 mapping (OTel here, Langfuse / Datadog / custom in the future)
 consumes through a uniform user-readable surface:
 
-- :data:`current_correlation_id` — the per-invocation cross-backend
+- :data:`current_correlation_id`: the per-invocation cross-backend
   join key. Set on every outermost ``invoke()`` call (caller-supplied
   or auto-generated UUIDv4) and reset on return. User code in node
   bodies, middleware, and observers reads it via
   :func:`current_correlation_id`.
-- :data:`_active_observers` — the observer set in scope for any code
+- :data:`_active_observers`: the observer set in scope for any code
   running INSIDE a node body. Read by capability backends that need
   to emit observer events from outside the engine's per-step
   machinery (e.g., the llm-provider span hook puts a NodeEvent-shaped
@@ -22,8 +22,8 @@ consumes through a uniform user-readable surface:
   it). The engine sets this around each ``chain(state)`` invocation
   via ``try/finally`` so reset is guaranteed even on exception.
 
-These primitives live in the core package — no OpenTelemetry
-dependency — because the contract is backend-agnostic. The
+These primitives live in the core package (no OpenTelemetry
+dependency) because the contract is backend-agnostic. The
 OTel-specific surfacing lives under ``openarmature.observability.otel``
 and is gated behind the ``[otel]`` extras.
 """
@@ -52,8 +52,8 @@ def current_correlation_id() -> str | None:
     ``None`` if no openarmature invocation is in scope.
 
     The correlation ID is readable from anywhere within an
-    invocation's async call tree — node bodies, middleware, observers
-    — without explicit threading through function arguments. This is
+    invocation's async call tree (node bodies, middleware, observers)
+    without explicit threading through function arguments. This is
     the public reader.
 
     Returns ``None`` outside an invocation (e.g., at module import
@@ -142,7 +142,7 @@ def current_active_observers() -> tuple[SubscribedObserver, ...]:
     delivery queue, this preserves strict serial event ordering
     across all event sources within an invocation.
 
-    Returns an empty tuple when no invocation is active, by design —
+    Returns an empty tuple when no invocation is active, by design;
     callers can iterate without a None check.
     """
     return _active_observers_var.get()
@@ -357,14 +357,14 @@ def current_active_observer_span() -> object | None:
     ``prepare_sync`` created synchronously during dispatch. The engine's
     ``innermost`` reads this AFTER ``_dispatch_started`` returns and
     attaches the span into the OTel context (via a try-imported OTel
-    helper) so that any logs emitted FROM INSIDE the node body — even
-    on the first line, before any ``await`` — pick up the span's
+    helper) so that any logs emitted FROM INSIDE the node body (even
+    on the first line, before any ``await``) pick up the span's
     trace_id/span_id via OTel's ``LoggingHandler``.
 
     Lifecycle: the value is ``None`` outside a node-body scope (between
     dispatches, during merge, during completed-event dispatch). The
     engine's ``innermost`` clears it to ``None`` in its ``finally``
-    block right after the OTel detach — so a subsequent
+    block right after the OTel detach; so a subsequent
     ``prepare_sync`` that raises or early-returns can't reveal a stale
     span from a previous node when the engine reads.
 

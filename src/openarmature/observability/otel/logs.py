@@ -2,7 +2,7 @@
 
 """OTel Logs Bridge integration.
 
-Provides :func:`install_log_bridge` — an opt-in helper that wires
+Provides :func:`install_log_bridge`; an opt-in helper that wires
 the stdlib :mod:`logging` root logger through the OTel Logs SDK so
 every log record emitted within an invocation carries the active
 ``trace_id`` / ``span_id`` plus ``openarmature.correlation_id``.
@@ -88,8 +88,8 @@ def install_log_bridge(
     The factory placement matters: log records emitted from
     anywhere within an invocation MUST carry
     ``openarmature.correlation_id``. Filters added to the root
-    logger fire only for records originating on root — Python's
-    propagation walks ancestor handlers but not ancestor filters —
+    logger fire only for records originating on root; Python's
+    propagation walks ancestor handlers but not ancestor filters;
     so a root-logger filter misses every child-logger record. The
     factory hook fires at record construction time, before any
     logger or handler dispatch, so every record gets the attribute
@@ -101,7 +101,7 @@ def install_log_bridge(
 
     The user retains responsibility for providing the
     :class:`LoggerProvider` (typically built with their preferred
-    exporter — :class:`InMemoryLogRecordExporter` for tests,
+    exporter; :class:`InMemoryLogRecordExporter` for tests,
     :class:`OTLPLogExporter` for production).
     """
     from opentelemetry.instrumentation.logging.handler import LoggingHandler

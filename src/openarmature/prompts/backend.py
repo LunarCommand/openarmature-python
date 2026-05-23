@@ -9,7 +9,7 @@ from .prompt import Prompt
 
 @runtime_checkable
 class PromptBackend(Protocol):
-    """Backend protocol — implementations and sibling packages plug into this.
+    """Backend protocol; implementations and sibling packages plug into this.
 
     A PromptBackend exposes one operation: ``fetch`` a prompt by name
     and label. Backends do NOT render; rendering is the manager's
@@ -33,4 +33,13 @@ class PromptBackend(Protocol):
     original fetch time, not the cache hit time.
     """
 
-    async def fetch(self, name: str, label: str = "production") -> Prompt: ...
+    async def fetch(self, name: str, label: str = "production") -> Prompt:
+        """Return the prompt registered as ``(name, label)``.
+
+        ``label`` defaults to ``"production"``. Raises
+        ``PromptNotFound`` if no prompt matches, and
+        ``PromptStoreUnavailable`` if the backing store is unreachable.
+        The returned ``Prompt`` carries its raw template plus
+        metadata; rendering is the manager's job, not the backend's.
+        """
+        ...

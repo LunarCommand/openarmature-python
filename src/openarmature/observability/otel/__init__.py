@@ -7,21 +7,21 @@
 
 """OpenTelemetry backend mapping for openarmature observability.
 
-This subpackage is extras-gated — install with
+This subpackage is extras-gated; install with
 ``pip install openarmature[otel]`` to bring in ``opentelemetry-api``
 and ``opentelemetry-sdk``.
 
 Importing this subpackage without the extras installed raises an
 informative :class:`ImportError` pointing the caller at the install
 command. We do NOT do partial fallbacks (e.g., a stubbed observer
-that silently no-ops) — the user opted in to OTel by importing
+that silently no-ops); the user opted in to OTel by importing
 ``openarmature.observability.otel``, so a clean failure on missing
 deps is preferable to silent-broken behavior.
 
 Public surface:
 
-- :class:`OTelObserver` — observer-driven span lifecycle.
-- :func:`install_log_bridge` — helper to wire the OTel Logs SDK to
+- :class:`OTelObserver`: observer-driven span lifecycle.
+- :func:`install_log_bridge`: helper to wire the OTel Logs SDK to
   the stdlib ``logging`` root with ``correlation_id`` injection.
 """
 

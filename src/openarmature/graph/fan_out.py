@@ -1,6 +1,6 @@
 # Spec: realizes pipeline-utilities §9 (fan-out node).
 
-"""Fan-out node — parallel per-item / per-count subgraph dispatch.
+"""Fan-out node: parallel per-item / per-count subgraph dispatch.
 
 A fan-out node executes a compiled subgraph (or async callable) once
 per item in a designated parent state field, with instances running
@@ -14,8 +14,8 @@ executions overlap in time within a single invocation; everywhere else
 
 The module contains:
 
-- :class:`FanOutConfig` — frozen configuration dataclass.
-- :class:`FanOutNode` — a node compatible with the engine's Node
+- :class:`FanOutConfig`: frozen configuration dataclass.
+- :class:`FanOutNode`: a node compatible with the engine's Node
   Protocol; ``run`` resolves count + concurrency, builds per-instance
   states, runs them concurrently with the configured error policy, and
   fan-ins results back as a partial update.
@@ -98,8 +98,14 @@ class FanOutNode[ParentT: State, ChildT: State]:
     middleware: tuple[Middleware, ...] = ()
 
     async def run(self, state: ParentT) -> Mapping[str, Any]:
+        """Not implemented at this level. The fan-out node requires the
+        engine's invocation context to resolve count and concurrency
+        and dispatch instances; the engine calls
+        :meth:`run_with_context` instead. This method exists only to
+        satisfy the :class:`Node` Protocol and always raises
+        :class:`NotImplementedError`."""
         del state
-        raise RuntimeError(
+        raise NotImplementedError(
             "FanOutNode is dispatched by the graph engine; if you're seeing "
             "this, you've likely instantiated it outside an engine context "
             "(e.g., calling node.run(state) directly instead of compiled.invoke)."

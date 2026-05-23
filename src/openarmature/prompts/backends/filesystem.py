@@ -27,12 +27,12 @@ class FilesystemPromptBackend:
     without needing a sidecar metadata file. Per spec §3, this
     satisfies the "stable identifier" requirement. The 16-char
     prefix puts the birthday-paradox collision boundary at ~4B
-    distinct templates — well past any realistic single-backend
+    distinct templates; well past any realistic single-backend
     exposure. Higher-scale backends should widen further or pick a
     different stable identifier (semver from a sidecar metadata
     file, git short-SHAs, etc.).
 
-    This backend reads from disk on every fetch — no caching. A
+    This backend reads from disk on every fetch; no caching. A
     caching backend (e.g., openarmature-langfuse) that returns
     cached results MUST preserve the original ``fetched_at`` on the
     returned Prompt, not the cache-hit time, per spec §3.
@@ -42,6 +42,14 @@ class FilesystemPromptBackend:
         self._root = root
 
     async def fetch(self, name: str, label: str = "production") -> Prompt:
+        """Read ``<root>/<label>/<name>.j2`` and return the prompt.
+
+        Reads on every call (no caching). The returned prompt's
+        ``version`` is the leading 16 hex chars of the template's
+        SHA-256, and ``template_hash`` is the full digest. Raises
+        ``PromptNotFound`` when the file is missing and
+        ``PromptStoreUnavailable`` on any other I/O error.
+        """
         path = self._root / label / f"{name}.j2"
         try:
             template_source = await asyncio.to_thread(path.read_text, encoding="utf-8")

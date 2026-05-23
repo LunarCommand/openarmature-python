@@ -1,4 +1,4 @@
-"""Prompt-management capability — fetch, render, and trace named prompts."""
+"""Prompt-management capability; fetch, render, and trace named prompts."""
 
 from .backend import PromptBackend
 from .backends import FilesystemPromptBackend

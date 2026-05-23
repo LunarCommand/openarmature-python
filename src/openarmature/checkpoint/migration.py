@@ -76,6 +76,16 @@ class MigrationRegistry:
         self._edges: dict[str, list[StateMigration]] = {}
 
     def register(self, migration: StateMigration) -> None:
+        """Add a migration to the registry.
+
+        Raises ``ValueError`` if ``migration.to_version`` is empty
+        (the empty string marks "no schema_version declared" and is
+        not a valid chain target). Raises
+        :class:`CheckpointStateMigrationChainAmbiguous` if a migration
+        with the same ``(from_version, to_version)`` pair is already
+        registered. On success the migration becomes available to
+        :meth:`resolve_chain` for any path that crosses it.
+        """
         # Per spec §10.2 / proposal 0014: empty ``to_version`` would
         # route migrations TO the "not declared" sentinel, which
         # the spec calls out as not migration-eligible — incoherent
@@ -124,7 +134,7 @@ class MigrationRegistry:
         Raises ``CheckpointStateMigrationChainAmbiguous`` if
         multiple distinct shortest paths exist between
         ``from_version`` and ``to_version`` (ambiguous chain per
-        spec §10.10 / §10.12.2 — proposal 0018 / spec v0.16.0).
+        spec §10.10 / §10.12.2; proposal 0018 / spec v0.16.0).
         Same canonical category as the duplicate-pair detection
         in ``register``; one type for chain ambiguity regardless
         of when it surfaces.

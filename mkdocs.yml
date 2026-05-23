@@ -106,6 +106,7 @@ nav:
     - State and reducers: concepts/state-and-reducers.md
     - Graphs: concepts/graphs.md
     - Composition: concepts/composition.md
+    - Middleware: concepts/middleware.md
     - Fan-out: concepts/fan-out.md
     - Parallel branches: concepts/parallel-branches.md
     - LLMs: concepts/llms.md

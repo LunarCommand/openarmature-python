@@ -9,7 +9,7 @@ This module defines:
 
 - `Observer`: the callable shape an observer satisfies.
 - `SubscribedObserver`: pairs an `Observer` with the phase set it
-  subscribes to. Public — users construct one directly when passing
+  subscribes to. Public; users construct one directly when passing
   phase-filtered observers to `invoke(observers=...)`.
 - `RemoveHandle`: returned by `CompiledGraph.attach_observer` so the
   caller can detach later.
@@ -41,7 +41,7 @@ from .state import State
 class Observer(Protocol):
     """The shape of a callable that receives node-boundary events.
 
-    `Observer` is a structural Protocol — any async callable matching the
+    `Observer` is a structural Protocol; any async callable matching the
     signature qualifies, no subclass required. Plain functions, bound
     methods, and class instances with `__call__` all work::
 
@@ -56,11 +56,11 @@ class Observer(Protocol):
       one and coordinate ordering. The graph itself never awaits
       observers.
     - Observers MUST NOT alter state, routing, or any other aspect
-      of the graph run — read-only side effects (logging, metrics,
+      of the graph run. Read-only side effects (logging, metrics,
       span emission) only.
 
     The event parameter is positional-only (`event, /`) so structural
-    conformance doesn't pin you to that name — any of `event`, `_event`,
+    conformance doesn't pin you to that name; any of `event`, `_event`,
     `e`, etc. matches.
 
     Optional ``prepare_sync`` extension
@@ -71,12 +71,12 @@ class Observer(Protocol):
 
     that the engine calls IN THE ENGINE TASK, BEFORE queueing the
     event for the async ``__call__``. This exists for observers that
-    need to set up state — e.g., open a span and stash a handle in
-    a ContextVar — that the engine itself must read synchronously
+    need to set up state (e.g., open a span and stash a handle in a
+    ContextVar) that the engine itself must read synchronously
     before running the node body (otherwise logs emitted on the
     first line of the body wouldn't see the right span).
 
-    ``prepare_sync`` is **opt-in via ``hasattr``** — no subclass or
+    ``prepare_sync`` is **opt-in via ``hasattr``**; no subclass or
     Protocol method required. Observers that don't define it skip
     the synchronous prep entirely; observers that do define it run
     only for ``"started"``-phase events, with errors warned-not-
@@ -114,15 +114,15 @@ class SubscribedObserver:
 
     Observers register with an optional ``phases`` parameter naming
     the phase strings they want to receive. The default is
-    ``ALL_PHASES`` — historically named when there were only two
-    phases, now meaning "the default subscription"
+    ``ALL_PHASES``, historically named when there were only two
+    phases; it now means "the default subscription"
     (``{"started", "completed"}``). The ``"checkpoint_saved"`` phase
     is opt-in: subscribe to it explicitly via
     ``phases={"checkpoint_saved"}`` (or include it in a custom set).
     ``KNOWN_PHASES`` is the full "every phase the engine can produce"
     set used by the registration-time validator.
 
-    Empty phase sets are forbidden — passing one raises
+    Empty phase sets are forbidden; passing one raises
     ``ValueError`` at registration time so misconfiguration surfaces
     immediately.
 
@@ -152,7 +152,7 @@ def _coerce_subscribed(
 
     - A bare `Observer` callable becomes a `SubscribedObserver` with
       either the supplied `phases` or `ALL_PHASES` (the default
-      subscription — `{"started", "completed"}`; subscribing to
+      subscription, `{"started", "completed"}`; subscribing to
       `"checkpoint_saved"` is opt-in via an explicit ``phases``).
     - An existing `SubscribedObserver` passes through unchanged; supplying
       a `phases` kwarg in that case is a misuse and raises.
@@ -170,7 +170,7 @@ def _coerce_subscribed(
 @dataclass(frozen=True)
 class RemoveHandle:
     """Returned by ``CompiledGraph.attach_observer``. Call
-    ``.remove()`` to detach the observer. Idempotent — calling
+    ``.remove()`` to detach the observer. Idempotent: calling
     ``.remove()`` after the observer is already detached is a no-op.
 
     Changes to the registered observer set during a graph run do NOT
@@ -181,6 +181,10 @@ class RemoveHandle:
     _observer: SubscribedObserver
 
     def remove(self) -> None:
+        """Detach the observer from its compiled graph. Idempotent: a
+        second call is a no-op rather than an error. The change takes
+        effect on the next ``invoke()``; in-flight invocations keep
+        the observer set they started with."""
         try:
             self._observers.remove(self._observer)
         except ValueError:
@@ -299,7 +303,7 @@ class _InvocationContext:
 
         Checkpointing fields propagate unchanged: subgraph-internal
         nodes save to the same backend with the same invocation_id
-        (per spec §10.3 — one save per inner-node completion).
+        (per spec §10.3; one save per inner-node completion).
         """
         return _InvocationContext(
             queue=self.queue,
@@ -378,7 +382,7 @@ class _InvocationContext:
 
         Branch identity lives on the
         ``observability.correlation._branch_name_var`` ContextVar
-        rather than on the descend context — set inside the
+        rather than on the descend context; set inside the
         branch's task closure so ``copy_context`` inherits it
         through the subgraph's execution.
 
@@ -506,8 +510,8 @@ async def deliver_loop(queue: asyncio.Queue[_QueuedItem | None]) -> None:
     - No observer receives event N+1 until everyone has finished N
       (the loop processes one item fully before pulling the next).
     - Observers whose ``phases`` set excludes the event's phase do
-      NOT receive it. Phase filter applies at delivery, not dispatch
-      — the engine still produces both events for every attempt.
+      NOT receive it. Phase filter applies at delivery, not dispatch;
+      the engine still produces both events for every attempt.
     - Observer exceptions don't propagate, don't break siblings,
       don't block subsequent events. Reported via ``warnings.warn``.
 

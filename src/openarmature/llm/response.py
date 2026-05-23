@@ -9,7 +9,7 @@
 The ``Response`` is what ``Provider.complete()`` returns: the
 assistant message, a finish reason, optional usage, and the verbatim
 parsed provider response. ``raw`` carries everything the provider
-returned — including fields the abstraction doesn't normalize
+returned; including fields the abstraction doesn't normalize
 (logprobs, content-filter detail, vendor-specific extensions) so
 users who need them can reach through the abstraction directly.
 
