@@ -66,4 +66,9 @@ jobs:
         with:
           apiToken: ${{ secrets.CF_API_TOKEN }}
           accountId: ${{ secrets.CF_ACCOUNT_ID }}
-          command: pages deploy site --project-name=openarmature-python-docs --branch=main
+          # Pass an ASCII-safe commit message to Cloudflare. The
+          # deployment API rejects some valid-UTF-8 characters (e.g.
+          # the section sign and arrow glyphs commonly used in spec
+          # references), and the failure surfaces only at deploy time.
+          # The SHA is sufficient to cross-reference the GitHub commit.
+          command: pages deploy site --project-name=openarmature-python-docs --branch=main --commit-hash=${{ github.sha }} --commit-message="docs deploy ${{ github.sha }}"
