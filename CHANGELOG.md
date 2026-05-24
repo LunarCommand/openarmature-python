@@ -6,6 +6,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). The
 
 ## [Unreleased]
 
+### Added
+
+- **Patterns docs section** at `docs/patterns/`, sibling to Concepts. Seeded with four recipes drawn from downstream usage and proposal 0008's alternatives section: parameterized entry point, tool-dispatch-as-node, session-as-checkpoint-resume, and bypass-if-output-exists. Patterns are user-level how-to recipes composing existing primitives, not framework contracts; new patterns can be added without spec coordination. Each page follows a problem / approach / snippet / when-right-when-not / cross-references structure.
+
 ### Notes
 
 - **Pinned spec version bumped to v0.17.1.** Proposal 0019 (multi-provider wire-format extension) reframes llm-provider §8 as a catalog of wire-format mappings, with the existing OpenAI-compatible body nested under §8.1. Purely textual on the spec side — no behavioral change, no fixture changes. Code and doc references to §8.X updated to match the new structure (§8.1 → §8.1.1, §8.2 → §8.1.2, §8.3 → §8.1.3, §8.5.1 → §8.1.5.1, §8.1.1 → §8.1.1.1). All existing conformance fixtures continue to pass.
