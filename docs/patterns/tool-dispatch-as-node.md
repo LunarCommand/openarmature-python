@@ -21,12 +21,13 @@ on top of [`Tool`, `ToolCall`, `ToolMessage`](../concepts/llms.md).
 ```python
 import json
 from typing import Annotated
+from pydantic import Field
 from openarmature.graph import END, EndSentinel, GraphBuilder, State, append
 from openarmature.llm import AssistantMessage, Message, Tool, ToolMessage
 
 
 class AgentState(State):
-    messages: Annotated[list[Message], append] = []
+    messages: Annotated[list[Message], append] = Field(default_factory=list)
     turn: int = 0
 
 

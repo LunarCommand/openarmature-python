@@ -26,14 +26,15 @@ across resume).
 
 ```python
 from typing import Annotated
+from pydantic import Field
 from openarmature.checkpoint import SQLiteCheckpointer
 from openarmature.graph import END, GraphBuilder, State, append, merge
 from openarmature.llm import Message
 
 
 class SessionState(State):
-    messages: Annotated[list[Message], append] = []
-    facts: Annotated[dict[str, str], merge] = {}
+    messages: Annotated[list[Message], append] = Field(default_factory=list)
+    facts: Annotated[dict[str, str], merge] = Field(default_factory=dict)
     last_user_input: str = ""
 
 
