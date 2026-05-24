@@ -32,7 +32,7 @@ import inspect
 import warnings
 from collections.abc import Iterable
 from dataclasses import dataclass, field
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 
 from .events import NodeEvent
 from .state import State
@@ -212,6 +212,51 @@ class _QueuedItem:
 _DRAIN_SENTINEL = None
 
 
+# Spec: realizes pipeline-utilities §10.11 per-instance progress
+# tracking in the engine. These are the MUTABLE internal-state
+# counterparts to the FROZEN public ``FanOutProgress`` /
+# ``FanOutInstanceProgress`` shapes the saved CheckpointRecord exposes.
+# ``_maybe_save_checkpoint`` projects this mutable state into the
+# frozen public shape when building a record.
+@dataclass
+class _FanOutInstanceState:
+    """Mutable per-instance state inside a fan-out, updated by the
+    engine as the instance progresses. ``state`` transitions
+    not_started → in_flight → completed.
+
+    - ``result`` holds the per-instance contribution to the fan-out
+      accumulator, set when ``state == "completed"``. The contribution
+      flows into the fan-out's ``target_field`` (success) or
+      ``errors_field`` (recorded error under ``collect`` policy) at the
+      fan-in step.
+    - ``completed_inner_positions`` accumulates ``NodePosition`` entries
+      from inner nodes that complete inside this instance's subgraph
+      execution. Captures the instance's progress for observational
+      purposes when an in_flight save snapshot fires; not used as a
+      resume re-entry point (the instance re-enters at its subgraph's
+      declared entry node per §10.7).
+    """
+
+    state: Literal["completed", "in_flight", "not_started"] = "not_started"
+    result: Any = None
+    completed_inner_positions: list[Any] = field(default_factory=list[Any])  # list[NodePosition]
+
+
+@dataclass
+class _FanOutExecutionState:
+    """Mutable per-fan-out execution state. One entry per in-flight
+    fan-out node in the invocation; lives on
+    ``_InvocationContext.fan_out_progress_state`` keyed by
+    ``(namespace, fan_out_node_name)``. The namespace component
+    disambiguates same-named fan-outs in different subgraph descents.
+    """
+
+    fan_out_node_name: str
+    namespace: tuple[str, ...]
+    instance_count: int
+    instances: list[_FanOutInstanceState]
+
+
 @dataclass
 class _InvocationContext:
     """Per-invocation state threaded through the engine and into subgraphs.
@@ -279,6 +324,17 @@ class _InvocationContext:
     # descents at the same depth project as usual. Shared mutable dict
     # propagates across descents.
     pending_resume_states: dict[int, Any] = field(default_factory=dict[int, Any])
+    # Per spec §10.11: mutable per-fan-out progress tracking. Keyed by
+    # ``(namespace, fan_out_node_name)`` — disambiguates same-named
+    # fan-outs in different subgraph descents. ``FanOutNode`` populates
+    # entries before descending into instances; updates state as
+    # instances progress; the entry stays in the dict for the duration
+    # of the fan-out so concurrent saves see consistent sibling state.
+    # ``_maybe_save_checkpoint`` projects this into the frozen
+    # ``FanOutProgress`` shape on the saved CheckpointRecord.
+    fan_out_progress_state: dict[tuple[tuple[str, ...], str], _FanOutExecutionState] = field(
+        default_factory=dict[tuple[tuple[str, ...], str], _FanOutExecutionState]
+    )
 
     def full_observers(self) -> tuple[SubscribedObserver, ...]:
         """Return the ordered observer list to deliver for events from
@@ -320,6 +376,7 @@ class _InvocationContext:
             resume_skip_set=self.resume_skip_set,
             pending_resume_states=self.pending_resume_states,
             resume_invocation=self.resume_invocation,
+            fan_out_progress_state=self.fan_out_progress_state,
         )
 
     def descend_into_fan_out_instance(
@@ -362,6 +419,10 @@ class _InvocationContext:
             # saved inner state to thread in. Drop the map.
             pending_resume_states={},
             resume_invocation=self.resume_invocation,
+            # Propagate the shared per-fan-out tracking dict so an
+            # inner-instance node can update its own entry and so the
+            # outer save sees consistent sibling state.
+            fan_out_progress_state=self.fan_out_progress_state,
         )
 
     def descend_into_parallel_branch(
@@ -406,6 +467,7 @@ class _InvocationContext:
             resume_skip_set=frozenset(),
             pending_resume_states={},
             resume_invocation=self.resume_invocation,
+            fan_out_progress_state=self.fan_out_progress_state,
         )
 
     def take_step(self) -> int:
