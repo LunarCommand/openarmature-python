@@ -4,7 +4,7 @@ The fixtures (``spec/llm-provider/conformance/``) describe a provider's
 behavior in terms of OpenAI Chat Completions wire-format mock
 responses + expected ``Provider.complete()`` / ``Provider.ready()``
 outcomes. The harness drives the real :class:`OpenAIProvider` via
-``httpx.MockTransport`` so the wire-mapping path (spec §8) is
+``httpx.MockTransport`` so the wire-mapping path (spec §8.1) is
 exercised end-to-end — fixture 005 explicitly tests that mapping, so
 mocking at the Provider boundary would skip what we want to verify.
 

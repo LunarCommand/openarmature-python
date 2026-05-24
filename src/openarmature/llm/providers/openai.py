@@ -1,5 +1,5 @@
-# Spec: realizes llm-provider §8 (concrete OpenAI provider) including
-# the §8.3 wire-error mapping table.
+# Spec: realizes llm-provider §8.1 (OpenAI-compatible wire-format mapping) including
+# the §8.1.3 wire-error mapping table.
 
 """OpenAI-compatible HTTPX-based provider.
 
@@ -389,7 +389,7 @@ class OpenAIProvider:
         return self._parse_response(cast("dict[str, Any]", payload_raw), schema_dict, schema_class)
 
     # ------------------------------------------------------------------
-    # Request building (spec §8.1)
+    # Request building (spec §8.1.1)
     # ------------------------------------------------------------------
 
     def _build_request_body(
@@ -433,7 +433,7 @@ class OpenAIProvider:
                 },
             }
         elif not include_response_format:
-            # On the fallback path the §8.5.1 contract is "response_format
+            # On the fallback path the §8.1.5.1 contract is "response_format
             # MUST NOT be on the wire." RuntimeConfig is extra="allow" so
             # a caller could pass response_format through via the extras
             # loop above; strip it here so the fallback contract holds
@@ -442,7 +442,7 @@ class OpenAIProvider:
         return body
 
     # ------------------------------------------------------------------
-    # Response parsing (spec §8.2)
+    # Response parsing (spec §8.1.2)
     # ------------------------------------------------------------------
 
     def _parse_response(
@@ -460,7 +460,7 @@ class OpenAIProvider:
             raise ProviderInvalidResponse(f"response missing required fields: {exc}") from exc
         finish_reason: str = finish_reason_raw if isinstance(finish_reason_raw, str) else "error"
 
-        # Per §8.2 (and conformance fixture 005's
+        # Per §8.1.2 (and conformance fixture 005's
         # `function_call_legacy_finish_reason_mapping` case): the
         # legacy `finish_reason: "function_call"` value MUST be
         # normalized to the spec's `"tool_calls"`. This is a
@@ -717,13 +717,13 @@ def _augment_messages_with_schema_directive(
 
 
 def _message_to_wire(msg: Message) -> dict[str, Any]:
-    """Spec §8.1 request mapping for one message."""
+    """Spec §8.1.1 request mapping for one message."""
     if isinstance(msg, SystemMessage):
         return {"role": "system", "content": msg.content}
     if isinstance(msg, UserMessage):
-        # Dual-shape user content (§8.1): string maps directly; a
+        # Dual-shape user content (§8.1.1): string maps directly; a
         # content-block sequence maps to OpenAI's content-array form
-        # per §8.1.1.
+        # per §8.1.1.1.
         if isinstance(msg.content, str):
             return {"role": "user", "content": msg.content}
         return {
@@ -760,7 +760,7 @@ def _message_to_wire(msg: Message) -> dict[str, Any]:
     }
 
 
-# Spec §8.1.1: content-block to OpenAI content-array entry mapping.
+# Spec §8.1.1.1: content-block to OpenAI content-array entry mapping.
 # Both URL-referenced and inline-base64 image blocks go through
 # OpenAI's `image_url` entry shape; the inline case is expressed as
 # an RFC 2397 data: URI carrying media_type + base64_data. The
@@ -872,7 +872,7 @@ def classify_http_error(resp: httpx.Response) -> LlmProviderError:
     if status in (401, 403):
         return ProviderAuthentication(message or f"HTTP {status}")
     if status == 400:
-        # Spec §8.3: HTTP 400 bodies that indicate the bound model
+        # Spec §8.1.3: HTTP 400 bodies that indicate the bound model
         # rejected a content block map to provider_unsupported_content_block
         # rather than the generic provider_invalid_request. The
         # detection rule is implementation-defined.

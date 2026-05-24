@@ -484,7 +484,7 @@ class MockResponse(_AllowExtras):
     Permissive shape because the body's content mirrors OpenAI's wire
     format which is wide and evolving; modelling every field would
     duplicate the OpenAI schema. The ``llm-provider`` capability's
-    spec.md §8 is the authoritative shape.
+    spec.md §8.1 is the authoritative shape.
     """
 
     status: int | None = None

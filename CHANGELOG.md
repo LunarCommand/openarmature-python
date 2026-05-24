@@ -4,6 +4,12 @@ All notable changes to `openarmature-python` are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). The package follows [Semantic Versioning](https://semver.org/); pre-1.0 minor bumps may carry behavioral changes per [spec governance](https://github.com/LunarCommand/openarmature-spec/blob/main/GOVERNANCE.md).
 
+## [Unreleased]
+
+### Notes
+
+- **Pinned spec version bumped to v0.17.1.** Proposal 0019 (multi-provider wire-format extension) reframes llm-provider §8 as a catalog of wire-format mappings, with the existing OpenAI-compatible body nested under §8.1. Purely textual on the spec side — no behavioral change, no fixture changes. Code and doc references to §8.X updated to match the new structure (§8.1 → §8.1.1, §8.2 → §8.1.2, §8.3 → §8.1.3, §8.5.1 → §8.1.5.1, §8.1.1 → §8.1.1.1). All existing conformance fixtures continue to pass.
+
 ## [0.8.0] — 2026-05-23
 
 LLM-provider span payload and GenAI semconv release. Pinned spec
