@@ -118,8 +118,11 @@ class CaseSpec(BaseModel):
     # llm-provider sub-cases.
     call: LlmCallSpec | None = None
     expected_wire_request: dict[str, Any] | None = None
-    # Checkpointing fixtures (024–031).
-    checkpointer: str | None = None
+    # Checkpointing fixtures (024-031, 048-054). Two shapes:
+    #   - ``str`` (e.g. ``"in_memory"``): backend kind selector.
+    #   - ``dict``: backend kind + config knobs (e.g. fixture 054's
+    #     ``{kind: in_memory_batched, fan_out_internal_save_batching: ...}``).
+    checkpointer: str | dict[str, Any] | None = None
     first_run_expected_error: dict[str, Any] | None = None
     saved_record_assertions: dict[str, Any] | None = None
     latest_record_assertions: dict[str, Any] | None = None

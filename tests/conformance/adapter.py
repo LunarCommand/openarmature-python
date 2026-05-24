@@ -67,6 +67,13 @@ def _parse_type(s: str) -> Any:
         return dict[str, Any]
     if s == "list<dict>":
         return list[dict[str, Any]]
+    # proposal-0009 fixture 052: ``error_entry`` is the spec's shorthand
+    # for the per-instance error record contributed to ``errors_field``
+    # under collect mode. The exact shape is implementation-defined per
+    # §9.5; the engine ships dict[str, str] with at least
+    # ``fan_out_index`` and ``category`` keys.
+    if s == "list<error_entry>":
+        return list[dict[str, str]]
     if s.startswith("list<") and s.endswith(">"):
         return list[_parse_type(s[5:-1])]
     if s.startswith("dict<") and s.endswith(">"):
@@ -171,14 +178,40 @@ def _make_pure_update_fn(
     update: Mapping[str, Any],
     trace: list[str],
 ) -> Callable[[Any], Awaitable[Mapping[str, Any]]]:
-    """`update_pure` test seam — same as `update` but explicitly tagged as
-    state-independent. Used by fan-out fixtures whose worker subgraphs
-    apply a fixed update that doesn't depend on the input state."""
+    """`update_pure` test seam — applies a fixed update.
+
+    Two shapes coexist across the spec fixtures:
+
+    - Literal values (e.g. ``update_pure: {a_ran: true, count: 0}``)
+      — most common, the snapshot is the partial verbatim.
+    - Field references (e.g. fixture 050 ``update_pure: {stage1: input}``)
+      — when a value is a string AND the state has a field of that
+      name, treat the string as a field-name reference and resolve
+      to ``state.<input>`` at call time. This handles fixtures that
+      use ``update_pure`` to copy one inner field to another without
+      a ``multiplier`` (which would route through ``update_from_field``).
+
+    The disambiguation is deliberately lax: a literal-string update
+    (e.g. ``update_pure: {label: "foo"}``) accidentally matching a
+    state field name would resolve incorrectly. Real fixtures don't
+    exercise this overlap; if a future fixture needs both shapes
+    disambiguated, prefer ``update_pure_from_state`` for the
+    field-reference case and keep ``update_pure`` strictly literal.
+    """
     snapshot = dict(update)
 
-    async def fn(_state: Any) -> Mapping[str, Any]:
+    async def fn(state: Any) -> Mapping[str, Any]:
         trace.append(node_name)
-        return copy.deepcopy(snapshot)
+        resolved: dict[str, Any] = {}
+        state_cls = cast("type[Any]", type(state))
+        model_fields = cast("dict[str, Any]", getattr(state_cls, "model_fields", {}))
+        state_field_names = set(model_fields.keys())
+        for k, v in snapshot.items():
+            if isinstance(v, str) and v in state_field_names:
+                resolved[k] = getattr(state, v)
+            else:
+                resolved[k] = copy.deepcopy(v)
+        return resolved
 
     return fn
 
@@ -301,6 +334,84 @@ def _make_flaky_instance_only_fn(
             raise _CategorizedException(
                 message="flaky_instance_only first-attempt failure",
                 category=category,
+            )
+        if success_compute:
+            return _resolve_success_compute(success_compute, state)
+        return {}
+
+    return fn
+
+
+def _make_flaky_per_index_fn(
+    node_name: str,
+    cfg: Mapping[str, Any],
+    trace: list[str],
+    *,
+    instance_attempt_recorder: dict[int, list[int]] | None = None,
+) -> Callable[[Any], Awaitable[Mapping[str, Any]]]:
+    """Build a flaky-per-index node body. Two failure-injection shapes
+    (per proposal-0009 fixture set 048-054):
+
+    - ``fail_first_run_indices: [int, ...]`` — instances with these
+      indices fail on the FIRST CALL EVER (the first-run path); all
+      subsequent calls (resume) succeed. The closure tracks "have I
+      ever failed" via a shared flag that flips on the first raise.
+
+    - ``always_fail_indices: [int, ...]`` — instances with these
+      indices fail on EVERY call. Used by collect-mode fixtures (052)
+      where the failure becomes an error contribution on the saved
+      record and rolls forward verbatim on resume.
+
+    Both forms share ``success_compute`` for the success-path state
+    update.
+
+    Reads ``current_fan_out_index()`` to determine which fan-out
+    instance is currently executing. Returns the success_compute output
+    for non-failing indices.
+
+    ``instance_attempt_recorder`` (optional): when supplied, the closure
+    appends each call's ``current_attempt_index()`` to
+    ``instance_attempt_recorder[idx]`` so the test driver can later
+    assert per-instance retry-count expectations
+    (``instance_N_attempt_index_on_resume`` /
+    ``instance_N_resume_attempt_count`` directives).
+    """
+    from openarmature.observability.correlation import (  # noqa: PLC0415
+        current_attempt_index,
+        current_fan_out_index,
+    )
+
+    fail_first_run_indices = set(cfg.get("fail_first_run_indices") or [])
+    always_fail_indices = set(cfg.get("always_fail_indices") or [])
+    success_compute = dict(cfg.get("success_compute", {}))
+    has_failed_once = [False]
+    traced = [False]
+
+    async def fn(state: Any) -> Mapping[str, Any]:
+        if not traced[0]:
+            trace.append(node_name)
+            traced[0] = True
+        idx = current_fan_out_index()
+        if idx is None:
+            # Defensive — flaky_per_index only makes sense inside a
+            # fan-out instance. Surface as a categorized failure so
+            # mismatched fixture wiring is loud rather than silent.
+            raise _CategorizedException(
+                message=f"flaky_per_index({node_name}) called outside a fan-out instance",
+                category="node_exception",
+            )
+        if instance_attempt_recorder is not None:
+            instance_attempt_recorder.setdefault(idx, []).append(current_attempt_index())
+        if idx in always_fail_indices:
+            raise _CategorizedException(
+                message=f"flaky_per_index({node_name}) always-fail at idx={idx}",
+                category="node_exception",
+            )
+        if idx in fail_first_run_indices and not has_failed_once[0]:
+            has_failed_once[0] = True
+            raise _CategorizedException(
+                message=f"flaky_per_index({node_name}) first-run failure at idx={idx}",
+                category="node_exception",
             )
         if success_compute:
             return _resolve_success_compute(success_compute, state)
@@ -504,6 +615,7 @@ def build_graph(
     graph_middleware: Sequence[Any] | None = None,
     fan_out_instance_middleware: Mapping[str, Sequence[Any]] | None = None,
     parallel_branches_branch_middleware: Mapping[str, Mapping[str, Sequence[Any]]] | None = None,
+    flaky_per_index_attempt_recorders: dict[str, dict[int, list[int]]] | None = None,
 ) -> BuiltGraph:
     """Translate a graph-shaped fixture block into a `BuiltGraph`.
 
@@ -584,6 +696,16 @@ def build_graph(
             body = _make_flaky_by_index_fn(node_name, node_spec["flaky_by_index"], trace)
         elif "flaky_instance_only" in node_spec:
             body = _make_flaky_instance_only_fn(node_name, node_spec["flaky_instance_only"], trace)
+        elif "flaky_per_index" in node_spec:
+            recorder: dict[int, list[int]] | None = None
+            if flaky_per_index_attempt_recorders is not None:
+                recorder = flaky_per_index_attempt_recorders.setdefault(node_name, {})
+            body = _make_flaky_per_index_fn(
+                node_name,
+                node_spec["flaky_per_index"],
+                trace,
+                instance_attempt_recorder=recorder,
+            )
         elif "update" in node_spec:
             body = _make_update_fn(node_name, node_spec["update"], trace)
         elif "update_pure" in node_spec:
@@ -594,8 +716,8 @@ def build_graph(
             raise ValueError(
                 f"node {node_name!r} has no recognized directive "
                 "(update / update_pure / update_from_field / raises / flaky / "
-                "flaky_by_index / flaky_instance_only / fan_out / parallel_branches / "
-                "subgraph)"
+                "flaky_by_index / flaky_instance_only / flaky_per_index / fan_out / "
+                "parallel_branches / subgraph)"
             )
 
         sleep_ms = node_spec.get("sleep_ms")
@@ -734,7 +856,16 @@ def _add_fan_out_node(
     elif count_raw is not None:
         count = int(count_raw)
 
-    conc_raw = cfg.get("concurrency", 10)
+    # ``concurrent_mode: serial`` (proposal-0009 fixture set 048-054)
+    # is harness sugar for ``concurrency=1`` — forces deterministic
+    # per-instance completion ordering for resume-correctness assertions.
+    # Takes precedence over an explicit ``concurrency`` value if both
+    # are present.
+    concurrent_mode = cfg.get("concurrent_mode")
+    if concurrent_mode == "serial":
+        conc_raw: Any = 1
+    else:
+        conc_raw = cfg.get("concurrency", 10)
     conc: int | Callable[[Any], int | None] | None
     if isinstance(conc_raw, dict):
         conc = cast(
