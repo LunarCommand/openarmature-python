@@ -40,7 +40,7 @@ class SessionState(State):
 # ... define nodes that read s.messages, append to s.messages,
 #     and merge into s.facts ...
 
-checkpointer = SQLiteCheckpointer(db_path="./sessions.db")
+checkpointer = SQLiteCheckpointer(path="./sessions.db")
 graph = (
     GraphBuilder(SessionState)
     .add_node("plan", plan)

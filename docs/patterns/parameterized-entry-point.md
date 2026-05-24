@@ -31,24 +31,28 @@ def route_from_starting_stage(s: MissionState) -> str | EndSentinel:
     return s.starting_stage
 
 
-def plan(s: MissionState) -> dict:
+async def router(s: MissionState) -> dict:
+    return {}  # no state change; conditional edge below routes
+
+
+async def plan(s: MissionState) -> dict:
     return {
         "plan": "Apollo-style free-return trajectory.",
         "starting_stage": "execute",
     }
 
 
-def execute(s: MissionState) -> dict:
+async def execute(s: MissionState) -> dict:
     return {"execution_log": "Burn complete. Trajectory nominal."}
 
 
-def report(s: MissionState) -> dict:
+async def report(s: MissionState) -> dict:
     return {"report": "Mission objectives met."}
 
 
 builder = (
     GraphBuilder(MissionState)
-    .add_node("router", lambda s: {})  # no state change; conditional edge below routes
+    .add_node("router", router)
     .add_node("plan", plan)
     .add_node("execute", execute)
     .add_node("report", report)

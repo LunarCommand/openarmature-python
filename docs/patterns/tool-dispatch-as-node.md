@@ -19,6 +19,7 @@ on top of [`Tool`, `ToolCall`, `ToolMessage`](../concepts/llms.md).
 ## Snippet
 
 ```python
+import json
 from typing import Annotated
 from openarmature.graph import END, EndSentinel, GraphBuilder, State, append
 from openarmature.llm import AssistantMessage, Message, Tool, ToolMessage
@@ -29,7 +30,17 @@ class AgentState(State):
     turn: int = 0
 
 
-TOOLS = [Tool(name="lookup_mission", description="...", parameters={...})]
+TOOLS = [
+    Tool(
+        name="lookup_mission",
+        description="Look up Apollo or Artemis mission facts.",
+        parameters={
+            "type": "object",
+            "properties": {"name": {"type": "string"}},
+            "required": ["name"],
+        },
+    ),
+]
 MAX_TURNS = 5
 
 
@@ -43,8 +54,9 @@ async def dispatch_tools(s: AgentState) -> dict:
     assert isinstance(assistant, AssistantMessage)
     results: list[Message] = []
     for tc in assistant.tool_calls or ():
-        output = await dispatch_one(tc.name, tc.arguments)  # your local fn
-        results.append(ToolMessage(content=output, tool_call_id=tc.id))
+        output = await dispatch_one(tc.name, tc.arguments)  # str or JSON-serializable
+        content = output if isinstance(output, str) else json.dumps(output)
+        results.append(ToolMessage(content=content, tool_call_id=tc.id))
     return {"messages": results}
 
 

@@ -8,7 +8,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). The
 
 ### Added
 
-- **Patterns docs section** at `docs/patterns/`, sibling to Concepts. Seeded with four recipes drawn from downstream usage and proposal 0008's alternatives section: parameterized entry point, tool-dispatch-as-node, session-as-checkpoint-resume, and bypass-if-output-exists. Patterns are user-level how-to recipes composing existing primitives, not framework contracts; new patterns can be added without spec coordination. Each page follows a problem / approach / snippet / when-right-when-not / cross-references structure.
+- **Patterns docs section** at `docs/patterns/`, sibling to Concepts. Seeded with four recipes drawn from downstream usage and proposal 0008's alternatives section: parameterized entry point, tool-dispatch-as-node, session-as-checkpoint-resume, and bypass-if-output-exists. Patterns are user-level how-to recipes composing existing primitives, not framework contracts; new patterns can be added without spec coordination. Each page follows a problem / approach / snippet / when this is the right pattern / when it isn't / cross-references structure.
 
 ### Notes
 
