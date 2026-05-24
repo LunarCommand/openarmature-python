@@ -454,7 +454,7 @@ async def test_save_failure_raises_to_invoke_caller() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Fan-out internal saves are gated off (§10.7 atomic restart)
+# Per-instance fan-out resume contract (proposal 0009 / spec v0.18.0)
 # ---------------------------------------------------------------------------
 
 
@@ -463,12 +463,20 @@ class _CapturingCheckpointer:
 
     def __init__(self) -> None:
         self.saves: list[CheckpointRecord] = []
+        self._records: dict[str, CheckpointRecord] = {}
 
     async def save(self, invocation_id: str, record: CheckpointRecord) -> None:
         self.saves.append(record)
+        self._records[invocation_id] = record
+
+    async def save_fan_out_internal(self, invocation_id: str, record: CheckpointRecord) -> None:
+        await self.save(invocation_id, record)
+
+    async def save_fan_out_in_flight_failure(self, invocation_id: str, record: CheckpointRecord) -> None:
+        await self.save(invocation_id, record)
 
     async def load(self, invocation_id: str) -> CheckpointRecord | None:
-        return None
+        return self._records.get(invocation_id)
 
     async def list(self, filter: Any = None) -> Any:
         return []
@@ -491,11 +499,13 @@ async def _scorer(s: _ItemState) -> dict[str, int]:
     return {"out": s.item + 100}
 
 
-async def test_fan_out_internal_saves_are_gated_off() -> None:
-    """Spec §10.3 + §10.7: per-instance internal completed events do
-    NOT produce saves in v1. Only the fan-out node's own completion
-    (the parent dispatch) saves, with ``fan_out_index is None`` on
-    every recorded position."""
+async def test_fan_out_internal_saves_fire_per_instance() -> None:
+    """Per spec §10.3 (revised by proposal 0009 / v0.18.0): fan-out
+    instance internal nodes DO produce saves. Each per-instance
+    completion emits at least one save with ``fan_out_index``
+    populated on the inner-node position, plus an explicit "instance
+    completed" save that flips the instance's ``fan_out_progress``
+    state to ``completed``."""
     inner = (
         GraphBuilder(_ItemState)
         .add_node("scorer", _scorer)
@@ -521,15 +531,118 @@ async def test_fan_out_internal_saves_are_gated_off() -> None:
         .compile()
     )
     await parent.invoke(_ParentState(items=[1, 2, 3]))
-    # Exactly one save: the fan-out's own completion (parent dispatch).
-    assert len(cp.saves) == 1
-    record = cp.saves[0]
-    # Every position in the record is at the parent level — no
-    # fan_out_index populated, ever.
-    for pos in record.completed_positions:
-        assert pos.fan_out_index is None
-    # And no save fired with a position from inside an instance.
-    assert all(p.namespace == () for p in record.completed_positions)
+    # Some inner-node saves fire (one per instance per inner node)
+    # AND the fan-out node's own completion save. Total >= instances +
+    # 1 (instance count + fan-out completion); the explicit
+    # ``_save_instance_completed`` adds another save per instance.
+    assert len(cp.saves) >= 3
+    # At least one save carries an inner position with fan_out_index
+    # populated — that's the inner-node save inside an instance,
+    # recorded against the per-instance ``completed_inner_positions``
+    # field on ``fan_out_progress`` (per spec §10.11).
+    saves_with_inner_positions = [
+        s
+        for s in cp.saves
+        for fp in s.fan_out_progress
+        for inst in fp.instances
+        if inst.completed_inner_positions
+    ]
+    assert saves_with_inner_positions, "expected at least one save with per-instance inner positions"
+    # The terminal save (fan-out node's own completion) carries the
+    # outer "fan" position with fan_out_index=None.
+    last_save = cp.saves[-1]
+    fan_positions = [p for p in last_save.completed_positions if p.node_name == "fan"]
+    assert len(fan_positions) == 1
+    assert fan_positions[0].fan_out_index is None
+
+
+# ---------------------------------------------------------------------------
+# Q4 from the spec impl review: focused unit test on fail_fast fast-cancel
+# ensuring the failed instance lands as in_flight (no result) on the
+# saved record after cancellation completes.
+# ---------------------------------------------------------------------------
+
+
+class _FailingItemState(State):
+    item: int = 0
+    out: int = 0
+
+
+class _FailingParentState(State):
+    items: list[int] = Field(default_factory=list[int])
+    results: list[int] = Field(default_factory=list[int])
+
+
+_failing_instance_counter = [0]
+
+
+async def _failing_scorer(s: _FailingItemState) -> dict[str, int]:
+    # Fail when item == 999 (sentinel). All others succeed and
+    # contribute ``out = item``. The sentinel is positioned in the
+    # items list to trigger fail_fast cancellation of siblings.
+    if s.item == 999:
+        raise RuntimeError(f"intentional failure for item {s.item}")
+    return {"out": s.item}
+
+
+async def test_fail_fast_cancellation_leaves_failed_instance_in_flight() -> None:
+    """Per §10.11.2 fail_fast cancellation contract: the failed
+    instance's ``fan_out_progress`` state on the saved record is
+    ``in_flight`` (no ``result`` recorded), and cancelled siblings
+    are also ``in_flight`` or ``not_started`` — never ``completed``
+    for the failed slot. Closes the spec impl-review Q4 follow-on."""
+    inner = (
+        GraphBuilder(_FailingItemState)
+        .add_node("scorer", _failing_scorer)
+        .add_edge("scorer", END)
+        .set_entry("scorer")
+        .compile()
+    )
+    cp = _CapturingCheckpointer()
+    parent = (
+        GraphBuilder(_FailingParentState)
+        .add_fan_out_node(
+            "fan",
+            subgraph=inner,
+            collect_field="out",
+            target_field="results",
+            items_field="items",
+            item_field="item",
+            concurrency=1,  # serial so the failure ordering is deterministic
+            error_policy="fail_fast",
+        )
+        .add_edge("fan", END)
+        .set_entry("fan")
+        .with_checkpointer(cp)
+        .compile()
+    )
+    # Items: [10, 20, 999, 40] — instance 2 (item 999) fails. The
+    # engine wraps the raw RuntimeError as ``NodeException``.
+    with pytest.raises(NodeException):
+        await parent.invoke(_FailingParentState(items=[10, 20, 999, 40]))
+    # Locate the latest save's fan_out_progress for the "fan" node.
+    assert cp.saves, "expected at least one save to fire"
+    latest = cp.saves[-1]
+    fan_progress = next(
+        (fp for fp in latest.fan_out_progress if fp.fan_out_node_name == "fan"),
+        None,
+    )
+    assert fan_progress is not None, "expected fan_out_progress entry for the 'fan' node"
+    # Per §10.11.2: failed instance (idx 2) state is ``in_flight``
+    # (no ``result`` recorded). Successful preceding instances
+    # (0, 1) are ``completed``; cancelled siblings (3) are
+    # ``in_flight`` or ``not_started``.
+    assert fan_progress.instances[0].state == "completed"
+    assert fan_progress.instances[1].state == "completed"
+    assert fan_progress.instances[2].state == "in_flight", (
+        f"failed instance state should be in_flight, got {fan_progress.instances[2].state!r}"
+    )
+    assert fan_progress.instances[2].result is None, (
+        f"failed instance result should be None, got {fan_progress.instances[2].result!r}"
+    )
+    assert fan_progress.instances[3].state in {"in_flight", "not_started"}, (
+        f"cancelled sibling state should be in_flight or not_started, got {fan_progress.instances[3].state!r}"
+    )
 
 
 # ---------------------------------------------------------------------------
