@@ -65,6 +65,8 @@ plugins:
           - getting-started/*.md
         Concepts:
           - concepts/*.md
+        Patterns:
+          - patterns/*.md
         Examples:
           - examples/*.md
         Model Providers:
@@ -113,6 +115,12 @@ nav:
     - Prompts: concepts/prompts.md
     - Observability: concepts/observability.md
     - Checkpointing: concepts/checkpointing.md
+  - Patterns:
+    - patterns/index.md
+    - Parameterized entry point: patterns/parameterized-entry-point.md
+    - Tool-dispatch-as-node: patterns/tool-dispatch-as-node.md
+    - Session-as-checkpoint-resume: patterns/session-as-checkpoint-resume.md
+    - Bypass-if-output-exists: patterns/bypass-if-output-exists.md
   - Examples:
     - examples/index.md
     - Hello, world: examples/00-hello-world.md

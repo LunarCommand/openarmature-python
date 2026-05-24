@@ -11,7 +11,7 @@ Register at build time via `with_checkpointer`:
 ```python
 from openarmature.checkpoint import SQLiteCheckpointer
 
-checkpointer = SQLiteCheckpointer(db_path="./checkpoints.db")
+checkpointer = SQLiteCheckpointer(path="./checkpoints.db")
 
 graph = (
     GraphBuilder(MyState)
