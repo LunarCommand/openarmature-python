@@ -28,10 +28,11 @@ across resume).
 from typing import Annotated
 from openarmature.checkpoint import SQLiteCheckpointer
 from openarmature.graph import END, GraphBuilder, State, append, merge
+from openarmature.llm import Message
 
 
 class SessionState(State):
-    messages: Annotated[list[dict], append] = []
+    messages: Annotated[list[Message], append] = []
     facts: Annotated[dict[str, str], merge] = {}
     last_user_input: str = ""
 
@@ -73,7 +74,7 @@ async def handle_turn(session_id: str, user_input: str) -> str:
     # correlation_id; exact lookup is application-side bookkeeping.
     sessions_db.set_invocation_id(session_id, latest_for(session_id))
 
-    return final.messages[-1]["content"]
+    return final.messages[-1].content
 ```
 
 `sessions_db` is your application's session-state store (Postgres,

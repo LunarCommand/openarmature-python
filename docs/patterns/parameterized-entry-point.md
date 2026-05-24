@@ -48,7 +48,7 @@ def report(s: MissionState) -> dict:
 
 builder = (
     GraphBuilder(MissionState)
-    .add_node("router", lambda s: {})  # passthrough; routes from state
+    .add_node("router", lambda s: {})  # no state change; conditional edge below routes
     .add_node("plan", plan)
     .add_node("execute", execute)
     .add_node("report", report)
