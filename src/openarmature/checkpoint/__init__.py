@@ -36,6 +36,8 @@ from .protocol import (
     CheckpointFilter,
     CheckpointRecord,
     CheckpointSummary,
+    FanOutInstanceProgress,
+    FanOutProgress,
     NodePosition,
 )
 
@@ -51,6 +53,8 @@ __all__ = [
     "CheckpointStateMigrationMissing",
     "CheckpointSummary",
     "Checkpointer",
+    "FanOutInstanceProgress",
+    "FanOutProgress",
     "InMemoryCheckpointer",
     "MigrationRegistry",
     "NodePosition",

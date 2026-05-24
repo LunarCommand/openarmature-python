@@ -95,7 +95,7 @@ def test_checkpoint_record_default_schema_version() -> None:
     # §10.2 (proposal 0014): records carry the user's state-schema
     # version, which is "" until the state class declares one.
     assert record.schema_version == ""
-    assert record.fan_out_progress is None
+    assert record.fan_out_progress == ()
 
 
 # ---------------------------------------------------------------------------

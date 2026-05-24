@@ -34,7 +34,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from dataclasses import dataclass, field
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 
 
 # Spec: realizes pipeline-utilities §10.2 NodePosition. Field semantics
@@ -80,18 +80,84 @@ class NodePosition:
     fan_out_index: int | None = None
 
 
+# Spec: realizes pipeline-utilities §10.11 per-instance fan-out
+# progress. Promoted from a None placeholder under proposal 0008 to
+# populated structures under proposal 0009: each fan-out node that is
+# in flight at save time contributes one FanOutProgress entry with
+# per-instance state, and saves now fire at every fan-out instance
+# internal completed event (not only at fan-out node completion).
+@dataclass(frozen=True)
+class FanOutInstanceProgress:
+    """Per-instance progress entry inside a fan-out's
+    :attr:`FanOutProgress.instances` sequence.
+
+    Fields:
+
+    - ``state``: one of ``"completed"``, ``"in_flight"``,
+      ``"not_started"``. The ``completed`` state is the load-bearing
+      correctness contract: an instance marked ``completed`` MUST have
+      its contribution recorded into the accumulator AND that
+      contribution MUST be reflected in ``result``. Reducer composition
+      rules (§10.11.1) depend on this exactly-once guarantee.
+    - ``result``: for ``completed`` instances, the durable contribution
+      to the fan-out accumulator (a success value for the
+      ``target_field`` bucket, or under ``collect`` error policy an
+      error entry for the ``errors_field`` bucket). Typed per the
+      parent state schema's ``target_field`` / ``errors_field``
+      (representation is implementation-defined per §10.11; Python
+      stores as ``Any`` since dynamic typing absorbs the variance).
+      Unused for ``in_flight`` and ``not_started``.
+    - ``completed_inner_positions``: for ``in_flight`` instances, a
+      tuple of ``NodePosition`` entries captured at save time. Same
+      shape as :attr:`CheckpointRecord.completed_positions` but scoped
+      to this instance's inner subgraph rather than the outer graph.
+      Empty when the instance fired its first ``started`` event but
+      no inner ``completed`` event yet. Observational only:
+      ``in_flight`` instances re-enter at the subgraph entry node on
+      resume, not at any of these positions. Unused for ``completed``
+      and ``not_started``.
+    """
+
+    state: Literal["completed", "in_flight", "not_started"]
+    result: Any = None
+    completed_inner_positions: tuple[NodePosition, ...] = ()
+
+
+@dataclass(frozen=True)
+class FanOutProgress:
+    """Per-fan-out-node progress entry inside a
+    :attr:`CheckpointRecord.fan_out_progress` sequence.
+
+    Fields:
+
+    - ``fan_out_node_name``: the fan-out node's name in its containing
+      graph.
+    - ``namespace``: the chain of outer subgraph-node names enclosing
+      the fan-out (empty for outermost-graph fan-outs). Disambiguates
+      fan-outs of the same name in different nested-subgraph contexts.
+    - ``instance_count``: the resolved instance count for this fan-out
+      (per pipeline-utilities §9 count or items_field mode).
+    - ``instances``: a tuple of per-instance entries indexed by
+      ``fan_out_index`` (``instances[i]`` is the entry for
+      ``fan_out_index=i``). Length equals ``instance_count``.
+    """
+
+    fan_out_node_name: str
+    namespace: tuple[str, ...]
+    instance_count: int
+    instances: tuple[FanOutInstanceProgress, ...]
+
+
 # Spec: realizes pipeline-utilities §10.2 CheckpointRecord.
-# ``fan_out_progress`` is reserved for proposal 0009 (per-instance
-# fan-out resume); always ``None`` in the shipping version.
 @dataclass(frozen=True)
 class CheckpointRecord:
     """One invocation's progress at one save point.
 
     Frozen: backends MUST treat the record as immutable. The engine
     builds a fresh record per ``completed`` event rather than mutating
-    a shared one. The ``fan_out_progress`` field is reserved for a
-    future per-instance fan-out resume mode; in the shipping version
-    it is always ``None``.
+    a shared one. The ``fan_out_progress`` field (per §10.11) carries
+    per-fan-out-node entries when one or more fan-outs are in flight
+    at save time; an empty tuple means no fan-out progress to record.
     """
 
     invocation_id: str
@@ -105,7 +171,7 @@ class CheckpointRecord:
     # Empty-string sentinel for state classes that don't declare a
     # version; non-empty declares migration-eligibility.
     schema_version: str = ""
-    fan_out_progress: None = field(default=None)
+    fan_out_progress: tuple[FanOutProgress, ...] = field(default=())
 
 
 # Spec: realizes pipeline-utilities §10.1 CheckpointSummary. The four
@@ -224,5 +290,7 @@ __all__ = [
     "CheckpointRecord",
     "CheckpointSummary",
     "Checkpointer",
+    "FanOutInstanceProgress",
+    "FanOutProgress",
     "NodePosition",
 ]
