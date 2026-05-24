@@ -222,13 +222,29 @@ _DRAIN_SENTINEL = None
 class _FanOutInstanceState:
     """Mutable per-instance state inside a fan-out, updated by the
     engine as the instance progresses. ``state`` transitions
-    not_started → in_flight → completed.
+    not_started -> in_flight -> completed.
 
     - ``result`` holds the per-instance contribution to the fan-out
-      accumulator, set when ``state == "completed"``. The contribution
-      flows into the fan-out's ``target_field`` (success) or
-      ``errors_field`` (recorded error under ``collect`` policy) at the
-      fan-in step.
+      accumulator, set when ``state == "completed"``. Per spec
+      §10.11 this is "the value contributed to the ``target_field``
+      bucket" (success path) or "the error entry contributed to the
+      ``errors_field`` bucket" (collect-mode failure). The harness
+      projects this into the frozen ``FanOutInstanceProgress.result``
+      verbatim.
+    - ``result_is_error`` distinguishes success contributions
+      (``False``) from collect-mode error contributions (``True``).
+      Internal flag — not exposed on the public
+      ``FanOutInstanceProgress`` shape because the spec presents
+      ``result`` as a single typed entry per the parent state schema.
+      ``FanOutNode.run_with_context`` consults this on resume to
+      route the rolled-forward contribution through the
+      ``errors_field`` bucket rather than ``target_field``.
+    - ``extra_outputs`` holds the per-instance values for the fan-out's
+      ``extra_outputs`` mapping (parent-field -> sub-field) so that
+      per-instance resume preserves the FULL per-instance contribution
+      (not just the ``target_field`` slice). Internal — not exposed on
+      the public ``FanOutInstanceProgress`` shape because the spec
+      describes ``result`` as a single accumulator entry.
     - ``completed_inner_positions`` accumulates ``NodePosition`` entries
       from inner nodes that complete inside this instance's subgraph
       execution. Captures the instance's progress for observational
@@ -239,6 +255,8 @@ class _FanOutInstanceState:
 
     state: Literal["completed", "in_flight", "not_started"] = "not_started"
     result: Any = None
+    result_is_error: bool = False
+    extra_outputs: dict[str, Any] = field(default_factory=dict[str, Any])
     completed_inner_positions: list[Any] = field(default_factory=list[Any])  # list[NodePosition]
 
 
@@ -392,15 +410,16 @@ class _InvocationContext:
         index onto the new context so every inner-node event carries it.
         Per spec §9 the index is the instance's 0-based position.
 
-        Per pipeline-utilities §10.3 / §10.7: fan-out instance internal
-        events do NOT produce checkpoint saves in v1. We achieve that
-        by clearing ``checkpointer`` to None on the descent so the
-        save gate inside the inner _step_function_node is False; the
-        rest of the checkpoint context (invocation_id, correlation_id,
-        etc.) still propagates so observability spans inside the
-        instance can correlate. ``resume_skip_set`` is also dropped:
-        a resumed invocation re-runs the entire fan-out from scratch
-        per §10.7 atomic-restart.
+        Per pipeline-utilities §10.3 (revised by proposal 0009): fan-out
+        instance internal nodes DO produce checkpoint saves. The
+        checkpointer reference propagates unchanged so an inner node's
+        ``completed`` event triggers a save; the engine's save path
+        projects the shared ``fan_out_progress_state`` into the record's
+        per-instance progress field. ``resume_skip_set`` is dropped:
+        inner-position skipping is governed by the per-instance
+        ``completed_inner_positions`` field on the loaded record's
+        ``fan_out_progress`` entry, not by the outer skip-set (which
+        would conflate inner and outer positions otherwise).
         """
         return _InvocationContext(
             queue=self.queue,
@@ -412,11 +431,9 @@ class _InvocationContext:
             fan_out_index=fan_out_index,
             invocation_id=self.invocation_id,
             correlation_id=self.correlation_id,
-            checkpointer=None,
+            checkpointer=self.checkpointer,
             completed_positions=self.completed_positions,
             resume_skip_set=frozenset(),
-            # Fan-out instances are atomic-restart per §10.7 — no
-            # saved inner state to thread in. Drop the map.
             pending_resume_states={},
             resume_invocation=self.resume_invocation,
             # Propagate the shared per-fan-out tracking dict so an
@@ -604,6 +621,8 @@ __all__ = [
     # imported by `compiled.py` and `subgraph.py`). The underscore prefix
     # is the user-facing "don't import these" signal.
     "_DRAIN_SENTINEL",
+    "_FanOutExecutionState",
+    "_FanOutInstanceState",
     "_InvocationContext",
     "_QueuedItem",
     "_coerce_subscribed",

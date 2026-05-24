@@ -26,7 +26,7 @@ from __future__ import annotations
 import asyncio
 import time
 import uuid
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from dataclasses import replace as dataclass_replace
 from typing import TYPE_CHECKING, Any, cast
@@ -57,6 +57,8 @@ from openarmature.checkpoint.migration import MigrationRegistry, StateMigration
 from openarmature.checkpoint.protocol import (
     Checkpointer,
     CheckpointRecord,
+    FanOutInstanceProgress,
+    FanOutProgress,
     NodePosition,
 )
 from openarmature.observability.correlation import (
@@ -96,6 +98,8 @@ from .observer import (
     SubscribedObserver,
     _coerce_subscribed,
     _dispatch,
+    _FanOutExecutionState,
+    _FanOutInstanceState,
     _InvocationContext,
     _QueuedItem,
     deliver_loop,
@@ -261,6 +265,191 @@ def _no_op_finalize(_edge_error: RuntimeGraphError | None) -> None:
     (transparent per fixture 013) and middleware that short-
     circuits without invoking ``next``. Edge errors propagate
     silently per proposal 0012 + fixture 013."""
+
+
+# Helpers for the proposal 0009 per-instance fan-out resume contract.
+# The shared mutable ``fan_out_progress_state`` dict on
+# _InvocationContext is keyed by ``(namespace, fan_out_node_name)``;
+# these helpers locate / project / mutate it consistently.
+
+
+def _find_innermost_fan_out_instance_state(
+    context: _InvocationContext,
+) -> _FanOutInstanceState | None:
+    """Locate the per-instance state for the innermost active fan-out
+    relative to ``context``.
+
+    A node running inside fan-out instance ``i`` of fan-out ``F``
+    sees ``context.namespace_prefix`` ending with ``F``'s own name
+    and ``context.fan_out_index == i``. Walk the namespace prefix
+    back to find the longest matching key in ``fan_out_progress_state``
+    so nested fan-outs route to the right level.
+
+    Returns ``None`` when no match is found — defensive against an
+    inner node firing outside any registered fan-out (shouldn't
+    happen if ``FanOutNode.run_with_context`` correctly registers
+    each fan-out before descending). Callers that expect a hit
+    surface the missing-state case as a no-op rather than a crash.
+    """
+    if context.fan_out_index is None:
+        return None
+    prefix = context.namespace_prefix
+    state_dict = context.fan_out_progress_state
+    # Walk the prefix from longest to shortest. The innermost
+    # fan-out's full key is (namespace_before_fan_out, fan_out_name)
+    # where namespace_before_fan_out + (fan_out_name,) == prefix.
+    for split in range(len(prefix), 0, -1):
+        key = (prefix[: split - 1], prefix[split - 1])
+        if key in state_dict:
+            exec_state = state_dict[key]
+            idx = context.fan_out_index
+            if 0 <= idx < len(exec_state.instances):
+                return exec_state.instances[idx]
+    return None
+
+
+def _project_fan_out_progress(
+    state_dict: Mapping[tuple[tuple[str, ...], str], _FanOutExecutionState],
+) -> tuple[FanOutProgress, ...]:
+    """Project the engine-internal mutable per-fan-out state into the
+    frozen :class:`FanOutProgress` shape on a saved record.
+
+    Per §10.11's snapshot semantics, a save fires with ALL concurrent
+    fan-out instances' states captured at the moment of the save —
+    not just the one whose ``completed`` event triggered the save.
+    This projection enumerates the whole dict; the engine save site
+    calls it once per save regardless of which fan-out's inner node
+    fired the event.
+
+    Deterministic ordering: sort by (namespace, fan_out_node_name).
+    Two saves carrying the same logical state then serialize
+    byte-identically, which matters for backends that hash records.
+    """
+    out: list[FanOutProgress] = []
+    for (namespace, name), exec_state in sorted(state_dict.items()):
+        instances = tuple(
+            FanOutInstanceProgress(
+                state=inst.state,
+                result=inst.result,
+                completed_inner_positions=tuple(inst.completed_inner_positions),
+            )
+            for inst in exec_state.instances
+        )
+        out.append(
+            FanOutProgress(
+                fan_out_node_name=name,
+                namespace=namespace,
+                instance_count=exec_state.instance_count,
+                instances=instances,
+            )
+        )
+    return tuple(out)
+
+
+def _restore_fan_out_progress_state(
+    saved: Sequence[FanOutProgress],
+) -> dict[tuple[tuple[str, ...], str], _FanOutExecutionState]:
+    """Inverse projection of :func:`_project_fan_out_progress`. On resume
+    the loaded record's frozen ``fan_out_progress`` tuple gets unpacked
+    into the mutable per-fan-out tracking dict that ``FanOutNode``
+    consults to decide which instances to skip vs re-run.
+
+    Extra-output state isn't preserved across resume — the spec models
+    ``result`` as a single accumulator entry and is silent on
+    ``extra_outputs``. Reconstructing them would require either
+    serializing them on the record (a spec change) or recomputing them
+    (defeating the point of skip-on-resume). Fixtures don't exercise
+    ``extra_outputs`` on the resume path; if a future workload needs
+    them, surface as a follow-on.
+
+    ``result_is_error`` distinguishes success contributions from
+    collect-mode error contributions. The public ``FanOutInstanceProgress``
+    shape doesn't carry this flag (the spec presents ``result`` as a
+    single typed entry), so it's reconstructed by structural pattern-
+    matching: an error record is a ``dict`` with the engine's
+    canonical ``fan_out_index`` + ``category`` keys (per
+    ``_fan_in_collect``). Success values from the user's state schema
+    aren't expected to take this exact shape.
+    """
+    out: dict[tuple[tuple[str, ...], str], _FanOutExecutionState] = {}
+    for fp in saved:
+        instances: list[_FanOutInstanceState] = []
+        for inst in fp.instances:
+            result_is_error = _looks_like_error_record(inst.result)
+            instances.append(
+                _FanOutInstanceState(
+                    state=inst.state,
+                    result=inst.result,
+                    result_is_error=result_is_error,
+                    extra_outputs={},
+                    completed_inner_positions=list(inst.completed_inner_positions),
+                )
+            )
+        key = (fp.namespace, fp.fan_out_node_name)
+        out[key] = _FanOutExecutionState(
+            fan_out_node_name=fp.fan_out_node_name,
+            namespace=fp.namespace,
+            instance_count=fp.instance_count,
+            instances=instances,
+        )
+    return out
+
+
+def _looks_like_error_record(value: Any) -> bool:
+    """Heuristic: identify the engine's error_record shape from
+    ``_fan_in_collect`` (``dict[str, str]`` with ``fan_out_index`` +
+    ``category`` keys). Used to reconstruct
+    ``_FanOutInstanceState.result_is_error`` from the public
+    ``FanOutInstanceProgress.result`` on resume.
+    """
+    if not isinstance(value, dict):
+        return False
+    value_dict = cast("dict[str, Any]", value)
+    return "fan_out_index" in value_dict and "category" in value_dict
+
+
+async def _save_fan_out_internal(
+    checkpointer: Any,
+    invocation_id: str,
+    record: CheckpointRecord,
+) -> None:
+    """Route a fan-out-internal save through the checkpointer's
+    optional batching seam.
+
+    Per spec §10.11.4, Checkpointer backends MAY support batching
+    scoped to fan-out internal saves. When the backend exposes a
+    ``save_fan_out_internal`` coroutine, route there so it can buffer
+    or flush per its configuration. Otherwise, fall back to the
+    standard ``save`` — non-batching backends see no behavioral change.
+    """
+    saver = getattr(checkpointer, "save_fan_out_internal", None)
+    if saver is None:
+        await checkpointer.save(invocation_id, record)
+        return
+    await saver(invocation_id, record)
+
+
+async def _save_fan_out_in_flight_failure(  # pyright: ignore[reportUnusedFunction]
+    checkpointer: Any,
+    invocation_id: str,
+    record: CheckpointRecord,
+) -> None:
+    """Route an "instance failed mid-execution" save through the
+    checkpointer's failure-save seam (§10.11.4 + the in_flight
+    observability gap §10.11).
+
+    Backends that expose ``save_fan_out_in_flight_failure`` get the
+    save directly; under batching, the typical implementation
+    buffers without triggering the flush count (preserving the
+    "buffered saves lost on crash" model). Backends that don't
+    expose the hook fall back to ``save`` so non-batching backends
+    keep the failure save durable.
+    """
+    saver = getattr(checkpointer, "save_fan_out_in_flight_failure", None)
+    if saver is None:
+        await checkpointer.save(invocation_id, record)
+        return
+    await saver(invocation_id, record)
 
 
 @dataclass(frozen=True)
@@ -670,6 +859,14 @@ class CompiledGraph[StateT: State]:
             # matches what the engine looks up at run time
             # (``context.namespace_prefix + (current,)``).
             resume_skip_set = frozenset(p.namespace + (p.node_name,) for p in completed_positions)
+            # Per spec §10.7 / §10.11: restore per-fan-out per-instance
+            # state from the loaded record. ``FanOutNode.run_with_context``
+            # consults this on re-dispatch — completed instances skip,
+            # in_flight / not_started instances re-execute. Empty tuple
+            # when no fan-outs were in flight at save time.
+            fan_out_progress_state = _restore_fan_out_progress_state(record.fan_out_progress)
+        else:
+            fan_out_progress_state = {}
 
         context = _InvocationContext(
             queue=queue,
@@ -682,6 +879,7 @@ class CompiledGraph[StateT: State]:
             resume_skip_set=resume_skip_set,
             pending_resume_states=pending_resume_states,
             resume_invocation=resume_invocation,
+            fan_out_progress_state=fan_out_progress_state,
         )
         # Spec observability §3.1: the correlation_id MUST be readable
         # from anywhere within the invocation's async call tree via the
@@ -1724,23 +1922,43 @@ class CompiledGraph[StateT: State]:
         post_state: Any,
     ) -> None:
         """Fire a checkpoint save for the just-completed node, if a
-        backend is registered and we're not inside a fan-out instance.
+        backend is registered.
 
-        Per spec pipeline-utilities §10.3:
+        Per spec pipeline-utilities §10.3 (revised by proposal 0009 /
+        spec v0.18.0):
 
         - Save fires for outermost-graph nodes, subgraph-internal
-          nodes, AND the fan-out node's own completion (the parent
-          dispatch). All three have ``fan_out_index is None`` from
-          the context's perspective.
-        - Save does NOT fire for events from inside a fan-out
-          instance. The atomic-restart contract (§10.7) means
-          per-instance progress isn't recoverable in v1, so saving
-          inner-instance state is dead weight.
+          nodes, fan-out instance internal nodes, AND the fan-out
+          node's own completion (the parent dispatch).
+        - When the save fires from inside a fan-out instance
+          (``context.fan_out_index is not None``), the inner node's
+          position is recorded against the per-instance state on the
+          shared ``fan_out_progress_state`` rather than the outer
+          ``completed_positions`` list. The saved record's
+          ``fan_out_progress`` field projects this shared dict so
+          all concurrent instances' snapshots are captured atomically.
+
+        Atomicity contract (§10.11): the save-call site below
+        completes the "produce contribution + record into accumulator
+        + save" sequence the spec mandates. ``FanOutNode.run_with_context``
+        flips an instance's state to ``completed`` and stashes its
+        ``result`` BEFORE invoking the save that durably records the
+        transition. A crash between that state mutation and the save
+        below leaves the in-memory dict updated but the persisted
+        record showing ``in_flight``, so resume re-runs the instance
+        and the append/last_write_wins/merge reducer's exactly-once
+        guarantee per §10.11.1 holds.
+
+        Save also enumerates ALL concurrent fan-out instances when
+        building ``fan_out_progress`` (not just the one whose
+        ``completed`` event triggered this save) — the per-instance
+        snapshot is consistent across siblings, matching §10.11's
+        "captured when a sibling instance's ``completed`` event
+        triggers a save during this instance's execution" wording.
 
         After ``Checkpointer.save`` returns, dispatch a
         ``checkpoint_saved`` observer event (per §10.8 SHOULD-level
-        guidance) so observability backends — wired in Phase 6 — can
-        surface saves as spans.
+        guidance) so observability backends can surface saves as spans.
 
         Save failures raise ``CheckpointSaveFailed`` to the caller of
         ``invoke()`` immediately; saves are NOT retried by the engine.
@@ -1748,22 +1966,49 @@ class CompiledGraph[StateT: State]:
         checkpointer = context.checkpointer
         if checkpointer is None:
             return
-        if context.fan_out_index is not None:
-            return
         # Per spec §10.2: NodePosition.namespace is the containing-
         # graph chain (outermost first), NOT including the node's
         # own name — distinct from NodeEvent.namespace which
         # includes it. The two are related by
         # NodeEvent.namespace == NodePosition.namespace +
         # (NodePosition.node_name,).
+        #
+        # Inner-position scoping (per §10.11.1, in-flight observability
+        # rules): a position from inside a fan-out instance is scoped
+        # to that instance's inner subgraph execution, NOT the outer
+        # graph. It accumulates on the per-instance state's
+        # ``completed_inner_positions`` list rather than the outer
+        # ``completed_positions`` list. The outer list keeps the outer
+        # graph's positions plus the fan-out node's own completion
+        # position (added by ``_step_fan_out_node`` after fan-in).
         position = NodePosition(
             namespace=context.namespace_prefix,
             node_name=node_name,
             step=step,
             attempt_index=attempt_index,
-            fan_out_index=None,
+            fan_out_index=context.fan_out_index,
         )
-        context.completed_positions.append(position)
+        if context.fan_out_index is not None:
+            # Locate the per-instance state for the innermost active
+            # fan-out (the one this node is running inside). The
+            # innermost fan-out's key has the longest namespace; the
+            # context's namespace_prefix at this depth is exactly that
+            # fan-out's full namespace prefix (namespace + name), so
+            # we walk the prefix back to find the matching key.
+            instance_state = _find_innermost_fan_out_instance_state(context)
+            if instance_state is not None:
+                instance_state.completed_inner_positions.append(position)
+        else:
+            context.completed_positions.append(position)
+        # Project the shared mutable per-fan-out tracking dict into the
+        # frozen ``FanOutProgress`` shape on the record. Per §10.11:
+        # enumerate every fan-out entry the engine has registered, not
+        # just the innermost one — concurrent fan-outs (nested or
+        # parallel) all contribute their state to the same save.
+        # Deterministic order: sort by (namespace, name) so two saves
+        # with identical state serialize identically (relevant for
+        # backends that hash records).
+        fan_out_progress = _project_fan_out_progress(context.fan_out_progress_state)
         record = CheckpointRecord(
             invocation_id=context.invocation_id,
             correlation_id=context.correlation_id,
@@ -1791,9 +2036,19 @@ class CompiledGraph[StateT: State]:
             # (subclass schema_versions don't shadow the declared
             # graph schema).
             schema_version=self.state_cls.schema_version,
+            fan_out_progress=fan_out_progress,
         )
+        # Per §10.11.4: batching applies ONLY to fan-out instance
+        # internal saves. Outer-graph + subgraph-internal +
+        # fan-out-node-completion saves remain synchronous.
+        # ``checkpointer.save`` is invoked via the batching helper
+        # which falls back to direct ``save`` for non-fan-out-internal
+        # events even on a batching-enabled backend.
         try:
-            await checkpointer.save(context.invocation_id, record)
+            if context.fan_out_index is not None:
+                await _save_fan_out_internal(checkpointer, context.invocation_id, record)
+            else:
+                await checkpointer.save(context.invocation_id, record)
         except Exception as exc:
             raise CheckpointSaveFailed(context.invocation_id, exc) from exc
         # §10.8: dispatch a ``checkpoint_saved`` observer event so
