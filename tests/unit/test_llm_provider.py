@@ -273,7 +273,7 @@ def test_transient_categories_excludes_terminal_categories() -> None:
 
 
 # ---------------------------------------------------------------------------
-# classify_http_error — wire-mapping table (spec §8.3)
+# classify_http_error — wire-mapping table (spec §8.1.3)
 # ---------------------------------------------------------------------------
 
 
