@@ -47,6 +47,7 @@ from .errors import (
 from .messages import (
     AssistantMessage,
     ContentBlock,
+    ForceTool,
     ImageBlock,
     ImageSource,
     ImageSourceInline,
@@ -56,6 +57,7 @@ from .messages import (
     TextBlock,
     Tool,
     ToolCall,
+    ToolChoice,
     ToolMessage,
     UserMessage,
 )
@@ -64,6 +66,7 @@ from .provider import (
     strict_mode_supported,
     validate_message_list,
     validate_response_schema,
+    validate_tool_choice,
     validate_tools,
 )
 from .providers import OpenAIProvider, classify_http_error, parse_retry_after
@@ -83,6 +86,7 @@ __all__ = [
     "AssistantMessage",
     "ContentBlock",
     "FinishReason",
+    "ForceTool",
     "ImageBlock",
     "ImageSource",
     "ImageSourceInline",
@@ -107,6 +111,7 @@ __all__ = [
     "TextBlock",
     "Tool",
     "ToolCall",
+    "ToolChoice",
     "ToolMessage",
     "Usage",
     "UserMessage",
@@ -115,5 +120,6 @@ __all__ = [
     "strict_mode_supported",
     "validate_message_list",
     "validate_response_schema",
+    "validate_tool_choice",
     "validate_tools",
 ]

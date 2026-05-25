@@ -76,6 +76,7 @@ from ..errors import (
 from ..messages import (
     AssistantMessage,
     ContentBlock,
+    ForceTool,
     ImageBlock,
     ImageSourceInline,
     Message,
@@ -83,12 +84,14 @@ from ..messages import (
     TextBlock,
     Tool,
     ToolCall,
+    ToolChoice,
     UserMessage,
 )
 from ..provider import (
     strict_mode_supported,
     validate_message_list,
     validate_response_schema,
+    validate_tool_choice,
     validate_tools,
 )
 from ..response import FinishReason, ParsedValue, Response, RuntimeConfig, Usage
@@ -232,24 +235,35 @@ class OpenAIProvider:
         tools: Sequence[Tool] | None = None,
         config: RuntimeConfig | None = None,
         response_schema: dict[str, Any] | type[BaseModel] | None = None,
+        tool_choice: ToolChoice | None = None,
     ) -> Response:
         """Single completion call.
 
         Pre-send validation runs first (per-message Pydantic +
-        list-level invariants + response_schema shape check). HTTP
-        errors map to canonical provider-error categories. The
-        successful 200 body is parsed into a :class:`Response`;
-        failure to parse raises ``provider_invalid_response``; failure
-        to validate the response content against ``response_schema``
-        raises ``structured_output_invalid``.
+        list-level invariants + response_schema shape check +
+        ``tool_choice`` validation). HTTP errors map to canonical
+        provider-error categories. The successful 200 body is parsed
+        into a :class:`Response`; failure to parse raises
+        ``provider_invalid_response``; failure to validate the response
+        content against ``response_schema`` raises
+        ``structured_output_invalid``.
 
         When ``response_schema`` is supplied as a Pydantic BaseModel
         subclass, ``Response.parsed`` is a validated instance of that
         class; when supplied as a JSON Schema dict,
         ``Response.parsed`` is the deserialized dict.
+
+        ``tool_choice`` is validated against ``tools`` per spec §5:
+        ``"required"`` and the ``ForceTool`` record both demand
+        non-empty ``tools``, and ``ForceTool.name`` must appear in the
+        supplied list. Violations raise ``provider_invalid_request``
+        BEFORE any HTTP request is sent.
         """
         validate_message_list(messages)
         validate_tools(tools)
+        # ``validate_tool_choice`` runs after ``validate_tools`` so the
+        # name-membership check sees a structurally valid tools list.
+        validate_tool_choice(tool_choice, tools)
         schema_dict, schema_class = _normalize_response_schema(response_schema)
         # On the fallback path, the wire-side messages list is an
         # augmented COPY of the caller's messages — original messages
@@ -268,6 +282,7 @@ class OpenAIProvider:
             # form calls (schema_dict is None) must preserve any
             # caller-supplied response_format from RuntimeConfig extras.
             include_response_format=(schema_dict is None or not self._force_prompt_augmentation_fallback),
+            tool_choice=tool_choice,
         )
 
         # Spec observability §5.5 LLM provider span: when an
@@ -399,6 +414,7 @@ class OpenAIProvider:
         config: RuntimeConfig | None,
         schema_dict: dict[str, Any] | None,
         include_response_format: bool = True,
+        tool_choice: ToolChoice | None = None,
     ) -> dict[str, Any]:
         body: dict[str, Any] = {
             "model": self.model,
@@ -439,6 +455,22 @@ class OpenAIProvider:
             # loop above; strip it here so the fallback contract holds
             # regardless of caller-supplied extras.
             body.pop("response_format", None)
+        # Per §8.1.1 (proposal 0025): map the spec-level `tool_choice`
+        # shape onto the OpenAI wire shape. ``None`` omits the field
+        # entirely so the OpenAI provider's own default applies —
+        # load-bearing for backward compat with pre-0025 callers. The
+        # string-literal modes pass through verbatim; the ``ForceTool``
+        # record renames ``type: "tool"`` → ``type: "function"`` and
+        # nests the name under a ``function`` sub-object per OpenAI's
+        # request shape.
+        if tool_choice is not None:
+            if isinstance(tool_choice, ForceTool):
+                body["tool_choice"] = {
+                    "type": "function",
+                    "function": {"name": tool_choice.name},
+                }
+            else:
+                body["tool_choice"] = tool_choice
         return body
 
     # ------------------------------------------------------------------

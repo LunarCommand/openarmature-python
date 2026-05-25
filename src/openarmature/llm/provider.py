@@ -48,9 +48,11 @@ from pydantic import BaseModel
 from .errors import ProviderInvalidRequest
 from .messages import (
     AssistantMessage,
+    ForceTool,
     Message,
     SystemMessage,
     Tool,
+    ToolChoice,
     ToolMessage,
     UserMessage,
 )
@@ -75,6 +77,7 @@ class Provider(Protocol):
         tools: Sequence[Tool] | None = None,
         config: RuntimeConfig | None = None,
         response_schema: dict[str, Any] | type[BaseModel] | None = None,
+        tool_choice: ToolChoice | None = None,
     ) -> Response:
         """Perform a single completion call.
 
@@ -93,6 +96,12 @@ class Provider(Protocol):
                 supplied, the implementation constrains the model's
                 output to the schema and populates ``Response.parsed``
                 with the validated value.
+            tool_choice: Optional tool-choice constraint (spec §5). One
+                of ``"auto"``, ``"required"``, ``"none"``, or a
+                :class:`ForceTool` record. When ``None`` (the default)
+                the wire ``tool_choice`` field is omitted and the
+                provider's own default applies. Pre-send validation
+                routes through ``provider_invalid_request``.
         """
         ...
 
@@ -172,6 +181,53 @@ def validate_tools(tools: Sequence[Tool] | None) -> None:
                 f"tools: duplicate tool name {t.name!r} (must be unique within a call)"
             )
         seen.add(t.name)
+
+
+# Spec: realizes llm-provider §5 `tool_choice` pre-send validation
+# rules (proposal 0025). The three failure modes route through the
+# existing §7 ``provider_invalid_request`` category; no new error
+# categories per the spec's "no new category" framing. Validation
+# fires BEFORE any HTTP request is sent (fixture 031's mock_provider
+# returns an empty response list on these cases to fail the test
+# if a request escapes the validation gate).
+def validate_tool_choice(
+    tool_choice: ToolChoice | None,
+    tools: Sequence[Tool] | None,
+) -> None:
+    """Validate ``tool_choice`` against ``tools`` per spec §5.
+
+    Raises :class:`ProviderInvalidRequest` (the §7
+    ``provider_invalid_request`` category) on:
+
+    - ``tool_choice="required"`` supplied with empty / absent
+      ``tools``.
+    - ``tool_choice=ForceTool(name=X)`` supplied with empty / absent
+      ``tools``.
+    - ``tool_choice=ForceTool(name=X)`` supplied with ``X`` not in the
+      supplied tools list.
+
+    No-op when ``tool_choice`` is ``None`` (the default — preserves
+    pre-0025 behavior; the wire field is omitted and the provider's
+    own default applies). ``tool_choice="auto"`` and
+    ``tool_choice="none"`` have no ``tools``-related preconditions.
+    """
+    if tool_choice is None:
+        return
+    has_tools = bool(tools)
+    if tool_choice == "required" and not has_tools:
+        raise ProviderInvalidRequest('tool_choice="required" requires non-empty tools')
+    if isinstance(tool_choice, ForceTool):
+        if not has_tools:
+            raise ProviderInvalidRequest(
+                f"tool_choice ForceTool(name={tool_choice.name!r}) requires non-empty tools"
+            )
+        # ``tools`` is non-empty here per the preceding guard. The list
+        # is also guaranteed non-None inside this branch.
+        names = {t.name for t in tools or ()}
+        if tool_choice.name not in names:
+            raise ProviderInvalidRequest(
+                f"tool_choice name {tool_choice.name!r} not in tools (declared: {sorted(names)})"
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -485,5 +541,6 @@ __all__ = [
     "strict_mode_supported",
     "validate_message_list",
     "validate_response_schema",
+    "validate_tool_choice",
     "validate_tools",
 ]
