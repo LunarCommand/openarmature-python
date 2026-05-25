@@ -273,6 +273,47 @@ prevents runaway loops on a model that stays in tool-calling forever.
 See [`09 - Tool use`](../examples/09-tool-use.md) for the runnable
 shape.
 
+### Controlling tool-call behavior with `tool_choice`
+
+By default the model decides whether and which tools to call.
+`tool_choice` constrains that decision per call. Four modes:
+
+- `"auto"` — the model decides. Equivalent to omitting the parameter
+  when `tools` is non-empty.
+- `"required"` — the model MUST call at least one tool. Useful for
+  routing nodes that branch on tool selection.
+- `"none"` — the model MUST NOT call tools, even if `tools` is
+  supplied. Useful for guarded LLM calls or for explicitly disabling
+  tool-calling without rebuilding a tools-less request.
+- `ForceTool(name=...)` — the model MUST call the named tool exactly.
+
+Pre-send validation catches the three failure modes (`required` with
+empty tools, `ForceTool` with empty tools, `ForceTool.name` not in
+the supplied list) and raises `ProviderInvalidRequest` before the
+HTTP request is sent.
+
+```python
+from openarmature.llm import ForceTool
+
+# Routing node: model MUST pick one of the supplied tools.
+response = await provider.complete(
+    messages, tools=[search, summarize], tool_choice="required"
+)
+
+# Forced specific tool: useful when the pipeline knows which tool
+# the model should call next (e.g., a `dispatch_search` node).
+response = await provider.complete(
+    messages, tools=[search, summarize], tool_choice=ForceTool(name="search")
+)
+```
+
+Not all providers honor `tool_choice` — confirm with your provider's
+documentation. The `OpenAIProvider` maps the spec shape onto OpenAI's
+wire shape per the §8.1.1 mapping table. Whether the model actually
+honored the constraint is observable from the returned
+`finish_reason` and `tool_calls` fields; the framework does NOT
+re-validate the response against the constraint.
+
 ## Content blocks (multimodal user messages)
 
 User messages carry content in one of two shapes: a plain text string,

@@ -68,6 +68,46 @@ class Tool(BaseModel):
     parameters: dict[str, Any]
 
 
+# Spec: realizes llm-provider §5 `tool_choice` discriminated-union
+# (proposal 0025). The string-literal modes (`"auto"`, `"required"`,
+# `"none"`) and the `ForceTool` record share the `ToolChoice` alias.
+# Implementations validate `tool_choice` against `tools` before send
+# (see ``validate_tool_choice`` in :mod:`provider`); violations raise
+# ``ProviderInvalidRequest`` per §7.
+class ForceTool(BaseModel):
+    """Force the model to call exactly the named tool.
+
+    Use the record form of the §5 `tool_choice` discriminated union
+    when you need the model to call a specific tool by name. ``type``
+    is the spec-level discriminator (``"tool"``); the wire mapping
+    (§8.1.1) renames it to ``"function"`` for the OpenAI body. The
+    ``name`` MUST match a ``Tool.name`` in the supplied ``tools``
+    list; ``validate_tool_choice`` enforces this at pre-send time and
+    raises ``ProviderInvalidRequest`` on violation.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    # Frozen + extras-forbidden so a ``ForceTool`` instance is safely
+    # hashable and structurally pinned. The ``Literal["tool"]`` default
+    # makes ``ForceTool(name="search")`` ergonomic at the call site
+    # while preserving the spec-level discriminator on the type.
+    type: Literal["tool"] = "tool"
+    name: str
+
+
+# Per spec §5: `tool_choice` is one of:
+# - ``"auto"`` — the model decides.
+# - ``"required"`` — the model MUST call at least one tool.
+# - ``"none"`` — the model MUST NOT call tools.
+# - ``ForceTool(name=X)`` — the model MUST call the named tool.
+# A union of the three string literals plus the record form.
+# Callers pass ``tool_choice=None`` (the default) to omit the field
+# from the wire — the provider's own default applies, preserving
+# pre-0025 behavior.
+ToolChoice = Literal["auto", "required", "none"] | ForceTool
+
+
 # ---------------------------------------------------------------------------
 # Per-role message classes
 # ---------------------------------------------------------------------------
@@ -274,6 +314,7 @@ Message = Annotated[
 __all__ = [
     "AssistantMessage",
     "ContentBlock",
+    "ForceTool",
     "ImageBlock",
     "ImageSource",
     "ImageSourceInline",
@@ -283,6 +324,7 @@ __all__ = [
     "TextBlock",
     "Tool",
     "ToolCall",
+    "ToolChoice",
     "ToolMessage",
     "UserMessage",
 ]

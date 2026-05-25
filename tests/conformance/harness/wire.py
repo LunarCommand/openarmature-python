@@ -97,6 +97,20 @@ def assert_response_format_absent(body: Mapping[str, Any]) -> None:
         )
 
 
+def assert_tool_choice_absent(body: Mapping[str, Any]) -> None:
+    """Assert the wire body has no ``tool_choice`` key.
+
+    Per spec §8.1.1 (proposal 0025): when the caller omits
+    ``tool_choice`` from the ``complete()`` call, the wire body MUST
+    omit the field entirely so the OpenAI provider's own default
+    applies. Mirrors :func:`assert_response_format_absent`'s pattern.
+    """
+    if "tool_choice" in body:
+        raise AssertionError(
+            f"wire check failed: tool_choice present (value={body['tool_choice']!r}), expected absent"
+        )
+
+
 def assert_system_references_schema(body: Mapping[str, Any], schema: Mapping[str, Any]) -> None:
     """Assert the first wire message is a system message whose content
     references the supplied JSON Schema (via substring match of the
