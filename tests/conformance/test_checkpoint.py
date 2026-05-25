@@ -793,7 +793,7 @@ def _assert_resume_invariants(
                     assert len(attempts) == value, (
                         f"instance {idx} resume attempt count: actual={len(attempts)}, expected={value}"
                     )
-        elif key.startswith("instance_") and key.endswith("_executes_step_") and key.endswith("_on_resume"):
+        elif key.startswith("instance_") and "_executes_step_" in key and key.endswith("_on_resume"):
             # Fixture 050 directive: ``instance_1_executes_step_a_on_resume: true``.
             # Verified indirectly by ``instances_executed_during_resume``
             # — the instance ran, so its inner subgraph re-entered at

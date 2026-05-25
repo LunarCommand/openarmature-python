@@ -341,7 +341,7 @@ class FanOutNode[ParentT: State, ChildT: State]:
                     raise
 
             tasks: list[tuple[int, asyncio.Task[Mapping[str, Any]]]] = [
-                (idx, asyncio.ensure_future(signaled_run(idx, st))) for idx, st in enumerate(instance_states)
+                (idx, asyncio.create_task(signaled_run(idx, st))) for idx, st in enumerate(instance_states)
             ]
             try:
                 await asyncio.wait(
