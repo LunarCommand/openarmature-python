@@ -92,10 +92,12 @@ class InMemoryCheckpointer:
         # Buffered fan-out internal saves keyed by invocation_id. Each
         # entry holds the latest buffered record for that invocation;
         # subsequent buffered saves overwrite (the most recent state
-        # is what would have flushed). Count of buffered saves
-        # decides when to flush per ``flush_every``.
+        # is what would have flushed). Per-invocation counts of
+        # buffered saves decide when to flush per ``flush_every``;
+        # keeping counts per-invocation isolates concurrent
+        # invocations that share the same checkpointer.
         self._fan_out_buffer: dict[str, CheckpointRecord] = {}
-        self._fan_out_buffer_count = 0
+        self._fan_out_buffer_counts: dict[str, int] = {}
 
     async def save(self, invocation_id: str, record: CheckpointRecord) -> None:
         """Store ``record`` under ``invocation_id``, replacing any
@@ -131,8 +133,8 @@ class InMemoryCheckpointer:
             return
         async with self._lock:
             self._fan_out_buffer[invocation_id] = record
-            self._fan_out_buffer_count += 1
-            if self._fan_out_buffer_count >= self._fan_out_batching.flush_every:
+            self._fan_out_buffer_counts[invocation_id] = self._fan_out_buffer_counts.get(invocation_id, 0) + 1
+            if self._fan_out_buffer_counts[invocation_id] >= self._fan_out_batching.flush_every:
                 self._flush_invocation_buffer_locked(invocation_id)
 
     async def save_fan_out_in_flight_failure(
@@ -171,15 +173,14 @@ class InMemoryCheckpointer:
     def _flush_invocation_buffer_locked(self, invocation_id: str) -> None:
         """Caller-holds-lock helper: flush this invocation's buffered
         fan-out internal save (if any) into the persistent records
-        dict. Resets the buffer count once flushed."""
+        dict. Resets only this invocation's buffer count, leaving
+        other invocations' accounting untouched so concurrent
+        invocations sharing the checkpointer don't interfere with
+        each other's flush thresholds."""
         buffered = self._fan_out_buffer.pop(invocation_id, None)
         if buffered is not None:
             self._records[invocation_id] = buffered
-        # Reset count; the spec doesn't require per-invocation
-        # counts (most pipelines run one invocation at a time
-        # against any given checkpointer instance), and resetting on
-        # any flush keeps the model simple.
-        self._fan_out_buffer_count = 0
+        self._fan_out_buffer_counts.pop(invocation_id, None)
 
     async def load(self, invocation_id: str) -> CheckpointRecord | None:
         """Return the saved record for ``invocation_id`` or ``None``

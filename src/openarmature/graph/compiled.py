@@ -1618,69 +1618,85 @@ class CompiledGraph[StateT: State]:
         dispatch_token = _set_active_dispatch(lambda event: _dispatch(context, event))
         namespace_token = _set_namespace_prefix(namespace)
         fan_out_token = _set_fan_out_index(context.fan_out_index)
+        # Per spec §10.11 the ``fan_out_progress`` entry is "in-flight
+        # only"; the fan-out's own completion save below is the last
+        # point where the entry is needed (proposal 0009: that save
+        # "also finalizes fan_out_progress to mark all instances
+        # complete"). Pop the entry after the save fires, regardless of
+        # whether the fan-out completed normally, short-circuited, or
+        # raised, so subsequent saves in this invocation do not carry
+        # stale fan-out progress and a retry middleware on the fan-out
+        # node sees a fresh tracked state on the second attempt.
+        fan_out_progress_key = (context.namespace_prefix, current)
         try:
             try:
-                final_partial = await chain(state)
-            except RuntimeGraphError:
-                raise
-            except Exception as e:
-                raise NodeException(node_name=current, cause=e, recoverable_state=state) from e
+                try:
+                    final_partial = await chain(state)
+                except RuntimeGraphError:
+                    raise
+                except Exception as e:
+                    raise NodeException(node_name=current, cause=e, recoverable_state=state) from e
+            finally:
+                _reset_fan_out_index(fan_out_token)
+                _reset_namespace_prefix(namespace_token)
+                _reset_active_dispatch(dispatch_token)
+                _reset_active_observers(observers_token)
+            merged_outer = _merge_partial(state, final_partial, self.reducers, current)
+            # Spec §10.3 + §10.7 + proposal 0009 §10.11: the fan-out's
+            # own completion DOES save — one record once the fan-out as
+            # a whole has finished and results have merged back. The
+            # save also finalizes ``fan_out_progress`` (the projection
+            # at the save site captures every tracked instance's
+            # terminal state before the outer ``finally`` pops the
+            # entry). Per graph-engine §6 v0.16.1: the saved
+            # attempt_index reflects the wrapping retry MW's counter
+            # (sourced from ``deferred_info[0]`` which captured
+            # ``current_attempt_index()`` at the moment of the
+            # successful merge). Short-circuit case (middleware
+            # returned without invoking ``next``) records
+            # attempt_index=0.
+            info = deferred_info[0]
+            saved_attempt = info[0] if info is not None else 0
+            await self._maybe_save_checkpoint(
+                context,
+                node_name=current,
+                namespace=namespace,
+                step=step,
+                attempt_index=saved_attempt,
+                post_state=merged_outer,
+            )
+
+            if info is None:
+                return _StepResult(state=merged_outer, finalize_completed=_no_op_finalize)
+            final_attempt_index, final_pre_state, final_merged = info
+
+            def finalize_completed(edge_error: RuntimeGraphError | None) -> None:
+                if edge_error is None:
+                    self._dispatch_completed(
+                        context,
+                        current,
+                        namespace,
+                        step,
+                        final_pre_state,
+                        post_state=final_merged,
+                        attempt_index=final_attempt_index,
+                        fan_out_config=fan_out_event_config,
+                    )
+                else:
+                    self._dispatch_completed(
+                        context,
+                        current,
+                        namespace,
+                        step,
+                        final_pre_state,
+                        error=edge_error,
+                        attempt_index=final_attempt_index,
+                        fan_out_config=fan_out_event_config,
+                    )
+
+            return _StepResult(state=merged_outer, finalize_completed=finalize_completed)
         finally:
-            _reset_fan_out_index(fan_out_token)
-            _reset_namespace_prefix(namespace_token)
-            _reset_active_dispatch(dispatch_token)
-            _reset_active_observers(observers_token)
-        merged_outer = _merge_partial(state, final_partial, self.reducers, current)
-        # Spec §10.3 + §10.7: the fan-out's own completion DOES save —
-        # one record once the fan-out as a whole has finished and
-        # results have merged back. Per-instance internal saves are
-        # gated off by the fan-out instance descent setting
-        # ``checkpointer=None`` on the inner context. Per graph-engine
-        # §6 v0.16.1: the saved attempt_index reflects the wrapping
-        # retry MW's counter (sourced from ``deferred_info[0]`` which
-        # captured ``current_attempt_index()`` at the moment of the
-        # successful merge). Short-circuit case (middleware returned
-        # without invoking ``next``) records attempt_index=0.
-        info = deferred_info[0]
-        saved_attempt = info[0] if info is not None else 0
-        await self._maybe_save_checkpoint(
-            context,
-            node_name=current,
-            namespace=namespace,
-            step=step,
-            attempt_index=saved_attempt,
-            post_state=merged_outer,
-        )
-
-        if info is None:
-            return _StepResult(state=merged_outer, finalize_completed=_no_op_finalize)
-        final_attempt_index, final_pre_state, final_merged = info
-
-        def finalize_completed(edge_error: RuntimeGraphError | None) -> None:
-            if edge_error is None:
-                self._dispatch_completed(
-                    context,
-                    current,
-                    namespace,
-                    step,
-                    final_pre_state,
-                    post_state=final_merged,
-                    attempt_index=final_attempt_index,
-                    fan_out_config=fan_out_event_config,
-                )
-            else:
-                self._dispatch_completed(
-                    context,
-                    current,
-                    namespace,
-                    step,
-                    final_pre_state,
-                    error=edge_error,
-                    attempt_index=final_attempt_index,
-                    fan_out_config=fan_out_event_config,
-                )
-
-        return _StepResult(state=merged_outer, finalize_completed=finalize_completed)
+            context.fan_out_progress_state.pop(fan_out_progress_key, None)
 
     async def _step_parallel_branches_node(
         self,

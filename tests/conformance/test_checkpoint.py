@@ -464,7 +464,7 @@ async def _run_one_case(spec: Mapping[str, Any], *, top_level: Mapping[str, Any]
     # appears in the recorder).
     if "instances_executed_during_resume" in resume_expected:
         expected_executed = sorted(
-            int(i) for i in cast("Iterable[Any]", resume_expected["instances_executed_during_resume"])
+            int(i) for i in cast(Iterable[Any], resume_expected["instances_executed_during_resume"])
         )
         actual_executed = sorted(_flatten_executed_instances(flaky_per_index_recorders))
         assert actual_executed == expected_executed, (
@@ -473,7 +473,7 @@ async def _run_one_case(spec: Mapping[str, Any], *, top_level: Mapping[str, Any]
         )
     if "instances_skipped_during_resume" in resume_expected:
         expected_skipped = sorted(
-            int(i) for i in cast("Iterable[Any]", resume_expected["instances_skipped_during_resume"])
+            int(i) for i in cast(Iterable[Any], resume_expected["instances_skipped_during_resume"])
         )
         actual_executed_set = set(_flatten_executed_instances(flaky_per_index_recorders))
         # An instance is "skipped" if its body did NOT run during resume.

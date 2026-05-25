@@ -267,7 +267,7 @@ class FanOutNode[ParentT: State, ChildT: State]:
                     tracked.result_is_error = True
                     tracked.extra_outputs = {}
                     tracked.state = "completed"
-                    await _save_instance_completed(self.name, idx, state, context)
+                    await _save_instance_completed(state, context)
                     raise
                 # Per §10.11 in_flight observability under fail_fast:
                 # if no sibling completion fired a save during this
@@ -280,7 +280,7 @@ class FanOutNode[ParentT: State, ChildT: State]:
                 # (no accumulator write happens on failure under
                 # fail_fast) per §10.11.2. Re-raise after the save so
                 # the fail_fast cancellation path stays intact.
-                await _save_instance_in_flight(self.name, idx, state, context)
+                await _save_instance_in_flight(state, context)
                 raise
 
             # Atomicity contract (§10.11): produce contribution -> record
@@ -306,7 +306,7 @@ class FanOutNode[ParentT: State, ChildT: State]:
             # therefore showed the instance as ``in_flight``). The
             # explicit save closes the atomicity gap. Routed through
             # the fan-out-internal batching seam per §10.11.4.
-            await _save_instance_completed(self.name, idx, state, context)
+            await _save_instance_completed(state, context)
 
             return partial
 
@@ -576,8 +576,6 @@ def _rolled_forward_partial(cfg: FanOutConfig, tracked: _FanOutInstanceState) ->
 
 
 async def _save_instance_in_flight(
-    fan_out_node_name: str,
-    instance_index: int,
     parent_state: Any,
     context: _InvocationContext,
 ) -> None:
@@ -604,8 +602,6 @@ async def _save_instance_in_flight(
         _save_fan_out_in_flight_failure,
     )
 
-    del fan_out_node_name, instance_index  # noqa: WPS336 — reserved for event correlation
-
     checkpointer = context.checkpointer
     if checkpointer is None:
         return
@@ -629,8 +625,6 @@ async def _save_instance_in_flight(
 
 
 async def _save_instance_completed(
-    fan_out_node_name: str,
-    instance_index: int,
     parent_state: Any,
     context: _InvocationContext,
 ) -> None:
@@ -706,7 +700,6 @@ async def _save_instance_completed(
     # progress. Adding a second event would double-count for backends
     # that surface them as spans. Suppress to keep the event stream
     # node-aligned.
-    del fan_out_node_name, instance_index  # noqa: WPS336 — args reserved for future event correlation
 
 
 def _fan_in_fail_fast(

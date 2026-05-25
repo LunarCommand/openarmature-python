@@ -573,9 +573,6 @@ class _FailingParentState(State):
     results: list[int] = Field(default_factory=list[int])
 
 
-_failing_instance_counter = [0]
-
-
 async def _failing_scorer(s: _FailingItemState) -> dict[str, int]:
     # Fail when item == 999 (sentinel). All others succeed and
     # contribute ``out = item``. The sentinel is positioned in the
