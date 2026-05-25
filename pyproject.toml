@@ -48,7 +48,7 @@ Repository = "https://github.com/LunarCommand/openarmature-python"
 Specification = "https://github.com/LunarCommand/openarmature-spec"
 
 [tool.openarmature]
-spec_version = "0.18.0"
+spec_version = "0.18.1"
 
 [dependency-groups]
 dev = [

@@ -877,6 +877,24 @@ def _assert_state_matches(actual: Any, expected: Mapping[str, Any]) -> None:
     else:
         raise AssertionError(f"unexpected actual state type {type(actual).__name__}")
     for k, v in expected.items():
+        # Magic-key length assertions can appear inside ``final_state``
+        # alongside literal field assertions (e.g. fixture 052 has
+        # ``errors_list_length: 1`` as a sibling of the literal
+        # ``results`` and ``items`` fields). Route the magic keys to
+        # length checks against the corresponding list field; literal
+        # keys take the standard equality path.
+        if k == "errors_list_length":
+            errors = actual_dict.get("errors")
+            assert isinstance(errors, list), f"errors_list_length: errors is not a list ({errors!r})"
+            errors_list = cast("list[Any]", errors)
+            assert len(errors_list) == v, f"errors_list_length: actual={len(errors_list)}, expected={v}"
+            continue
+        if k == "results_list_length":
+            results = actual_dict.get("results")
+            assert isinstance(results, list), f"results_list_length: results is not a list ({results!r})"
+            results_list = cast("list[Any]", results)
+            assert len(results_list) == v, f"results_list_length: actual={len(results_list)}, expected={v}"
+            continue
         assert actual_dict.get(k) == v, f"state field {k!r}: actual={actual_dict.get(k)!r}, expected={v!r}"
 
 
