@@ -28,6 +28,7 @@ from .wire import (
     assert_error_carries,
     assert_response_format_absent,
     assert_system_references_schema,
+    assert_tool_choice_absent,
     match_wire_body,
     request_body,
 )
@@ -41,6 +42,7 @@ __all__ = [
     "assert_error_carries",
     "assert_response_format_absent",
     "assert_system_references_schema",
+    "assert_tool_choice_absent",
     "discover_fixtures",
     "load_fixture",
     "match_wire_body",

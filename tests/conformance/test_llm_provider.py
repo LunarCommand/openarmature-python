@@ -31,6 +31,7 @@ from pydantic import ValidationError
 from openarmature.llm import (
     TRANSIENT_CATEGORIES,
     AssistantMessage,
+    ForceTool,
     LlmProviderError,
     Message,
     OpenAIProvider,
@@ -41,6 +42,7 @@ from openarmature.llm import (
     SystemMessage,
     Tool,
     ToolCall,
+    ToolChoice,
     ToolMessage,
     UserMessage,
 )
@@ -49,6 +51,7 @@ from .harness import (
     assert_error_carries,
     assert_response_format_absent,
     assert_system_references_schema,
+    assert_tool_choice_absent,
     match_wire_body,
     request_body,
 )
@@ -200,6 +203,30 @@ def _build_tools(raw_list: list[Mapping[str, Any]] | None) -> list[Tool] | None:
     ]
 
 
+def _build_tool_choice(raw: Any) -> ToolChoice | None:
+    """Translate a fixture's ``tool_choice:`` value into the
+    :class:`ToolChoice` discriminated-union value.
+
+    Two YAML shapes per spec proposal 0025:
+
+    - String: ``auto`` / ``required`` / ``none`` — passes through
+      verbatim.
+    - Dict: ``{type: tool, name: X}`` — constructed into a
+      :class:`ForceTool` record. The wire-side rename (``tool`` →
+      ``function``) happens inside the provider, not at parse time.
+
+    Returns ``None`` when the fixture omits ``tool_choice``; the
+    provider's own default applies on the wire.
+    """
+    if raw is None:
+        return None
+    if isinstance(raw, str):
+        return cast("ToolChoice", raw)
+    if isinstance(raw, dict):
+        return ForceTool.model_validate(raw)
+    raise AssertionError(f"unrecognized tool_choice shape in fixture: {raw!r}")
+
+
 # ---------------------------------------------------------------------------
 # Assertion helpers
 # ---------------------------------------------------------------------------
@@ -265,6 +292,9 @@ def _assert_wire_expectations(
             if key == "response_format_absent":
                 if value is True:
                     assert_response_format_absent(body)
+            elif key == "tool_choice_absent":
+                if value is True:
+                    assert_tool_choice_absent(body)
             elif key == "system_message_content_references_schema":
                 if value is True:
                     if not isinstance(response_schema, dict):
@@ -468,10 +498,17 @@ async def _run_one_call(
                         _build_message(m) for m in cast("list[Mapping[str, Any]]", call_spec["messages"])
                     ]
                     tools = _build_tools(cast("list[Mapping[str, Any]] | None", call_spec.get("tools")))
+                    tool_choice = _build_tool_choice(call_spec.get("tool_choice"))
                 except ValidationError as ve:
                     raise ProviderInvalidRequest(str(ve)) from ve
                 await _maybe_with_retry(
-                    lambda: provider.complete(messages, tools, config, response_schema=response_schema),
+                    lambda: provider.complete(
+                        messages,
+                        tools,
+                        config,
+                        response_schema=response_schema,
+                        tool_choice=tool_choice,
+                    ),
                     retry_mw_cfg,
                 )
             _assert_raises_matches(excinfo, expected["raises"])
@@ -485,8 +522,15 @@ async def _run_one_call(
             messages = [_build_message(m) for m in cast("list[Mapping[str, Any]]", call_spec["messages"])]
             messages_snapshot = [m.model_dump(mode="json") for m in messages]
             tools = _build_tools(cast("list[Mapping[str, Any]] | None", call_spec.get("tools")))
+            tool_choice = _build_tool_choice(call_spec.get("tool_choice"))
             response = await _maybe_with_retry(
-                lambda: provider.complete(messages, tools, config, response_schema=response_schema),
+                lambda: provider.complete(
+                    messages,
+                    tools,
+                    config,
+                    response_schema=response_schema,
+                    tool_choice=tool_choice,
+                ),
                 retry_mw_cfg,
             )
             _assert_response_matches(response, cast("Mapping[str, Any]", expected.get("response") or {}))
