@@ -196,6 +196,16 @@ class FanOutNode[ParentT: State, ChildT: State]:
                 del exec_state.instances[instance_count:]
             exec_state.instance_count = instance_count
 
+        # Shared cancel signal for the fail_fast path. Defined here (not
+        # inside the fail_fast branch below) so ``run_instance`` can
+        # check it AFTER semaphore acquisition but BEFORE mutating
+        # tracked state — closes a race where a semaphore-blocked
+        # sibling would flip its tracked state to ``in_flight`` after a
+        # sibling failed and set the signal. In collect mode the signal
+        # is never set, so the check inside ``run_instance`` is a
+        # no-op there.
+        cancel_signal = asyncio.Event()
+
         # Per-instance task: build the instance_middleware chain, run
         # the subgraph against it, and return the per-instance partial
         # (collect_field + extra_outputs).
@@ -221,6 +231,17 @@ class FanOutNode[ParentT: State, ChildT: State]:
                     raise _RolledForwardError(category=_extract_error_category(tracked.result))
                 # Roll the success contribution forward verbatim.
                 return _rolled_forward_partial(cfg, tracked)
+
+            # Cancel-signal check AFTER the resume rollforward branch
+            # but BEFORE the first tracked-state mutation. Covers the
+            # race where a sibling failed (setting the signal) while
+            # this task was blocked on the bounded-concurrency
+            # semaphore inside ``gated_run``; without this check, the
+            # task would acquire the semaphore and flip ``tracked.state``
+            # to ``in_flight``, contradicting §10.11.2's
+            # "not-yet-dispatched siblings end up not_started" contract.
+            if cancel_signal.is_set():
+                raise asyncio.CancelledError()
 
             # Flip to in_flight BEFORE dispatching so a sibling-
             # triggered save during this instance's execution observes
@@ -313,17 +334,15 @@ class FanOutNode[ParentT: State, ChildT: State]:
         gated_run = _bounded_runner(run_instance, max_concurrency)
 
         if cfg.error_policy == "fail_fast":
-            # Shared cancel signal: when one instance raises, sibling
-            # tasks check this BEFORE acquiring the semaphore (and
-            # before any other meaningful work) and exit early as
-            # CancelledError so the saved record's per-instance state
-            # for them stays ``not_started`` (per §10.11.2 fail_fast
-            # cancellation invariant). Plain asyncio.gather +
-            # asyncio.wait don't enforce this strongly enough with a
-            # bounded-concurrency semaphore: siblings still waiting
-            # on the semaphore can race past the wait-for-cancellation
-            # window. The explicit signal closes that gap.
-            cancel_signal = asyncio.Event()
+            # ``cancel_signal`` is defined above (before ``run_instance``)
+            # so the in-instance check can read it. The wrapper below
+            # adds a fast-path check before semaphore acquisition for
+            # tasks that haven't entered ``run_instance`` yet; the
+            # in-instance check covers the race after semaphore
+            # acquisition. The explicit signal closes the
+            # bounded-concurrency-semaphore cancellation gap that
+            # ``asyncio.gather`` / ``asyncio.wait`` don't enforce
+            # strongly enough on their own.
 
             async def signaled_run(idx: int, st: Any) -> Mapping[str, Any]:
                 # Check before any work — if a sibling already failed,
@@ -354,15 +373,22 @@ class FanOutNode[ParentT: State, ChildT: State]:
                 await asyncio.gather(*(t for _, t in tasks), return_exceptions=True)
                 raise
 
-            # Find the first task that raised a real exception (not
-            # CancelledError — those are the siblings we cancelled).
+            # Iterate all completed-not-cancelled tasks to retrieve
+            # each exception via ``t.exception()`` (otherwise asyncio
+            # warns "Task exception was never retrieved" on GC for any
+            # task that failed before fail_fast cancelled its
+            # siblings). ``failed_cause`` still captures only the
+            # FIRST real exception — NodeException's ``cause`` should
+            # be the originating instance's error, not a later
+            # sibling's. CancelledErrors are siblings we cancelled, so
+            # ignore them.
             failed_cause: BaseException | None = None
             for _, t in tasks:
                 if t.done() and not t.cancelled():
                     exc = t.exception()
                     if exc is not None and not isinstance(exc, asyncio.CancelledError):
-                        failed_cause = exc
-                        break
+                        if failed_cause is None:
+                            failed_cause = exc
 
             # Cancel any still-pending tasks; drain to absorb
             # CancelledError so it doesn't propagate as unhandled.

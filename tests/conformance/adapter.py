@@ -384,7 +384,12 @@ def _make_flaky_per_index_fn(
     fail_first_run_indices = set(cfg.get("fail_first_run_indices") or [])
     always_fail_indices = set(cfg.get("always_fail_indices") or [])
     success_compute = dict(cfg.get("success_compute", {}))
-    has_failed_once = [False]
+    # Per-index tracking of which ``fail_first_run_indices`` instances
+    # have already failed once. The earlier single-flag shape failed
+    # only the first index in dispatch order when the list named
+    # multiple indices; per-index tracking matches the directive's
+    # "fail on FIRST CALL EVER" wording.
+    already_failed_indices: set[int] = set()
     traced = [False]
 
     async def fn(state: Any) -> Mapping[str, Any]:
@@ -407,8 +412,8 @@ def _make_flaky_per_index_fn(
                 message=f"flaky_per_index({node_name}) always-fail at idx={idx}",
                 category="node_exception",
             )
-        if idx in fail_first_run_indices and not has_failed_once[0]:
-            has_failed_once[0] = True
+        if idx in fail_first_run_indices and idx not in already_failed_indices:
+            already_failed_indices.add(idx)
             raise _CategorizedException(
                 message=f"flaky_per_index({node_name}) first-run failure at idx={idx}",
                 category="node_exception",

@@ -20,8 +20,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). The
 
 ### Notes
 
-- **Pinned spec version bumped from v0.17.1 to v0.18.0.** Proposal 0009 (per-instance fan-out resume) is the v0.18.0 driver: pipeline-utilities §10.3 / §10.7 revised, §10.11 added with per-instance state machine + composition rules + configurable batching. The `append` reducer no-double-merge invariant from §10.11.1 is the load-bearing correctness story.
-- **Pinned spec version bumped to v0.17.1.** Proposal 0019 (multi-provider wire-format extension) reframes llm-provider §8 as a catalog of wire-format mappings, with the existing OpenAI-compatible body nested under §8.1. Purely textual on the spec side, no behavioral change, no fixture changes. Code and doc references to §8.X updated to match the new structure (§8.1 to §8.1.1, §8.2 to §8.1.2, §8.3 to §8.1.3, §8.5.1 to §8.1.5.1, §8.1.1 to §8.1.1.1). All existing conformance fixtures continue to pass.
+- **Pinned spec version bumped from v0.17.0 to v0.18.1 over this Unreleased cycle.** Three spec versions absorbed: v0.17.1 (proposal 0019, multi-provider wire-format extension; purely textual reframe of llm-provider §8 as a catalog of wire-format mappings, OpenAI-compatible body nested under §8.1, code references updated to §8.1 / §8.1.1 / §8.1.2 / §8.1.3 / §8.1.5.1 / §8.1.1.1), v0.18.0 (proposal 0009, per-instance fan-out resume; pipeline-utilities §10.3 / §10.7 revised, §10.11 added with per-instance state machine plus composition rules plus configurable batching; the `append` reducer no-double-merge invariant from §10.11.1 is the load-bearing correctness story; see Added / Changed above), and v0.18.1 (fixture-only patch on `release/v0.18.1` correcting an off-by-one literal in fixture 052's expected `results`). All existing conformance fixtures continue to pass.
 
 ## [0.8.0] — 2026-05-23
 
