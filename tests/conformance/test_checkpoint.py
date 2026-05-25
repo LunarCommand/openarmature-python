@@ -59,12 +59,14 @@ CONFORMANCE_DIR = (
 )
 
 # Conformance fixture range: 024-031 minus 028 are the proposal-0008
-# set; 048-054 are the proposal-0009 per-instance-resume set. 028
-# (fan-out atomic-restart) was REMOVED in spec v0.18.0 when proposal
-# 0009 superseded its contract, so it is explicitly excluded from the
-# set rather than relying on the test runner's file-glob to filter
-# the missing fixture out.
-_CHECKPOINT_FIXTURE_NUMBERS: frozenset[int] = frozenset((set(range(24, 32)) - {28}) | set(range(48, 55)))
+# set; 048-054 are the proposal-0009 per-instance-resume set; 055
+# (schema_version declared class — proposal 0028) and 056 (fan-out
+# count drift — proposal 0029) are the follow-on bundle. 028 (fan-out
+# atomic-restart) was REMOVED in spec v0.18.0 when proposal 0009
+# superseded its contract, so it is explicitly excluded from the set
+# rather than relying on the test runner's file-glob to filter the
+# missing fixture out.
+_CHECKPOINT_FIXTURE_NUMBERS: frozenset[int] = frozenset((set(range(24, 32)) - {28}) | set(range(48, 57)))
 
 # Fixtures that need resume-aware test seams the conformance adapter
 # doesn't yet translate. Skipped here with a clear reason — the engine
@@ -142,6 +144,17 @@ class _CapturingCheckpointer:
         self.saves: list[CheckpointRecord] = []
         self._abort_after_instance = abort_after_instance
         self._aborted = False
+        # Per proposal 0029 (fixture 056): mutating the saved record's
+        # outer state on ``load`` simulates "user shrank/grew the input
+        # set between runs." The engine restores from this mutated
+        # state, the fan-out node re-resolves count from the mutated
+        # ``items``, and the count-drift check raises
+        # ``checkpoint_record_invalid`` because the saved
+        # ``fan_out_progress`` entry's ``instance_count`` doesn't match.
+        # Keys are field names on the outer state; values replace
+        # those fields when the record is returned to the engine on
+        # resume.
+        self.load_state_overrides: dict[str, Any] = {}
 
     async def save(self, invocation_id: str, record: CheckpointRecord) -> None:
         self._raise_if_post_abort()
@@ -187,7 +200,26 @@ class _CapturingCheckpointer:
                     raise _AbortAfterInstance(f"simulated crash after instance {target_idx} completed save")
 
     async def load(self, invocation_id: str) -> CheckpointRecord | None:
-        return await self._inner.load(invocation_id)
+        record = await self._inner.load(invocation_id)
+        if record is None or not self.load_state_overrides:
+            return record
+        # Apply overrides to the outer state. For outer-level saves the
+        # outer state is ``record.state``; for inner saves (fan-out
+        # instance, subgraph) it's ``record.parent_states[0]``. Mutate
+        # whichever shape is present so the test driver doesn't need
+        # to care which save site landed last.
+        from dataclasses import replace as dataclass_replace  # noqa: PLC0415
+
+        if record.parent_states:
+            outer = record.parent_states[0]
+            outer_updates = {**outer.model_dump(), **self.load_state_overrides}
+            new_outer = type(outer)(**outer_updates)
+            new_parents = (new_outer,) + record.parent_states[1:]
+            return dataclass_replace(record, parent_states=new_parents)
+        outer = record.state
+        outer_updates = {**outer.model_dump(), **self.load_state_overrides}
+        new_outer = type(outer)(**outer_updates)
+        return dataclass_replace(record, state=new_outer)
 
     async def list(self, filter: Any = None) -> Any:
         return await self._inner.list(filter)
@@ -316,9 +348,46 @@ async def _run_one_case(spec: Mapping[str, Any], *, top_level: Mapping[str, Any]
         flaky_per_index_attempt_recorders=flaky_per_index_recorders,
     )
     builder = built.builder
+
+    # Per proposal 0028 (fixture 055): the fixture's ``state.schema_version``
+    # directive declares the graph state class's schema_version, and the
+    # optional ``runtime_state_subclass.schema_version`` directive
+    # creates a subclass shadowing it. The harness applies both directly
+    # to the constructed state class (build_state_cls in adapter.py
+    # ignores schema_version today — supporting it via class-level
+    # attribute writes here keeps the adapter signature stable).
+    state_block = cast("Mapping[str, Any]", spec.get("state") or {})
+    declared_schema_version = state_block.get("schema_version")
+    if declared_schema_version is not None:
+        built.state_cls.schema_version = str(declared_schema_version)
+
     builder.with_checkpointer(cast("Checkpointer", capturing))
     compiled = builder.compile()
-    initial_state = built.initial_state(spec.get("initial_state", {}))
+
+    # Per proposal 0028: ``runtime_state_subclass`` constructs a Python
+    # subclass with the overridden ``schema_version`` and passes an
+    # instance of THAT subclass to ``invoke()``. The test verifies the
+    # engine ignores the subclass's value and writes saves using the
+    # declared class's value — proving §10.2's "declared class is
+    # canonical" rule.
+    runtime_subclass_directive = cast(
+        "Mapping[str, Any] | None",
+        spec.get("runtime_state_subclass"),
+    )
+    if runtime_subclass_directive is not None:
+        override_version = str(runtime_subclass_directive["schema_version"])
+        # Subclass with ClassVar override at the class level. The
+        # subclass IS-A built.state_cls (Pydantic structural-conformance
+        # holds), so ``compiled.invoke(subclass_instance, ...)`` accepts
+        # it without complaint.
+        runtime_subclass = type(
+            f"{built.state_cls.__name__}Runtime",
+            (built.state_cls,),
+            {"schema_version": override_version},
+        )
+        initial_state = cast("State", runtime_subclass(**spec.get("initial_state", {})))
+    else:
+        initial_state = built.initial_state(spec.get("initial_state", {}))
 
     # Run #1 — first invocation. May succeed or fail per fixture.
     first_run_expected_error = spec.get("first_run_expected_error")
@@ -420,6 +489,31 @@ async def _run_one_case(spec: Mapping[str, Any], *, top_level: Mapping[str, Any]
     if "invariants" in expected:
         _assert_invariants(cast("Mapping[str, Any]", expected["invariants"]), capturing.saves)
 
+    # Per proposal 0028 (fixture 055): ``every_save_assertions`` is a
+    # cross-save invariant block — every captured save during the
+    # invocation MUST match every key in this block. Catches
+    # implementations that read ``schema_version`` from
+    # ``type(state)`` (the runtime subclass) at any intermediate save
+    # site instead of from the declared graph state class. Distinct
+    # from ``invariants`` above which asserts properties of the SET of
+    # saves (e.g., "at least one save fired"); this asserts the same
+    # property holds on EVERY save.
+    every_save_block = cast(
+        "Mapping[str, Any] | None",
+        spec.get("every_save_assertions"),
+    )
+    if every_save_block is not None:
+        assert capturing.saves, (
+            "every_save_assertions declared but no saves were captured during the invocation"
+        )
+        for save_idx, saved_record in enumerate(capturing.saves):
+            for key, expected_value in every_save_block.items():
+                actual_value = getattr(saved_record, key, None)
+                assert actual_value == expected_value, (
+                    f"every_save_assertions: save[{save_idx}].{key} mismatch — "
+                    f"actual={actual_value!r}, expected={expected_value!r}"
+                )
+
     # ----- checkpoint_not_found expected (fixture 030) -----
     if expected.get("expected_error") == "checkpoint_not_found":
         ghost = cast("str", expected.get("resume_invocation_id", "ghost"))
@@ -427,7 +521,7 @@ async def _run_one_case(spec: Mapping[str, Any], *, top_level: Mapping[str, Any]
             await compiled.invoke(initial_state, resume_invocation=ghost)
         return
 
-    # ----- Resume path (fixtures 025, 029, 031, 048-054) -----
+    # ----- Resume path (fixtures 025, 029, 031, 048-054, 056) -----
     resume_block = spec.get("resume")
     if resume_block is None or not resume_block.get("from_first_run"):
         return
@@ -448,6 +542,49 @@ async def _run_one_case(spec: Mapping[str, Any], *, top_level: Mapping[str, Any]
     capturing._abort_after_instance = None  # noqa: SLF001
     # Clear the trace so post-resume execution capture is isolated.
     trace.clear()
+
+    # Per proposal 0029 (fixture 056): ``resume_with_modified_items``
+    # simulates "user changed the input set between runs." The engine
+    # restores state from the saved record on resume (the
+    # ``initial_state`` parameter to ``invoke`` is ignored on the
+    # resume path); to actually mutate the resumed run's state we
+    # install overrides on the capturing checkpointer's ``load``
+    # path, which patches the outer state when the engine reads back
+    # the saved record. The fan-out node then re-resolves its count
+    # from the mutated state and the count-drift check raises.
+    modified_items_directive = cast(
+        "Mapping[str, Any] | None",
+        resume_block.get("resume_with_modified_items"),
+    )
+    if modified_items_directive is not None:
+        capturing.load_state_overrides = dict(modified_items_directive)
+
+    # Per proposal 0029: a resume that hits count drift MUST raise
+    # ``checkpoint_record_invalid``. ``resume.expected_error`` carries
+    # the assertion (sibling to ``resume.expected``); when present, the
+    # invoke MUST raise the named category before final_state can be
+    # checked.
+    resume_expected_error = cast(
+        "Mapping[str, Any] | None",
+        resume_block.get("expected_error"),
+    )
+    if resume_expected_error is not None:
+        # CheckpointRecordInvalid (the proposal-0029 count-drift category)
+        # is a CheckpointError, NOT a RuntimeGraphError — they're sibling
+        # categorized error hierarchies. Catch the broader Exception and
+        # assert ``category`` on the value to match both paths.
+        with pytest.raises((CheckpointError, RuntimeGraphError)) as excinfo:
+            await compiled.invoke(
+                initial_state,
+                resume_invocation=invocation_id_first_run,
+            )
+        expected_cat = resume_expected_error["category"]
+        actual_cat = cast("str", getattr(excinfo.value, "category", ""))
+        assert actual_cat == expected_cat, (
+            f"resume expected_error category mismatch: actual={actual_cat!r}, expected={expected_cat!r}"
+        )
+        return
+
     try:
         final_resume = await compiled.invoke(
             initial_state,
@@ -692,19 +829,25 @@ def _assert_fan_out_instance(
             f"fan_out_progress[{node_name!r}].instances[{idx}].result: "
             f"actual={actual.result!r}, expected={expected['result']!r}"
         )
-    if expected.get("result_kind") == "error":
-        # Spec §10.11.2: collect-mode error contributions are recorded
-        # as the per-instance result entry. The engine ships
-        # ``dict[str, str]`` with ``fan_out_index`` and ``category``.
-        raw_result: Any = actual.result
-        assert isinstance(raw_result, dict), (
-            f"fan_out_progress[{node_name!r}].instances[{idx}].result: "
-            f"expected dict (error_record), got {type(raw_result).__name__}"
+    if "result_is_error" in expected:
+        # Spec §10.11 (proposal 0027): explicit boolean discriminator
+        # on the per-instance entry. Replaced the pre-0027
+        # ``result_kind: error`` shape heuristic.
+        assert actual.result_is_error == expected["result_is_error"], (
+            f"fan_out_progress[{node_name!r}].instances[{idx}].result_is_error: "
+            f"actual={actual.result_is_error!r}, expected={expected['result_is_error']!r}"
         )
-        result_dict = cast("dict[str, Any]", raw_result)
-        assert "category" in result_dict, (
-            f"fan_out_progress[{node_name!r}].instances[{idx}].result: "
-            f"expected error_record with 'category' key, got {result_dict!r}"
+    if "result_present" in expected:
+        # Spec §10.11 (proposal 0027): assert the ``result`` field
+        # exists on the saved record without constraining its shape
+        # (the value remains impl-defined per §9.5). Pair with
+        # ``result_is_error: true`` to assert "an error contribution
+        # was captured" without locking the test to one impl's error
+        # record format.
+        result_present_actual = actual.result is not None
+        assert result_present_actual == expected["result_present"], (
+            f"fan_out_progress[{node_name!r}].instances[{idx}].result_present: "
+            f"actual={result_present_actual!r}, expected={expected['result_present']!r}"
         )
     if "completed_inner_positions" in expected:
         positions_expected = cast("list[Mapping[str, Any]]", expected["completed_inner_positions"])
