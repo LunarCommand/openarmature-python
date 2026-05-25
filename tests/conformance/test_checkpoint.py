@@ -58,11 +58,13 @@ CONFORMANCE_DIR = (
     Path(__file__).resolve().parents[2] / "openarmature-spec" / "spec" / "pipeline-utilities" / "conformance"
 )
 
-# Conformance fixture range: 024-031 are the proposal-0008 set,
-# 048-054 are the proposal-0009 per-instance-resume set. 028 was
-# REMOVED in spec v0.18.0 — the file no longer exists, so the range
-# naturally excludes it.
-_CHECKPOINT_FIXTURE_NUMBERS: frozenset[int] = frozenset(list(range(24, 32)) + list(range(48, 55)))
+# Conformance fixture range: 024-031 minus 028 are the proposal-0008
+# set; 048-054 are the proposal-0009 per-instance-resume set. 028
+# (fan-out atomic-restart) was REMOVED in spec v0.18.0 when proposal
+# 0009 superseded its contract, so it is explicitly excluded from the
+# set rather than relying on the test runner's file-glob to filter
+# the missing fixture out.
+_CHECKPOINT_FIXTURE_NUMBERS: frozenset[int] = frozenset((set(range(24, 32)) - {28}) | set(range(48, 55)))
 
 # Fixtures that need resume-aware test seams the conformance adapter
 # doesn't yet translate. Skipped here with a clear reason — the engine
