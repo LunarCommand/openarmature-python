@@ -531,11 +531,20 @@ async def test_fan_out_internal_saves_fire_per_instance() -> None:
         .compile()
     )
     await parent.invoke(_ParentState(items=[1, 2, 3]))
-    # Some inner-node saves fire (one per instance per inner node)
-    # AND the fan-out node's own completion save. Total >= instances +
-    # 1 (instance count + fan-out completion); the explicit
-    # ``_save_instance_completed`` adds another save per instance.
-    assert len(cp.saves) >= 3
+    # Deterministic save breakdown for this test (3 instances,
+    # 1-node inner subgraph):
+    #   3 inner-node saves (per-instance scorer completion via
+    #     ``_maybe_save_checkpoint`` with ``fan_out_index`` set)
+    #   3 explicit "instance completed" saves (per-instance via
+    #     ``_save_instance_completed`` in ``fan_out.py``)
+    #   1 fan-out node completion save (via ``_maybe_save_checkpoint``
+    #     in ``_step_fan_out_node`` after fan-in)
+    # Total: 7. Use ``>=`` rather than ``==`` so future engine
+    # internals can add additional saves without breaking the test.
+    assert len(cp.saves) >= 7, (
+        f"expected >= 7 saves (3 inner-node + 3 instance-completed + "
+        f"1 fan-out completion), got {len(cp.saves)}"
+    )
     # At least one save carries an inner position with fan_out_index
     # populated — that's the inner-node save inside an instance,
     # recorded against the per-instance ``completed_inner_positions``
