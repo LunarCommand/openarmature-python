@@ -50,7 +50,13 @@ class GraphEngineExpected(_ForbidExtras):
     observer_event_invariants: dict[str, Any] | None = None
     # 020 — proposal-0012 fixture: assertions about edge-resolution
     # failure event shapes. Permissive dict until Phase 1.
+    # 022–024 (proposal 0010 §6 Drain) — drain-summary invariants
+    # (drain_returned_within_timeout, graph_state_intact_after_timeout,
+    # drain_waited_for_all_events) ride on the same field.
     invariants: dict[str, Any] | None = None
+    # 022–025 (proposal 0010 §6 Drain) — DrainSummary assertions
+    # (timeout_reached, undelivered_count, undelivered_count_min).
+    drain_summary: dict[str, Any] | None = None
     # 015 — invoke() returns normally; obs_raiser's exceptions surface to
     # warnings rather than propagate.
     no_propagated_error: bool | None = None

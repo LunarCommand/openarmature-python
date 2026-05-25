@@ -764,6 +764,15 @@ class ObserverFixture:
     `phases` is the optional subscription set parsed from the fixture's
     YAML. None means "no `phases:` key was present" — the harness leaves
     the engine to default to both phases.
+
+    `sleep_ms_per_event` configures the slow-observer directive (proposal
+    0010 §6 Drain conformance). When `None`, the observer runs at full
+    speed. An int means a constant sleep per event. A dict with
+    `first_invocation` / `subsequent_invocations` keys is invocation-
+    counter-aware: the first invocation through this observer uses the
+    `first_invocation` value, every subsequent invocation uses the
+    `subsequent_invocations` value. `invocation_counter` is bumped by the
+    harness between invocations.
     """
 
     name: str
@@ -771,6 +780,8 @@ class ObserverFixture:
     target: str  # "outer" | <subgraph name>
     behavior: str  # "record" | "raise"
     phases: frozenset[str] | None = None
+    sleep_ms_per_event: int | Mapping[str, int] | None = None
+    invocation_counter: list[int] = field(default_factory=lambda: [0])
     events: list[dict[str, Any]] = field(default_factory=list[dict[str, Any]])
 
 
@@ -796,6 +807,25 @@ def _record_event(event: NodeEvent) -> dict[str, Any]:
     return rec
 
 
+def _resolve_sleep_ms(fixture: ObserverFixture) -> int:
+    """Resolve the per-event sleep duration in ms for the slow-observer
+    directive (proposal 0010 §6 Drain). `None` and `0` mean no sleep;
+    an int form is constant; a dict form selects by `invocation_counter`.
+    """
+    spec = fixture.sleep_ms_per_event
+    if spec is None:
+        return 0
+    if isinstance(spec, int):
+        return spec
+    # Dict form with first_invocation / subsequent_invocations keys —
+    # used by fixture 024 to slow only the first invocation so the
+    # second drain runs cleanly. `invocation_counter[0]` is bumped by
+    # the harness between `compiled.invoke()` calls.
+    if fixture.invocation_counter[0] == 0:
+        return int(spec.get("first_invocation", 0))
+    return int(spec.get("subsequent_invocations", 0))
+
+
 def make_observer_fn(
     fixture: ObserverFixture,
     delivery: list[tuple[str, int, str]],
@@ -808,9 +838,17 @@ def make_observer_fn(
     `delivery_order`). Raising observers record + append before raising,
     so the engine's error isolation can be verified by checking that
     subsequent observers/events still get through.
+
+    Honors `fixture.sleep_ms_per_event` per the proposal 0010 slow-
+    observer directive: each event awaits `asyncio.sleep(ms / 1000)`
+    BEFORE recording, so a drain timeout that cancels mid-sleep leaves
+    the event unrecorded and the counter shows it as undelivered.
     """
 
     async def observer(event: NodeEvent) -> None:
+        sleep_ms = _resolve_sleep_ms(fixture)
+        if sleep_ms > 0:
+            await asyncio.sleep(sleep_ms / 1000.0)
         delivery.append((fixture.name, event.step, event.phase))
         fixture.events.append(_record_event(event))
         if fixture.behavior == "raise":

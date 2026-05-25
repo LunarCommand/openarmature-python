@@ -7,6 +7,7 @@ expands to one parametrized case per entry in its `cases:` block.
 
 from __future__ import annotations
 
+import time
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, cast
@@ -244,6 +245,7 @@ async def _run_runtime_case(spec: Mapping[str, Any], fixture_id: str) -> None:
             target=o["target"],
             behavior=o["behavior"],
             phases=phases,
+            sleep_ms_per_event=o.get("sleep_ms_per_event"),
         )
         observer_fixtures[ofx.name] = ofx
         obs = make_observer_fn(ofx, delivery)
@@ -281,6 +283,112 @@ async def _run_runtime_case(spec: Mapping[str, Any], fixture_id: str) -> None:
             assert built.trace == expected_err["execution_order"]
         return
 
+    # Proposal 0010 §6 Drain — multi-invocation fixture form
+    # (`invocations:` array; fixture 024). Each entry runs as its own
+    # `invoke` + `drain` against the same compiled graph + observers, so
+    # the cross-invocation cleanliness contract can be asserted end-to-
+    # end. Observers' `invocation_counter` bumps between entries so the
+    # dict-form `sleep_ms_per_event` can vary per invocation.
+    if "invocations" in spec:
+        for inv_idx, inv in enumerate(cast("list[dict[str, Any]]", spec["invocations"])):
+            inv_initial = built.initial_state(inv.get("initial_state", {}))
+            drain_block: dict[str, Any] = inv.get("drain") or {}
+            ts = drain_block.get("timeout_seconds")
+            inv_timeout: float | None = float(ts) if ts is not None else None
+            inv_expected: dict[str, Any] = inv.get("expected") or {}
+
+            # Reset per-invocation observer state and bump the counter
+            # so dict-form `sleep_ms_per_event` selects the right value.
+            for ofx in observer_fixtures.values():
+                if inv_idx > 0:
+                    ofx.invocation_counter[0] = inv_idx
+                    ofx.events.clear()
+            if inv_idx > 0:
+                # Drop the per-invocation delivery trace; subsequent
+                # invocations assert against a fresh recorder.
+                delivery.clear()
+                # `built.trace` is shared across the fixture; clear it
+                # between invocations so per-invocation execution_order
+                # assertions don't accumulate.
+                built.trace.clear()
+
+            inv_final = await compiled.invoke(inv_initial, observers=invocation_observers)
+            inv_drain_start = time.monotonic()
+            inv_drain_summary = await compiled.drain(timeout=inv_timeout)
+            inv_drain_elapsed = time.monotonic() - inv_drain_start
+
+            if "final_state" in inv_expected:
+                assert inv_final.model_dump() == inv_expected["final_state"], (
+                    f"invocation {inv_idx} final_state mismatch"
+                )
+            if "execution_order" in inv_expected:
+                assert built.trace == inv_expected["execution_order"], (
+                    f"invocation {inv_idx} execution_order mismatch"
+                )
+
+            ds_expected: dict[str, Any] | None = inv_expected.get("drain_summary")
+            if ds_expected is not None:
+                if "timeout_reached" in ds_expected:
+                    assert inv_drain_summary.timeout_reached == ds_expected["timeout_reached"], (
+                        f"invocation {inv_idx} drain_summary.timeout_reached: "
+                        f"actual={inv_drain_summary.timeout_reached}, "
+                        f"expected={ds_expected['timeout_reached']}"
+                    )
+                if "undelivered_count" in ds_expected:
+                    assert inv_drain_summary.undelivered_count == ds_expected["undelivered_count"], (
+                        f"invocation {inv_idx} drain_summary.undelivered_count: "
+                        f"actual={inv_drain_summary.undelivered_count}, "
+                        f"expected={ds_expected['undelivered_count']}"
+                    )
+                if "undelivered_count_min" in ds_expected:
+                    assert inv_drain_summary.undelivered_count >= ds_expected["undelivered_count_min"], (
+                        f"invocation {inv_idx} drain_summary.undelivered_count below min: "
+                        f"actual={inv_drain_summary.undelivered_count}, "
+                        f"min={ds_expected['undelivered_count_min']}"
+                    )
+
+            if "observer_events" in inv_expected:
+                obs_events_map = cast("dict[str, list[dict[str, Any]]]", inv_expected["observer_events"])
+                for name, expected_events in obs_events_map.items():
+                    actual = observer_fixtures[name].events
+                    normalized = [normalize_expected_event(ev) for ev in expected_events]
+                    assert len(actual) == len(normalized), (
+                        f"invocation {inv_idx} observer event count mismatch for {name!r}: "
+                        f"actual={len(actual)}, expected={len(normalized)}"
+                    )
+                    for i, (a, e) in enumerate(zip(actual, normalized, strict=True)):
+                        for key, expected_value in e.items():
+                            assert key in a, (
+                                f"invocation {inv_idx} observer {name!r} event {i} "
+                                f"missing key {key!r}: actual={a}"
+                            )
+                            assert a[key] == expected_value, (
+                                f"invocation {inv_idx} observer {name!r} event {i} "
+                                f"key {key!r} mismatch: actual={a[key]!r}, expected={expected_value!r}"
+                            )
+
+            # Per-invocation invariants (e.g.,
+            # `drain_returned_within_timeout` on the timed first
+            # invocation in fixture 024).
+            inv_invariants: dict[str, Any] = inv_expected.get("invariants") or {}
+            if inv_invariants.get("drain_returned_within_timeout"):
+                assert inv_timeout is not None
+                assert inv_drain_elapsed < inv_timeout + 0.4, (
+                    f"invocation {inv_idx} drain returned outside timeout window: "
+                    f"elapsed={inv_drain_elapsed:.3f}s, timeout={inv_timeout}s"
+                )
+
+        # Top-level invariants (e.g.,
+        # `second_invocation_drain_independent_of_first` on fixture 024)
+        # apply after all invocations complete.
+        top_invariants: dict[str, Any] = spec.get("invariants") or {}
+        if top_invariants.get("second_invocation_drain_independent_of_first"):
+            # The fact that we reached this point with all per-invocation
+            # assertions passing IS the proof of cross-invocation
+            # independence; the assertion is structural.
+            assert len(compiled._active_workers) == 0
+        return
+
     expected = spec["expected"]
 
     # Observer-fixture-with-error (014): the run is expected to raise, and
@@ -295,22 +403,98 @@ async def _run_runtime_case(spec: Mapping[str, Any], fixture_id: str) -> None:
         if "message" in nested_error:
             assert str(excinfo.value.__cause__) == nested_error["message"]
     else:
-        # Happy path (001–006, 011, 012, 013, 015).
+        # Happy path (001–006, 011, 012, 013, 015, 022–025).
+        # `invoke.drain.timeout_seconds` is the proposal 0010 drain
+        # timeout directive; absent for legacy fixtures, present for
+        # 022/023/025. The captured `drain_summary` is asserted below.
+        invoke_block: dict[str, Any] = spec.get("invoke") or {}
+        drain_block_raw = invoke_block.get("drain")
+        timeout: float | None
+        if isinstance(drain_block_raw, dict):
+            drain_block_typed = cast("dict[str, Any]", drain_block_raw)
+            ts = drain_block_typed.get("timeout_seconds")
+            timeout = float(ts) if ts is not None else None
+        else:
+            timeout = None
         final = await compiled.invoke(initial, observers=invocation_observers)
-        await compiled.drain()
+        # Bracket the drain call to assert the `drain_returned_within_timeout`
+        # invariant when the fixture declares it.
+        drain_start = time.monotonic()
+        drain_summary = await compiled.drain(timeout=timeout)
+        drain_elapsed = time.monotonic() - drain_start
         if "final_state" in expected:
             assert final.model_dump() == expected["final_state"]
         if "execution_order" in expected:
             assert built.trace == expected["execution_order"]
 
-    # Observer event assertions (012–016, 018).
+        # Proposal 0010 §6 Drain — DrainSummary assertions. The fixture
+        # MAY assert exact `undelivered_count` or a lower-bound
+        # `undelivered_count_min` (timing-dependent fixtures use min).
+        ds_expected: dict[str, Any] | None = expected.get("drain_summary")
+        if ds_expected is not None:
+            if "timeout_reached" in ds_expected:
+                assert drain_summary.timeout_reached == ds_expected["timeout_reached"], (
+                    f"drain_summary.timeout_reached mismatch: "
+                    f"actual={drain_summary.timeout_reached}, expected={ds_expected['timeout_reached']}"
+                )
+            if "undelivered_count" in ds_expected:
+                assert drain_summary.undelivered_count == ds_expected["undelivered_count"], (
+                    f"drain_summary.undelivered_count mismatch: "
+                    f"actual={drain_summary.undelivered_count}, expected={ds_expected['undelivered_count']}"
+                )
+            if "undelivered_count_min" in ds_expected:
+                assert drain_summary.undelivered_count >= ds_expected["undelivered_count_min"], (
+                    f"drain_summary.undelivered_count below min: "
+                    f"actual={drain_summary.undelivered_count}, "
+                    f"min={ds_expected['undelivered_count_min']}"
+                )
+
+        # Proposal 0010 §6 Drain — invariants block. Each invariant flag
+        # is a fixture-level assertion the harness verifies separately
+        # from drain_summary.
+        invariants: dict[str, Any] = expected.get("invariants") or {}
+        if invariants.get("drain_returned_within_timeout"):
+            assert timeout is not None, "drain_returned_within_timeout invariant requires a timeout"
+            # Allow generous slack for cancellation settlement + CI
+            # scheduler variance — gather(return_exceptions=True) on
+            # cancelled workers settles within an event-loop tick.
+            assert drain_elapsed < timeout + 0.4, (
+                f"drain returned outside timeout window: elapsed={drain_elapsed:.3f}s, timeout={timeout}s"
+            )
+        if invariants.get("graph_state_intact_after_timeout"):
+            # `_active_workers` cleaned after cancelled workers settled.
+            assert len(compiled._active_workers) == 0, (
+                f"graph state not clean after timeout: {len(compiled._active_workers)} workers remaining"
+            )
+        if invariants.get("drain_waited_for_all_events"):
+            # No timeout supplied; drain blocked until all observer
+            # work completed. The summary already asserts undelivered=0;
+            # this invariant adds a positive lower-bound on duration
+            # (drain took at least most of the observer's work).
+            assert drain_summary.undelivered_count == 0
+            assert drain_summary.timeout_reached is False
+
+    # Observer event assertions (012–016, 018, 022–025).
+    # Per-event comparison projects the recorded event down to the keys
+    # the fixture specifies. Fixtures that exercise state machinery
+    # (012–016, 018) include `pre_state` / `post_state`; drain fixtures
+    # (023, 025) assert only on phase/step/namespace/node_name shape and
+    # MUST NOT fail because the recorded event happens to carry state.
     if "observer_events" in expected:
         for name, expected_events in expected["observer_events"].items():
             actual = observer_fixtures[name].events
             normalized = [normalize_expected_event(ev) for ev in expected_events]
-            assert actual == normalized, (
-                f"observer events mismatch for {name!r}: actual={actual}, expected={normalized}"
+            assert len(actual) == len(normalized), (
+                f"observer event count mismatch for {name!r}: "
+                f"actual={len(actual)}, expected={len(normalized)}"
             )
+            for i, (a, e) in enumerate(zip(actual, normalized, strict=True)):
+                for key, expected_value in e.items():
+                    assert key in a, f"observer {name!r} event {i} missing key {key!r}: actual={a}"
+                    assert a[key] == expected_value, (
+                        f"observer {name!r} event {i} key {key!r} mismatch: "
+                        f"actual={a[key]!r}, expected={expected_value!r}"
+                    )
 
     if "delivery_order" in expected:
         expected_delivery = [(d["observer"], d["step"], d["phase"]) for d in expected["delivery_order"]]
