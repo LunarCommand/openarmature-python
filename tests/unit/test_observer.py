@@ -17,6 +17,7 @@ from openarmature.graph.observer import (
     _DRAIN_SENTINEL,
     RemoveHandle,
     _dispatch,
+    _DrainCounters,
     _InvocationContext,
     _QueuedItem,
     deliver_loop,
@@ -65,7 +66,7 @@ async def test_events_delivered_in_queue_order() -> None:
         received.append(event.node_name)
 
     queue: asyncio.Queue[_QueuedItem | None] = asyncio.Queue()
-    worker = asyncio.create_task(deliver_loop(queue))
+    worker = asyncio.create_task(deliver_loop(queue, _DrainCounters()))
     subscribed = (_wrap(observer),)
     for name in ("a", "b", "c"):
         queue.put_nowait(_QueuedItem(event=_make_event(name), observers=subscribed))
@@ -84,7 +85,7 @@ async def test_multiple_observers_fire_in_registration_order() -> None:
         received.append(f"obs2:{event.node_name}")
 
     queue: asyncio.Queue[_QueuedItem | None] = asyncio.Queue()
-    worker = asyncio.create_task(deliver_loop(queue))
+    worker = asyncio.create_task(deliver_loop(queue, _DrainCounters()))
     subscribed = (_wrap(obs1), _wrap(obs2))
     queue.put_nowait(_QueuedItem(event=_make_event("a"), observers=subscribed))
     queue.put_nowait(_QueuedItem(event=_make_event("b"), observers=subscribed))
@@ -104,7 +105,7 @@ async def test_observer_exception_does_not_propagate_to_caller() -> None:
         raise RuntimeError("nope")
 
     queue: asyncio.Queue[_QueuedItem | None] = asyncio.Queue()
-    worker = asyncio.create_task(deliver_loop(queue))
+    worker = asyncio.create_task(deliver_loop(queue, _DrainCounters()))
     queue.put_nowait(_QueuedItem(event=_make_event("a"), observers=(_wrap(boom),)))
 
     with warnings.catch_warnings(record=True) as caught:
@@ -125,7 +126,7 @@ async def test_raising_observer_does_not_block_siblings_on_same_event() -> None:
         received.append(event.node_name)
 
     queue: asyncio.Queue[_QueuedItem | None] = asyncio.Queue()
-    worker = asyncio.create_task(deliver_loop(queue))
+    worker = asyncio.create_task(deliver_loop(queue, _DrainCounters()))
     queue.put_nowait(_QueuedItem(event=_make_event("a"), observers=(_wrap(obs1), _wrap(obs2))))
 
     with warnings.catch_warnings(record=True):
@@ -145,7 +146,7 @@ async def test_raising_observer_does_not_block_subsequent_events() -> None:
         received.append(event.node_name)
 
     queue: asyncio.Queue[_QueuedItem | None] = asyncio.Queue()
-    worker = asyncio.create_task(deliver_loop(queue))
+    worker = asyncio.create_task(deliver_loop(queue, _DrainCounters()))
     subscribed = (_wrap(always_raises), _wrap(silent))
     for name in ("a", "b", "c"):
         queue.put_nowait(_QueuedItem(event=_make_event(name), observers=subscribed))
@@ -167,7 +168,7 @@ async def test_phase_filter_skips_unsubscribed_phase() -> None:
         received.append((event.node_name, event.phase))
 
     queue: asyncio.Queue[_QueuedItem | None] = asyncio.Queue()
-    worker = asyncio.create_task(deliver_loop(queue))
+    worker = asyncio.create_task(deliver_loop(queue, _DrainCounters()))
     completed_only = (SubscribedObserver(observer=obs, phases=frozenset({"completed"})),)
     queue.put_nowait(_QueuedItem(event=_make_event("a", phase="started"), observers=completed_only))
     queue.put_nowait(_QueuedItem(event=_make_event("a", phase="completed"), observers=completed_only))
@@ -210,7 +211,7 @@ async def test_sentinel_terminates_worker_after_processing_queued_events() -> No
         received.append(event.node_name)
 
     queue: asyncio.Queue[_QueuedItem | None] = asyncio.Queue()
-    worker = asyncio.create_task(deliver_loop(queue))
+    worker = asyncio.create_task(deliver_loop(queue, _DrainCounters()))
     subscribed = (_wrap(observer),)
     queue.put_nowait(_QueuedItem(event=_make_event("a"), observers=subscribed))
     queue.put_nowait(_QueuedItem(event=_make_event("b"), observers=subscribed))
