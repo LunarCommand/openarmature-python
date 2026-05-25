@@ -183,6 +183,15 @@ def validate_tools(tools: Sequence[Tool] | None) -> None:
         seen.add(t.name)
 
 
+# The string literals allowed under the §5 `tool_choice` shape.
+# Pyright catches non-literal strings at type-check time via the
+# ``ToolChoice = Literal[...] | ForceTool`` alias, but Python does
+# not enforce Literal at runtime — untyped callers (tests, dynamic
+# harnesses, ad-hoc scripts) can pass an arbitrary string. The
+# runtime check below is the API-boundary defense against that.
+_ALLOWED_TOOL_CHOICE_MODES: frozenset[str] = frozenset({"auto", "required", "none"})
+
+
 # Spec: realizes llm-provider §5 `tool_choice` pre-send validation
 # rules (proposal 0025). The three failure modes route through the
 # existing §7 ``provider_invalid_request`` category; no new error
@@ -199,6 +208,10 @@ def validate_tool_choice(
     Raises :class:`ProviderInvalidRequest` (the §7
     ``provider_invalid_request`` category) on:
 
+    - ``tool_choice`` supplied as a string that is not one of
+      ``"auto"`` / ``"required"`` / ``"none"`` (runtime defense
+      against untyped callers; the Literal alias catches well-typed
+      ones at type-check time).
     - ``tool_choice="required"`` supplied with empty / absent
       ``tools``.
     - ``tool_choice=ForceTool(name=X)`` supplied with empty / absent
@@ -213,6 +226,10 @@ def validate_tool_choice(
     """
     if tool_choice is None:
         return
+    if isinstance(tool_choice, str) and tool_choice not in _ALLOWED_TOOL_CHOICE_MODES:
+        raise ProviderInvalidRequest(
+            f'tool_choice {tool_choice!r} is not one of "auto" / "required" / "none"'
+        )
     has_tools = bool(tools)
     if tool_choice == "required" and not has_tools:
         raise ProviderInvalidRequest('tool_choice="required" requires non-empty tools')

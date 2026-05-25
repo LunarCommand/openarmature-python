@@ -97,6 +97,20 @@ def test_validate_force_specific_passes_with_matching_tool() -> None:
     validate_tool_choice(fc, [_tool("summarize"), _tool("search")])
 
 
+def test_validate_rejects_unknown_string_literal() -> None:
+    # Defensive runtime check: Pyright catches non-literal strings at
+    # type-check time via the `ToolChoice = Literal[...] | ForceTool`
+    # alias, but Python doesn't enforce Literal at runtime. Untyped
+    # callers passing `tool_choice="bogus"` would have fallen through
+    # to the wire and yielded a hard-to-debug provider-side 4xx.
+    # `validate_tool_choice` now raises `ProviderInvalidRequest` at
+    # the API boundary instead.
+    with pytest.raises(ProviderInvalidRequest, match='not one of "auto" / "required" / "none"'):
+        validate_tool_choice("bogus", None)  # type: ignore[arg-type]
+    with pytest.raises(ProviderInvalidRequest, match='not one of "auto" / "required" / "none"'):
+        validate_tool_choice("force", [_tool("search")])  # type: ignore[arg-type]
+
+
 # ---------------------------------------------------------------------------
 # ForceTool shape
 # ---------------------------------------------------------------------------
