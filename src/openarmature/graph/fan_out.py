@@ -606,8 +606,19 @@ async def _save_instance_in_flight(
     if checkpointer is None:
         return
     fan_out_progress = _project_fan_out_progress(context.fan_out_progress_state)
-    parent_state_cls = cast("type[Any]", type(parent_state))
-    schema_version = cast("str", getattr(parent_state_cls, "schema_version", ""))
+    # Per spec §10.2: ``schema_version`` is the OUTERMOST graph state's
+    # version — the record represents the whole invocation tree. For a
+    # nested fan-out (a fan-out inside a subgraph), ``parent_state`` is
+    # the subgraph's state, not the outermost; read from
+    # ``context.parent_states_prefix[0]`` (the outermost state lives at
+    # index 0 of the parent chain) when non-empty, else from
+    # ``parent_state`` directly (which IS the outermost state for an
+    # outermost fan-out).
+    if context.parent_states_prefix:
+        outermost_cls = cast("type[Any]", type(context.parent_states_prefix[0]))
+    else:
+        outermost_cls = cast("type[Any]", type(parent_state))
+    schema_version = cast("str", getattr(outermost_cls, "schema_version", ""))
     record = CheckpointRecord(
         invocation_id=context.invocation_id,
         correlation_id=context.correlation_id,
@@ -666,16 +677,20 @@ async def _save_instance_completed(
     # records and the resume path handles either based on
     # ``parent_states`` length.
     fan_out_progress = _project_fan_out_progress(context.fan_out_progress_state)
-    # Read ``schema_version`` off the parent state's declared class
-    # when present (State subclasses MAY declare one per spec §10.2);
-    # fall back to the empty-string sentinel otherwise. Mirrors
-    # ``_maybe_save_checkpoint``'s read in ``compiled.py`` without
-    # the cross-graph self.state_cls handle — the parent state's type
-    # is the same as the graph's declared state class here because
-    # ``parent_state`` is the outer state passed into the graph's
-    # ``invoke``.
-    parent_state_cls = cast("type[Any]", type(parent_state))
-    schema_version = cast("str", getattr(parent_state_cls, "schema_version", ""))
+    # Per spec §10.2: ``schema_version`` is the OUTERMOST graph state's
+    # version (the record represents the whole invocation tree). For a
+    # nested fan-out (a fan-out inside a subgraph), ``parent_state`` is
+    # the subgraph's state, not the outermost — read from
+    # ``context.parent_states_prefix[0]`` (the outermost state lives at
+    # index 0 of the parent chain) when non-empty, else from
+    # ``parent_state`` directly (which IS the outermost state for an
+    # outermost fan-out). Mirrors ``_maybe_save_checkpoint``'s
+    # ``self.state_cls.schema_version`` read in ``compiled.py``.
+    if context.parent_states_prefix:
+        outermost_cls = cast("type[Any]", type(context.parent_states_prefix[0]))
+    else:
+        outermost_cls = cast("type[Any]", type(parent_state))
+    schema_version = cast("str", getattr(outermost_cls, "schema_version", ""))
     record = CheckpointRecord(
         invocation_id=context.invocation_id,
         correlation_id=context.correlation_id,

@@ -14,7 +14,7 @@ test_checkpoint.py's _DEFERRED_FIXTURES note).
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 import pytest
 from pydantic import Field
@@ -640,6 +640,101 @@ async def test_fail_fast_cancellation_leaves_failed_instance_in_flight() -> None
     assert fan_progress.instances[3].state in {"in_flight", "not_started"}, (
         f"cancelled sibling state should be in_flight or not_started, got {fan_progress.instances[3].state!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Nested fan-out: schema_version read from outermost state class
+# ---------------------------------------------------------------------------
+
+
+class _NestedSchemaOuterState(State):
+    schema_version: ClassVar[str] = "outer-v1"
+    items: list[int] = Field(default_factory=list[int])
+    results: list[int] = Field(default_factory=list[int])
+
+
+class _NestedSchemaMiddleState(State):
+    schema_version: ClassVar[str] = "middle-v1"
+    items: list[int] = Field(default_factory=list[int])
+    results: list[int] = Field(default_factory=list[int])
+
+
+class _NestedSchemaInnerState(State):
+    item: int = 0
+    out: int = 0
+
+
+async def _nested_schema_scorer(s: _NestedSchemaInnerState) -> dict[str, int]:
+    return {"out": s.item}
+
+
+async def test_nested_fan_out_records_outermost_schema_version() -> None:
+    """Per spec §10.2: a ``CheckpointRecord``'s ``schema_version`` is the
+    outermost graph state's declared version (the record represents the
+    whole invocation tree). For a fan-out inside a subgraph, the
+    engine's ``_save_instance_completed`` / ``_save_instance_in_flight``
+    helpers read from the outermost state via
+    ``context.parent_states_prefix[0]`` rather than the subgraph state's
+    class. Closes the spec impl-review observation (a) on nested
+    fan-out schema_version drift."""
+    inner = (
+        GraphBuilder(_NestedSchemaInnerState)
+        .add_node("scorer", _nested_schema_scorer)
+        .add_edge("scorer", END)
+        .set_entry("scorer")
+        .compile()
+    )
+    middle = (
+        GraphBuilder(_NestedSchemaMiddleState)
+        .add_fan_out_node(
+            "fan",
+            subgraph=inner,
+            collect_field="out",
+            target_field="results",
+            count=3,
+            error_policy="fail_fast",
+        )
+        .add_edge("fan", END)
+        .set_entry("fan")
+        .compile()
+    )
+    cp = _CapturingCheckpointer()
+    outer = (
+        GraphBuilder(_NestedSchemaOuterState)
+        .add_subgraph_node("dispatch", middle)
+        .add_edge("dispatch", END)
+        .set_entry("dispatch")
+        .with_checkpointer(cp)
+        .compile()
+    )
+    await outer.invoke(_NestedSchemaOuterState())
+    # The fan-out's explicit "instance completed" saves fire from inside
+    # the subgraph context. Identify them by:
+    #   - ``parent_states`` has length 1 — only the outermost state, since
+    #     the fan-out lives one descent in (in the middle subgraph).
+    #     Inner-instance node saves have length-2 parent_states
+    #     ``(outer, middle)`` and use the INNER graph's
+    #     ``self.state_cls.schema_version`` via ``_maybe_save_checkpoint``,
+    #     which is a separate code path not targeted by this test.
+    #   - ``completed_positions`` is empty. The fan-out node's own
+    #     completion save (fired by ``_maybe_save_checkpoint`` after
+    #     fan-in) appends the ``fan`` position to completed_positions;
+    #     ``_save_instance_completed`` doesn't.
+    instance_completed_saves = [
+        s for s in cp.saves if len(s.parent_states) == 1 and not s.completed_positions
+    ]
+    assert instance_completed_saves, (
+        "expected at least one '_save_instance_completed' save "
+        "(non-empty parent_states + empty completed_positions); "
+        f"got saves with shapes: "
+        f"{[(len(s.parent_states), len(s.completed_positions)) for s in cp.saves]}"
+    )
+    for save in instance_completed_saves:
+        assert save.schema_version == "outer-v1", (
+            f"_save_instance_completed save's schema_version should be "
+            f"outermost's ('outer-v1'), got {save.schema_version!r} "
+            f"(subgraph state class declares 'middle-v1')"
+        )
 
 
 # ---------------------------------------------------------------------------
