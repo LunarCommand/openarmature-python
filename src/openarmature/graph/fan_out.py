@@ -180,21 +180,28 @@ class FanOutNode[ParentT: State, ChildT: State]:
                 instances=[_FanOutInstanceState() for _ in range(instance_count)],
             )
             context.fan_out_progress_state[key] = exec_state
-        else:
-            # Defensive: instance_count may have changed between runs if
-            # the items_field/count resolver returns a different value
-            # on resume. Trust the current count — pad or truncate the
-            # tracked instances to match. In practice users either
-            # configure deterministic counts or change them between
-            # runs deliberately; spec §10.5 idempotency says the work
-            # is the same on resume but is silent on count drift.
-            if len(exec_state.instances) < instance_count:
-                exec_state.instances.extend(
-                    _FanOutInstanceState() for _ in range(instance_count - len(exec_state.instances))
-                )
-            elif len(exec_state.instances) > instance_count:
-                del exec_state.instances[instance_count:]
-            exec_state.instance_count = instance_count
+        elif exec_state.instance_count != instance_count:
+            # Per spec §10.11 + §10.10 (proposal 0029): a saved
+            # ``instance_count`` that differs from the resumed run's
+            # resolved count MUST raise ``checkpoint_record_invalid``
+            # before any fan-out instance work runs on this path. The
+            # pre-0029 pad/truncate behavior would silently drop
+            # ``completed`` contributions on shrink (breaking §10.11.1's
+            # exactly-once guarantee) and dispatch unsaved work on grow
+            # (violating §10.5's idempotency framing). The strict raise
+            # surfaces the divergence to the user; they cohere inputs
+            # or restart cleanly.
+            # Local import to avoid an engine ↔ checkpoint package cycle
+            # at module load (mirrors the existing
+            # ``CheckpointSaveFailed`` imports below in this file).
+            from openarmature.checkpoint.errors import CheckpointRecordInvalid  # noqa: PLC0415
+
+            raise CheckpointRecordInvalid(
+                context.invocation_id,
+                f"fan_out {self.name!r} at namespace {context.namespace_prefix!r}: "
+                f"saved instance_count={exec_state.instance_count} does not match "
+                f"resolved instance_count={instance_count} on resume",
+            )
 
         # Shared cancel signal for the fail_fast path. Defined here (not
         # inside the fail_fast branch below) so ``run_instance`` can
@@ -632,19 +639,12 @@ async def _save_instance_in_flight(
     if checkpointer is None:
         return
     fan_out_progress = _project_fan_out_progress(context.fan_out_progress_state)
-    # Per spec §10.2: ``schema_version`` is the OUTERMOST graph state's
-    # version — the record represents the whole invocation tree. For a
-    # nested fan-out (a fan-out inside a subgraph), ``parent_state`` is
-    # the subgraph's state, not the outermost; read from
-    # ``context.parent_states_prefix[0]`` (the outermost state lives at
-    # index 0 of the parent chain) when non-empty, else from
-    # ``parent_state`` directly (which IS the outermost state for an
-    # outermost fan-out).
-    if context.parent_states_prefix:
-        outermost_cls = cast("type[Any]", type(context.parent_states_prefix[0]))
-    else:
-        outermost_cls = cast("type[Any]", type(parent_state))
-    schema_version = cast("str", getattr(outermost_cls, "schema_version", ""))
+    # Per spec §10.2 (proposal 0028): ``schema_version`` sourced from the
+    # declared graph state class via ``context.state_cls`` so every save
+    # site in the invocation reports the same value. See the matching
+    # comment in ``_save_instance_completed`` below for the full
+    # rationale.
+    schema_version = cast("str", getattr(context.state_cls, "schema_version", ""))
     record = CheckpointRecord(
         invocation_id=context.invocation_id,
         correlation_id=context.correlation_id,
@@ -703,20 +703,17 @@ async def _save_instance_completed(
     # records and the resume path handles either based on
     # ``parent_states`` length.
     fan_out_progress = _project_fan_out_progress(context.fan_out_progress_state)
-    # Per spec §10.2: ``schema_version`` is the OUTERMOST graph state's
-    # version (the record represents the whole invocation tree). For a
-    # nested fan-out (a fan-out inside a subgraph), ``parent_state`` is
-    # the subgraph's state, not the outermost — read from
-    # ``context.parent_states_prefix[0]`` (the outermost state lives at
-    # index 0 of the parent chain) when non-empty, else from
-    # ``parent_state`` directly (which IS the outermost state for an
-    # outermost fan-out). Mirrors ``_maybe_save_checkpoint``'s
-    # ``self.state_cls.schema_version`` read in ``compiled.py``.
-    if context.parent_states_prefix:
-        outermost_cls = cast("type[Any]", type(context.parent_states_prefix[0]))
-    else:
-        outermost_cls = cast("type[Any]", type(parent_state))
-    schema_version = cast("str", getattr(outermost_cls, "schema_version", ""))
+    # Per spec §10.2 (proposal 0028): ``schema_version`` is sourced from
+    # the declared graph state class on the outermost ``CompiledGraph``,
+    # not from ``type(state)`` at save time. Threaded as
+    # ``context.state_cls`` from the outermost ``invoke``; the rule
+    # matters when the user passes a State subclass that shadows
+    # ``schema_version`` (instance class would yield a different value;
+    # the declared class is the only value §10.12 migration lookups
+    # know about). Mirrors ``_maybe_save_checkpoint``'s
+    # ``self.state_cls.schema_version`` read in ``compiled.py`` so every
+    # save site within an invocation reports the same value.
+    schema_version = cast("str", getattr(context.state_cls, "schema_version", ""))
     record = CheckpointRecord(
         invocation_id=context.invocation_id,
         correlation_id=context.correlation_id,

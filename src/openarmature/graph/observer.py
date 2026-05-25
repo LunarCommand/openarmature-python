@@ -399,6 +399,21 @@ class _InvocationContext:
     # counters because subgraphs share the parent's queue + worker, so
     # the parent context's counts naturally cover subgraph events.
     drain_counters: _DrainCounters = field(default_factory=_DrainCounters)
+    # Per spec §10.2 (proposal 0028): the canonical source for
+    # ``CheckpointRecord.schema_version``. Set once at the outermost
+    # ``invoke`` to the compiled graph's declared state class
+    # (``CompiledGraph.state_cls``); propagated unchanged through every
+    # descent (subgraphs, fan-out instances, parallel branches). All
+    # save sites within an invocation MUST read ``schema_version`` from
+    # this class — NOT from ``type(state)`` at save time — so the
+    # value is consistent across the outer dispatch save, fan-out
+    # instance internal saves, and the fan-out node's own completion
+    # save. The distinction matters only when a user passes a State
+    # subclass that shadows ``schema_version``; the declared class is
+    # the only consistent choice for §10.12 migration lookups.
+    # ``Any`` rather than ``type[State]`` to avoid an import cycle
+    # between graph and observer; callers narrow at the read site.
+    state_cls: Any = None
 
     def full_observers(self) -> tuple[SubscribedObserver, ...]:
         """Return the ordered observer list to deliver for events from
@@ -442,6 +457,7 @@ class _InvocationContext:
             resume_invocation=self.resume_invocation,
             fan_out_progress_state=self.fan_out_progress_state,
             drain_counters=self.drain_counters,
+            state_cls=self.state_cls,
         )
 
     def descend_into_fan_out_instance(
@@ -488,6 +504,7 @@ class _InvocationContext:
             # outer save sees consistent sibling state.
             fan_out_progress_state=self.fan_out_progress_state,
             drain_counters=self.drain_counters,
+            state_cls=self.state_cls,
         )
 
     def descend_into_parallel_branch(
@@ -534,6 +551,7 @@ class _InvocationContext:
             resume_invocation=self.resume_invocation,
             fan_out_progress_state=self.fan_out_progress_state,
             drain_counters=self.drain_counters,
+            state_cls=self.state_cls,
         )
 
     def take_step(self) -> int:

@@ -332,6 +332,7 @@ def _project_fan_out_progress(
             FanOutInstanceProgress(
                 state=inst.state,
                 result=inst.result,
+                result_is_error=inst.result_is_error,
                 completed_inner_positions=tuple(inst.completed_inner_positions),
             )
             for inst in exec_state.instances
@@ -363,25 +364,23 @@ def _restore_fan_out_progress_state(
     ``extra_outputs`` on the resume path; if a future workload needs
     them, surface as a follow-on.
 
-    ``result_is_error`` distinguishes success contributions from
-    collect-mode error contributions. The public ``FanOutInstanceProgress``
-    shape doesn't carry this flag (the spec presents ``result`` as a
-    single typed entry), so it's reconstructed by structural pattern-
-    matching: an error record is a ``dict`` with the engine's
-    canonical ``fan_out_index`` + ``category`` keys (per
-    ``_fan_in_collect``). Success values from the user's state schema
-    aren't expected to take this exact shape.
+    ``result_is_error`` is read verbatim from the saved record's
+    explicit field per spec §10.11 (proposal 0027). The pre-0027
+    structural-pattern heuristic is gone — the spec mandates the
+    explicit field as the authoritative discriminator because the
+    user's state schema can legitimately contain values that match
+    the engine's canonical error-record shape, and a heuristic would
+    misclassify them.
     """
     out: dict[tuple[tuple[str, ...], str], _FanOutExecutionState] = {}
     for fp in saved:
         instances: list[_FanOutInstanceState] = []
         for inst in fp.instances:
-            result_is_error = _looks_like_error_record(inst.result)
             instances.append(
                 _FanOutInstanceState(
                     state=inst.state,
                     result=inst.result,
-                    result_is_error=result_is_error,
+                    result_is_error=inst.result_is_error,
                     extra_outputs={},
                     completed_inner_positions=list(inst.completed_inner_positions),
                 )
@@ -394,19 +393,6 @@ def _restore_fan_out_progress_state(
             instances=instances,
         )
     return out
-
-
-def _looks_like_error_record(value: Any) -> bool:
-    """Heuristic: identify the engine's error_record shape from
-    ``_fan_in_collect`` (``dict[str, str]`` with ``fan_out_index`` +
-    ``category`` keys). Used to reconstruct
-    ``_FanOutInstanceState.result_is_error`` from the public
-    ``FanOutInstanceProgress.result`` on resume.
-    """
-    if not isinstance(value, dict):
-        return False
-    value_dict = cast("dict[str, Any]", value)
-    return "fan_out_index" in value_dict and "category" in value_dict
 
 
 async def _save_fan_out_internal(
@@ -940,6 +926,10 @@ class CompiledGraph[StateT: State]:
             pending_resume_states=pending_resume_states,
             resume_invocation=resume_invocation,
             fan_out_progress_state=fan_out_progress_state,
+            # Per spec §10.2 (proposal 0028): the canonical source for
+            # ``schema_version`` on every save during this invocation.
+            # Threaded unchanged through every descent.
+            state_cls=self.state_cls,
         )
         # Spec observability §3.1: the correlation_id MUST be readable
         # from anywhere within the invocation's async call tree via the
@@ -1298,6 +1288,17 @@ class CompiledGraph[StateT: State]:
                 final_partial = await chain(state)
             except RuntimeGraphError:
                 raise
+            except CheckpointError:
+                # CheckpointError categories (CheckpointRecordInvalid,
+                # CheckpointStateMigrationMissing, CheckpointSaveFailed,
+                # …) are sibling-typed to RuntimeGraphError but carry
+                # their own canonical category strings per spec §10.10
+                # / §10.12. They MUST propagate to the invoke() caller
+                # unwrapped — wrapping as NodeException would mask the
+                # checkpoint-category surface the user is meant to
+                # branch on. Notably proposal 0029's count-drift raise
+                # surfaces here when it fires from inside FanOutNode.
+                raise
             except Exception as e:
                 # A raw exception (node-raised or middleware-raised) escaped
                 # the chain unrecovered. Wrap as NodeException per §4.
@@ -1627,6 +1628,18 @@ class CompiledGraph[StateT: State]:
                         fan_out_config=fan_out_event_config,
                     )
                     raise
+                except CheckpointError:
+                    # CheckpointError categories (proposal 0029's
+                    # count-drift raise, the migration-category errors,
+                    # save-failed) are sibling-typed to RuntimeGraphError
+                    # and propagate to the invoke() caller unwrapped so
+                    # callers can branch on ``e.category``. No completed
+                    # event is dispatched here — the `NodeEvent.error`
+                    # field is typed as ``RuntimeGraphError | None`` per
+                    # spec §6 and CheckpointError isn't in that
+                    # hierarchy. Matches ``_step_function_node``'s
+                    # CheckpointError branch (also raise-only).
+                    raise
                 except Exception as e:
                     wrapped = NodeException(node_name=current, cause=e, recoverable_state=s)
                     self._dispatch_completed(
@@ -1697,6 +1710,14 @@ class CompiledGraph[StateT: State]:
                 try:
                     final_partial = await chain(state)
                 except RuntimeGraphError:
+                    raise
+                except CheckpointError:
+                    # See the matching branch in ``_step_function_node``:
+                    # checkpoint-category errors propagate unwrapped so
+                    # callers can branch on ``e.category``. The
+                    # proposal-0029 count-drift raise from
+                    # ``FanOutNode.run_with_context`` surfaces through
+                    # here on the resume path.
                     raise
                 except Exception as e:
                     raise NodeException(node_name=current, cause=e, recoverable_state=state) from e
@@ -2106,16 +2127,22 @@ class CompiledGraph[StateT: State]:
             # ``step`` field on each NodePosition is the canonical
             # within-invocation order.
             last_saved_at=time.time(),
-            # Per spec §10.2 (proposal 0014): read the user's
-            # state-schema version off the declared state class at
-            # save time. Empty-string sentinel when the user hasn't
-            # declared one — those records are not migration-eligible
-            # until they declare a non-empty version (per §10.2).
-            # ``self.state_cls`` is the authoritative source so the
-            # save-side read symmetrizes with the resume-side check
-            # (subclass schema_versions don't shadow the declared
-            # graph schema).
-            schema_version=self.state_cls.schema_version,
+            # Per spec §10.2 (proposal 0028, supersedes proposal 0014's
+            # ``type(state)`` framing): ``schema_version`` is sourced
+            # from the OUTERMOST declared state class threaded as
+            # ``context.state_cls``, NOT from ``self.state_cls`` on
+            # the current graph. The distinction matters at subgraph
+            # save sites: subgraphs have their own ``state_cls`` (the
+            # subgraph's state class), but the saved record represents
+            # the WHOLE invocation tree and the canonical version is
+            # the outer graph's. Reading from ``context.state_cls``
+            # gives every save site within an invocation the same
+            # value, aligning subgraph-internal saves with outer
+            # dispatch saves and fan-out instance internal saves.
+            # Empty-string sentinel when the user hasn't declared one
+            # — those records are not migration-eligible until they
+            # declare a non-empty version (per §10.2).
+            schema_version=cast("str", getattr(context.state_cls, "schema_version", "")),
             fan_out_progress=fan_out_progress,
         )
         # Per §10.11.4: batching applies ONLY to fan-out instance

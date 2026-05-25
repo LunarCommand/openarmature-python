@@ -100,6 +100,12 @@ def _fan_out_progress_to_dict(fp: FanOutProgress) -> dict[str, Any]:
             {
                 "state": inst.state,
                 "result": inst.result,
+                # Per proposal 0027: explicit discriminator on the saved
+                # record. Backward-compat path on load: pre-0027 records
+                # omit the key, which `dict.get(...)` returns ``False``
+                # for, matching the ``FanOutInstanceProgress`` default
+                # for ``in_flight`` / ``not_started`` entries.
+                "result_is_error": inst.result_is_error,
                 "completed_inner_positions": [asdict(p) for p in inst.completed_inner_positions],
             }
             for inst in fp.instances
@@ -127,6 +133,12 @@ def _fan_out_progress_from_dict(d: dict[str, Any]) -> FanOutProgress:
             FanOutInstanceProgress(
                 state=inst["state"],
                 result=inst.get("result"),
+                # Pre-0027 records omit ``result_is_error``; the default
+                # ``False`` (matching the dataclass default) is correct
+                # for those — pre-0027 was atomic-restart-fan-out resume
+                # under proposal 0008, no error-record state machine, so
+                # the field's absence semantically means "not an error."
+                result_is_error=bool(inst.get("result_is_error", False)),
                 completed_inner_positions=inner_positions,
             )
         )

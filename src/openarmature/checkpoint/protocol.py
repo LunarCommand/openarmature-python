@@ -107,6 +107,17 @@ class FanOutInstanceProgress:
       (representation is implementation-defined per §10.11; Python
       stores as ``Any`` since dynamic typing absorbs the variance).
       Unused for ``in_flight`` and ``not_started``.
+    - ``result_is_error``: boolean discriminator for ``completed``
+      entries — ``True`` when the contribution is a ``collect``-mode
+      error entry that rolls forward into ``errors_field``, ``False``
+      when the contribution is a success value that rolls forward
+      into ``target_field``. MUST be ``False`` for ``in_flight`` and
+      ``not_started`` (the value of ``result`` is ignored for those).
+      Per proposal 0027 (spec v0.21.0): implementations MUST consult
+      this field on resume rather than inferring routing from
+      ``result``'s shape — heuristic inspection would misclassify
+      user state values that happen to match the engine's
+      error-record shape.
     - ``completed_inner_positions``: for ``in_flight`` instances, a
       tuple of ``NodePosition`` entries captured at save time. Same
       shape as :attr:`CheckpointRecord.completed_positions` but scoped
@@ -120,6 +131,7 @@ class FanOutInstanceProgress:
 
     state: Literal["completed", "in_flight", "not_started"]
     result: Any = None
+    result_is_error: bool = False
     completed_inner_positions: tuple[NodePosition, ...] = ()
 
 
