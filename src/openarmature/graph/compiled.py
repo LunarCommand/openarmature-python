@@ -93,6 +93,7 @@ from .middleware import ChainCall, Middleware, compose_chain
 from .nodes import Node
 from .observer import (
     _DRAIN_SENTINEL,
+    DrainSummary,
     Observer,
     RemoveHandle,
     SubscribedObserver,
@@ -523,10 +524,14 @@ class CompiledGraph[StateT: State]:
     # dataclass: the list reference is fixed but its contents change.
     # Parameterized factories so pyright infers the element types.
     _attached_observers: list[SubscribedObserver] = field(default_factory=list[SubscribedObserver])
-    # `set` (not list) so a per-task `add_done_callback(self._active_workers.discard)`
-    # auto-removes completed workers — long-running services that never call
-    # drain() don't accumulate completed Task references indefinitely.
-    _active_workers: set[asyncio.Task[None]] = field(default_factory=set[asyncio.Task[None]])
+    # Per-task `add_done_callback` auto-removes completed workers — long-
+    # running services that never call drain() don't accumulate completed
+    # Task references indefinitely. Values are the per-invocation
+    # `_InvocationContext` so `drain()` can read each worker's
+    # `drain_counters` to compute the undelivered-event count at timeout.
+    _active_workers: dict[asyncio.Task[None], _InvocationContext] = field(
+        default_factory=dict[asyncio.Task[None], _InvocationContext]
+    )
     # Single-element list so the frozen-dataclass binding is stable but
     # the user can swap the registered Checkpointer via
     # ``attach_checkpointer``. ``None`` when no backend is registered.
@@ -680,13 +685,13 @@ class CompiledGraph[StateT: State]:
         )
         return migrated, summary
 
-    async def drain(self) -> None:
+    async def drain(self, timeout: float | None = None) -> DrainSummary:
         """Await delivery of every observer event produced by prior
-        invocations of this graph.
+        invocations of this graph, optionally bounded by ``timeout``.
 
         Callers running in short-lived processes (scripts, serverless
-        functions, CLIs) MUST use drain to avoid losing observer
-        events that were dispatched but not yet delivered.
+        functions, CLIs) MUST use drain to avoid losing observer events
+        that were dispatched but not yet delivered.
 
         Only events dispatched before this call are awaited; events
         from invocations started concurrently with drain may or may
@@ -694,21 +699,76 @@ class CompiledGraph[StateT: State]:
         part of the parent invocation's worker and are covered
         automatically.
 
-        **Unbounded by design.** Drain blocks until every queued event has
-        been delivered to every subscribed observer. A slow, hung, or
-        misbehaving observer can therefore hold drain, and the calling
-        process, indefinitely. If you need a bounded wait, wrap the call
-        in `asyncio.wait_for` and accept that events still queued when the
-        deadline elapses will not be delivered::
+        ``timeout`` is a non-negative duration in seconds. If omitted
+        or ``None``, drain waits indefinitely — a slow, hung, or
+        misbehaving observer can therefore hold drain (and the calling
+        process) indefinitely. If supplied, drain returns no later
+        than ``timeout`` seconds after the call begins; any observer
+        events still queued or in-flight at that point are considered
+        undelivered. Workers are cancelled via ``Task.cancel()`` so
+        the compiled graph remains usable for subsequent invocations
+        — partial delivery state from one drain does NOT leak into
+        the next invocation.
 
-            await asyncio.wait_for(compiled.drain(), timeout=5.0)
+        Returns a :class:`DrainSummary` with ``undelivered_count`` and
+        ``timeout_reached`` fields. The shape is the same whether or
+        not a timeout was supplied; on the no-timeout / timeout-not-
+        fired path both fields are zero / false.
+
+        Observers SHOULD be written to be cancellation-safe
+        (idempotent writes, try/finally cleanup) so that interruption
+        by drain timeout does not leave partial side effects in an
+        inconsistent state.
+
+        Raises ``ValueError`` if ``timeout`` is negative or NaN.
+        Non-numeric input raises ``TypeError`` from the comparison.
         """
+        # ``not (timeout >= 0)`` is the right check: catches negative
+        # values, catches NaN (all comparisons with NaN return False),
+        # and lets non-numeric input raise ``TypeError`` from the
+        # comparison operator itself. Silently treating a negative
+        # timeout as "immediate cancel" would be a user-hostile failure
+        # mode — the spec contract is non-negative seconds.
+        if timeout is not None and not (timeout >= 0):
+            raise ValueError(f"drain timeout must be non-negative, got {timeout!r}")
         if not self._active_workers:
-            return
-        # Snapshot the set: each worker's done-callback removes itself
-        # from `_active_workers`, so iterating it directly while gather
-        # awaits would mutate during iteration.
-        await asyncio.gather(*list(self._active_workers), return_exceptions=True)
+            return DrainSummary(undelivered_count=0, timeout_reached=False)
+        # Snapshot the dict: each worker's done-callback removes its
+        # entry from `_active_workers`, so iterating directly while
+        # `asyncio.wait` awaits would mutate during iteration.
+        snapshot = dict(self._active_workers)
+        workers = list(snapshot.keys())
+
+        _done, pending = await asyncio.wait(
+            workers,
+            timeout=timeout,
+            return_when=asyncio.ALL_COMPLETED,
+        )
+
+        if pending:
+            undelivered = sum(
+                snapshot[w].drain_counters.dispatched - snapshot[w].drain_counters.delivered for w in pending
+            )
+            timeout_reached = True
+            for w in pending:
+                w.cancel()
+        else:
+            undelivered = 0
+            timeout_reached = False
+
+        # Gather ALL workers (done + pending) so any exception that
+        # escaped a delivery worker surfaces here instead of leaking
+        # as a "Task exception was never retrieved" warning. The
+        # ``return_exceptions=True`` absorbs both the synthetic
+        # ``CancelledError`` from cancelled workers and any genuine
+        # bug-escape from a ``deliver_loop`` that ever raised past
+        # its inner ``warnings.warn`` isolation. Also load-bearing
+        # for the cross-invocation cleanliness contract — done-
+        # callbacks fire on cancellation, so ``_active_workers`` is
+        # empty by the time we return.
+        await asyncio.gather(*workers, return_exceptions=True)
+
+        return DrainSummary(undelivered_count=undelivered, timeout_reached=timeout_reached)
 
     # ------------------------------------------------------------------
     # Public invocation
@@ -893,12 +953,16 @@ class CompiledGraph[StateT: State]:
         # "per-invocation is OUTERMOST invoke" wording).
         correlation_token = _set_correlation_id(resolved_correlation_id)
         invocation_token = _set_invocation_id(invocation_id)
-        worker = asyncio.create_task(deliver_loop(queue))
-        self._active_workers.add(worker)
+        worker = asyncio.create_task(deliver_loop(queue, context.drain_counters))
+        self._active_workers[worker] = context
         # Auto-prune: when the worker completes (after the sentinel is
-        # processed), remove it from the active set so long-running
-        # services don't leak Task references between drain() calls.
-        worker.add_done_callback(self._active_workers.discard)
+        # processed, or after cancellation by drain() on timeout), remove
+        # it from the active set so long-running services don't leak Task
+        # references between drain() calls. ``pop(key, None)`` is the
+        # idempotent form — if a concurrent drain() removed the entry
+        # already (it shouldn't with the current design, but the no-arg
+        # form would raise KeyError), this is a safe no-op.
+        worker.add_done_callback(lambda t: self._active_workers.pop(t, None))
         # Per spec §6 cross-ref in proposal 0014: dispatch the
         # ``checkpoint_migrated`` event as soon as the delivery
         # worker is alive but before any node runs, so the OTel

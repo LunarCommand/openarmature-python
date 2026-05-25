@@ -243,7 +243,23 @@ class GraphFixture(_ForbidExtras):
     provider: dict[str, Any] | None = None
     mock_llm: list[MockResponse] | None = None
     caller_global_otel_active: bool | None = None
-    invocations: int | None = None
+    # Two shapes:
+    # - ``int``: run-count for observability multi-run fixtures (legacy).
+    # - ``list[dict]``: per-invocation specs for proposal 0010 §6 Drain
+    #   cross-invocation cleanliness fixtures (e.g., fixture 024). Each
+    #   entry carries its own ``initial_state``, ``drain``, ``expected``.
+    invocations: int | list[dict[str, Any]] | None = None
+    # Proposal 0010 §6 Drain — the ``invoke`` directive wraps the
+    # ``drain.timeout_seconds`` parameter for single-invocation
+    # drain-timeout fixtures (022, 023, 025). Multi-invocation fixture
+    # 024 uses the ``invocations`` array above instead.
+    invoke: dict[str, Any] | None = None
+    # Proposal 0010 §6 Drain — top-level invariants applied across all
+    # invocations of a multi-invocation fixture (e.g.,
+    # ``second_invocation_drain_independent_of_first`` on fixture 024).
+    # Single-invocation fixtures put their invariants under
+    # ``expected.invariants`` (the field already on ExpectedBlock).
+    invariants: dict[str, Any] | None = None
 
 
 # ---------------------------------------------------------------------------

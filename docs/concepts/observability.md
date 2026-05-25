@@ -221,11 +221,13 @@ finished. For long-running services that's fine. For short-lived
 processes (scripts, serverless, CLIs), events dispatched late in the
 run may not be delivered before the process exits.
 
-`drain()` blocks until every dispatched event has been delivered:
+`drain()` waits until every dispatched event has been delivered and
+returns a `DrainSummary` reporting the outcome:
 
 ```python
 final = await compiled.invoke(initial)
-await compiled.drain()
+summary = await compiled.drain()
+# DrainSummary(undelivered_count=0, timeout_reached=False)
 ```
 
 - Per-graph, not per-invoke. Drain awaits *all* prior invocations'
@@ -238,6 +240,32 @@ await compiled.drain()
 
 If you forget `drain()` in a CLI, the symptom is an empty trace file
 or missing log entries.
+
+### Bounded drain (optional timeout)
+
+`drain()` accepts an optional `timeout` parameter (non-negative
+seconds) — `await compiled.drain(timeout=5.0)` bounds the wait at five
+seconds. When the deadline fires, in-flight workers are cancelled
+cleanly so the compiled graph stays usable for subsequent invocations
+— partial delivery state from one drain does NOT leak into the next.
+
+The returned `DrainSummary` carries:
+
+- `timeout_reached: bool` — `True` only when the timeout actually
+  fired. A drain that finishes before the deadline reports `False`.
+- `undelivered_count: int` — events dispatched but not fully delivered
+  to every subscribed observer before the deadline. Always `0` when
+  `timeout_reached is False`.
+
+Observers **should** be cancellation-safe (idempotent writes,
+`try/finally` cleanup) so that interruption by drain timeout does not
+leave partial side effects in an inconsistent state.
+
+When to set a timeout: short-lived processes (CLIs, scripts,
+serverless functions) where a misbehaving observer holding drain
+indefinitely would stall process exit. Long-running services that
+control their own lifecycle can leave the timeout off and let drain
+wait for natural completion.
 
 ## Error isolation
 

@@ -596,6 +596,11 @@ class ObserverSpec(_ForbidExtras):
       ``raise`` (raise to verify error isolation).
     - ``phases`` (optional, spec v0.6 §6) — subset of ``{"started",
       "completed"}`` for per-observer phase subscription.
+    - ``sleep_ms_per_event`` (proposal 0010 §6 Drain conformance) — the
+      slow-observer directive. An int means a constant sleep per
+      event; a dict with ``first_invocation`` / ``subsequent_invocations``
+      keys selects per invocation index (used by fixture 024 to slow
+      only the first invocation).
     """
 
     name: str
@@ -603,6 +608,7 @@ class ObserverSpec(_ForbidExtras):
     target: str
     behavior: Literal["record", "raise"]
     phases: list[Literal["started", "completed"]] | None = None
+    sleep_ms_per_event: int | dict[str, int] | None = None
 
 
 # ---------------------------------------------------------------------------

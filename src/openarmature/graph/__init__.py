@@ -48,7 +48,7 @@ from .middleware import (
     exponential_jitter_backoff,
 )
 from .nodes import FunctionNode, Node
-from .observer import Observer, RemoveHandle, SubscribedObserver
+from .observer import DrainSummary, Observer, RemoveHandle, SubscribedObserver
 from .parallel_branches import BranchSpec, ParallelBranchesNode
 from .projection import ExplicitMapping, FieldNameMatching, ProjectionStrategy
 from .reducers import Reducer, append, last_write_wins, merge
@@ -62,6 +62,7 @@ __all__ = [
     "ConditionalEdge",
     "ConflictingReducers",
     "DanglingEdge",
+    "DrainSummary",
     "EdgeException",
     "EndSentinel",
     "ExplicitMapping",

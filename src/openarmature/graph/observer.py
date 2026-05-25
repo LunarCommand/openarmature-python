@@ -212,6 +212,46 @@ class _QueuedItem:
 _DRAIN_SENTINEL = None
 
 
+# Spec: realizes graph-engine §6 Drain undelivered-count bookkeeping
+# (proposal 0010). Per-invocation mutable counters; `_dispatch` bumps
+# `dispatched` after a successful `queue.put_nowait`; `deliver_loop`
+# bumps `delivered` after the per-event observer for-loop completes.
+# `undelivered = dispatched - delivered` at any point in time — and
+# specifically at `CompiledGraph.drain()` cancellation time when the
+# timeout has elapsed and pending workers' counters get summed into
+# the returned `DrainSummary`.
+@dataclass
+class _DrainCounters:
+    dispatched: int = 0
+    delivered: int = 0
+
+
+# Spec: realizes graph-engine §6 Drain summary return shape (proposal
+# 0010). The two declared fields are the spec-mandated minimum;
+# implementations MAY add richer detail in future PRs (per-observer
+# counts, sampled event metadata) without breaking the v0.19.0 shape.
+@dataclass(frozen=True)
+class DrainSummary:
+    """Outcome of a `CompiledGraph.drain()` call.
+
+    Returned from `drain()` regardless of whether a `timeout` was
+    supplied. When no timeout was supplied, or the timeout did not
+    fire, `undelivered_count == 0` and `timeout_reached is False`.
+    When the timeout fired, `undelivered_count` reports the number of
+    events that were dispatched to the delivery worker but not fully
+    delivered to every subscribed observer before cancellation, and
+    `timeout_reached is True`.
+
+    The spec-mandated minimum is these two fields. Implementations MAY
+    extend the shape with diagnostic detail (per-observer counts,
+    sampled event metadata) in subsequent versions; v0.19.0 ships the
+    minimum.
+    """
+
+    undelivered_count: int
+    timeout_reached: bool
+
+
 # Spec: realizes pipeline-utilities §10.11 per-instance progress
 # tracking in the engine. These are the MUTABLE internal-state
 # counterparts to the FROZEN public ``FanOutProgress`` /
@@ -353,6 +393,12 @@ class _InvocationContext:
     fan_out_progress_state: dict[tuple[tuple[str, ...], str], _FanOutExecutionState] = field(
         default_factory=dict[tuple[tuple[str, ...], str], _FanOutExecutionState]
     )
+    # Per spec §6 Drain (proposal 0010): shared mutable counters that
+    # the worker reads at drain-cancel time to report undelivered events
+    # in the returned ``DrainSummary``. Subgraphs share the parent's
+    # counters because subgraphs share the parent's queue + worker, so
+    # the parent context's counts naturally cover subgraph events.
+    drain_counters: _DrainCounters = field(default_factory=_DrainCounters)
 
     def full_observers(self) -> tuple[SubscribedObserver, ...]:
         """Return the ordered observer list to deliver for events from
@@ -395,6 +441,7 @@ class _InvocationContext:
             pending_resume_states=self.pending_resume_states,
             resume_invocation=self.resume_invocation,
             fan_out_progress_state=self.fan_out_progress_state,
+            drain_counters=self.drain_counters,
         )
 
     def descend_into_fan_out_instance(
@@ -440,6 +487,7 @@ class _InvocationContext:
             # inner-instance node can update its own entry and so the
             # outer save sees consistent sibling state.
             fan_out_progress_state=self.fan_out_progress_state,
+            drain_counters=self.drain_counters,
         )
 
     def descend_into_parallel_branch(
@@ -485,6 +533,7 @@ class _InvocationContext:
             pending_resume_states={},
             resume_invocation=self.resume_invocation,
             fan_out_progress_state=self.fan_out_progress_state,
+            drain_counters=self.drain_counters,
         )
 
     def take_step(self) -> int:
@@ -579,9 +628,16 @@ def _dispatch(context: _InvocationContext, event: NodeEvent) -> None:
                     stacklevel=2,
                 )
     context.queue.put_nowait(_QueuedItem(event=event, observers=observers))
+    # Per spec §6 Drain (proposal 0010): increment AFTER the put so a
+    # raise from ``put_nowait`` (queue full on a bounded queue — we
+    # don't bound, but the invariant holds) doesn't desync the counter.
+    context.drain_counters.dispatched += 1
 
 
-async def deliver_loop(queue: asyncio.Queue[_QueuedItem | None]) -> None:
+async def deliver_loop(
+    queue: asyncio.Queue[_QueuedItem | None],
+    counters: _DrainCounters,
+) -> None:
     """Background worker: read queued events, deliver to observers serially.
 
     - No two observers receive the same event concurrently (we await
@@ -610,10 +666,19 @@ async def deliver_loop(queue: asyncio.Queue[_QueuedItem | None]) -> None:
                     f"observer raised {type(e).__name__}: {e}",
                     stacklevel=1,
                 )
+        # Per spec §6 Drain (proposal 0010): increment AFTER the
+        # observer for-loop completes for this event, so an event
+        # cancelled mid-for-loop is counted as undelivered
+        # (``dispatched - delivered`` includes it). The phase-filter
+        # ``continue`` above does NOT skip the increment — an event
+        # filtered out for every observer is still considered
+        # delivered (we did all the work there was to do for it).
+        counters.delivered += 1
 
 
 __all__ = [
     "ALL_PHASES",
+    "DrainSummary",
     "Observer",
     "RemoveHandle",
     "SubscribedObserver",
@@ -621,6 +686,7 @@ __all__ = [
     # imported by `compiled.py` and `subgraph.py`). The underscore prefix
     # is the user-facing "don't import these" signal.
     "_DRAIN_SENTINEL",
+    "_DrainCounters",
     "_FanOutExecutionState",
     "_FanOutInstanceState",
     "_InvocationContext",
