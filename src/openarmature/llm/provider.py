@@ -226,9 +226,28 @@ def validate_tool_choice(
     """
     if tool_choice is None:
         return
-    if isinstance(tool_choice, str) and tool_choice not in _ALLOWED_TOOL_CHOICE_MODES:
+    # Two-layer type defense at the API boundary. Pyright catches the
+    # well-formed path via the ``ToolChoice = Literal[...] | ForceTool``
+    # alias; the runtime checks below cover untyped callers that bypass
+    # type-check (tests, dynamic harnesses, ad-hoc scripts). A caller
+    # hand-building a dict like ``{"type": "tool", "name": X}`` thinking
+    # that's the API would otherwise fall through to the wire and yield
+    # a hard-to-debug provider-side 4xx — the spec→wire rename only
+    # runs on actual ``ForceTool`` instances.
+    if isinstance(tool_choice, str):
+        if tool_choice not in _ALLOWED_TOOL_CHOICE_MODES:
+            raise ProviderInvalidRequest(
+                f'tool_choice {tool_choice!r} is not one of "auto" / "required" / "none"'
+            )
+    # Pyright narrows ``tool_choice`` to ``ForceTool`` here based on the
+    # type alias, so the isinstance check looks unnecessary to it. But
+    # the entire purpose of this validator is to defend against untyped
+    # callers passing arbitrary values at runtime — the static narrowing
+    # doesn't hold for them. The pyright suppression is load-bearing.
+    elif not isinstance(tool_choice, ForceTool):  # pyright: ignore[reportUnnecessaryIsInstance]
         raise ProviderInvalidRequest(
-            f'tool_choice {tool_choice!r} is not one of "auto" / "required" / "none"'
+            f'tool_choice must be one of "auto" / "required" / "none" or a ForceTool instance, '
+            f"got {type(tool_choice).__name__}"
         )
     has_tools = bool(tools)
     if tool_choice == "required" and not has_tools:

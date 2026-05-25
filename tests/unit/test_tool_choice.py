@@ -111,6 +111,21 @@ def test_validate_rejects_unknown_string_literal() -> None:
         validate_tool_choice("force", [_tool("search")])  # type: ignore[arg-type]
 
 
+def test_validate_rejects_non_str_non_force_tool_input() -> None:
+    # Defensive runtime check: a caller hand-building a dict like
+    # `{"type": "tool", "name": "search"}` (instead of constructing a
+    # `ForceTool` instance) would previously fall through validation
+    # — the raw dict ended up on the wire and the OpenAI request
+    # shape was wrong. Now surfaces at the API boundary with the
+    # expected type listed.
+    with pytest.raises(ProviderInvalidRequest, match="ForceTool instance"):
+        validate_tool_choice({"type": "tool", "name": "search"}, [_tool("search")])  # type: ignore[arg-type]
+    with pytest.raises(ProviderInvalidRequest, match="ForceTool instance"):
+        validate_tool_choice(42, None)  # type: ignore[arg-type]
+    with pytest.raises(ProviderInvalidRequest, match="ForceTool instance"):
+        validate_tool_choice(["auto"], None)  # type: ignore[arg-type]
+
+
 # ---------------------------------------------------------------------------
 # ForceTool shape
 # ---------------------------------------------------------------------------
