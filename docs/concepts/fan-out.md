@@ -125,14 +125,59 @@ namespace.
 ## Resume semantics
 
 A fan-out node's `completed` event triggers a save like any other
-outermost-graph or subgraph-internal node. **Per-instance internal
-events do NOT save** in the shipping version; on resume, the
-fan-out re-runs end-to-end if it hadn't completed (atomic restart).
+outermost-graph or subgraph-internal node. Per-instance internal
+events also save, and the resume contract is **per-instance**: the
+engine consults the saved record's `fan_out_progress` entry for
+this fan-out and treats each instance as one of three states:
 
-A per-instance fan-out resume mode is planned but not yet shipped.
-The `fan_out_progress` field on `CheckpointRecord` is reserved for
-its eventual contents. Until it lands, atomic restart is the
-shipping behavior.
+- **`completed`**: the instance ran to completion in the prior run
+  and recorded its contribution into the accumulator. The engine
+  skips re-execution on resume; the contribution rolls forward to
+  the fan-in step.
+- **`in_flight`**: the instance began execution but its terminal
+  inner node had not yet fired `completed` at save time, so no
+  contribution was recorded. On resume the engine re-runs the
+  instance from the subgraph's declared entry node.
+  `completed_inner_positions` on the saved record are observational
+  only; they do NOT serve as a per-inner-node resume point.
+- **`not_started`**: the instance was not dispatched at save time.
+  On resume the engine dispatches it normally.
+
+The `append` reducer's no-double-merge guarantee holds because
+`completed` is a one-shot accumulator state: every completed
+instance's contribution rolls forward exactly once at fan-in.
+
+Under `error_policy: collect`, a failed instance's error record IS
+a `completed` contribution (the error rolls forward through the
+`errors_field` bucket rather than `target_field`). Under
+`error_policy: fail_fast`, a failed instance leaves the saved
+record with that instance in `in_flight` state; cancelled siblings
+are `in_flight` or `not_started`. None are `completed`, so resume
+re-runs them all.
+
+Per-instance saves can be high-volume in fan-outs with many
+instances or many inner nodes per instance. `Checkpointer` backends
+MAY opt into **configurable batching** scoped to fan-out instance
+internal saves; outermost-graph, subgraph-internal, and the fan-out
+node's own completion save remain synchronous. The in-memory
+backend exposes the knob via:
+
+```python
+from openarmature.checkpoint import (
+    InMemoryCheckpointer,
+    FanOutInternalSaveBatching,
+)
+
+cp = InMemoryCheckpointer(
+    fan_out_internal_save_batching=FanOutInternalSaveBatching(flush_every=10),
+)
+```
+
+Buffered-but-unflushed saves are lost on crash by design:
+instances whose `completed` state was only buffered revert to
+`in_flight` / `not_started` on resume and re-run. The trade-off is
+explicit (fewer writes per fan-out instance vs some redundant
+re-execution on crash recovery); default is no batching.
 
 ## When to reach for fan-out
 

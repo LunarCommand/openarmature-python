@@ -46,6 +46,28 @@ sentinel headline that always raises `ProviderUnavailable`; under
   `error_policy` at runtime. Inner-instance events carry
   `fan_out_index` but not the config.
 
+## Composing with checkpointing
+
+This example doesn't register a `Checkpointer`, but the fan-out
+pattern composes cleanly with checkpoint resume. When a fan-out
+runs under a registered backend, the resume contract is
+**per-instance**: instances that completed in the prior run skip
+re-execution and their contributions roll forward through the
+fan-in step; instances that were `in_flight` at save time re-run
+from the subgraph's entry node; not-started instances dispatch
+normally. The `append` reducer's no-double-merge guarantee holds
+across resume because `completed` is a one-shot accumulator state.
+
+Composition with `instance_middleware` (retry): on resume, an
+instance's `attempt_index` resets to 0 (a fresh retry budget) per
+spec graph-engine §6's resume semantics. So a retry-exhausted
+instance whose `in_flight` state was saved gets a fresh budget on
+the resumed run.
+
+See [Resume semantics in fan-out](../concepts/fan-out.md#resume-semantics)
+and the [Checkpointing concept page](../concepts/checkpointing.md)
+for the full contract.
+
 ## How to run
 
 ```bash
