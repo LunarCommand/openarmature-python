@@ -215,3 +215,22 @@ async def test_drain_with_zero_timeout_fires_immediately() -> None:
     # before the zero-second deadline fired.
     assert summary.undelivered_count == 6
     assert len(received) == 0
+
+
+async def test_drain_rejects_negative_timeout() -> None:
+    # Spec §6: timeout is "a non-negative duration in seconds". A
+    # negative value is a user mistake — surface it as ValueError at
+    # the API boundary rather than silently treating it like an
+    # immediate cancel.
+    compiled = _build_compiled()
+    with pytest.raises(ValueError, match="non-negative"):
+        await compiled.drain(timeout=-1.0)
+
+
+async def test_drain_rejects_nan_timeout() -> None:
+    # NaN compares False against everything, so `not (timeout >= 0)`
+    # catches it just like negative values. Without the validation it
+    # would silently fall through `asyncio.wait` as an immediate cancel.
+    compiled = _build_compiled()
+    with pytest.raises(ValueError, match="non-negative"):
+        await compiled.drain(timeout=float("nan"))

@@ -719,7 +719,18 @@ class CompiledGraph[StateT: State]:
         (idempotent writes, try/finally cleanup) so that interruption
         by drain timeout does not leave partial side effects in an
         inconsistent state.
+
+        Raises ``ValueError`` if ``timeout`` is negative or NaN.
+        Non-numeric input raises ``TypeError`` from the comparison.
         """
+        # ``not (timeout >= 0)`` is the right check: catches negative
+        # values, catches NaN (all comparisons with NaN return False),
+        # and lets non-numeric input raise ``TypeError`` from the
+        # comparison operator itself. Silently treating a negative
+        # timeout as "immediate cancel" would be a user-hostile failure
+        # mode — the spec contract is non-negative seconds.
+        if timeout is not None and not (timeout >= 0):
+            raise ValueError(f"drain timeout must be non-negative, got {timeout!r}")
         if not self._active_workers:
             return DrainSummary(undelivered_count=0, timeout_reached=False)
         # Snapshot the dict: each worker's done-callback removes its
@@ -734,22 +745,30 @@ class CompiledGraph[StateT: State]:
             return_when=asyncio.ALL_COMPLETED,
         )
 
-        if not pending:
-            return DrainSummary(undelivered_count=0, timeout_reached=False)
+        if pending:
+            undelivered = sum(
+                snapshot[w].drain_counters.dispatched - snapshot[w].drain_counters.delivered for w in pending
+            )
+            timeout_reached = True
+            for w in pending:
+                w.cancel()
+        else:
+            undelivered = 0
+            timeout_reached = False
 
-        undelivered = sum(
-            snapshot[w].drain_counters.dispatched - snapshot[w].drain_counters.delivered for w in pending
-        )
-        for w in pending:
-            w.cancel()
-        # Wait for cancellations to settle so the done-callbacks fire
-        # and `_active_workers` cleans for the next invocation —
-        # load-bearing for the cross-invocation cleanliness contract.
-        # ``return_exceptions`` absorbs the ``CancelledError`` each
-        # cancelled worker raises.
-        await asyncio.gather(*pending, return_exceptions=True)
+        # Gather ALL workers (done + pending) so any exception that
+        # escaped a delivery worker surfaces here instead of leaking
+        # as a "Task exception was never retrieved" warning. The
+        # ``return_exceptions=True`` absorbs both the synthetic
+        # ``CancelledError`` from cancelled workers and any genuine
+        # bug-escape from a ``deliver_loop`` that ever raised past
+        # its inner ``warnings.warn`` isolation. Also load-bearing
+        # for the cross-invocation cleanliness contract — done-
+        # callbacks fire on cancellation, so ``_active_workers`` is
+        # empty by the time we return.
+        await asyncio.gather(*workers, return_exceptions=True)
 
-        return DrainSummary(undelivered_count=undelivered, timeout_reached=True)
+        return DrainSummary(undelivered_count=undelivered, timeout_reached=timeout_reached)
 
     # ------------------------------------------------------------------
     # Public invocation
