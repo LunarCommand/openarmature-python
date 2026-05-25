@@ -31,6 +31,7 @@ measuring once large-N workloads exist.
 from __future__ import annotations
 
 import asyncio
+import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal, cast
@@ -42,6 +43,7 @@ from .errors import (
     NodeException,
 )
 from .middleware import ChainCall, Middleware, compose_chain
+from .observer import _FanOutExecutionState, _FanOutInstanceState
 from .state import State
 
 if TYPE_CHECKING:
@@ -126,6 +128,18 @@ class FanOutNode[ParentT: State, ChildT: State]:
         fan-in collected/extra fields, write count_field and
         errors_field if configured.
 
+        Per proposal 0009 / §10.11 per-instance resume contract: this
+        method registers a per-fan-out tracking entry on the shared
+        ``context.fan_out_progress_state`` dict before dispatching,
+        flips each instance's state through
+        ``not_started -> in_flight -> completed`` as the instance
+        progresses, and fires an explicit "instance completed" save
+        after the per-instance contribution has been recorded into
+        the accumulator. The atomicity contract from §10.11 is
+        observed: the per-instance state mutation precedes the save,
+        so a crash after mutation but before save leaves the saved
+        record showing ``in_flight`` (resume re-runs the instance).
+
         ``pre_resolved_count`` / ``pre_resolved_concurrency`` are the
         proposal-0013 v0.10.0 hooks: when the engine has already
         resolved the config eagerly to populate
@@ -152,10 +166,93 @@ class FanOutNode[ParentT: State, ChildT: State]:
         else:
             max_concurrency = _resolve_concurrency(self.name, cfg, state)
 
+        # Register / reuse the per-fan-out tracking entry on the
+        # shared dict. Resume threads a pre-restored entry through
+        # ``context.fan_out_progress_state``; first-run constructs a
+        # fresh one with all instances ``not_started``.
+        key = (context.namespace_prefix, self.name)
+        exec_state = context.fan_out_progress_state.get(key)
+        if exec_state is None:
+            exec_state = _FanOutExecutionState(
+                fan_out_node_name=self.name,
+                namespace=context.namespace_prefix,
+                instance_count=instance_count,
+                instances=[_FanOutInstanceState() for _ in range(instance_count)],
+            )
+            context.fan_out_progress_state[key] = exec_state
+        else:
+            # Defensive: instance_count may have changed between runs if
+            # the items_field/count resolver returns a different value
+            # on resume. Trust the current count — pad or truncate the
+            # tracked instances to match. In practice users either
+            # configure deterministic counts or change them between
+            # runs deliberately; spec §10.5 idempotency says the work
+            # is the same on resume but is silent on count drift.
+            if len(exec_state.instances) < instance_count:
+                exec_state.instances.extend(
+                    _FanOutInstanceState() for _ in range(instance_count - len(exec_state.instances))
+                )
+            elif len(exec_state.instances) > instance_count:
+                del exec_state.instances[instance_count:]
+            exec_state.instance_count = instance_count
+
+        # Shared cancel signal for the fail_fast path. Defined here (not
+        # inside the fail_fast branch below) so ``run_instance`` can
+        # check it AFTER semaphore acquisition but BEFORE mutating
+        # tracked state — closes a race where a semaphore-blocked
+        # sibling would flip its tracked state to ``in_flight`` after a
+        # sibling failed and set the signal. In collect mode the signal
+        # is never set, so the check inside ``run_instance`` is a
+        # no-op there.
+        cancel_signal = asyncio.Event()
+
         # Per-instance task: build the instance_middleware chain, run
         # the subgraph against it, and return the per-instance partial
         # (collect_field + extra_outputs).
+        #
+        # Resume gating: an instance whose tracked state is
+        # ``completed`` is skipped (its result rolls forward from the
+        # accumulator entry). Instances tracked as ``in_flight`` or
+        # ``not_started`` dispatch normally with fresh per-instance
+        # state — per §10.7 the inner subgraph re-enters at its
+        # declared entry, not at any of the ``completed_inner_positions``
+        # captured in the prior run.
         async def run_instance(idx: int, instance_state: ChildT) -> Mapping[str, Any]:
+            tracked = exec_state.instances[idx]
+            if tracked.state == "completed":
+                if tracked.result_is_error:
+                    # Per §10.11.2 collect-mode resume: an error
+                    # contribution rolls forward through the
+                    # ``errors_field`` bucket, not ``target_field``.
+                    # Raise a categorized exception so the outer
+                    # gather captures it and ``_fan_in_collect``
+                    # routes it through error_records (with the same
+                    # ``category`` the original failure carried).
+                    raise _RolledForwardError(category=_extract_error_category(tracked.result))
+                # Roll the success contribution forward verbatim.
+                return _rolled_forward_partial(cfg, tracked)
+
+            # Cancel-signal check AFTER the resume rollforward branch
+            # but BEFORE the first tracked-state mutation. Covers the
+            # race where a sibling failed (setting the signal) while
+            # this task was blocked on the bounded-concurrency
+            # semaphore inside ``gated_run``; without this check, the
+            # task would acquire the semaphore and flip ``tracked.state``
+            # to ``in_flight``, contradicting §10.11.2's
+            # "not-yet-dispatched siblings end up not_started" contract.
+            if cancel_signal.is_set():
+                raise asyncio.CancelledError()
+
+            # Flip to in_flight BEFORE dispatching so a sibling-
+            # triggered save during this instance's execution observes
+            # the correct state. Reset completed_inner_positions to
+            # ensure resume re-execution doesn't accumulate against
+            # the prior run's prefix.
+            tracked.state = "in_flight"
+            tracked.completed_inner_positions.clear()
+            tracked.result = None
+            tracked.extra_outputs = {}
+
             child_context = context.descend_into_fan_out_instance(
                 fan_out_node_name=self.name,
                 parent_state=state,
@@ -171,34 +268,165 @@ class FanOutNode[ParentT: State, ChildT: State]:
                 return _extract_instance_partial(cfg, final_inst_state)
 
             chain: ChainCall = compose_chain(cfg.instance_middleware, innermost)
-            return await chain(instance_state)
+            try:
+                partial = await chain(instance_state)
+            except Exception as exc:
+                if cfg.error_policy == "collect":
+                    # Per §10.11.2 collect mode: the failure becomes a
+                    # ``completed`` contribution with the error record
+                    # as ``result``. Mutate state BEFORE saving so the
+                    # save durably reflects the completion (atomicity
+                    # contract per §10.11). The re-raise hands the
+                    # exception back to the outer gather so the
+                    # ``_fan_in_collect`` path builds the parent
+                    # ``errors_field`` from raw_results.
+                    error_record: dict[str, str] = {
+                        "fan_out_index": str(idx),
+                        "category": getattr(exc, "category", type(exc).__name__),
+                    }
+                    tracked.result = error_record
+                    tracked.result_is_error = True
+                    tracked.extra_outputs = {}
+                    tracked.state = "completed"
+                    await _save_instance_completed(state, context)
+                    raise
+                # Per §10.11 in_flight observability under fail_fast:
+                # if no sibling completion fired a save during this
+                # instance's execution (the serial-execution +
+                # first-node-fails case), the saved record would not
+                # otherwise reflect this instance's in_flight
+                # transition. Fire an explicit "instance failed" save
+                # so the per-instance in_flight observation reaches
+                # the saved record. Tracked state stays ``in_flight``
+                # (no accumulator write happens on failure under
+                # fail_fast) per §10.11.2. Re-raise after the save so
+                # the fail_fast cancellation path stays intact.
+                await _save_instance_in_flight(state, context)
+                raise
+
+            # Atomicity contract (§10.11): produce contribution -> record
+            # into accumulator -> save. The accumulator update below
+            # happens BEFORE the explicit "instance completed" save so a
+            # crash between accumulator write and save leaves the saved
+            # record showing ``in_flight`` and resume re-runs the
+            # instance. The ``append`` reducer's no-double-merge guarantee
+            # (§10.11.1) depends on this ordering.
+            tracked.result = partial.get(cfg.collect_field)
+            tracked.result_is_error = False
+            tracked.extra_outputs = {
+                parent_field: partial[parent_field]
+                for parent_field in cfg.extra_outputs
+                if parent_field in partial
+            }
+            tracked.state = "completed"
+
+            # Fire an explicit "instance completed" save so the saved
+            # record durably reflects the completed state. Without this
+            # save, only the terminal inner node's intrinsic save fires
+            # (which executed BEFORE the accumulator mutation above and
+            # therefore showed the instance as ``in_flight``). The
+            # explicit save closes the atomicity gap. Routed through
+            # the fan-out-internal batching seam per §10.11.4.
+            await _save_instance_completed(state, context)
+
+            return partial
 
         gated_run = _bounded_runner(run_instance, max_concurrency)
 
         if cfg.error_policy == "fail_fast":
-            tasks = [gated_run(idx, st) for idx, st in enumerate(instance_states)]
+            # ``cancel_signal`` is defined above (before ``run_instance``)
+            # so the in-instance check can read it. The wrapper below
+            # adds a fast-path check before semaphore acquisition for
+            # tasks that haven't entered ``run_instance`` yet; the
+            # in-instance check covers the race after semaphore
+            # acquisition. The explicit signal closes the
+            # bounded-concurrency-semaphore cancellation gap that
+            # ``asyncio.gather`` / ``asyncio.wait`` don't enforce
+            # strongly enough on their own.
+
+            async def signaled_run(idx: int, st: Any) -> Mapping[str, Any]:
+                # Check before any work — if a sibling already failed,
+                # exit immediately so this instance's tracked state
+                # stays at its default not_started.
+                if cancel_signal.is_set():
+                    raise asyncio.CancelledError()
+                try:
+                    return await gated_run(idx, st)
+                except Exception:
+                    # Set the signal so siblings about to run see it
+                    # before they enter run_instance and mutate
+                    # tracked state. The first task to raise wins.
+                    cancel_signal.set()
+                    raise
+
+            tasks: list[tuple[int, asyncio.Task[Mapping[str, Any]]]] = [
+                (idx, asyncio.create_task(signaled_run(idx, st))) for idx, st in enumerate(instance_states)
+            ]
             try:
-                results = await asyncio.gather(*tasks)
-            except Exception as exc:
-                # Per spec §9.5: the propagated exception is the
-                # offending instance's, wrapped in a node_exception
-                # with recoverable_state set to the parent's pre-fan-out
-                # snapshot. Sibling cancellations are infrastructure
-                # (asyncio.gather already cancelled them) and don't
-                # produce additional node_exception per cancelled
-                # instance.
-                raise NodeException(
-                    node_name=self.name,
-                    cause=exc,
-                    recoverable_state=state,
-                ) from exc
-            return _fan_in_fail_fast(cfg, results)
+                await asyncio.wait(
+                    [t for _, t in tasks],
+                    return_when=asyncio.FIRST_EXCEPTION,
+                )
+            except BaseException:
+                for _, t in tasks:
+                    t.cancel()
+                await asyncio.gather(*(t for _, t in tasks), return_exceptions=True)
+                raise
+
+            # Iterate all completed-not-cancelled tasks to retrieve
+            # each exception via ``t.exception()`` (otherwise asyncio
+            # warns "Task exception was never retrieved" on GC for any
+            # task that failed before fail_fast cancelled its
+            # siblings). ``failed_cause`` still captures only the
+            # FIRST real exception — NodeException's ``cause`` should
+            # be the originating instance's error, not a later
+            # sibling's. CancelledErrors are siblings we cancelled, so
+            # ignore them.
+            failed_cause: BaseException | None = None
+            for _, t in tasks:
+                if t.done() and not t.cancelled():
+                    exc = t.exception()
+                    if exc is not None and not isinstance(exc, asyncio.CancelledError):
+                        if failed_cause is None:
+                            failed_cause = exc
+
+            # Cancel any still-pending tasks; drain to absorb
+            # CancelledError so it doesn't propagate as unhandled.
+            for _, t in tasks:
+                if not t.done():
+                    t.cancel()
+            await asyncio.gather(*(t for _, t in tasks if not t.done()), return_exceptions=True)
+
+            if failed_cause is None:
+                # All tasks finished without raising. Collect results
+                # in instance-index order and fan-in.
+                results = [t.result() for _, t in tasks]
+                return _fan_in_fail_fast(cfg, results)
+
+            # Per spec §9.5: the propagated exception is the offending
+            # instance's, wrapped in a node_exception with
+            # recoverable_state set to the parent's pre-fan-out
+            # snapshot. Per §10.11.2 the failed instance's tracked
+            # state is ``in_flight`` (no accumulator entry was
+            # recorded because the contribution -> mutation -> save
+            # sequence raised before the mutation; resume re-runs).
+            raise NodeException(
+                node_name=self.name,
+                cause=failed_cause,
+                recoverable_state=state,
+            ) from failed_cause
 
         # collect — run all instances; capture per-instance exceptions
-        # rather than propagate.
-        tasks = [gated_run(idx, st) for idx, st in enumerate(instance_states)]
-        raw = await asyncio.gather(*tasks, return_exceptions=True)
-        return _fan_in_collect(cfg, raw, instance_count)
+        # rather than propagate. Per §10.11.2 a collect-mode failure
+        # produces a ``completed`` instance whose ``result`` is the
+        # error record contributed to ``errors_field``. Per-instance
+        # promotion happens inside ``run_instance`` so the
+        # ``completed`` save fires before sibling instances dispatch
+        # (the §10.11 atomicity contract still holds and the abort_-
+        # after_instance harness directive sees the right state).
+        collect_tasks = [gated_run(idx, st) for idx, st in enumerate(instance_states)]
+        raw_results = await asyncio.gather(*collect_tasks, return_exceptions=True)
+        return _fan_in_collect(cfg, raw_results, instance_count)
 
 
 # ---------------------------------------------------------------------------
@@ -331,6 +559,188 @@ def _extract_instance_partial(cfg: FanOutConfig, final_state: Any) -> Mapping[st
     for parent_field, sub_field in cfg.extra_outputs.items():
         partial[parent_field] = getattr(final_state, sub_field)
     return partial
+
+
+class _RolledForwardError(Exception):
+    """Exception raised by ``run_instance`` to signal that a
+    collect-mode resume is rolling forward a recorded error
+    contribution. Carries the original failure's ``category`` so
+    the resumed fan-in path can record an error entry with the
+    same category that the prior run produced. Internal — never
+    propagates out of the fan-out's run_with_context.
+    """
+
+    def __init__(self, *, category: str) -> None:
+        super().__init__(f"rolled-forward error ({category})")
+        self.category = category
+
+
+def _extract_error_category(error_record: Any) -> str:
+    """Pull the ``category`` field from an error_record dict the engine
+    stored as a tracked instance's ``result``. Falls back to
+    ``node_exception`` when the field isn't present (defensive — the
+    engine always sets ``category`` per ``_fan_in_collect``)."""
+    if isinstance(error_record, dict):
+        result_dict = cast("dict[str, Any]", error_record)
+        category = result_dict.get("category", "node_exception")
+        if isinstance(category, str):
+            return category
+    return "node_exception"
+
+
+def _rolled_forward_partial(cfg: FanOutConfig, tracked: _FanOutInstanceState) -> Mapping[str, Any]:
+    """Reconstruct the per-instance partial for a ``completed`` instance
+    being skipped on resume. The accumulator entry rolls forward
+    verbatim — same shape as :func:`_extract_instance_partial` would
+    have produced on the original run, sourced from the per-instance
+    tracked state instead of a freshly-computed inner state."""
+    partial: dict[str, Any] = {cfg.collect_field: tracked.result}
+    for parent_field in cfg.extra_outputs:
+        if parent_field in tracked.extra_outputs:
+            partial[parent_field] = tracked.extra_outputs[parent_field]
+    return partial
+
+
+async def _save_instance_in_flight(
+    parent_state: Any,
+    context: _InvocationContext,
+) -> None:
+    """Fire an explicit save when an instance fails before any sibling
+    triggered a save during its execution. Without this save, the
+    instance's in_flight transition would not be observable on the
+    saved record under serial execution: no sibling completion fires
+    during a serial instance's run, and the instance's own inner-node
+    save only fires on successful merge (failure path skips it).
+
+    Routes through the checkpointer's ``save_fan_out_in_flight_failure``
+    seam (when present) per §10.11.4. Batching backends typically
+    buffer this save WITHOUT triggering a flush — the "crash" the
+    failure represents would lose the buffer, including this save,
+    in a real-world scenario. Non-batching backends route it through
+    the synchronous ``save`` path so the in_flight observability of
+    fixture 048 holds.
+    """
+    from openarmature.checkpoint.errors import CheckpointSaveFailed  # noqa: PLC0415
+    from openarmature.checkpoint.protocol import CheckpointRecord  # noqa: PLC0415
+
+    from .compiled import (  # noqa: PLC0415
+        _project_fan_out_progress,
+        _save_fan_out_in_flight_failure,
+    )
+
+    checkpointer = context.checkpointer
+    if checkpointer is None:
+        return
+    fan_out_progress = _project_fan_out_progress(context.fan_out_progress_state)
+    # Per spec §10.2: ``schema_version`` is the OUTERMOST graph state's
+    # version — the record represents the whole invocation tree. For a
+    # nested fan-out (a fan-out inside a subgraph), ``parent_state`` is
+    # the subgraph's state, not the outermost; read from
+    # ``context.parent_states_prefix[0]`` (the outermost state lives at
+    # index 0 of the parent chain) when non-empty, else from
+    # ``parent_state`` directly (which IS the outermost state for an
+    # outermost fan-out).
+    if context.parent_states_prefix:
+        outermost_cls = cast("type[Any]", type(context.parent_states_prefix[0]))
+    else:
+        outermost_cls = cast("type[Any]", type(parent_state))
+    schema_version = cast("str", getattr(outermost_cls, "schema_version", ""))
+    record = CheckpointRecord(
+        invocation_id=context.invocation_id,
+        correlation_id=context.correlation_id,
+        state=parent_state,
+        completed_positions=tuple(context.completed_positions),
+        parent_states=context.parent_states_prefix,
+        last_saved_at=time.time(),
+        schema_version=schema_version,
+        fan_out_progress=fan_out_progress,
+    )
+    try:
+        await _save_fan_out_in_flight_failure(checkpointer, context.invocation_id, record)
+    except Exception as exc:
+        raise CheckpointSaveFailed(context.invocation_id, exc) from exc
+
+
+async def _save_instance_completed(
+    parent_state: Any,
+    context: _InvocationContext,
+) -> None:
+    """Fire the explicit "instance completed" save closing the §10.11
+    atomicity gap. The per-instance state has already been flipped to
+    ``completed`` with ``result`` populated; this save durably records
+    that transition so resume can skip the instance.
+
+    Routed through the fan-out-internal batching seam per §10.11.4 —
+    backends opting into batching may buffer the save; non-batching
+    backends call ``save`` directly. On crash with buffered-but-
+    unflushed saves, the instance reverts to ``in_flight`` /
+    ``not_started`` on resume and re-runs (contributing for the first
+    time, no double-merge per §10.11.1).
+    """
+    # Lazy imports: ``compiled`` and ``checkpoint.protocol`` would
+    # create textual cycles at module-load. Function-scope keeps the
+    # import cheap (cached after first call) and the cycle off the
+    # static analyzer's graph.
+    from openarmature.checkpoint.errors import CheckpointSaveFailed  # noqa: PLC0415
+    from openarmature.checkpoint.protocol import CheckpointRecord  # noqa: PLC0415
+
+    from .compiled import (  # noqa: PLC0415
+        _project_fan_out_progress,
+        _save_fan_out_internal,
+    )
+
+    checkpointer = context.checkpointer
+    if checkpointer is None:
+        return
+    # The "instance completed" save records the post-merge outer state
+    # via ``parent_state`` (the snapshot of outer state at fan-out
+    # dispatch time). ``parent_states`` carries any enclosing subgraph
+    # chain. This save shape mirrors a top-level "outer node completed"
+    # save: ``state`` = outer; ``parent_states`` = enclosing chain
+    # (empty for outermost fan-outs). The inner-node saves fired during
+    # the instance's execution have a different shape (state = inner,
+    # parent_states includes outer) — both shapes are valid checkpoint
+    # records and the resume path handles either based on
+    # ``parent_states`` length.
+    fan_out_progress = _project_fan_out_progress(context.fan_out_progress_state)
+    # Per spec §10.2: ``schema_version`` is the OUTERMOST graph state's
+    # version (the record represents the whole invocation tree). For a
+    # nested fan-out (a fan-out inside a subgraph), ``parent_state`` is
+    # the subgraph's state, not the outermost — read from
+    # ``context.parent_states_prefix[0]`` (the outermost state lives at
+    # index 0 of the parent chain) when non-empty, else from
+    # ``parent_state`` directly (which IS the outermost state for an
+    # outermost fan-out). Mirrors ``_maybe_save_checkpoint``'s
+    # ``self.state_cls.schema_version`` read in ``compiled.py``.
+    if context.parent_states_prefix:
+        outermost_cls = cast("type[Any]", type(context.parent_states_prefix[0]))
+    else:
+        outermost_cls = cast("type[Any]", type(parent_state))
+    schema_version = cast("str", getattr(outermost_cls, "schema_version", ""))
+    record = CheckpointRecord(
+        invocation_id=context.invocation_id,
+        correlation_id=context.correlation_id,
+        state=parent_state,
+        completed_positions=tuple(context.completed_positions),
+        parent_states=context.parent_states_prefix,
+        last_saved_at=time.time(),
+        schema_version=schema_version,
+        fan_out_progress=fan_out_progress,
+    )
+    try:
+        await _save_fan_out_internal(checkpointer, context.invocation_id, record)
+    except Exception as exc:
+        raise CheckpointSaveFailed(context.invocation_id, exc) from exc
+    # Per §10.8: the explicit "instance completed" save is a save like
+    # any other and SHOULD emit a ``checkpoint_saved`` observer event.
+    # However the engine's primary save call site
+    # (``_maybe_save_checkpoint``) already dispatches the event for
+    # every save it owns, and the explicit save here is conceptually
+    # part of the same save-point: the inner node's intrinsic save
+    # already fired ``checkpoint_saved`` for this fan-out instance's
+    # progress. Adding a second event would double-count for backends
+    # that surface them as spans. Suppress to keep the event stream
+    # node-aligned.
 
 
 def _fan_in_fail_fast(

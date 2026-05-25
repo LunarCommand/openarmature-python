@@ -45,12 +45,23 @@ from ..protocol import (
     CheckpointFilter,
     CheckpointRecord,
     CheckpointSummary,
+    FanOutInstanceProgress,
+    FanOutProgress,
     NodePosition,
 )
 
 SerializationMode = Literal["pickle", "json"]
 
 
+# Proposal 0009 / spec v0.18.0 sqlite serialization choice (Q3 in the
+# impl plan): the new ``fan_out_progress`` field on CheckpointRecord
+# gets a dedicated BLOB column (Plan B). Plan A from the impl plan
+# was JSON-blob expansion of an existing blob, but each existing blob
+# encodes one specific field (state, positions, parent_states); adding
+# fan_out_progress as a new column keeps the field-to-blob mapping
+# obvious and avoids smearing two semantically distinct fields into
+# one. The column is added via ALTER TABLE for backward compatibility
+# with databases written before this proposal landed.
 _SCHEMA_DDL = """
 CREATE TABLE IF NOT EXISTS checkpoints (
     invocation_id     TEXT PRIMARY KEY,
@@ -65,6 +76,66 @@ CREATE TABLE IF NOT EXISTS checkpoints (
 CREATE INDEX IF NOT EXISTS idx_correlation_id
     ON checkpoints (correlation_id);
 """
+
+# Idempotent column add for the fan_out_progress blob. Older databases
+# created before proposal 0009 lack this column; SQLite has no
+# ``ADD COLUMN IF NOT EXISTS``, so we attempt the ADD and swallow the
+# duplicate-column error.
+_FAN_OUT_PROGRESS_COLUMN_DDL = "ALTER TABLE checkpoints ADD COLUMN fan_out_progress_blob BLOB"
+
+
+def _fan_out_progress_to_dict(fp: FanOutProgress) -> dict[str, Any]:
+    """Serialize a frozen :class:`FanOutProgress` entry to a dict shape
+    the configured serialization mode round-trips cleanly.
+
+    JSON mode walks tuples as lists already; pickle mode round-trips
+    dicts identically. The shape mirrors the dataclass fields one for
+    one with namespace/positions flattened to lists.
+    """
+    return {
+        "fan_out_node_name": fp.fan_out_node_name,
+        "namespace": list(fp.namespace),
+        "instance_count": fp.instance_count,
+        "instances": [
+            {
+                "state": inst.state,
+                "result": inst.result,
+                "completed_inner_positions": [asdict(p) for p in inst.completed_inner_positions],
+            }
+            for inst in fp.instances
+        ],
+    }
+
+
+def _fan_out_progress_from_dict(d: dict[str, Any]) -> FanOutProgress:
+    """Inverse of :func:`_fan_out_progress_to_dict` — rebuild a frozen
+    :class:`FanOutProgress` from its dict shape, restoring positions
+    as :class:`NodePosition` instances."""
+    instances: list[FanOutInstanceProgress] = []
+    for inst in cast("list[dict[str, Any]]", d["instances"]):
+        inner_positions = tuple(
+            NodePosition(
+                namespace=tuple(p["namespace"]),
+                node_name=p["node_name"],
+                step=p["step"],
+                attempt_index=p.get("attempt_index", 0),
+                fan_out_index=p.get("fan_out_index"),
+            )
+            for p in cast("list[dict[str, Any]]", inst.get("completed_inner_positions", []))
+        )
+        instances.append(
+            FanOutInstanceProgress(
+                state=inst["state"],
+                result=inst.get("result"),
+                completed_inner_positions=inner_positions,
+            )
+        )
+    return FanOutProgress(
+        fan_out_node_name=d["fan_out_node_name"],
+        namespace=tuple(d["namespace"]),
+        instance_count=d["instance_count"],
+        instances=tuple(instances),
+    )
 
 
 def _to_json_native(obj: Any) -> Any:
@@ -125,6 +196,16 @@ class SQLiteCheckpointer:
     def _initialize_sync(self) -> None:
         with self._connect() as conn:
             conn.executescript(_SCHEMA_DDL)
+            # Add the fan_out_progress_blob column for databases written
+            # before proposal 0009. Idempotent: subsequent runs against
+            # an already-migrated database hit "duplicate column" and
+            # swallow it. New databases pick the column up via the
+            # initial table create + this ALTER, equivalent end state.
+            try:
+                conn.execute(_FAN_OUT_PROGRESS_COLUMN_DDL)
+            except sqlite3.OperationalError as exc:
+                if "duplicate column" not in str(exc).lower():
+                    raise
 
     async def _ensure_initialized(self) -> None:
         if self._initialized:
@@ -168,14 +249,21 @@ class SQLiteCheckpointer:
 
     async def save(self, invocation_id: str, record: CheckpointRecord) -> None:
         """Upsert ``record`` under ``invocation_id``. The state,
-        completed positions, and parent-state stack are serialized via
-        the configured :class:`SerializationMode` and written in a
-        single statement. Writes are durable on return (WAL mode,
-        per-write fsync at the SQLite layer)."""
+        completed positions, parent-state stack, and (per proposal 0009)
+        per-fan-out-node progress are serialized via the configured
+        :class:`SerializationMode` and written in a single statement.
+        Writes are durable on return (WAL mode, per-write fsync at the
+        SQLite layer)."""
         await self._ensure_initialized()
         state_blob = self._encode(record.state)
         positions_blob = self._encode([asdict(p) for p in record.completed_positions])
         parent_states_blob = self._encode(list(record.parent_states))
+        # Per pipeline-utilities §10.11: serialize the per-fan-out-node
+        # progress sequence. Empty tuple is the common case (no fan-outs
+        # in flight at save time) and round-trips as an empty list.
+        fan_out_progress_blob = self._encode(
+            [_fan_out_progress_to_dict(fp) for fp in record.fan_out_progress]
+        )
         serialization_mode = self._serialization
 
         def _do() -> None:
@@ -185,16 +273,17 @@ class SQLiteCheckpointer:
                     INSERT INTO checkpoints
                         (invocation_id, correlation_id, state_blob,
                          positions_blob, parent_states_blob, last_saved_at,
-                         schema_version, serialization)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                         schema_version, serialization, fan_out_progress_blob)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(invocation_id) DO UPDATE SET
-                        correlation_id     = excluded.correlation_id,
-                        state_blob         = excluded.state_blob,
-                        positions_blob     = excluded.positions_blob,
-                        parent_states_blob = excluded.parent_states_blob,
-                        last_saved_at      = excluded.last_saved_at,
-                        schema_version     = excluded.schema_version,
-                        serialization      = excluded.serialization
+                        correlation_id        = excluded.correlation_id,
+                        state_blob            = excluded.state_blob,
+                        positions_blob        = excluded.positions_blob,
+                        parent_states_blob    = excluded.parent_states_blob,
+                        last_saved_at         = excluded.last_saved_at,
+                        schema_version        = excluded.schema_version,
+                        serialization         = excluded.serialization,
+                        fan_out_progress_blob = excluded.fan_out_progress_blob
                     """,
                     (
                         invocation_id,
@@ -205,6 +294,7 @@ class SQLiteCheckpointer:
                         record.last_saved_at,
                         record.schema_version,
                         serialization_mode,
+                        fan_out_progress_blob,
                     ),
                 )
 
@@ -225,7 +315,7 @@ class SQLiteCheckpointer:
                     """
                     SELECT correlation_id, state_blob, positions_blob,
                            parent_states_blob, last_saved_at,
-                           schema_version, serialization
+                           schema_version, serialization, fan_out_progress_blob
                     FROM checkpoints
                     WHERE invocation_id = ?
                     """,
@@ -245,6 +335,7 @@ class SQLiteCheckpointer:
             last_saved_at,
             schema_version,
             recorded_serialization,
+            fan_out_progress_blob,
         ) = row
         # Note: per spec §10.12 (proposal 0014), version mismatches
         # are no longer rejected at the backend boundary. The engine
@@ -265,6 +356,20 @@ class SQLiteCheckpointer:
             )
             for p in position_dicts
         )
+        # fan_out_progress_blob may be NULL on rows written before
+        # proposal 0009 (the column was added via ALTER TABLE and
+        # back-fills as NULL on pre-existing rows). Treat NULL as
+        # "no fan-outs in flight at save time" — the empty-tuple
+        # default on CheckpointRecord.
+        if fan_out_progress_blob is None:
+            fan_out_progress: tuple[FanOutProgress, ...] = ()
+        else:
+            fan_out_progress_dicts = self._decode(
+                fan_out_progress_blob,
+                recorded_serialization,
+                invocation_id,
+            )
+            fan_out_progress = tuple(_fan_out_progress_from_dict(fp) for fp in fan_out_progress_dicts)
         return CheckpointRecord(
             invocation_id=invocation_id,
             correlation_id=correlation_id,
@@ -273,6 +378,7 @@ class SQLiteCheckpointer:
             parent_states=tuple(parent_states),
             last_saved_at=last_saved_at,
             schema_version=schema_version,
+            fan_out_progress=fan_out_progress,
         )
 
     async def list(self, filter: CheckpointFilter | None = None) -> Iterable[CheckpointSummary]:

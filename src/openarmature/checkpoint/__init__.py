@@ -20,7 +20,7 @@ subgraph-internal nodes, and ``invoke(resume_invocation=X)`` loads +
 restores from a prior record.
 """
 
-from .backends import InMemoryCheckpointer, SerializationMode, SQLiteCheckpointer
+from .backends import FanOutInternalSaveBatching, InMemoryCheckpointer, SerializationMode, SQLiteCheckpointer
 from .errors import (
     CheckpointError,
     CheckpointNotFound,
@@ -36,6 +36,8 @@ from .protocol import (
     CheckpointFilter,
     CheckpointRecord,
     CheckpointSummary,
+    FanOutInstanceProgress,
+    FanOutProgress,
     NodePosition,
 )
 
@@ -51,6 +53,9 @@ __all__ = [
     "CheckpointStateMigrationMissing",
     "CheckpointSummary",
     "Checkpointer",
+    "FanOutInstanceProgress",
+    "FanOutInternalSaveBatching",
+    "FanOutProgress",
     "InMemoryCheckpointer",
     "MigrationRegistry",
     "NodePosition",

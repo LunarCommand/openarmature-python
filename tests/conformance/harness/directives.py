@@ -15,7 +15,7 @@ all of these could live in one file but the file would push 800 lines.
 
 from __future__ import annotations
 
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Literal, cast
 
 from pydantic import (
     BaseModel,
@@ -159,10 +159,23 @@ class FlakyByIndexSpec(_AllowExtras):
 
 
 class FlakyPerIndexSpec(_AllowExtras):
-    """Checkpoint-resume variant: indices in ``fail_first_run_indices`` fail
-    on the first invocation; everyone succeeds on subsequent runs."""
+    """Checkpoint-resume variant. Two failure-injection shapes:
 
-    fail_first_run_indices: list[int]
+    - ``fail_first_run_indices``: indices fail on the first invocation
+      only; everyone succeeds on subsequent runs (used by 048, 049,
+      050, 051, 053, 054 to simulate "abort, then resume succeeds").
+    - ``always_fail_indices``: indices fail on EVERY invocation
+      (deterministic failure). Used by 052 (collect mode): the failure
+      gets recorded as an error contribution and the instance is
+      ``completed`` on the saved record; on resume the recorded error
+      rolls forward verbatim without re-running.
+
+    Both forms share ``success_compute`` for the success-path state
+    update.
+    """
+
+    fail_first_run_indices: list[int] | None = None
+    always_fail_indices: list[int] | None = None
     success_compute: dict[str, Any]
 
 
@@ -233,6 +246,63 @@ class FanOutSpec(_AllowExtras):
     on_empty: Literal["raise", "noop"] | None = None
     errors_field: str | None = None
     instance_middleware: list[MiddlewareSpec] | None = None
+    # proposal-0009 fixtures (048-054): ``concurrent_mode: serial``
+    # forces deterministic completion ordering for resume-correctness
+    # assertions. The adapter translates this into ``concurrency=1``;
+    # other modes (the implicit "concurrent" default) fall through to
+    # the configured ``concurrency`` value.
+    concurrent_mode: Literal["serial", "concurrent"] | None = None
+    # proposal-0009 fixture 052 (collect mode): ``abort_after_instance: N``
+    # is a harness directive — after instance N's completion save fires,
+    # the harness aborts to simulate a crash with that prefix flushed.
+    # The engine never sees this directive; the conformance test driver
+    # interprets it.
+    abort_after_instance: int | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize_instance_middleware(cls, data: Any) -> Any:
+        """Normalize the two YAML shapes for ``instance_middleware`` entries.
+
+        Existing fixtures (e.g., 021) use the explicit-tag form::
+
+            instance_middleware:
+              - type: retry
+                max_attempts: 3
+
+        proposal-0009 fixture 053 uses the key-as-tag form::
+
+            instance_middleware:
+              - retry:
+                  max_attempts: 3
+
+        Both are valid YAML descriptions of the same configuration.
+        Rewrite the second shape into the first BEFORE the
+        discriminated union validates so downstream parsing sees a
+        uniform shape.
+        """
+        if not isinstance(data, dict):
+            return data
+        data_dict: dict[str, Any] = cast("dict[str, Any]", data)
+        im: Any = data_dict.get("instance_middleware")
+        if not isinstance(im, list):
+            return data_dict
+        normalized: list[Any] = []
+        for entry in cast("list[Any]", im):
+            if isinstance(entry, dict):
+                entry_dict = cast("dict[str, Any]", entry)
+                if "type" not in entry_dict and len(entry_dict) == 1:
+                    only_key = next(iter(entry_dict))
+                    inner = entry_dict[only_key]
+                    if isinstance(inner, dict):
+                        inner_dict = cast("dict[str, Any]", inner)
+                        flat: dict[str, Any] = {"type": only_key}
+                        flat.update(inner_dict)
+                        normalized.append(flat)
+                        continue
+            normalized.append(entry)
+        data_dict["instance_middleware"] = normalized
+        return data_dict
 
 
 class ParallelBranchSpec(_AllowExtras):

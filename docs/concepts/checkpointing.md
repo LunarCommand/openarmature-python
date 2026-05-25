@@ -26,9 +26,12 @@ graph = (
 ```
 
 The engine writes a record at every `completed` event for outermost-
-graph nodes and subgraph-internal nodes. **Fan-out instance internal
-events do NOT save** in the shipping version. Atomic-restart is the
-fan-out contract.
+graph nodes, subgraph-internal nodes, and fan-out instance internal
+nodes. **Per-instance fan-out resume** is the contract: on resume the
+engine re-runs only the instances that did not complete-and-record
+their contribution into the fan-out accumulator in the prior run;
+completed instances skip and their contributions roll forward to the
+fan-in step.
 
 ## Saves are synchronous-by-contract
 
@@ -79,8 +82,8 @@ class CheckpointRecord:
     completed_positions: tuple[NodePosition, ...]
     parent_states: tuple[Any, ...]
     last_saved_at: float
-    schema_version: str = CHECKPOINT_SCHEMA_VERSION
-    fan_out_progress: None = field(default=None)
+    schema_version: str = ""
+    fan_out_progress: tuple[FanOutProgress, ...] = field(default=())
 ```
 
 Field framing worth getting right:
@@ -103,9 +106,19 @@ Field framing worth getting right:
   Outermost first; empty for an outer-level save. Inner-node saves
   populate it so resume can re-enter a subgraph from the right
   depth without re-projecting.
-- **`fan_out_progress: None` is reserved** for a future per-instance
-  fan-out resume mode (planned, not yet shipped). In the shipping
-  version it's always `None`.
+- **`fan_out_progress` carries per-fan-out-node progress** when one
+  or more fan-outs are in flight at save time. Each `FanOutProgress`
+  entry records the fan-out's name, namespace, instance count, and a
+  per-instance state machine (`not_started` / `in_flight` /
+  `completed`) plus the recorded contribution for finalized
+  instances. On resume the engine consults this field to decide
+  which instances skip (their contributions roll forward) vs re-run
+  (re-execute from the inner subgraph's declared entry node). Empty
+  tuple when no fan-outs are in flight. See
+  [Resume semantics](fan-out.md#resume-semantics) on the fan-out
+  page for the full per-instance contract including reducer
+  composition, error_policy semantics, and the optional
+  fan-out-internal save batching.
 
 ## The Checkpointer Protocol
 

@@ -17,10 +17,11 @@ Users typically import from the package root::
     from openarmature.checkpoint import InMemoryCheckpointer, SQLiteCheckpointer
 """
 
-from .memory import InMemoryCheckpointer
+from .memory import FanOutInternalSaveBatching, InMemoryCheckpointer
 from .sqlite import SerializationMode, SQLiteCheckpointer
 
 __all__ = [
+    "FanOutInternalSaveBatching",
     "InMemoryCheckpointer",
     "SQLiteCheckpointer",
     "SerializationMode",
