@@ -28,6 +28,18 @@ jobs:
           # Conformance fixtures live in the openarmature-spec submodule.
           submodules: recursive
 
+      - name: Fetch submodule tags
+        # actions/checkout's submodule clone is shallow and doesn't
+        # carry tags. ``scripts/build_agents_md.py`` asserts the
+        # submodule HEAD is AT a ``v*`` tag (``git tag --points-at
+        # HEAD``; refuses to bundle draft spec text or text from
+        # a commit between two release tags);
+        # ``tests/test_agents_md_drift.py`` runs that assertion.
+        # Fetch tag refs only — the HEAD commit is already present
+        # from the submodule checkout, and we don't need history
+        # beyond what tags point at. Mirrors the step in ``ci.yml``.
+        run: git -C openarmature-spec fetch --tags
+
       - name: Install uv
         uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b  # v8.1.0
         with:
