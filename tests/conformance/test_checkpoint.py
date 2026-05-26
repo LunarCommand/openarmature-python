@@ -838,16 +838,26 @@ def _assert_fan_out_instance(
             f"actual={actual.result_is_error!r}, expected={expected['result_is_error']!r}"
         )
     if "result_present" in expected:
-        # Spec §10.11 (proposal 0027): assert the ``result`` field
-        # exists on the saved record without constraining its shape
-        # (the value remains impl-defined per §9.5). Pair with
+        # Spec §10.11 (proposal 0027): assert the captured
+        # contribution is a non-None value — the fixture's way of
+        # saying "an entry was recorded" without constraining its
+        # shape (the value remains impl-defined per §9.5). Pair with
         # ``result_is_error: true`` to assert "an error contribution
-        # was captured" without locking the test to one impl's error
-        # record format.
-        result_present_actual = actual.result is not None
-        assert result_present_actual == expected["result_present"], (
+        # was captured" portably across implementations whose
+        # error_record formats differ.
+        #
+        # Note on the semantic: ``FanOutInstanceProgress.result`` is
+        # a dataclass field that always exists as an attribute with
+        # a None default; "presence" here means "result is a
+        # non-None value." A hypothetical legitimate ``result =
+        # None`` on a completed-success entry would be treated as
+        # "not present" by this check, but spec frames ``result`` as
+        # "the durable contribution" and no fixture exercises a
+        # None contribution on a completed entry.
+        result_has_value = actual.result is not None
+        assert result_has_value == expected["result_present"], (
             f"fan_out_progress[{node_name!r}].instances[{idx}].result_present: "
-            f"actual={result_present_actual!r}, expected={expected['result_present']!r}"
+            f"actual={result_has_value!r}, expected={expected['result_present']!r}"
         )
     if "completed_inner_positions" in expected:
         positions_expected = cast("list[Mapping[str, Any]]", expected["completed_inner_positions"])

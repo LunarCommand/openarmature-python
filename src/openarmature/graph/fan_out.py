@@ -196,8 +196,14 @@ class FanOutNode[ParentT: State, ChildT: State]:
             # ``CheckpointSaveFailed`` imports below in this file).
             from openarmature.checkpoint.errors import CheckpointRecordInvalid  # noqa: PLC0415
 
+            # ``context.resume_invocation`` identifies the SAVED record
+            # being validated (per spec §10.4 step 3); ``context.invocation_id``
+            # is freshly minted for the resumed run (step 4). The fresh-
+            # run fallback is defensive only — the count-drift path can
+            # only fire on resume since fan_out_progress_state is empty
+            # on a fresh first run.
             raise CheckpointRecordInvalid(
-                context.invocation_id,
+                context.resume_invocation or context.invocation_id,
                 f"fan_out {self.name!r} at namespace {context.namespace_prefix!r}: "
                 f"saved instance_count={exec_state.instance_count} does not match "
                 f"resolved instance_count={instance_count} on resume",

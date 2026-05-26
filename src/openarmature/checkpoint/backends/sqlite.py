@@ -113,10 +113,15 @@ def _fan_out_progress_to_dict(fp: FanOutProgress) -> dict[str, Any]:
     }
 
 
-def _fan_out_progress_from_dict(d: dict[str, Any]) -> FanOutProgress:
+def _fan_out_progress_from_dict(d: dict[str, Any], invocation_id: str) -> FanOutProgress:
     """Inverse of :func:`_fan_out_progress_to_dict` — rebuild a frozen
     :class:`FanOutProgress` from its dict shape, restoring positions
-    as :class:`NodePosition` instances."""
+    as :class:`NodePosition` instances.
+
+    ``invocation_id`` is threaded in so ``CheckpointRecordInvalid``
+    raises (e.g., a non-bool ``result_is_error`` field) can point at
+    the correct persisted record.
+    """
     instances: list[FanOutInstanceProgress] = []
     for inst in cast("list[dict[str, Any]]", d["instances"]):
         inner_positions = tuple(
@@ -129,16 +134,31 @@ def _fan_out_progress_from_dict(d: dict[str, Any]) -> FanOutProgress:
             )
             for p in cast("list[dict[str, Any]]", inst.get("completed_inner_positions", []))
         )
+        # Per proposal 0027: distinguish key-absent (pre-0027 records,
+        # default ``False`` for backward compat) from key-present
+        # (strictly validate it's a bool). The naive
+        # ``bool(inst.get("result_is_error", False))`` would coerce
+        # truthy non-bools (e.g. the string ``"false"``) to ``True``
+        # and misclassify resume routing — the JSON deserializer can
+        # in principle land a non-bool here from a corrupted record,
+        # and silently coercing it would route a success contribution
+        # through the errors_field bucket on resume.
+        if "result_is_error" in inst:
+            raw_rie = inst["result_is_error"]
+            if not isinstance(raw_rie, bool):
+                raise CheckpointRecordInvalid(
+                    invocation_id,
+                    f"fan_out_progress instance result_is_error must be bool, "
+                    f"got {type(raw_rie).__name__}: {raw_rie!r}",
+                )
+            result_is_error = raw_rie
+        else:
+            result_is_error = False
         instances.append(
             FanOutInstanceProgress(
                 state=inst["state"],
                 result=inst.get("result"),
-                # Pre-0027 records omit ``result_is_error``; the default
-                # ``False`` (matching the dataclass default) is correct
-                # for those — pre-0027 was atomic-restart-fan-out resume
-                # under proposal 0008, no error-record state machine, so
-                # the field's absence semantically means "not an error."
-                result_is_error=bool(inst.get("result_is_error", False)),
+                result_is_error=result_is_error,
                 completed_inner_positions=inner_positions,
             )
         )
@@ -381,7 +401,9 @@ class SQLiteCheckpointer:
                 recorded_serialization,
                 invocation_id,
             )
-            fan_out_progress = tuple(_fan_out_progress_from_dict(fp) for fp in fan_out_progress_dicts)
+            fan_out_progress = tuple(
+                _fan_out_progress_from_dict(fp, invocation_id) for fp in fan_out_progress_dicts
+            )
         return CheckpointRecord(
             invocation_id=invocation_id,
             correlation_id=correlation_id,

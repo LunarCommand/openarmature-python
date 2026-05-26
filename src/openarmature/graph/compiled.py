@@ -1628,17 +1628,35 @@ class CompiledGraph[StateT: State]:
                         fan_out_config=fan_out_event_config,
                     )
                     raise
-                except CheckpointError:
-                    # CheckpointError categories (proposal 0029's
-                    # count-drift raise, the migration-category errors,
-                    # save-failed) are sibling-typed to RuntimeGraphError
-                    # and propagate to the invoke() caller unwrapped so
-                    # callers can branch on ``e.category``. No completed
-                    # event is dispatched here — the `NodeEvent.error`
-                    # field is typed as ``RuntimeGraphError | None`` per
-                    # spec §6 and CheckpointError isn't in that
-                    # hierarchy. Matches ``_step_function_node``'s
-                    # CheckpointError branch (also raise-only).
+                except CheckpointError as e:
+                    # Spec proposal 0012's pairing contract requires
+                    # every started event have a paired completed
+                    # event. CheckpointError categories (notably
+                    # proposal 0029's count-drift raise) are sibling-
+                    # typed to RuntimeGraphError and propagate to the
+                    # invoke() caller unwrapped so callers can branch
+                    # on ``e.category``. To preserve pairing while
+                    # keeping ``NodeEvent.error`` typed as
+                    # ``RuntimeGraphError | None`` per spec §6, the
+                    # completed event carries a ``NodeException``
+                    # wrapper whose ``__cause__`` is the original
+                    # CheckpointError. The bare ``raise`` re-raises
+                    # the active exception (the CheckpointError, not
+                    # the wrapper) so the caller still sees the
+                    # checkpoint category. Mirrors the ``except
+                    # Exception`` branch below structurally; the
+                    # difference is what gets re-raised.
+                    wrapped = NodeException(node_name=current, cause=e, recoverable_state=s)
+                    self._dispatch_completed(
+                        context,
+                        current,
+                        namespace,
+                        step,
+                        s,
+                        error=wrapped,
+                        attempt_index=attempt_index,
+                        fan_out_config=fan_out_event_config,
+                    )
                     raise
                 except Exception as e:
                     wrapped = NodeException(node_name=current, cause=e, recoverable_state=s)
