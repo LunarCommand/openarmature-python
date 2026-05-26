@@ -113,12 +113,26 @@ Field framing worth getting right:
   `completed`) plus the recorded contribution for finalized
   instances. On resume the engine consults this field to decide
   which instances skip (their contributions roll forward) vs re-run
-  (re-execute from the inner subgraph's declared entry node). Empty
-  tuple when no fan-outs are in flight. See
+  (re-execute from the inner subgraph's declared entry node). Each
+  per-instance entry carries an explicit `result_is_error` boolean
+  that discriminates success contributions (roll forward into
+  `target_field`) from `collect`-mode error contributions (roll
+  forward into `errors_field`) — the engine reads the explicit field
+  on resume rather than inferring routing from the shape of `result`.
+  Empty tuple when no fan-outs are in flight. See
   [Resume semantics](fan-out.md#resume-semantics) on the fan-out
   page for the full per-instance contract including reducer
   composition, error_policy semantics, and the optional
   fan-out-internal save batching.
+
+  **Count drift between runs raises.** If the resumed run's resolved
+  instance count differs from the saved entry's `instance_count`
+  (e.g., the user shrunk or grew the `items_field` list between
+  crash and resume), the engine raises `CheckpointRecordInvalid`
+  before any fan-out instance work runs. The strict raise prevents
+  silent contribution loss (under shrink) or dispatching unsaved
+  work (under grow); the user either coheres the inputs or restarts
+  cleanly.
 
 ## The Checkpointer Protocol
 
@@ -205,6 +219,16 @@ fast path (no migration consulted). If it differs, the engine
 resolves a chain through the registry (BFS for the shortest path),
 applies each migration in order to the record's state, then
 deserializes the result into your current state class.
+
+**Canonical source for `schema_version`.** The framework reads
+`schema_version` from the state class declared at graph construction
+time — the class passed to `GraphBuilder(...)`. If you pass a State
+subclass instance at runtime whose `schema_version` shadows the
+declared class's value, the saved record still carries the declared
+class's value. This rule keeps every save site within an invocation
+consistent (outer dispatch saves, subgraph-internal saves, fan-out
+instance internal saves all report the same version) and aligns
+with how the migration registry is keyed.
 
 ### Chain resolution
 
