@@ -61,6 +61,14 @@ SPEC_ROOT = REPO_ROOT / "openarmature-spec"
 DOCS = REPO_ROOT / "docs"
 EXAMPLES = REPO_ROOT / "examples"
 OUTPUT = REPO_ROOT / "src" / "openarmature" / "AGENTS.md"
+# Directory holding per-pattern transformed markdown for the
+# programmatic API (``openarmature.patterns``). Each ``<slug>.md``
+# file inside is a generated artifact; the directory is a package
+# (``__init__.py`` exists) so ``importlib.resources.files()`` can
+# locate it through the standard import mechanism. Sandboxed
+# environments that can ``import openarmature`` can also resolve
+# its package resources.
+PATTERNS_DIR_OUTPUT = REPO_ROOT / "src" / "openarmature" / "_patterns"
 
 # Spec capability directory names under ``openarmature-spec/spec/``,
 # in the order they appear in the bundle's "Capability contracts"
@@ -219,51 +227,99 @@ _PATTERN_LINK_RE = re.compile(r"\(\.\./(concepts|examples)/([^)]+?)\.md\)")
 _PATTERN_INTRA_LINK_RE = re.compile(r"\((?!\.\.|https?://|#)([a-z0-9-]+)\.md\)")
 
 
-def _transform_pattern_content(text: str) -> str:
-    """Bundle-side rewrite of a pattern doc's markdown.
+def _demote_headings(text: str) -> str:
+    """Demote ATX headings by two levels by prepending ``##``.
 
-    Two transforms applied for the wheel-shipped bundle (the source
-    files in ``docs/patterns/`` stay unchanged — they're MkDocs source
-    where relative links work correctly):
-
-    1. **Demote ATX headings by two levels.** Pattern files open with
-       ``# Title`` (H1); inlined verbatim under the bundle's
-       ``## Patterns`` H2, those H1s would create multiple top-level
-       headings in the same document. Prepending ``##`` to every
-       ``#``-prefixed line puts pattern titles at H3 (under
-       ``## Patterns``) and preserves the relative depth of any
-       deeper nested headings.
-
-    2. **Rewrite relative doc-tree links to absolute docs-site URLs.**
-       Patterns link to ``../concepts/<name>.md`` and
-       ``../examples/<name>.md`` — relative paths that resolve in the
-       MkDocs source tree but break in the installed wheel (no docs/
-       tree present). The MkDocs site strips ``.md`` and serves at
-       ``/<section>/<name>/``, so the rewrite is mechanical.
-       ``../<section>/index.md`` collapses to the section root.
+    Bundle-only transform. Pattern files open with ``# Title`` (H1);
+    inlined verbatim under the bundle's ``## Patterns`` H2, those
+    H1s would create multiple top-level headings in the same
+    document. Prepending ``##`` to every ``#``-prefixed line puts
+    pattern titles at H3 (under ``## Patterns``) and preserves the
+    relative depth of any deeper nested headings.
     """
-    # Demote headings.
-    demoted: list[str] = []
+    out: list[str] = []
     for line in text.splitlines():
         if line.startswith("#"):
             line = "##" + line
-        demoted.append(line)
-    out = "\n".join(demoted)
+        out.append(line)
+    return "\n".join(out)
 
-    # Rewrite relative doc-tree links.
+
+def _rewrite_doc_tree_links(text: str) -> str:
+    """Rewrite relative ``../concepts/...md`` / ``../examples/...md``
+    references to absolute ``openarmature.ai`` URLs.
+
+    Shared between the bundle and the programmatic patterns API —
+    relative paths resolve in the MkDocs source tree but break
+    everywhere else (the installed wheel, programmatic `import`
+    consumers). The MkDocs site strips ``.md`` and serves at
+    ``/<section>/<name>/``; ``../<section>/index.md`` collapses to
+    the section root.
+    """
+
     def _rewrite(m: re.Match[str]) -> str:
         section, name = m.group(1), m.group(2)
         if name == "index":
             return f"(https://openarmature.ai/{section}/)"
         return f"(https://openarmature.ai/{section}/{name}/)"
 
-    out = _PATTERN_LINK_RE.sub(_rewrite, out)
-    # Rewrite intra-pattern links to in-document anchors. Bare-name
-    # ``.md`` references render fine on the MkDocs site (sibling-file
-    # resolution) but break in the bundled single-file AGENTS.md.
-    # The demoted H3 heading slug matches the filename slug — e.g.,
-    # ``(bypass-if-output-exists.md)`` → ``(#bypass-if-output-exists)``.
-    return _PATTERN_INTRA_LINK_RE.sub(lambda m: f"(#{m.group(1)})", out)
+    return _PATTERN_LINK_RE.sub(_rewrite, text)
+
+
+def _rewrite_intra_pattern_to_anchor(text: str) -> str:
+    """Bundle-only: rewrite pattern-to-pattern bare-name ``.md``
+    references to in-document anchors.
+
+    In the bundled single-file ``AGENTS.md`` all patterns appear
+    inline; the demoted H3 heading slug matches the filename slug,
+    so ``(bypass-if-output-exists.md)`` → ``(#bypass-if-output-exists)``
+    resolves to the in-document section.
+    """
+    return _PATTERN_INTRA_LINK_RE.sub(lambda m: f"(#{m.group(1)})", text)
+
+
+def _rewrite_intra_pattern_to_url(text: str) -> str:
+    """Programmatic-only: rewrite pattern-to-pattern bare-name ``.md``
+    references to absolute docs-site URLs.
+
+    The programmatic API returns one pattern at a time; in-document
+    anchors would be dead links because the other patterns aren't
+    in the same string. Absolute URLs to the MkDocs site let the
+    consumer follow the cross-reference if they want to.
+    """
+
+    def _rewrite(m: re.Match[str]) -> str:
+        name = m.group(1)
+        return f"(https://openarmature.ai/patterns/{name}/)"
+
+    return _PATTERN_INTRA_LINK_RE.sub(_rewrite, text)
+
+
+def _transform_pattern_content_for_bundle(text: str) -> str:
+    """Apply bundle-side transforms to a pattern doc's markdown.
+
+    Composes the heading-demotion + doc-tree-link + intra-anchor
+    rewrites. The source files in ``docs/patterns/`` stay unchanged
+    — they're MkDocs source where relative links work correctly;
+    only the bundled copy gets these rewrites.
+    """
+    out = _demote_headings(text)
+    out = _rewrite_doc_tree_links(out)
+    out = _rewrite_intra_pattern_to_anchor(out)
+    return out
+
+
+def _transform_pattern_content_for_programmatic(text: str) -> str:
+    """Apply programmatic-API transforms to a pattern doc's markdown.
+
+    Doc-tree-link rewrites + intra-pattern → absolute URL. No
+    heading demotion: each pattern accessed via
+    ``openarmature.patterns.get(name)`` is a standalone document; its
+    ``# Title`` H1 is the right level.
+    """
+    out = _rewrite_doc_tree_links(text)
+    out = _rewrite_intra_pattern_to_url(out)
+    return out
 
 
 def _patterns() -> str:
@@ -279,7 +335,7 @@ def _patterns() -> str:
     pattern_files = sorted(p for p in (DOCS / "patterns").glob("*.md") if p.name != "index.md")
     for pf in pattern_files:
         sections.append("")
-        sections.append(_transform_pattern_content(pf.read_text()).rstrip())
+        sections.append(_transform_pattern_content_for_bundle(pf.read_text()).rstrip())
     return "\n".join(sections)
 
 
@@ -365,12 +421,88 @@ def build() -> str:
     return "\n\n".join(sections).rstrip() + "\n"
 
 
+_PATTERNS_INIT_CONTENT = (
+    '"""Auto-generated package holding the programmatic patterns API\'s\n'
+    "transformed markdown payload.\n"
+    "\n"
+    "``openarmature.patterns.list()`` / ``get(name)`` resolve the\n"
+    "per-pattern ``<slug>.md`` files in this package via\n"
+    "``importlib.resources``. The files are generated artifacts —\n"
+    "regenerate with ``uv run python scripts/build_agents_md.py``.\n"
+    "\n"
+    "Source: ``docs/patterns/*.md`` (excluding ``index.md``) with\n"
+    "the programmatic-API transforms applied — relative\n"
+    "``../concepts/...md`` / ``../examples/...md`` links rewritten\n"
+    "to absolute ``openarmature.ai`` URLs, intra-pattern bare-name\n"
+    "``.md`` links rewritten to absolute\n"
+    "``openarmature.ai/patterns/...`` URLs (see\n"
+    "``_transform_pattern_content_for_programmatic`` in\n"
+    "``scripts/build_agents_md.py``). No heading demotion: each\n"
+    "pattern stands alone when read via the programmatic API.\n"
+    '"""\n'
+)
+
+
+def build_patterns_data() -> dict[str, str]:
+    """Build the per-pattern transformed markdown payload.
+
+    Returns a dict mapping ``<slug>.md`` filename → transformed
+    content. Caller writes each entry to
+    ``src/openarmature/_patterns/<slug>.md``. Consumed by the
+    programmatic patterns API (``openarmature.patterns.list()`` /
+    ``get(name)``) via ``importlib.resources``.
+
+    Uses the programmatic transform set (no heading demotion,
+    intra-pattern → absolute URLs) so each pattern stands alone
+    when read individually.
+    """
+    pattern_files = sorted(p for p in (DOCS / "patterns").glob("*.md") if p.name != "index.md")
+    out: dict[str, str] = {}
+    for pf in pattern_files:
+        content = _transform_pattern_content_for_programmatic(pf.read_text()).rstrip() + "\n"
+        out[f"{pf.stem}.md"] = content
+    return out
+
+
+def _write_patterns_data(payload: dict[str, str]) -> tuple[int, int]:
+    """Write per-pattern files into ``_patterns/`` + the package
+    ``__init__.py``. Returns ``(file_count, total_bytes)``.
+
+    Files that exist but aren't in the payload (e.g., a pattern
+    removed upstream) are deleted so the directory stays in lockstep
+    with the source. The ``__init__.py`` is rewritten unconditionally
+    to keep its docstring current.
+    """
+    PATTERNS_DIR_OUTPUT.mkdir(exist_ok=True)
+    init_path = PATTERNS_DIR_OUTPUT / "__init__.py"
+    init_path.write_text(_PATTERNS_INIT_CONTENT)
+    expected = set(payload.keys())
+    expected.add("__init__.py")
+    # Clean up stray .md files from a prior generation that aren't in
+    # the current payload (e.g., a pattern was renamed or removed).
+    for existing in PATTERNS_DIR_OUTPUT.iterdir():
+        if existing.name not in expected and existing.suffix == ".md":
+            existing.unlink()
+    total_bytes = len(_PATTERNS_INIT_CONTENT.encode("utf-8"))
+    for filename, content in payload.items():
+        (PATTERNS_DIR_OUTPUT / filename).write_text(content)
+        total_bytes += len(content.encode("utf-8"))
+    return (len(payload), total_bytes)
+
+
 def main() -> None:
     content = build()
     OUTPUT.write_text(content)
     line_count = content.count("\n")
     byte_count = len(content.encode("utf-8"))
     print(f"wrote {OUTPUT.relative_to(REPO_ROOT)}: {line_count} lines, {byte_count:,} bytes")
+
+    patterns_payload = build_patterns_data()
+    file_count, total_bytes = _write_patterns_data(patterns_payload)
+    print(
+        f"wrote {PATTERNS_DIR_OUTPUT.relative_to(REPO_ROOT)}/: "
+        f"{file_count} pattern files + __init__.py, {total_bytes:,} bytes total"
+    )
 
 
 if __name__ == "__main__":
