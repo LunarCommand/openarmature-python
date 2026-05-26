@@ -204,4 +204,20 @@ If you're an AI agent working in code that uses openarmature, read the bundled a
 python -c "import openarmature; print(openarmature.__path__[0] + '/AGENTS.md')"
 ```
 
-The file ships with the package and covers capability contracts, common patterns, non-obvious shapes, and an example index. Adopting projects can point their own `AGENTS.md` / `CLAUDE.md` at this path so agent sessions in their codebase find it automatically.
+Or use the convenience CLI:
+
+```bash
+openarmature docs        # print the path to the bundled AGENTS.md
+python -m openarmature docs  # same, via the module entry point
+```
+
+The file ships with the package and covers capability contracts, common patterns, non-obvious shapes, and an example index. Adopting projects can run `openarmature init` from the project root to append a discovery pointer block into their own `AGENTS.md` / `CLAUDE.md` so agent sessions in their codebase find the bundled file automatically.
+
+The same patterns content is also available programmatically:
+
+```python
+import openarmature.patterns as patterns
+
+patterns.list()                          # ['bypass-if-output-exists', ...]
+patterns.get('bypass-if-output-exists')  # canonical recipe content (markdown)
+```

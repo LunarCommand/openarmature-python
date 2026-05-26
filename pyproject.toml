@@ -47,6 +47,9 @@ otel = [
 Repository = "https://github.com/LunarCommand/openarmature-python"
 Specification = "https://github.com/LunarCommand/openarmature-spec"
 
+[project.scripts]
+openarmature = "openarmature.cli:main"
+
 [tool.openarmature]
 spec_version = "0.22.1"
 
