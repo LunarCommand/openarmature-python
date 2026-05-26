@@ -21,7 +21,8 @@ from __future__ import annotations
 
 import argparse
 import sys
-from importlib.resources import files
+from importlib.resources import as_file, files
+from importlib.resources.abc import Traversable
 from pathlib import Path
 
 # Comment marker that ``openarmature init`` writes into managed
@@ -57,15 +58,32 @@ def _pointer_block() -> str:
 def _bundled_agents_md_path() -> Path:
     """Return the absolute path to the bundled ``AGENTS.md``.
 
-    Resolved via :mod:`importlib.resources` so it works whether the
-    package is installed as a wheel, editable, or zipped — same
-    mechanism the README discovery one-liner relies on.
+    Resolved via :mod:`importlib.resources`. Works for wheel and
+    editable installs (the realistic distribution shapes for this
+    package) since both extract to a real filesystem path under
+    ``site-packages``. Pure zipimport installs don't surface a
+    stable filesystem path; this function raises ``RuntimeError``
+    in that case rather than printing a non-existent path.
     """
-    resource = files("openarmature").joinpath("AGENTS.md")
-    # ``files()`` returns a Traversable; the bundle is a regular
-    # file shipped at the package root, so ``str()`` is the on-disk
-    # path. ``Path()`` normalizes platform separators.
-    return Path(str(resource))
+    resource: Traversable = files("openarmature").joinpath("AGENTS.md")
+    # ``as_file`` returns the resource as a real filesystem path
+    # when the loader exposes one (the typical case), and would
+    # otherwise extract to a temp file inside the ``with`` block.
+    # We need a stable path the caller can print and re-open, so
+    # we exit the context manager immediately and verify the path
+    # still exists — if not, the resource was only valid for the
+    # duration of the temp-file context, which means we're under
+    # a non-filesystem loader.
+    with as_file(resource) as path:
+        bundled = Path(path)
+    if not bundled.is_file():
+        raise RuntimeError(
+            "openarmature/AGENTS.md is not available as a stable filesystem path "
+            "(install appears to be zipimport-backed). Use the python -c discovery "
+            "recipe instead: "
+            "python -c \"import openarmature; print(openarmature.__path__[0] + '/AGENTS.md')\""
+        )
+    return bundled
 
 
 def _apply_init_to_file(target: Path, *, force: bool, dry_run: bool) -> tuple[str, str]:
@@ -93,10 +111,10 @@ def _apply_init_to_file(target: Path, *, force: bool, dry_run: bool) -> tuple[st
         # Fresh file gets the block verbatim: no leading blank line,
         # trailing newline preserved.
         if not dry_run:
-            target.write_text(block)
+            target.write_text(block, encoding="utf-8")
         return ("create", str(target))
 
-    existing = target.read_text()
+    existing = target.read_text(encoding="utf-8")
     if INIT_MARKER in existing and not force:
         return ("skip", f"{target} already contains {INIT_MARKER}")
 
@@ -105,7 +123,7 @@ def _apply_init_to_file(target: Path, *, force: bool, dry_run: bool) -> tuple[st
     # ``<existing trimmed>\n\n## OpenArmature\n...``.
     appended = existing.rstrip() + "\n\n" + block
     if not dry_run:
-        target.write_text(appended)
+        target.write_text(appended, encoding="utf-8")
     action = "force-append" if force and INIT_MARKER in existing else "append"
     return (action, str(target))
 
@@ -127,7 +145,11 @@ def cmd_init(args: argparse.Namespace) -> int:
 def cmd_docs(args: argparse.Namespace) -> int:
     """Handle ``openarmature docs``."""
     del args
-    print(_bundled_agents_md_path())
+    try:
+        print(_bundled_agents_md_path())
+    except RuntimeError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
     return 0
 
 
