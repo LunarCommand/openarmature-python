@@ -195,3 +195,13 @@ A few things to notice:
 - **API reference**: auto-generated from docstrings. [openarmature.ai/reference](https://openarmature.ai/reference/)
 - **Examples**: ten runnable demos with walk-throughs. [openarmature.ai/examples](https://openarmature.ai/examples/) (source at [./examples/](./examples/))
 - **Spec**: behavioral contract this implementation conforms to. [LunarCommand/openarmature-spec](https://github.com/LunarCommand/openarmature-spec)
+
+## For AI agents
+
+If you're an AI agent working in code that uses openarmature, read the bundled agent docs before editing:
+
+```bash
+python -c "import openarmature; print(openarmature.__path__[0] + '/AGENTS.md')"
+```
+
+The file ships with the package and covers capability contracts, common patterns, non-obvious shapes, and an example index. Adopting projects can point their own `AGENTS.md` / `CLAUDE.md` at this path so agent sessions in their codebase find it automatically.
