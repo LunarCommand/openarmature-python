@@ -815,7 +815,7 @@ for malformed `ToolCall.arguments`, and trace output.
 
 - Tools have side effects you can't replay safely on resume. Wrap
   each side-effecting tool with the
-  [bypass-if-output-exists](bypass-if-output-exists.md) pattern so
+  [bypass-if-output-exists](#bypass-if-output-exists) pattern so
   a crashed run resumes without re-side-effecting.
 - The "tools" are long-running async pipelines, not function
   calls. Model them as subgraphs and let the LLM node route via

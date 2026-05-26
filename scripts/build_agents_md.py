@@ -13,8 +13,15 @@ Sources, in order of bundle layout:
    capability spec, read from the pinned ``openarmature-spec``
    submodule via ``git show <sha>:spec/...`` rather than the
    working tree.
-4. ``docs/patterns/*.md`` — verbatim concatenation of the patterns
-   docs (excluding ``index.md``).
+4. ``docs/patterns/*.md`` — concatenation of the patterns docs
+   (excluding ``index.md``), with bundle-side transforms applied
+   in ``_transform_pattern_content``: ATX headings demoted by two
+   levels (so a pattern's ``# Title`` H1 renders as ``### Title``
+   H3 under the bundle's ``## Patterns`` H2) and relative
+   ``../concepts/...md`` / ``../examples/...md`` links rewritten
+   to absolute ``openarmature.ai`` URLs (the relative paths
+   resolve in the MkDocs source tree but not in the installed
+   wheel).
 5. ``docs/agent/non-obvious-shapes.md`` — hand-written opinionated
    recipes.
 6. Example index — one-line description + path for each
@@ -25,8 +32,9 @@ Sources, in order of bundle layout:
 Build-time invariants (matches proposal-0028 follow-on review's
 submodule-pin discipline):
 
-- Submodule HEAD MUST be reachable from a ``v*`` tag. The build
-  refuses to read draft (untagged) spec text into a release bundle.
+- Submodule HEAD MUST be AT a ``v*`` tag (``git tag --points-at HEAD``).
+  The build refuses to read draft (untagged) spec text — or text from
+  a commit between two release tags — into a release bundle.
 - Spec text is read from the pinned commit via ``git show``, NOT
   from the submodule working tree. Closes the "submodule HEAD
   moved but bundle still reads stale tree" failure mode.
@@ -203,6 +211,13 @@ def _capability_summaries(spec_tag: str) -> str:
 
 _PATTERN_LINK_RE = re.compile(r"\(\.\./(concepts|examples)/([^)]+?)\.md\)")
 
+# Matches bare-name ``.md`` references in the patterns markdown
+# (pattern-to-pattern links like ``(bypass-if-output-exists.md)``).
+# The negative lookahead skips ``../`` parent-relative paths
+# (handled by ``_PATTERN_LINK_RE``), ``http(s)://`` absolute URLs,
+# and ``#`` in-document anchors.
+_PATTERN_INTRA_LINK_RE = re.compile(r"\((?!\.\.|https?://|#)([a-z0-9-]+)\.md\)")
+
 
 def _transform_pattern_content(text: str) -> str:
     """Bundle-side rewrite of a pattern doc's markdown.
@@ -242,7 +257,13 @@ def _transform_pattern_content(text: str) -> str:
             return f"(https://openarmature.ai/{section}/)"
         return f"(https://openarmature.ai/{section}/{name}/)"
 
-    return _PATTERN_LINK_RE.sub(_rewrite, out)
+    out = _PATTERN_LINK_RE.sub(_rewrite, out)
+    # Rewrite intra-pattern links to in-document anchors. Bare-name
+    # ``.md`` references render fine on the MkDocs site (sibling-file
+    # resolution) but break in the bundled single-file AGENTS.md.
+    # The demoted H3 heading slug matches the filename slug — e.g.,
+    # ``(bypass-if-output-exists.md)`` → ``(#bypass-if-output-exists)``.
+    return _PATTERN_INTRA_LINK_RE.sub(lambda m: f"(#{m.group(1)})", out)
 
 
 def _patterns() -> str:
