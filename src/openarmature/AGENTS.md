@@ -1,10 +1,10 @@
 # OpenArmature — Agent documentation
 
-*This is the agent guide bundled with the openarmature Python package, version 0.8.0 (spec v0.22.1). For the full docs site see [openarmature.ai](https://openarmature.ai). For the canonical spec text see [openarmature.ai/capabilities](https://openarmature.ai/capabilities/). For project-specific conventions for the code you're editing, see the host project's `AGENTS.md` or `CLAUDE.md`.*
+*This is the agent guide bundled with the openarmature Python package, version 0.8.0 (spec v0.22.1). For the full docs site see [openarmature.ai](https://openarmature.ai). For the canonical spec text see [openarmature.org/capabilities](https://openarmature.org/capabilities/). For project-specific conventions for the code you're editing, see the host project's `AGENTS.md` or `CLAUDE.md`.*
 
 ## TL;DR
 
-OpenArmature is a workflow framework for LLM pipelines and tool-calling agents — typed state, compile-time topology checks, observability, and crash-safe checkpoints baked into a graph engine. The graph layer has no concept of LLMs or tools; the same primitives drive deterministic ETL pipelines and tool-calling agents alike. Nodes return partial updates; the engine merges into a frozen state snapshot. Behavior is defined by [openarmature-spec](https://openarmature.ai/capabilities/) and verified by conformance fixtures; this package is the reference Python implementation.
+OpenArmature is a workflow framework for LLM pipelines and tool-calling agents — typed state, compile-time topology checks, observability, and crash-safe checkpoints baked into a graph engine. The graph layer has no concept of LLMs or tools; the same primitives drive deterministic ETL pipelines and tool-calling agents alike. Nodes return partial updates; the engine merges into a frozen state snapshot. Behavior is defined by [openarmature-spec](https://openarmature.org/capabilities/) and verified by conformance fixtures; this package is the reference Python implementation.
 
 **What OpenArmature is NOT:** not a chat framework (no built-in messages channel), not an LLM SDK (Provider is the abstraction layer; OpenAIProvider is the canonical impl), not a state-management library (state is per-invocation, not application-wide), not an evaluation framework (deferred to `openarmature-eval`).
 
@@ -14,12 +14,12 @@ _Sourced from openarmature-spec v0.22.1. Each entry below reproduces §1 (Purpos
 
 ### Capability: `graph-engine`
 
-## 1. Purpose
+#### 1. Purpose
 
 The graph engine defines how a workflow is structured, how state flows between steps, and how execution
 progresses. It is the substrate for both deterministic LLM pipelines and LLM-driven tool-calling agents.
 
-## 2. Concepts
+#### 2. Concepts
 
 **State.** A typed schema describing the data flowing through a graph. State is a product type (a record with
 named, typed fields). Implementations MUST validate state against the schema at graph boundaries (entry, exit)
@@ -116,7 +116,7 @@ identifiers (as an error class, error code, or tagged discriminant, per the lang
 
 ### Capability: `pipeline-utilities`
 
-## 1. Purpose
+#### 1. Purpose
 
 The pipeline-utilities capability defines a layer of cross-cutting concerns that compose with the
 graph-engine without modifying the engine. This first version specifies **middleware** — wrappers
@@ -134,7 +134,7 @@ The pipeline-utilities capability composes on top of graph-engine. It does NOT m
 behavior — middleware sits between the engine's "node dispatch" step and the user's node function,
 and is invisible to nodes that don't opt into middleware.
 
-## 2. Concepts
+#### 2. Concepts
 
 **Middleware.** An async callable with the shape:
 
@@ -217,7 +217,7 @@ similar frameworks.
 
 ### Capability: `llm-provider`
 
-## 1. Purpose
+#### 1. Purpose
 
 The LLM provider capability defines a uniform request/response surface for sending messages to a
 Large Language Model and receiving its response. It is the substrate every higher-level LLM
@@ -247,7 +247,7 @@ provider exception as cause. Users who need provider-specific fields (logprobs, 
 details, vendor-specific extensions) reach through the abstraction directly; structure is added,
 never removed.
 
-## 2. Concepts
+#### 2. Concepts
 
 **Message.** A typed entry in a conversation. The four message kinds are `system`, `user`,
 `assistant`, and `tool`. Each kind carries kind-specific content as defined in §3.
@@ -267,7 +267,7 @@ information.
 
 ### Capability: `observability`
 
-## 1. Purpose
+#### 1. Purpose
 
 The observability capability defines normative mappings from OpenArmature's runtime event surface
 (graph-engine §6 observer events, specifically the v0.6.0 started/completed event pairs) into
@@ -282,7 +282,7 @@ The capability does NOT introduce new graph-engine primitives. It consumes the e
 event stream — `started` events open spans, `completed` events close them. An implementation that
 emits OTel spans is built on top of §6, not into the engine.
 
-## 2. Concepts
+#### 2. Concepts
 
 **Span.** A unit of work in OTel — a logically distinct interval with a name, start/end timestamps,
 status, attributes, and parent-child relationships. The mapping translates each user-meaningful unit
@@ -314,7 +314,7 @@ infrastructure activity. See §3 (architectural contract) and §5.6 (OTel attrib
 
 ### Capability: `prompt-management`
 
-## 1. Purpose
+#### 1. Purpose
 
 The prompt-management capability defines the contract by which named, versioned templates
 are fetched from one or more backends, rendered with caller-supplied variables, and turned
@@ -335,7 +335,7 @@ This capability does NOT define:
 - Cache invalidation policies (the spec defines hashes that user code MAY use as cache
   keys; the cache itself is out of scope).
 
-## 2. Concepts
+#### 2. Concepts
 
 **Prompt.** An unrendered template plus its identity metadata. A prompt is what a backend
 returns from a fetch; it carries enough information to be rendered, traced, and
@@ -378,14 +378,14 @@ treats fetch and render as separable.
 
 _Recipes that compose the primitives. Not framework contracts — these are how to do common things idiomatically._
 
-# Bypass-if-output-exists
+### Bypass-if-output-exists
 
 **Problem.** How do I skip a node whose external output already
 exists?
 
-## Approach
+#### Approach
 
-A small custom [middleware](../concepts/middleware.md) wraps the
+A small custom [middleware](https://openarmature.ai/concepts/middleware/) wraps the
 node. Before calling `next_(state)`, the middleware checks "does
 my output already exist?" (a filesystem file, a database row, a
 content-addressable store entry). If yes, it returns the cached
@@ -396,7 +396,7 @@ The node sees its normal `(state) → partial_update` contract.
 The middleware is the only thing that knows about idempotency;
 all callers of the node compose with it cleanly.
 
-## Snippet
+#### Snippet
 
 ```python
 import os
@@ -450,11 +450,11 @@ builder = (
 ```
 
 The middleware composes with the framework's
-[four registration sites](../concepts/middleware.md): attach it
+[four registration sites](https://openarmature.ai/concepts/middleware/): attach it
 per-node (as above), per-graph, per-branch, or
 per-fan-out-instance, depending on the scope of the bypass.
 
-## When this is the right pattern
+#### When this is the right pattern
 
 - The node's work is expensive and idempotent given the same key
   (rendering a frame, calling an external API with content-
@@ -465,7 +465,7 @@ per-fan-out-instance, depending on the scope of the bypass.
   update returned by the middleware is indistinguishable from a
   successful node run.
 
-## When it isn't
+#### When it isn't
 
 - The check itself is expensive enough that you'd rather just run
   the node. The cost model inverts; the pattern is wrong.
@@ -479,9 +479,9 @@ per-fan-out-instance, depending on the scope of the bypass.
   dedicated caching layer instead of reimplementing cache
   invalidation in the middleware.
 
-## Cross-references
+#### Cross-references
 
-- [Middleware](../concepts/middleware.md) — middleware shape, the
+- [Middleware](https://openarmature.ai/concepts/middleware/) — middleware shape, the
   four registration sites, composition.
 - Spec: [pipeline-utilities](https://openarmature.org/capabilities/pipeline-utilities/)
 
@@ -489,23 +489,23 @@ This pattern is explicitly called out in proposal 0008's
 *Alternatives considered* section as a userland recipe rather than
 spec'd behavior — this page is its canonical home.
 
-# Parameterized entry point
+### Parameterized entry point
 
 **Problem.** How do I start the graph at an arbitrary node?
 
-## Approach
+#### Approach
 
 You don't. Make the "entry point" a state-level parameter instead.
 A first router node passes through, and a
-[conditional edge](../concepts/composition.md) routes to wherever
+[conditional edge](https://openarmature.ai/concepts/composition/) routes to wherever
 execution should begin. The graph stays a single graph; what
 differs across runs is which branch the conditional edge takes.
 
-Combine with [checkpointing](../concepts/checkpointing.md) if you
+Combine with [checkpointing](https://openarmature.ai/concepts/checkpointing/) if you
 want resume-style behavior — skip nodes whose work is already
 captured in state.
 
-## Snippet
+#### Snippet
 
 ```python
 from openarmature.graph import END, EndSentinel, GraphBuilder, State
@@ -555,27 +555,27 @@ builder = (
 )
 graph = builder.compile()
 
-# Start at the beginning:
+### Start at the beginning:
 await graph.invoke(MissionState())
 
-# Or skip straight to execute, with the plan already in state:
+### Or skip straight to execute, with the plan already in state:
 await graph.invoke(MissionState(starting_stage="execute", plan="..."))
 ```
 
 The caller pre-populates `starting_stage` (and any prerequisite
 fields the chosen branch needs) and the graph routes accordingly.
 
-## When this is the right pattern
+#### When this is the right pattern
 
 - You have a few canonical entry points and the choice between
   them is data, not control flow.
 - You want to skip work already done in a prior run — combine with
-  [checkpointing](../concepts/checkpointing.md) to pick up where
+  [checkpointing](https://openarmature.ai/concepts/checkpointing/) to pick up where
   you left off.
 - Your "different entry points" share state structure and most of
   the downstream graph.
 
-## When it isn't
+#### When it isn't
 
 - "Start at node X" really means "run a different pipeline." Then
   it's a different compiled graph. Don't bend one graph into two;
@@ -584,19 +584,19 @@ fields the chosen branch needs) and the graph routes accordingly.
   reimplementing routing — consider a higher-level dispatch layer
   that picks which graph to invoke.
 
-## Cross-references
+#### Cross-references
 
-- [Composition: conditional edges](../concepts/composition.md)
-- [Checkpointing](../concepts/checkpointing.md)
+- [Composition: conditional edges](https://openarmature.ai/concepts/composition/)
+- [Checkpointing](https://openarmature.ai/concepts/checkpointing/)
 - Spec: [graph-engine](https://openarmature.org/capabilities/graph-engine/)
 
-# Session-as-checkpoint-resume
+### Session-as-checkpoint-resume
 
 **Problem.** How do I keep multi-turn agent state across turns?
 
-## Approach
+#### Approach
 
-The framework's [checkpointing](../concepts/checkpointing.md)
+The framework's [checkpointing](https://openarmature.ai/concepts/checkpointing/)
 provides single-invocation crash resume out of the box. Multi-turn
 state is the same primitive used differently: the application
 keeps a stable `session_id → invocation_id` mapping, and each
@@ -614,7 +614,7 @@ join key the application maintains, typically as the
 `correlation_id` on `invoke()` (which is preserved unchanged
 across resume).
 
-## Snippet
+#### Snippet
 
 ```python
 from typing import Annotated
@@ -630,8 +630,8 @@ class SessionState(State):
     last_user_input: str = ""
 
 
-# ... define nodes that read s.messages, append to s.messages,
-#     and merge into s.facts ...
+### ... define nodes that read s.messages, append to s.messages,
+###     and merge into s.facts ...
 
 checkpointer = SQLiteCheckpointer(path="./sessions.db")
 graph = (
@@ -646,11 +646,11 @@ graph = (
 )
 
 
-# The application maintains its own session table mapping
-# session_id -> latest invocation_id. OA's checkpointer doesn't
-# know about sessions; the join is the application's
-# responsibility. The session_id doubles as correlation_id so
-# observability traces share the cross-turn join key.
+### The application maintains its own session table mapping
+### session_id -> latest invocation_id. OA's checkpointer doesn't
+### know about sessions; the join is the application's
+### responsibility. The session_id doubles as correlation_id so
+### observability traces share the cross-turn join key.
 async def handle_turn(session_id: str, user_input: str) -> str:
     initial = SessionState(last_user_input=user_input)
     prior_invocation_id = sessions_db.get_invocation_id(session_id)
@@ -674,7 +674,7 @@ async def handle_turn(session_id: str, user_input: str) -> str:
 Redis, a flat file, whatever); the checkpointer holds the OA-side
 state and the session table holds the join keys.
 
-## When this is the right pattern
+#### When this is the right pattern
 
 - Your application has long-lived sessions with multiple LLM turns
   and you want the prior state to be the starting point of the
@@ -684,7 +684,7 @@ state and the session table holds the join keys.
 - Cross-turn state has clean reducer semantics: `merge` for
   accumulating dicts, `append` for growing lists.
 
-## When it isn't
+#### When it isn't
 
 - A session's "state" is bigger than fits comfortably in a single
   graph state shape. Split into multiple graphs and share an
@@ -695,35 +695,35 @@ state and the session table holds the join keys.
   conflicts with OA's frozen-state model. Use OA per-turn without
   cross-turn resume.
 
-## Cross-references
+#### Cross-references
 
-- [Checkpointing](../concepts/checkpointing.md) — backend wiring,
+- [Checkpointing](https://openarmature.ai/concepts/checkpointing/) — backend wiring,
   `resume_invocation`, schema migration.
-- [State and reducers](../concepts/state-and-reducers.md) — `merge`
+- [State and reducers](https://openarmature.ai/concepts/state-and-reducers/) — `merge`
   and `append` reducer strategies.
-- [`examples/08-checkpointing-and-migration`](../examples/08-checkpointing-and-migration.md) —
+- [`examples/08-checkpointing-and-migration`](https://openarmature.ai/examples/08-checkpointing-and-migration/) —
   single-resume baseline.
 - Spec: [pipeline-utilities](https://openarmature.org/capabilities/pipeline-utilities/)
 
-# Tool-dispatch-as-node
+### Tool-dispatch-as-node
 
 **Problem.** How do I run an agent tool-call loop?
 
-## Approach
+#### Approach
 
 A node reads the assistant's last `tool_calls` from the running
 message list, dispatches each to a local Python function, appends
 `ToolMessage` records back to the message list via an
-[`append` reducer](../concepts/state-and-reducers.md), and a
-[conditional edge](../concepts/composition.md) loops back to the
+[`append` reducer](https://openarmature.ai/concepts/state-and-reducers/), and a
+[conditional edge](https://openarmature.ai/concepts/composition/) loops back to the
 LLM node if the model wants more turns. The exit is the
 conditional edge routing to a `present` node (or `END`) when the
 assistant returns no `tool_calls`.
 
 No "agent framework" abstraction — the loop is just a graph cycle
-on top of [`Tool`, `ToolCall`, `ToolMessage`](../concepts/llms.md).
+on top of [`Tool`, `ToolCall`, `ToolMessage`](https://openarmature.ai/concepts/llms/).
 
-## Snippet
+#### Snippet
 
 ```python
 import json
@@ -798,11 +798,11 @@ The `MAX_TURNS` cap prevents runaway loops; the conditional edge
 short-circuits to `present` when the cap is hit or when the model
 returns no `tool_calls`.
 
-See [`examples/09-tool-use`](../examples/09-tool-use.md) for a
+See [`examples/09-tool-use`](https://openarmature.ai/examples/09-tool-use/) for a
 runnable version with full tool definitions, defensive handling
 for malformed `ToolCall.arguments`, and trace output.
 
-## When this is the right pattern
+#### When this is the right pattern
 
 - The model needs to call local Python functions and react to
   their results.
@@ -811,7 +811,7 @@ for malformed `ToolCall.arguments`, and trace output.
 - Tool results are textual or JSON-serializable and fit cleanly
   into `ToolMessage.content`.
 
-## When it isn't
+#### When it isn't
 
 - Tools have side effects you can't replay safely on resume. Wrap
   each side-effecting tool with the
@@ -825,14 +825,14 @@ for malformed `ToolCall.arguments`, and trace output.
   current `Tool` / `ToolMessage` shape is request/response;
   streaming is out of scope for this pattern.
 
-## Cross-references
+#### Cross-references
 
-- [LLMs concept page](../concepts/llms.md) — `Tool`, `ToolCall`,
+- [LLMs concept page](https://openarmature.ai/concepts/llms/) — `Tool`, `ToolCall`,
   `ToolMessage` types and the `complete(messages, tools=...)`
   contract.
-- [State and reducers](../concepts/state-and-reducers.md) —
+- [State and reducers](https://openarmature.ai/concepts/state-and-reducers/) —
   `append` reducer semantics.
-- [`examples/09-tool-use`](../examples/09-tool-use.md) — runnable
+- [`examples/09-tool-use`](https://openarmature.ai/examples/09-tool-use/) — runnable
   reference implementation.
 - Spec: [llm-provider](https://openarmature.org/capabilities/llm-provider/)
 
@@ -902,6 +902,6 @@ _Runnable example programs shipped in the source tree at `examples/`. The full c
 If your question isn't covered above, look here:
 
 - **Full docs site:** [openarmature.ai](https://openarmature.ai)
-- **Spec text:** [openarmature.ai/capabilities](https://openarmature.ai/capabilities/)
+- **Spec text:** [openarmature.org/capabilities](https://openarmature.org/capabilities/)
 - **API reference:** [openarmature.ai/reference](https://openarmature.ai/reference/)
 - **Host project conventions:** the project's own `AGENTS.md` / `CLAUDE.md`

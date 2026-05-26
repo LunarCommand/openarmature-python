@@ -37,6 +37,7 @@ caught by ``tests/test_agents_md_drift.py``.
 
 from __future__ import annotations
 
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -84,19 +85,31 @@ def _assert_pin_at_tag() -> str:
     Returns the tag name (e.g., ``v0.22.1``). Raises ``RuntimeError``
     on a non-tag pin so a release can't accidentally ship a bundle
     pinned to a draft spec commit.
+
+    Prefers the highest semver tag when multiple ``v*`` tags point at
+    the same SHA (the v0.19.0 / v0.20.0 / v0.20.1 retag during the
+    fixture 052 backport produced this shape). Uses git's native
+    ``--sort=-version:refname`` rather than Python lexicographic sort,
+    which mis-orders multi-digit versions (``v0.9.0`` lex-sorts after
+    ``v0.10.0``).
     """
     sha = _git_in_spec("rev-parse", "HEAD")
-    tags_out = _git_in_spec("tag", "--points-at", sha, "--list", "v*")
+    tags_out = _git_in_spec(
+        "tag",
+        "--sort=-version:refname",
+        "--points-at",
+        sha,
+        "--list",
+        "v*",
+    )
     if not tags_out:
         raise RuntimeError(
             f"submodule HEAD {sha[:8]} is not at a v* tag; "
             f"bundle build refuses to read draft (untagged) spec text. "
             f"Pin the submodule to a published tag before regenerating."
         )
-    # Prefer the highest version tag if multiple point at the same SHA
-    # (e.g., during a re-tag) — sort by version-string descending.
-    tags = sorted(tags_out.splitlines(), reverse=True)
-    return tags[0]
+    # Git's version-aware descending sort puts the highest semver tag first.
+    return tags_out.splitlines()[0]
 
 
 def _read_pinned_spec(path_in_spec: str) -> str:
@@ -121,7 +134,7 @@ def _header(version: str, spec_tag: str) -> str:
         f"*This is the agent guide bundled with the openarmature Python package, "
         f"version {version} (spec {spec_tag}). For the full docs site see "
         f"[openarmature.ai](https://openarmature.ai). For the canonical spec text see "
-        f"[openarmature.ai/capabilities](https://openarmature.ai/capabilities/). "
+        f"[openarmature.org/capabilities](https://openarmature.org/capabilities/). "
         f"For project-specific conventions for the code you're editing, see the host "
         f"project's `AGENTS.md` or `CLAUDE.md`.*"
     )
@@ -133,7 +146,17 @@ def _tldr() -> str:
 
 
 def _extract_sections_1_2(spec_text: str) -> str:
-    """Extract content between ``## 1.`` and ``## 3.`` (inclusive of §1+§2)."""
+    """Extract content between ``## 1.`` and ``## 3.`` (inclusive of §1+§2).
+
+    Demotes ATX headings by two levels so the bundled markdown's
+    hierarchy stays consistent: the wrapping ``### Capability: ...``
+    H3 sits above the extracted ``## 1. Purpose`` rendered as
+    ``#### 1. Purpose`` (H4). Any deeper nested headings inside §1+§2
+    (e.g., ``### State``) preserve their relative depth one step
+    deeper. Without this demotion, the spec's H2 headings would
+    appear higher in the document than the H3 they sit under,
+    breaking TOC rendering and navigation.
+    """
     out: list[str] = []
     in_target = False
     for line in spec_text.splitlines():
@@ -142,6 +165,9 @@ def _extract_sections_1_2(spec_text: str) -> str:
         elif line.startswith("## 3."):
             break
         if in_target:
+            if line.startswith("#"):
+                # Demote ATX heading by two levels.
+                line = "##" + line
             out.append(line)
     if not out:
         raise RuntimeError(
@@ -152,13 +178,19 @@ def _extract_sections_1_2(spec_text: str) -> str:
 
 
 def _capability_summaries(spec_tag: str) -> str:
+    # Long-string entries use explicit ``+`` concat (not Python's
+    # implicit adjacent-string-literal concat) so CodeQL / static
+    # analyzers don't flag the pattern as a possibly-missing comma
+    # inside the list literal.
     sections = [
         "## Capability contracts",
         "",
-        f"_Sourced from openarmature-spec {spec_tag}. Each entry below "
-        f"reproduces §1 (Purpose) and §2 (Concepts) of the capability's "
-        f"`spec.md`. For the full spec text (execution model, error semantics, "
-        f"determinism, observer hooks, etc.) see the linked docs site._",
+        (
+            f"_Sourced from openarmature-spec {spec_tag}. Each entry below "
+            + "reproduces §1 (Purpose) and §2 (Concepts) of the capability's "
+            + "`spec.md`. For the full spec text (execution model, error semantics, "
+            + "determinism, observer hooks, etc.) see the linked docs site._"
+        ),
     ]
     for cap in CAPABILITIES:
         text = _read_pinned_spec(f"spec/{cap}/spec.md")
@@ -169,17 +201,64 @@ def _capability_summaries(spec_tag: str) -> str:
     return "\n".join(sections)
 
 
+_PATTERN_LINK_RE = re.compile(r"\(\.\./(concepts|examples)/([^)]+?)\.md\)")
+
+
+def _transform_pattern_content(text: str) -> str:
+    """Bundle-side rewrite of a pattern doc's markdown.
+
+    Two transforms applied for the wheel-shipped bundle (the source
+    files in ``docs/patterns/`` stay unchanged — they're MkDocs source
+    where relative links work correctly):
+
+    1. **Demote ATX headings by two levels.** Pattern files open with
+       ``# Title`` (H1); inlined verbatim under the bundle's
+       ``## Patterns`` H2, those H1s would create multiple top-level
+       headings in the same document. Prepending ``##`` to every
+       ``#``-prefixed line puts pattern titles at H3 (under
+       ``## Patterns``) and preserves the relative depth of any
+       deeper nested headings.
+
+    2. **Rewrite relative doc-tree links to absolute docs-site URLs.**
+       Patterns link to ``../concepts/<name>.md`` and
+       ``../examples/<name>.md`` — relative paths that resolve in the
+       MkDocs source tree but break in the installed wheel (no docs/
+       tree present). The MkDocs site strips ``.md`` and serves at
+       ``/<section>/<name>/``, so the rewrite is mechanical.
+       ``../<section>/index.md`` collapses to the section root.
+    """
+    # Demote headings.
+    demoted: list[str] = []
+    for line in text.splitlines():
+        if line.startswith("#"):
+            line = "##" + line
+        demoted.append(line)
+    out = "\n".join(demoted)
+
+    # Rewrite relative doc-tree links.
+    def _rewrite(m: re.Match[str]) -> str:
+        section, name = m.group(1), m.group(2)
+        if name == "index":
+            return f"(https://openarmature.ai/{section}/)"
+        return f"(https://openarmature.ai/{section}/{name}/)"
+
+    return _PATTERN_LINK_RE.sub(_rewrite, out)
+
+
 def _patterns() -> str:
+    # See ``_capability_summaries`` for the explicit-concat rationale.
     sections = [
         "## Patterns",
         "",
-        "_Recipes that compose the primitives. Not framework contracts — "
-        "these are how to do common things idiomatically._",
+        (
+            "_Recipes that compose the primitives. Not framework contracts — "
+            + "these are how to do common things idiomatically._"
+        ),
     ]
     pattern_files = sorted(p for p in (DOCS / "patterns").glob("*.md") if p.name != "index.md")
     for pf in pattern_files:
         sections.append("")
-        sections.append(pf.read_text().rstrip())
+        sections.append(_transform_pattern_content(pf.read_text()).rstrip())
     return "\n".join(sections)
 
 
@@ -214,12 +293,15 @@ def _extract_first_docstring_paragraph(source: str) -> str:
 
 
 def _example_index() -> str:
+    # See ``_capability_summaries`` for the explicit-concat rationale.
     sections = [
         "## Example index",
         "",
-        "_Runnable example programs shipped in the source tree at `examples/`. "
-        "The full code is not bundled here (each example is 300+ lines); read "
-        "the file at the listed path to see the canonical shape for that use case._",
+        (
+            "_Runnable example programs shipped in the source tree at `examples/`. "
+            + "The full code is not bundled here (each example is 300+ lines); read "
+            + "the file at the listed path to see the canonical shape for that use case._"
+        ),
         "",
     ]
     for ex in sorted(EXAMPLES.glob("*/main.py")):
@@ -236,7 +318,7 @@ def _discovery_footer() -> str:
         "If your question isn't covered above, look here:\n"
         "\n"
         "- **Full docs site:** [openarmature.ai](https://openarmature.ai)\n"
-        "- **Spec text:** [openarmature.ai/capabilities](https://openarmature.ai/capabilities/)\n"
+        "- **Spec text:** [openarmature.org/capabilities](https://openarmature.org/capabilities/)\n"
         "- **API reference:** [openarmature.ai/reference](https://openarmature.ai/reference/)\n"
         "- **Host project conventions:** the project's own `AGENTS.md` / `CLAUDE.md`\n"
     )
