@@ -336,7 +336,12 @@ def build() -> str:
         _example_index(),
         _discovery_footer(),
     ]
-    return "\n\n".join(sections) + "\n"
+    # ``_discovery_footer`` already ends with ``\n``; strip any
+    # trailing whitespace from the joined output, then add exactly
+    # one final newline. Avoids the pre-commit end-of-file-fixer /
+    # editor "strip trailing blank line" normalization producing a
+    # different byte sequence than the committed file.
+    return "\n\n".join(sections).rstrip() + "\n"
 
 
 def main() -> None:

@@ -2,6 +2,72 @@
 
 Recipes that aren't deducible from the API surface alone. The primitives docs tell you what's possible; this section tells you what's smart.
 
+### Declare a non-clobbering reducer on accumulator list fields
+
+State fields default to `last_write_wins` — each node's write replaces the prior value for that field. For scalar fields (`status: str`, `count: int`) that's usually what you want. For list fields that accumulate contributions across multiple nodes (`messages: list[Message]`, `events: list[Event]`, `results: list[Result]`), it's the wrong default — every node's contribution silently clobbers everything before it.
+
+Declare `append` (or another non-clobbering reducer) at the state class:
+
+```python
+from typing import Annotated
+from pydantic import Field
+from openarmature.graph import State, append
+
+class WorkflowState(State):
+    messages: Annotated[list[Message], append] = Field(default_factory=list)
+    events: Annotated[list[Event], append] = Field(default_factory=list)
+    final_status: str = "pending"   # last_write_wins is fine here
+```
+
+The failure mode without `append` is silent and easy to misdiagnose — the final state shows only the last node's contribution to the list, with no error. Common "why is my accumulator empty?" question. `merge` is the equivalent for `dict[str, V]` fields that accumulate keys across nodes.
+
+### Branch on `Response.finish_reason` before reading `message.content`
+
+After `await provider.complete(messages, tools=[...])` returns, the shape of `Response` varies by `finish_reason`:
+
+- `finish_reason == "stop"` — assistant produced a content response. `message.content` carries the text; `message.tool_calls` is empty.
+- `finish_reason == "tool_calls"` — assistant emitted tool calls. `message.tool_calls` carries the list; `message.content` is typically empty (model didn't say anything beyond the tool calls).
+- `finish_reason == "length"` / `"content_filter"` / `"error"` — completion was cut off or refused; `message.content` may be partial or empty.
+
+Post-LLM logic that reads `message.content` without checking `finish_reason` misses the entire tool-calling path:
+
+```python
+response = await provider.complete(messages, tools=tools)
+
+if response.finish_reason == "tool_calls":
+    # Dispatch each tool call, append ToolMessage responses, re-call complete()
+    for tc in response.message.tool_calls:
+        result = dispatch_tool(tc.name, tc.arguments)
+        messages.append(ToolMessage(content=result, tool_call_id=tc.id))
+    response = await provider.complete(messages, tools=tools)
+elif response.finish_reason == "stop":
+    handle_text(response.message.content)
+else:
+    handle_error_or_partial(response)
+```
+
+The discriminator is one branch; missing it gives you empty data on tool-call responses and silently wrong behavior on truncations.
+
+### `disable_llm_payload` defaults to `True` — flip it for LLM-aware observability backends
+
+The `OTelObserver` (and any spec-conformant observer reading LLM events) defaults `disable_llm_payload: bool = True` per spec §5.5's "default-off by privacy" framing. Without flipping the flag, LLM spans carry GenAI semconv attributes (token counts, model name, finish reason) but NOT the message payload (input messages, response content, request extras).
+
+That's the right default for general OpenArmature use — payloads may contain PII the user hasn't audited, and storage cost grows with prompt size. But it's the WRONG default if you're wiring up an LLM-aware observability backend (Langfuse, Phoenix, Honeycomb's LLM lens) that renders the message stream as part of its generation view. Backends will show "empty" generations and you'll wonder why.
+
+Flip the flag once at observer construction:
+
+```python
+from openarmature.observability import OTelObserver
+
+observer = OTelObserver(
+    span_processor=your_exporter,
+    disable_llm_payload=False,   # opt in to message-payload attributes
+)
+compiled.attach_observer(observer)
+```
+
+The companion `disable_genai_semconv` flag defaults to `False` — GenAI semconv attributes emit by default since they're how LLM-aware backends render anything at all. Don't flip that one unless you're routing GenAI emission through a different layer.
+
 ### Use the bundled `FilesystemCheckpointer` or `SQLiteCheckpointer`, not a hand-rolled serializer
 
 The temptation when persisting graph state is to `json.dumps(state.model_dump())` and write to a file. Don't. The shipped Checkpointer backends handle every contract `openarmature.checkpoint.Checkpointer` defines — round-trip integrity, `parent_states` for inner-save resume, fan-out progress tracking, schema-version migration, listing by `correlation_id`, `CheckpointRecordInvalid` on shape drift. A hand-rolled serializer that "works" on the happy path silently fails the moment a fan-out crash leaves an in-flight save record, and you'll be debugging it for hours before realizing the bundled backend exists.
