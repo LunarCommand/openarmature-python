@@ -114,35 +114,45 @@ Trace id=01234567-89ab-...
 
 ## Swapping to a real Langfuse SDK
 
-The observer's `client` parameter is `LangfuseClient`-Protocol-typed,
-so any structurally-compatible value works:
+Install the optional extras:
+
+```bash
+pip install 'openarmature[langfuse]'
+```
+
+Wrap the SDK client with `LangfuseSDKAdapter` and pass it to the
+observer:
 
 ```python
 from langfuse import Langfuse
+from openarmature.observability.langfuse import (
+    LangfuseObserver,
+    LangfuseSDKAdapter,
+)
 
-client = Langfuse(
+langfuse_client = Langfuse(
     public_key="pk-lf-...",
     secret_key="sk-lf-...",
     host="https://cloud.langfuse.com",
 )
-observer = LangfuseObserver(client=client, disable_llm_payload=False)
+observer = LangfuseObserver(
+    client=LangfuseSDKAdapter(langfuse_client),
+    disable_llm_payload=False,
+)
 ```
 
-If the installed SDK version's `trace` / `span` / `generation` method
-signatures match the Protocol exactly, this is the whole change. If
-they diverge (renamed kwargs, return-type quirks), wrap the SDK in a
-small adapter class that implements `LangfuseClient` and delegates to
-the SDK call-by-call. The Protocol surface is narrow — four methods —
-so the adapter is on the order of 40 lines.
+The adapter bridges `langfuse>=4.6,<5`'s unified `start_observation`
+API onto OA's four-method `LangfuseClient` Protocol. v4 has no
+explicit trace creation (traces are auto-created from observations);
+the adapter caches trace info from `.trace()` and applies it via
+`propagate_attributes` around EVERY observation under that trace_id.
+Propagating on every observation keeps v4's last-attribute-wins
+display logic from clobbering the trace's display name when later
+observations land without the attribute set.
 
-**No specific `langfuse` SDK version is validated in CI as of this
-release.** The Protocol matches the SDK's documented low-level shape,
-but `langfuse` has shifted between major versions (v2 → v3 introduced
-API changes). A follow-on release pins a tested `[langfuse]` extras
-range and a runtime `isinstance(client, LangfuseClient)` check; until
-then, smoke-trace in your own environment with whichever `langfuse`
-version your stack already uses and write a thin adapter if any
-kwargs don't line up.
+Validated against `langfuse>=4.6,<5`. v2.x and v3.x are NOT
+supported — supply your own adapter against the same four-method
+Protocol if you need to stay on an older version.
 
 For prompt linkage: in production, the
 `Prompt.observability_entities['langfuse_prompt']` value is the SDK's

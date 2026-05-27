@@ -21,8 +21,12 @@ manually.
 The example uses the bundled ``InMemoryLangfuseClient`` recorder so the
 demo runs without a Langfuse account — at the end we print the captured
 Trace + Observation tree. Swapping to a real ``langfuse.Langfuse()``
-client is a one-line constructor change (see the comment near the
-observer build below).
+client is a one-line constructor change via ``LangfuseSDKAdapter`` (see
+the comment near the observer build below). The adapter bridges the
+``langfuse>=4.6`` Python SDK shape onto OA's ``LangfuseClient``
+Protocol. Install with::
+
+    pip install 'openarmature[langfuse]'
 
 LLM calls go through ``openarmature.llm.OpenAIProvider``.
 
@@ -244,11 +248,18 @@ async def main() -> None:
     # fields — without needing a Langfuse account. For production:
     #
     #     from langfuse import Langfuse
-    #     client = Langfuse(public_key=..., secret_key=..., host=...)
+    #     from openarmature.observability.langfuse import LangfuseSDKAdapter
     #
-    # Replace the InMemoryLangfuseClient construction below with that
-    # client. The observer code doesn't change — the client is
-    # Protocol-typed, so any structurally-compatible value works.
+    #     langfuse_client = Langfuse(
+    #         public_key="pk-lf-...",
+    #         secret_key="sk-lf-...",
+    #         host="https://cloud.langfuse.com",
+    #     )
+    #     client = LangfuseSDKAdapter(langfuse_client)
+    #
+    # Validated against ``langfuse>=4.6,<5``. The adapter bridges
+    # langfuse v4's unified ``start_observation`` API onto OA's
+    # ``LangfuseClient`` Protocol; the observer code doesn't change.
     client = InMemoryLangfuseClient()
 
     # disable_llm_payload=False opts in to capturing the input messages

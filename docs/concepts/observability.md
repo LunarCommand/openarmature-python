@@ -610,26 +610,55 @@ graph.attach_observer(observer)
 The `client` is anything matching the `LangfuseClient` Protocol —
 the bundled `InMemoryLangfuseClient` (used by the conformance
 harness, useful for unit tests), or a real `langfuse.Langfuse()`
-instance from the [Langfuse Python SDK](https://github.com/langfuse/langfuse-python).
-The Protocol declares only the methods the observer calls, so SDK
-versions whose shape matches drop in directly. SDK versions whose
-shape diverges (renamed kwargs, return-type quirks) plug in via a
-small adapter; see
+instance wrapped in `LangfuseSDKAdapter` for production. Install
+the optional extras to bring in the Langfuse SDK:
+
+```bash
+pip install 'openarmature[langfuse]'
+```
+
+Production wire-up:
+
+```python
+from langfuse import Langfuse
+from openarmature.observability.langfuse import (
+    LangfuseObserver,
+    LangfuseSDKAdapter,
+)
+
+langfuse_client = Langfuse(
+    public_key="pk-lf-...",
+    secret_key="sk-lf-...",
+    host="https://cloud.langfuse.com",
+)
+observer = LangfuseObserver(
+    client=LangfuseSDKAdapter(langfuse_client),
+    disable_llm_payload=False,
+)
+```
+
+The adapter bridges `langfuse>=4.6`'s unified `start_observation`
+API onto our `LangfuseClient` Protocol; the observer code is the
+same in tests and production. See
 [`examples/10-langfuse-observability`](../examples/10-langfuse-observability.md)
-for the runnable demo plus the adapter shape.
+for a runnable demo.
 
 !!! note "Langfuse SDK version compatibility"
 
-    No specific `langfuse` SDK version is validated in CI as of this
-    release. The Protocol mirrors the SDK's documented low-level
-    `trace` / `span` / `generation` shape, but the SDK has shifted
-    between major versions (v2 → v3 introduced API changes). A
-    follow-on release pins a tested `[langfuse]` extras range and
-    ships a runtime `isinstance` check confirming the SDK satisfies
-    the Protocol. Until then, treat production wire-up as a "verify
-    in your own environment" path: bring the langfuse version your
-    stack already uses, run a smoke trace, and write a thin adapter
-    if any kwargs don't line up.
+    Validated against `langfuse>=4.6,<5`. The v4 SDK introduced an
+    OTel-based architecture with `start_observation` /
+    `propagate_attributes` replacing the v2/v3 `trace` / `span` /
+    `generation` low-level API; the bundled `LangfuseSDKAdapter`
+    handles the bridge so the observer surface is stable across
+    future v4 patches.
+
+    Earlier SDK versions (v2.x, v3.x) are NOT supported. Projects on
+    those versions either upgrade to v4 or supply their own adapter
+    matching the `LangfuseClient` Protocol's four methods.
+
+    A runtime `isinstance(adapter, LangfuseClient)` check ships in
+    the unit suite — if a future v4 patch breaks the Protocol's
+    surface, the test fails loudly.
 
 ### What Langfuse sees
 

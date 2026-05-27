@@ -1,0 +1,186 @@
+"""Unit + integration tests for LangfuseSDKAdapter against langfuse>=4.6.
+
+The unit test instantiates a real ``langfuse.Langfuse`` client with
+dummy credentials and verifies the adapter satisfies the
+:class:`LangfuseClient` Protocol via runtime ``isinstance`` — no
+network calls. Skipped when the ``[langfuse]`` extra isn't installed.
+
+The integration test, gated by ``@pytest.mark.integration`` plus
+``LANGFUSE_PUBLIC_KEY`` / ``LANGFUSE_SECRET_KEY`` env vars, runs a
+small graph end-to-end against real Langfuse Cloud. Use::
+
+    LANGFUSE_PUBLIC_KEY=pk-lf-... \\
+    LANGFUSE_SECRET_KEY=sk-lf-... \\
+    LANGFUSE_HOST=https://cloud.langfuse.com \\
+        uv run pytest tests/unit/test_observability_langfuse_adapter.py \\
+        -m integration -v
+
+CI does NOT run integration tests; they're opt-in for local
+verification.
+"""
+
+from __future__ import annotations
+
+import os
+from typing import Annotated, Any
+
+import pytest
+
+# Skip the whole module if langfuse isn't installed (extras not present).
+pytest.importorskip("langfuse")
+
+from langfuse import Langfuse  # noqa: E402
+
+from openarmature.graph import END, GraphBuilder, State, append  # noqa: E402
+from openarmature.observability.langfuse import (  # noqa: E402
+    LangfuseClient,
+    LangfuseObserver,
+    LangfuseSDKAdapter,
+)
+
+
+def _dummy_client() -> Langfuse:
+    # langfuse 4.x's Langfuse() constructor accepts credentials via env
+    # vars or kwargs. Dummy keys bypass auth_check (which is called
+    # opportunistically) — the adapter only needs the methods present
+    # on the constructed instance, not a working API connection.
+    return Langfuse(
+        public_key="pk-lf-test",
+        secret_key="sk-lf-test",
+        host="http://localhost:0",  # unreachable; we don't make calls in unit tests
+    )
+
+
+def test_adapter_satisfies_langfuse_client_protocol() -> None:
+    # Structural typing: the adapter MUST satisfy LangfuseClient at
+    # runtime so LangfuseObserver accepts it. This is the load-bearing
+    # test for the [langfuse] extras pin — if a future SDK release
+    # breaks the Protocol's surface, this fails loudly.
+    adapter = LangfuseSDKAdapter(_dummy_client())
+    assert isinstance(adapter, LangfuseClient)
+
+
+def test_adapter_observer_construction() -> None:
+    # End-to-end: the observer accepts the adapter as its client
+    # (Protocol satisfaction proves out at instantiation time under
+    # the LangfuseClient annotation).
+    adapter = LangfuseSDKAdapter(_dummy_client())
+    observer = LangfuseObserver(client=adapter)
+    assert observer.client is adapter
+
+
+def test_adapter_caches_trace_info() -> None:
+    # The trace() call doesn't hit the SDK; it caches info that
+    # propagate_attributes applies on every observation under that
+    # trace_id (not just the first — v4's last-wins display logic
+    # would otherwise let later observations clobber the trace name).
+    adapter = LangfuseSDKAdapter(_dummy_client())
+    adapter.trace(id="trace-1", name="my-trace", metadata={"correlation_id": "c-1"})
+
+    assert "trace-1" in adapter._trace_info  # noqa: SLF001
+    cached = adapter._trace_info["trace-1"]  # noqa: SLF001
+    assert cached["name"] == "my-trace"
+    assert cached["metadata"] == {"correlation_id": "c-1"}
+
+
+def test_adapter_converts_uuid_trace_id_to_otel_hex() -> None:
+    # Langfuse v4 expects OTel-format trace IDs (32-char lowercase
+    # hex, no dashes). OA's invocation_id is a UUID4 with dashes.
+    # The adapter MUST convert before passing to TraceContext, or
+    # the SDK fails with ValueError("invalid literal for int() with
+    # base 16: 'uuid-with-dashes'") at the OTel-attribute layer
+    # — which OA's observer-error-isolation pattern swallows as a
+    # warnings.warn, leaving the trace invisibly broken.
+    from openarmature.observability.langfuse.adapter import _to_otel_trace_id
+
+    assert _to_otel_trace_id("b24eda93-d06d-4eaa-9891-ca5e56f35722") == "b24eda93d06d4eaa9891ca5e56f35722"
+    # Idempotent on already-hex input.
+    assert _to_otel_trace_id("b24eda93d06d4eaa9891ca5e56f35722") == "b24eda93d06d4eaa9891ca5e56f35722"
+    # Non-UUID inputs pass through unchanged (consumers passing an
+    # already-OTel-formatted trace_id from elsewhere don't get
+    # mangled).
+    assert _to_otel_trace_id("custom-trace-id") == "custom-trace-id"
+
+
+def test_adapter_update_trace_merges_into_cache() -> None:
+    # update_trace merges into the cache so subsequent observations
+    # under this trace_id pick up the new values via propagate_attributes.
+    adapter = LangfuseSDKAdapter(_dummy_client())
+    adapter.trace(id="trace-1", name="initial", metadata={"key1": "v1"})
+    adapter.update_trace(id="trace-1", name="renamed", metadata={"key2": "v2"})
+
+    cached = adapter._trace_info["trace-1"]  # noqa: SLF001
+    assert cached["name"] == "renamed"
+    assert cached["metadata"] == {"key1": "v1", "key2": "v2"}
+
+
+# ---------------------------------------------------------------------------
+# Integration test against real Langfuse Cloud (opt-in)
+# ---------------------------------------------------------------------------
+
+
+class _S(State):
+    trail: Annotated[list[str], append] = []
+
+
+async def _node(name: str) -> Any:
+    return {"trail": [name]}
+
+
+@pytest.mark.integration
+async def test_adapter_against_real_langfuse_cloud() -> None:
+    # Validates that the adapter actually exchanges data with Langfuse
+    # Cloud — instantiates the real SDK, runs a tiny graph through
+    # LangfuseObserver, calls flush(). No assertions on the
+    # remote-side ingest (which is async). Manually verify via the
+    # Langfuse dashboard that the trace appears with the expected
+    # observation tree.
+    public_key = os.environ.get("LANGFUSE_PUBLIC_KEY")
+    secret_key = os.environ.get("LANGFUSE_SECRET_KEY")
+    if not public_key or not secret_key:
+        pytest.skip("LANGFUSE_PUBLIC_KEY / LANGFUSE_SECRET_KEY not set")
+
+    # LANGFUSE_HOST is the canonical name (matches the SDK's ``host=``
+    # kwarg); LANGFUSE_BASE_URL is the common alias some downstream
+    # configs use. Accept either; LANGFUSE_HOST wins when both set.
+    host = (
+        os.environ.get("LANGFUSE_HOST") or os.environ.get("LANGFUSE_BASE_URL") or "https://cloud.langfuse.com"
+    )
+    client = Langfuse(
+        public_key=public_key,
+        secret_key=secret_key,
+        host=host,
+    )
+    # Fail loudly on bad credentials. Without this, a 401 from the
+    # background export thread is just a logged warning and the test
+    # passes while traces vanish.
+    assert client.auth_check(), (
+        "Langfuse auth_check failed — verify LANGFUSE_PUBLIC_KEY / LANGFUSE_SECRET_KEY / LANGFUSE_HOST"
+    )
+
+    observer = LangfuseObserver(client=LangfuseSDKAdapter(client))
+
+    graph = (
+        GraphBuilder(_S)
+        .add_node("step_a", lambda _s: _node("step_a"))
+        .add_node("step_b", lambda _s: _node("step_b"))
+        .add_edge("step_a", "step_b")
+        .add_edge("step_b", END)
+        .set_entry("step_a")
+        .compile()
+    )
+    graph.attach_observer(observer)
+    await graph.invoke(_S())
+    await graph.drain()
+    observer.shutdown()
+    # ``client.shutdown()`` is the synchronous drain — flush() returns
+    # immediately while the OTel BatchSpanProcessor exports in
+    # background, and the test process exits before that finishes.
+    # shutdown() blocks until all spans are exported (or the
+    # exporter's shutdown timeout elapses).
+    client.shutdown()
+    # Manual check: open the trace in the dashboard and confirm
+    # "step_a" + "step_b" appear as Span observations under one Trace.
+    # The trace_id in the dashboard is the 32-char hex form (no dashes)
+    # of OA's UUID4 invocation_id; strip dashes from any logged
+    # correlation_id / invocation_id to find it.

@@ -42,6 +42,18 @@ from .client import (
 )
 from .observer import LangfuseObserver
 
+# LangfuseSDKAdapter requires the [langfuse] optional dependency.
+# Surface it when available, but don't force the import on consumers
+# who only use the InMemoryLangfuseClient — the adapter module's own
+# guard raises an informative ImportError if anyone tries to use it
+# without the extras installed.
+try:
+    from .adapter import LangfuseSDKAdapter as LangfuseSDKAdapter
+
+    _adapter_available = True
+except ImportError:  # pragma: no cover - exercised by extras-not-installed path
+    _adapter_available = False
+
 __all__ = [
     "InMemoryLangfuseClient",
     "LangfuseClient",
@@ -54,3 +66,5 @@ __all__ = [
     "ObservationLevel",
     "ObservationType",
 ]
+if _adapter_available:
+    __all__.append("LangfuseSDKAdapter")
