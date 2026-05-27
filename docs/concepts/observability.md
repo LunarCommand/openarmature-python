@@ -586,3 +586,113 @@ appear dropped. Two workarounds:
 - Use `SimpleSpanProcessor` instead of `BatchSpanProcessor` in
   tests; it exports synchronously and is unaffected by teardown
   timing.
+
+## Langfuse mapping (opt-in)
+
+A second sibling observer maps the same `NodeEvent` stream onto
+Langfuse's native Trace + Observation data model — Traces at the
+top, Span observations for graph nodes, Generation observations for
+LLM calls. Use it instead of (or alongside) the OTel observer when
+your trace UI is Langfuse and you want first-class Generation
+rendering without going through Langfuse's OTLP ingest.
+
+```python
+from openarmature.observability.langfuse import (
+    InMemoryLangfuseClient,
+    LangfuseObserver,
+)
+
+client = InMemoryLangfuseClient()  # or langfuse.Langfuse(...) in prod
+observer = LangfuseObserver(client=client)
+graph.attach_observer(observer)
+```
+
+The `client` is anything matching the `LangfuseClient` Protocol —
+the bundled `InMemoryLangfuseClient` (used by the conformance
+harness, useful for unit tests), or a real `langfuse.Langfuse()`
+instance from the [Langfuse Python SDK](https://github.com/langfuse/langfuse-python).
+The Protocol declares only the methods the observer calls, so SDK
+versions whose shape matches drop in directly. SDK versions whose
+shape diverges (renamed kwargs, return-type quirks) plug in via a
+small adapter; see
+[`examples/10-langfuse-observability`](../examples/10-langfuse-observability.md)
+for the runnable demo plus the adapter shape.
+
+!!! note "Langfuse SDK version compatibility"
+
+    No specific `langfuse` SDK version is validated in CI as of this
+    release. The Protocol mirrors the SDK's documented low-level
+    `trace` / `span` / `generation` shape, but the SDK has shifted
+    between major versions (v2 → v3 introduced API changes). A
+    follow-on release pins a tested `[langfuse]` extras range and
+    ships a runtime `isinstance` check confirming the SDK satisfies
+    the Protocol. Until then, treat production wire-up as a "verify
+    in your own environment" path: bring the langfuse version your
+    stack already uses, run a smoke trace, and write a thin adapter
+    if any kwargs don't line up.
+
+### What Langfuse sees
+
+- **Trace ID = invocation ID.** The Trace's `id` is the OA
+  `invocation_id` verbatim, so cross-system lookup by invocation_id
+  finds the Langfuse Trace directly (spec §8.4.1).
+- **Trace name.** Defaults to the entry-node name (spec §8.6
+  fallback). Caller-supplied invocation labels land in PR 4
+  (proposal 0034).
+- **Per-observation metadata.** Each Span / Generation carries
+  `namespace`, `step`, `attempt_index`, optional `fan_out_index` /
+  `branch_name`, and the `correlation_id` cross-cutting join key
+  (spec §8.5).
+- **Generation fields.** LLM calls become Generation observations
+  with `model`, `model_parameters` (the `gen_ai.request.*` request
+  parameters lifted by inclusion per §8.4.3), `usage` (input /
+  output / total tokens), and `metadata.finish_reason` /
+  `system` / `response_model` / `response_id`.
+
+### Payload + truncation
+
+`disable_llm_payload` mirrors the OTel observer's flag — defaults
+to `True` for the same privacy reason. Flip to `False` to populate
+`generation.input` / `output` / `metadata.request_extras` from the
+LLM event payload.
+
+```python
+observer = LangfuseObserver(
+    client=client,
+    disable_llm_payload=False,
+    payload_byte_cap=65536,
+)
+```
+
+When a payload exceeds `payload_byte_cap`, the observer emits the
+serialized form with the §5.5.5 truncation marker
+(`…[truncated, M bytes total]`) verbatim as a raw string instead of
+parsing back to native shape. The unparseable JSON IS the
+truncation signal in the Langfuse UI.
+
+### Prompt linkage
+
+When a Prompt's source backend exposes a Langfuse Prompt entity
+reference under `Prompt.observability_entities['langfuse_prompt']`,
+the Generation observation links to that entity natively (spec
+§8.4.4 case 1). Backends that don't surface a Langfuse reference
+(filesystem, in-memory, etc.) leave the Generation with
+`metadata.prompt` populated but no entity link (case 2).
+
+### Composition with OTel
+
+The two observers are independent §6 event consumers and can be
+attached together. They share the `correlation_id` as the
+cross-backend join key — find a slow Generation in Langfuse, search
+for its `correlation_id` in OTel logs, see the surrounding
+infrastructure activity.
+
+```python
+otel_observer = OTelObserver(span_processor=...)
+langfuse_observer = LangfuseObserver(client=langfuse_client)
+graph.attach_observer(otel_observer)
+graph.attach_observer(langfuse_observer)
+```
+
+Each observer's `disable_llm_spans` / `disable_llm_payload` flag is
+independent; one MAY emit while the other suppresses.
