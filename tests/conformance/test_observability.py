@@ -103,6 +103,9 @@ _SUPPORTED_FIXTURES = frozenset(
         "019-otel-llm-genai-semconv",
         "020-otel-llm-genai-system-override",
         "021-otel-llm-disable-genai-semconv",
+        # v0.24.0 — proposal 0032 (three new declared RuntimeConfig
+        # fields surfaced as gen_ai.request.* attributes).
+        "025-otel-llm-request-params-extended",
     }
 )
 
@@ -177,6 +180,7 @@ async def test_observability_fixture(fixture_path: Path) -> None:
         "019-otel-llm-genai-semconv",
         "020-otel-llm-genai-system-override",
         "021-otel-llm-disable-genai-semconv",
+        "025-otel-llm-request-params-extended",
     }:
         await _run_llm_payload_fixture(spec)
     else:
@@ -1853,7 +1857,18 @@ async def _run_llm_payload_case(case: Mapping[str, Any]) -> None:
     if config_spec:
         extras = cast("dict[str, Any]", config_spec.get("extras") or {})
         runtime_config_kwargs: dict[str, Any] = {
-            k: v for k, v in config_spec.items() if k in {"temperature", "max_tokens", "top_p", "seed"}
+            k: v
+            for k, v in config_spec.items()
+            if k
+            in {
+                "temperature",
+                "max_tokens",
+                "top_p",
+                "seed",
+                "frequency_penalty",
+                "presence_penalty",
+                "stop_sequences",
+            }
         }
         runtime_config_kwargs.update(extras)
         runtime_config = RuntimeConfig(**runtime_config_kwargs)

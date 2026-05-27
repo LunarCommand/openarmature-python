@@ -396,8 +396,9 @@ tools). Emitted alongside the OA namespace:
 - `gen_ai.request.model` / `gen_ai.response.model` — the bound
   model and (when the provider returns one) the more-specific
   identifier in the response body.
-- `gen_ai.request.temperature` / `max_tokens` / `top_p` / `seed`
-  — only emitted for fields the caller actually set; absence on
+- `gen_ai.request.temperature` / `max_tokens` / `top_p` / `seed` /
+  `frequency_penalty` / `presence_penalty` / `stop_sequences` —
+  only emitted for fields the caller actually set; absence on
   the span means "not supplied," distinct from a zero value.
 - `gen_ai.usage.input_tokens` / `output_tokens` — token counts.
 - `gen_ai.response.finish_reasons` — single-element string array.
@@ -429,7 +430,8 @@ This surfaces three attributes:
   with empty content.
 - `openarmature.llm.request.extras` — JSON-encoded `RuntimeConfig`
   extras bag (provider-specific pass-through fields like
-  `frequency_penalty`). Omitted when empty.
+  `repetition_penalty` for vLLM, or `top_k` for HuggingFace
+  endpoints). Omitted when empty.
 
 **Default-off is deliberate.** The payload may contain PII the user
 hasn't audited; opting in is a separate decision from opting into

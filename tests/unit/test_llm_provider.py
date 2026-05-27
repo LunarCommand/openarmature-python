@@ -462,3 +462,44 @@ async def test_complete_negative_usage_surfaces_as_invalid_response() -> None:
             await provider.complete([UserMessage(content="hi")])
     finally:
         await provider.aclose()
+
+
+# RuntimeConfig.from_partial — Python ergonomic introduced alongside
+# proposal 0032. Wire-layer null-skip already drops Nones; this just
+# lets callers splat a partial dict without filtering at the call site.
+
+
+def test_runtime_config_from_partial_drops_nones() -> None:
+    from openarmature.llm import RuntimeConfig
+
+    config = RuntimeConfig.from_partial(temperature=0.7, max_tokens=None, top_p=0.9, seed=None)
+
+    assert config.temperature == 0.7
+    assert config.top_p == 0.9
+    # max_tokens and seed default to None on a base RuntimeConfig, so
+    # `is None` alone doesn't prove the drop. model_fields_set carries
+    # only explicitly-set fields, so its absence proves from_partial
+    # filtered the None kwargs before __init__ ran.
+    assert "max_tokens" not in config.model_fields_set
+    assert "seed" not in config.model_fields_set
+    assert config.max_tokens is None
+    assert config.seed is None
+
+
+def test_runtime_config_from_partial_forwards_extras() -> None:
+    from openarmature.llm import RuntimeConfig
+
+    config = RuntimeConfig.from_partial(temperature=0.5, repetition_penalty=1.05, top_k=None)
+
+    assert config.temperature == 0.5
+    assert (config.model_extra or {}) == {"repetition_penalty": 1.05}
+
+
+def test_runtime_config_from_partial_empty() -> None:
+    from openarmature.llm import RuntimeConfig
+
+    config = RuntimeConfig.from_partial()
+
+    assert config.temperature is None
+    assert config.frequency_penalty is None
+    assert config.stop_sequences is None

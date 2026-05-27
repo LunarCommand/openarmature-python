@@ -423,6 +423,11 @@ class OpenAIProvider:
         if tools:
             body["tools"] = [_tool_to_wire(t) for t in tools]
         if config is not None:
+            # Per spec §6 null-skip: each declared field with value
+            # ``None`` is omitted from the wire body. Same-name keys
+            # for the pre-0032 four; same-name for frequency_penalty /
+            # presence_penalty per §8.1; ``stop_sequences`` renames to
+            # OpenAI's body key ``stop`` per §8.1's only rename.
             if config.temperature is not None:
                 body["temperature"] = config.temperature
             if config.max_tokens is not None:
@@ -431,9 +436,15 @@ class OpenAIProvider:
                 body["top_p"] = config.top_p
             if config.seed is not None:
                 body["seed"] = config.seed
+            if config.frequency_penalty is not None:
+                body["frequency_penalty"] = config.frequency_penalty
+            if config.presence_penalty is not None:
+                body["presence_penalty"] = config.presence_penalty
+            if config.stop_sequences is not None:
+                body["stop"] = config.stop_sequences
             # Pass-through any provider-specific extras (extra="allow"
-            # on RuntimeConfig); spec §6 permits implementations to
-            # accept additional fields.
+            # on RuntimeConfig); spec §6 mandates implementations MUST
+            # accept and forward undeclared fields untouched.
             extras = config.model_extra or {}
             for k, v in extras.items():
                 body.setdefault(k, v)
@@ -1111,6 +1122,15 @@ def _request_params_from_config(config: RuntimeConfig | None) -> dict[str, Any]:
         out["top_p"] = config.top_p
     if config.seed is not None:
         out["seed"] = config.seed
+    # Three fields promoted in proposal 0032; surfaced under their
+    # cross-vendor declared names so the observer emits
+    # gen_ai.request.{frequency_penalty,presence_penalty,stop_sequences}.
+    if config.frequency_penalty is not None:
+        out["frequency_penalty"] = config.frequency_penalty
+    if config.presence_penalty is not None:
+        out["presence_penalty"] = config.presence_penalty
+    if config.stop_sequences is not None:
+        out["stop_sequences"] = config.stop_sequences
     return out
 
 
