@@ -227,6 +227,15 @@ class LangfuseClient(Protocol):
         :class:`InMemoryLangfuseClient` has no buffer and returns
         ``True`` immediately; SDK adapters delegate to the underlying
         client's flush.
+
+        **Deadline honor is best-effort.** Adapters wrapping SDKs
+        that don't expose a timeout-propagation surface (the v4
+        Langfuse SDK is one such case — its ``flush()`` blocks on the
+        SDK's own internal defaults) may ignore ``timeout_ms`` and
+        return ``True`` once the underlying call returns. Callers
+        with a hard deadline should layer their own wall-clock guard
+        around this method rather than relying solely on the return
+        value.
         """
         ...
 

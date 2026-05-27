@@ -114,6 +114,26 @@ def test_adapter_update_trace_merges_into_cache() -> None:
     assert cached["metadata"] == {"key1": "v1", "key2": "v2"}
 
 
+def test_adapter_force_flush_delegates_to_client() -> None:
+    # force_flush() must invoke the wrapped SDK's flush() so callers
+    # in fast-teardown harnesses get the SDK's internal drain
+    # (OTel TracerProvider.force_flush + score/media queue joins).
+    # Mock(wraps=...) lets us assert delegation without simulating
+    # the SDK's full surface.
+    from unittest.mock import Mock
+
+    real_client = _dummy_client()
+    wrapped = Mock(wraps=real_client)
+    adapter = LangfuseSDKAdapter(wrapped)
+
+    assert adapter.force_flush() is True
+    wrapped.flush.assert_called_once_with()
+
+    # timeout_ms is accepted but unused per the documented contract.
+    assert adapter.force_flush(timeout_ms=1_000) is True
+    assert wrapped.flush.call_count == 2
+
+
 # ---------------------------------------------------------------------------
 # Integration test against real Langfuse Cloud (opt-in)
 # ---------------------------------------------------------------------------
@@ -173,11 +193,12 @@ async def test_adapter_against_real_langfuse_cloud() -> None:
     await graph.invoke(_S())
     await graph.drain()
     observer.shutdown()
-    # ``client.shutdown()`` is the synchronous drain — flush() returns
-    # immediately while the OTel BatchSpanProcessor exports in
-    # background, and the test process exits before that finishes.
-    # shutdown() blocks until all spans are exported (or the
-    # exporter's shutdown timeout elapses).
+    # Use ``client.shutdown()`` rather than ``client.flush()`` here:
+    # both block on the SDK's internal drain (OTel's force_flush plus
+    # the score/media queue joins), but shutdown() also tears down
+    # the resource manager so the test process exits cleanly. flush()
+    # is the appropriate call from a long-lived process that wants
+    # to drain without releasing SDK resources.
     client.shutdown()
     # Manual check: open the trace in the dashboard and confirm
     # "step_a" + "step_b" appear as Span observations under one Trace.
