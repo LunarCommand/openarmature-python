@@ -328,6 +328,16 @@ class LangfuseSDKAdapter:
         )
         return _SpanHandle(obs)
 
+    def force_flush(self, timeout_ms: int = 30_000) -> bool:
+        # The v4 SDK's flush() returns ``None`` synchronously but
+        # internally waits for the OTel BatchSpanProcessor to drain.
+        # No timeout parameter is exposed on the SDK call, so we
+        # ignore ``timeout_ms`` here and rely on the SDK's own
+        # default. Returns True if flush() completes without raising.
+        del timeout_ms
+        self._client.flush()
+        return True
+
     def _start_observation(
         self,
         *,

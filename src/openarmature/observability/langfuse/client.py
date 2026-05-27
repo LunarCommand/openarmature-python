@@ -217,6 +217,19 @@ class LangfuseClient(Protocol):
         prompt: Any = None,
     ) -> LangfuseGenerationHandle: ...
 
+    def force_flush(self, timeout_ms: int = 30_000) -> bool:
+        """Flush any pending outbound buffer in the underlying sink.
+
+        Returns ``True`` when the flush completes within the deadline,
+        ``False`` otherwise. The semantics mirror OTel's
+        ``TracerProvider.force_flush``: cover the export-buffer half
+        of fast-teardown races. The bundled
+        :class:`InMemoryLangfuseClient` has no buffer and returns
+        ``True`` immediately; SDK adapters delegate to the underlying
+        client's flush.
+        """
+        ...
+
 
 # Concrete in-memory implementation ---------------------------------------
 # Used by tests and the conformance harness. Stores everything the
@@ -406,6 +419,13 @@ class InMemoryLangfuseClient:
         )
         trace.observations.append(observation)
         return _InMemoryGenerationHandle(observation=observation)
+
+    def force_flush(self, timeout_ms: int = 30_000) -> bool:
+        # In-memory recorder has no outbound buffer; every observation
+        # is captured synchronously on its create call. The ``timeout_ms``
+        # parameter is accepted for Protocol compatibility but unused.
+        del timeout_ms
+        return True
 
     def _get_trace(self, trace_id: str) -> LangfuseTrace:
         trace = self.traces.get(trace_id)

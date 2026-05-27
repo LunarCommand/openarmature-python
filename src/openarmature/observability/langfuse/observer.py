@@ -741,6 +741,24 @@ class LangfuseObserver:
         ):
             self._close_subgraph_observation(inv_state, prefix)
 
+    def force_flush(self, timeout_ms: int = 30_000) -> bool:
+        """Flush pending observations through the underlying client.
+
+        Returns ``True`` when the client's flush completes within the
+        deadline, ``False`` otherwise. Mirrors the OTel observer's
+        ``force_flush`` surface — distinct from
+        :meth:`~openarmature.graph.compiled.CompiledGraph.drain` (which
+        covers the engine's observer-event queue): this method covers
+        the outbound buffer of the Langfuse client (the SDK's OTel
+        BatchSpanProcessor when wrapped via :class:`LangfuseSDKAdapter`).
+
+        Useful in fast-teardown harnesses (CLI one-shots, serverless
+        functions, ASGI lifespan shutdown) where the SDK's
+        BatchSpanProcessor export thread would otherwise be cut off
+        before its buffer drains.
+        """
+        return self.client.force_flush(timeout_ms=timeout_ms)
+
     def shutdown(self) -> None:
         """Drain every in-flight invocation. Use for long-lived
         observers shared across requests; CLI / one-shot processes
