@@ -1,0 +1,151 @@
+# Conformance manifest for openarmature-python.
+#
+# Records which openarmature-spec proposals are implemented in this
+# package, and starting at which release version. Intended to be read
+# by external consumers (notably the openarmature-spec docs build,
+# which surfaces a per-implementation status column on the proposals
+# index page).
+#
+# Stable URL (read-only, fetched at docs-build time):
+#   https://raw.githubusercontent.com/LunarCommand/openarmature-python/main/conformance.toml
+#
+# Maintenance: keep in sync with CHANGELOG.md. The CI guard at
+# scripts/check_conformance_manifest.py validates this file against the
+# pinned spec submodule's proposals/ directory on every PR and release
+# build; any Accepted proposal lacking an entry (or any entry pointing
+# at a non-existent / non-Accepted proposal) fails the build.
+#
+# Scope: this file lists ONLY proposals visible in the pinned spec
+# submodule (openarmature-spec at the SHA pinned by this repo's
+# submodule). Proposals accepted on the spec's main branch after this
+# repo's last spec bump are intentionally absent — surfacing the gap
+# between pinned-spec and spec-head is the consumer's job (e.g., the
+# spec docs site computes the difference and renders accordingly).
+#
+# Convention: this file is only updated as part of release PRs. Between
+# releases, the manifest reflects the most-recently-published version
+# so external readers never see a `since` referring to an unreleased
+# pre-tag commit.
+
+[manifest]
+implementation = "openarmature-python"
+spec_pin = "v0.22.1"
+
+# Status values:
+#   implemented   — shipped behavior matches the proposal's contract
+#   partial       — partial impl; consult `note` for what's missing
+#   textual-only  — accepted proposal is purely textual (reframe,
+#                   clarification, template) with no module-level
+#                   change required; CHANGELOG note explains why
+#   not-yet       — accepted in spec, not yet shipped in this package
+#
+# Drafts and Superseded proposals are deliberately absent from this
+# file. The CI guard requires entries only for proposals whose spec
+# header reads `Status: Accepted`.
+
+[proposals."0001"]
+status = "implemented"
+since = "0.5.0"
+
+[proposals."0002"]
+status = "implemented"
+since = "0.5.0"
+
+[proposals."0003"]
+status = "implemented"
+since = "0.5.0"
+
+[proposals."0004"]
+status = "implemented"
+since = "0.5.0"
+
+[proposals."0005"]
+status = "implemented"
+since = "0.5.0"
+
+[proposals."0006"]
+status = "implemented"
+since = "0.5.0"
+
+[proposals."0007"]
+status = "implemented"
+since = "0.5.0"
+
+[proposals."0008"]
+status = "implemented"
+since = "0.5.0"
+
+[proposals."0009"]
+status = "implemented"
+since = "0.9.0"
+
+[proposals."0010"]
+status = "implemented"
+since = "0.9.0"
+
+[proposals."0011"]
+status = "implemented"
+since = "0.6.0"
+
+[proposals."0012"]
+status = "implemented"
+since = "0.5.0"
+
+[proposals."0013"]
+status = "implemented"
+since = "0.5.0"
+
+[proposals."0014"]
+status = "implemented"
+since = "0.6.0"
+
+[proposals."0015"]
+status = "implemented"
+since = "0.6.0"
+
+[proposals."0016"]
+status = "implemented"
+since = "0.6.0"
+
+[proposals."0017"]
+status = "implemented"
+since = "0.6.0"
+
+[proposals."0018"]
+status = "implemented"
+since = "0.6.0"
+
+[proposals."0019"]
+status = "textual-only"
+since = "0.9.0"
+note = "Purely textual reframe of llm-provider §8 as a catalog of wire-format mappings (OpenAI-compatible body nested under §8.1). No module-level change required."
+
+[proposals."0024"]
+status = "implemented"
+since = "0.8.0"
+
+[proposals."0025"]
+status = "implemented"
+since = "0.9.0"
+
+[proposals."0026"]
+status = "textual-only"
+since = "0.9.0"
+note = "Purely textual §8 framing paragraph; the existing OpenAI §8.1 mapping is the template's reference shape, so no module-level work was needed."
+
+[proposals."0027"]
+status = "implemented"
+since = "0.9.0"
+
+[proposals."0028"]
+status = "implemented"
+since = "0.9.0"
+
+[proposals."0029"]
+status = "implemented"
+since = "0.9.0"
+
+[proposals."0030"]
+status = "textual-only"
+since = "0.9.0"
+note = "Drain snapshot semantic and timeout-input validation already implemented as part of the proposal 0010 impl PR (v0.9.0); no additional module-level work needed."
