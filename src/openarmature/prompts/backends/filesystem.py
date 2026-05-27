@@ -68,12 +68,15 @@ class FilesystemPromptBackend:
         # Unified mode: load and parse at construction so the cost is
         # paid once. Backend instances are typically long-lived
         # process-wide singletons, so a single read on startup is
-        # cheaper than re-reading per fetch.
-        self._unified_sampling: dict[str, dict[str, Any]] | None = None
+        # cheaper than re-reading per fetch. Per-prompt values typed
+        # ``Any`` rather than ``dict[str, Any]`` so the runtime
+        # isinstance guard in ``_resolve_sampling`` remains meaningful
+        # — JSON files can have non-dict values under top-level keys.
+        self._unified_sampling: dict[str, Any] | None = None
         if sampling_source == "unified":
             self._unified_sampling = self._load_unified_configs()
 
-    def _load_unified_configs(self) -> dict[str, dict[str, Any]]:
+    def _load_unified_configs(self) -> dict[str, Any]:
         path = self._root / "prompt_configs.json"
         if not path.exists():
             return {}
@@ -91,7 +94,7 @@ class FilesystemPromptBackend:
                 name="",
                 label="",
             )
-        return cast(dict[str, dict[str, Any]], data)
+        return cast(dict[str, Any], data)
 
     def _template_path(self, name: str, label: str) -> Path:
         if self._layout == "flat":
@@ -111,7 +114,15 @@ class FilesystemPromptBackend:
             raw = self._unified_sampling.get(name)
             if raw is None:
                 return None
-            return _sampling_from_dict(raw)
+            if not isinstance(raw, dict):
+                raise PromptStoreUnavailable(
+                    f"unified prompt_configs.json entry for {name!r} is not a JSON object "
+                    f"(got {type(raw).__name__})",
+                    name=name,
+                    label="",
+                )
+            entry = cast(dict[str, Any], raw)
+            return _sampling_from_dict(entry)
         # per-prompt-sidecar
         path = self._sidecar_path(name, label)
         if not path.exists():

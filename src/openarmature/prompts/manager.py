@@ -207,8 +207,14 @@ class PromptManager:
             variables=variables,
             fetched_at=prompt.fetched_at,
             rendered_at=datetime.now(UTC),
-            sampling=prompt.sampling,
-            observability_entities=prompt.observability_entities,
+            # Defensive copy of the two mutable propagated fields.
+            # Caching backends re-serve the same Prompt instance, so
+            # aliasing would let a caller's mutation of the result
+            # corrupt the backend's cached state.
+            sampling=prompt.sampling.model_copy() if prompt.sampling is not None else None,
+            observability_entities=(
+                dict(prompt.observability_entities) if prompt.observability_entities is not None else None
+            ),
         )
 
     async def get(
