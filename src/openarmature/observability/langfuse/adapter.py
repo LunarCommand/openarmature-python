@@ -8,7 +8,11 @@
 #   - v4 has no explicit `client.trace(...)` — traces are auto-created
 #     when the first observation starts. We cache the trace name +
 #     metadata on `.trace()` and apply them via `propagate_attributes`
-#     around the first observation under that trace_id.
+#     around EVERY observation under that trace_id. Propagating on
+#     every observation (not just the first) keeps v4's
+#     last-attribute-wins display logic from clobbering the trace's
+#     display name when later observations land without the attribute
+#     set.
 #   - v4 unifies span and generation under `start_observation(as_type=)`.
 #     The adapter routes `.span()` to `as_type="span"` and
 #     `.generation()` to `as_type="generation"`.
@@ -16,14 +20,14 @@
 #     (not Dict[str, Any]). Non-string values are JSON-serialized at
 #     the boundary.
 #
-# `update_trace` is best-effort. v4 doesn't expose a clean
-# post-creation trace-update SDK method — we can only mutate trace
-# fields via OTel attributes during observation creation. The current
-# OA LangfuseObserver doesn't actually invoke `update_trace` (caller-
-# supplied invocation-label lands in PR 4 via the
-# `propagate_attributes` path on first observation instead), so the
-# adapter no-ops it and updates the cached pending info in case some
-# future caller needs it before the trace materializes.
+# `update_trace` merges into the persistent trace_info cache so
+# subsequent observations under the trace_id pick up the new values
+# via `propagate_attributes`. Existing observations are NOT
+# retroactively updated. The current OA LangfuseObserver doesn't
+# actually invoke `update_trace` today — caller-supplied
+# invocation-label lands in PR 4 via the trace_info cache before the
+# first observation creates the trace — but the merge-then-propagate
+# path is wired for forward compat.
 
 """LangfuseSDKAdapter: bridge langfuse>=4.6 onto the LangfuseClient Protocol."""
 

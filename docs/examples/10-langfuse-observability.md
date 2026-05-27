@@ -145,8 +145,10 @@ The adapter bridges `langfuse>=4.6,<5`'s unified `start_observation`
 API onto OA's four-method `LangfuseClient` Protocol. v4 has no
 explicit trace creation (traces are auto-created from observations);
 the adapter caches trace info from `.trace()` and applies it via
-`propagate_attributes` around the first observation, so trace name
-+ metadata land on the trace as Langfuse renders it.
+`propagate_attributes` around EVERY observation under that trace_id.
+Propagating on every observation keeps v4's last-attribute-wins
+display logic from clobbering the trace's display name when later
+observations land without the attribute set.
 
 Validated against `langfuse>=4.6,<5`. v2.x and v3.x are NOT
 supported — supply your own adapter against the same four-method
