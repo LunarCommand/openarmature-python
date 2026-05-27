@@ -306,6 +306,12 @@ class LangfuseObserver:
                 if len(prefix) > len(event.namespace) and prefix[: len(event.namespace)] == event.namespace:
                     self._close_fan_out_instance_dispatch_observation(inv_state, prefix)
             inv_state.fan_out_parent_node_name.pop(event.namespace, None)
+            # Clear the detached-child-trace-ids accumulator for this
+            # fan-out node — cyclic execution that re-enters the same
+            # fan-out starts the next iteration with a fresh list
+            # rather than appending to the previous iteration's
+            # accumulator and overwriting the prior link metadata.
+            inv_state.detached_child_trace_ids.pop(event.namespace, None)
 
         key = self._key_for(event)
         observation = inv_state.open_observations.pop(key, None)
@@ -566,12 +572,18 @@ class LangfuseObserver:
             if sg is not None:
                 parent_observation_id = sg.handle.id
                 break
-        self.client.span(
+        # Zero-duration link observation in the main Trace — it
+        # exists only to surface the cross-Trace reference via
+        # metadata.detached_child_trace_ids; close it immediately so
+        # nothing perceives it as in-flight. Mirrors the OTel
+        # observer's synthetic-event zero-duration spans.
+        link_handle = self.client.span(
             trace_id=inv_state.trace_id,
             name=prefix[-1],
             metadata=link_metadata,
             parent_observation_id=parent_observation_id,
         )
+        link_handle.end()
         # Open the detached Trace + the dispatch observation that
         # subtree descendants parent under.
         detached_metadata: dict[str, Any] = {"detached_from_invocation_id": inv_state.trace_id}
@@ -685,6 +697,59 @@ class LangfuseObserver:
                 return observation
         return None
 
+    # ------------------------------------------------------------------
+    # Lifecycle: close_invocation / shutdown
+    # ------------------------------------------------------------------
+
+    def close_invocation(self, invocation_id: str) -> None:
+        """Drain still-open observations for ``invocation_id``.
+
+        Synthetic dispatch observations only close on cursor-move when
+        a subsequent event arrives with a different namespace prefix.
+        For a subgraph or fan-out that's the last subtree of an
+        invocation, no follow-up event triggers the close — this
+        method walks the per-invocation state and ends anything left
+        in child→parent order so the Langfuse-side observations don't
+        stay perpetually in-flight.
+
+        Idempotent: calling twice (or for an invocation_id with no
+        open state) is a no-op.
+        """
+        inv_state = self._inv_states.pop(invocation_id, None)
+        if inv_state is None:
+            return
+        # Order: deepest leaves first so parents see all children
+        # closed before they end. LLM observations → leaf nodes
+        # (sorted deepest-first by namespace length) → per-instance
+        # fan-out dispatches → subgraph dispatches.
+        for call_id in list(inv_state.open_llm_observations.keys()):
+            obs = inv_state.open_llm_observations.pop(call_id, None)
+            if obs is not None:
+                obs.handle.end()
+        for key in sorted(
+            inv_state.open_observations.keys(),
+            key=lambda k: -len(k[0]),
+        ):
+            obs = inv_state.open_observations.pop(key, None)
+            if obs is not None:
+                obs.handle.end()
+        for prefix in list(inv_state.fan_out_instance_observations.keys()):
+            self._close_fan_out_instance_dispatch_observation(inv_state, prefix)
+        for prefix in sorted(
+            inv_state.subgraph_observations.keys(),
+            key=lambda p: -len(p),
+        ):
+            self._close_subgraph_observation(inv_state, prefix)
+
+    def shutdown(self) -> None:
+        """Drain every in-flight invocation. Use for long-lived
+        observers shared across requests; CLI / one-shot processes
+        typically call this from a ``finally`` block alongside
+        ``compiled.drain()``.
+        """
+        for invocation_id in list(self._inv_states.keys()):
+            self.close_invocation(invocation_id)
+
     def _observation_metadata(self, event: NodeEvent, correlation_id: str | None) -> dict[str, Any]:
         # §8.4.2 observation-level mapping. Fields below mirror the
         # OTel observer's _node_attrs() output, renamed for Langfuse's
@@ -783,11 +848,16 @@ class LangfuseObserver:
         self, inv_state: _InvState, payload: LlmEventPayload
     ) -> str | None:
         # Calling-node identity comes from the payload (set at
-        # dispatch time per llm-provider §5.5). Try the exact-match
-        # leaf node first; if absent (LLM call fired from a wrapper
-        # node only, or the calling node already completed), fall
-        # back to the per-instance / subgraph dispatch chain, then to
-        # the leaf ancestor walk.
+        # dispatch time per llm-provider §5.5). Precedence:
+        #   1. Exact-match leaf node at the calling key.
+        #   2. Per-instance fan-out dispatch observation when the
+        #      call originated inside a fan-out instance.
+        #   3. Subgraph dispatch observations along the calling
+        #      namespace prefix, walked longest-prefix-first.
+        #   4. None — Trace becomes the implicit parent.
+        # The dispatch fallbacks cover the wrapped-call cases the
+        # exact-match miss would otherwise need a leaf-ancestor walk
+        # to handle.
         key: _StackKey = (
             payload.calling_namespace_prefix,
             payload.calling_attempt_index,

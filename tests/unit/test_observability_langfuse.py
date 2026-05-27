@@ -314,7 +314,7 @@ async def test_detached_fan_out_each_instance_gets_trace() -> None:
     # The fan-out node's metadata accumulates all 3 detached trace ids.
     link_ids = fan_node.metadata.get("detached_child_trace_ids")
     assert isinstance(link_ids, list)
-    assert set(cast("list[str]", link_ids)) == {t.id for t in detached_traces}
+    assert set(cast(list[str], link_ids)) == {t.id for t in detached_traces}
 
     # Each detached Trace has its own per-instance dispatch with a
     # worker observation under it.
@@ -322,3 +322,29 @@ async def test_detached_fan_out_each_instance_gets_trace() -> None:
         dispatch = _find_observation(t, "fan")
         worker = _find_observation(t, "worker")
         assert worker.parent_observation_id == dispatch.id
+
+
+async def test_subgraph_dispatch_observation_ended_on_invocation_close() -> None:
+    # Synthetic dispatch observations close on cursor-move; without
+    # the close_invocation drain a subgraph at the tail of an
+    # invocation would leave its dispatch in-flight forever. Verifies
+    # the drain path ends everything.
+    inner = (
+        GraphBuilder(_S)
+        .add_node("inner_a", lambda _s: _record("inner_a"))
+        .add_edge("inner_a", END)
+        .set_entry("inner_a")
+        .compile()
+    )
+    parent = GraphBuilder(_S).add_subgraph_node("sub", inner).add_edge("sub", END).set_entry("sub").compile()
+    graph, client, observer = _attach(parent)
+
+    await graph.invoke(_S())
+    await graph.drain()
+    # Without explicit close_invocation, the sub dispatch would still
+    # be in-flight (ended=False). Call shutdown() to drain.
+    observer.shutdown()
+
+    trace = next(iter(client.traces.values()))
+    for obs in trace.observations:
+        assert obs.ended, f"observation {obs.name!r} not ended after shutdown()"
