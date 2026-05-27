@@ -166,6 +166,14 @@ class LangfuseClient(Protocol):
         """
         ...
 
+    # The current observer doesn't invoke this method — it sets the
+    # Trace's full metadata + entry-node-name fallback at creation.
+    # The Protocol still declares it because the caller-supplied
+    # invocation-label path (proposal 0034, PR 4) may need to swap
+    # the trace name AFTER the first node event opens the Trace; in
+    # that case the observer calls update_trace mid-invocation to
+    # apply the label. SDK adapters implement this for forward
+    # compatibility with PR 4's wiring.
     def update_trace(
         self,
         *,

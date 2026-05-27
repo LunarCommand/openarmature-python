@@ -618,6 +618,19 @@ small adapter; see
 [`examples/10-langfuse-observability`](../examples/10-langfuse-observability.md)
 for the runnable demo plus the adapter shape.
 
+!!! note "Langfuse SDK version compatibility"
+
+    No specific `langfuse` SDK version is validated in CI as of this
+    release. The Protocol mirrors the SDK's documented low-level
+    `trace` / `span` / `generation` shape, but the SDK has shifted
+    between major versions (v2 → v3 introduced API changes). A
+    follow-on release pins a tested `[langfuse]` extras range and
+    ships a runtime `isinstance` check confirming the SDK satisfies
+    the Protocol. Until then, treat production wire-up as a "verify
+    in your own environment" path: bring the langfuse version your
+    stack already uses, run a smoke trace, and write a thin adapter
+    if any kwargs don't line up.
+
 ### What Langfuse sees
 
 - **Trace ID = invocation ID.** The Trace's `id` is the OA

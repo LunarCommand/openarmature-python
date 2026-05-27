@@ -233,12 +233,24 @@ class LangfuseObserver:
         return (event.namespace, event.attempt_index, event.fan_out_index)
 
     def _resolve_parent_observation_id(self, inv_state: _InvState, event: NodeEvent) -> str | None:
-        # Walk namespace ancestors looking for the innermost open
-        # observation; fall back to None (Trace becomes the parent).
-        # Subgraph dispatch / fan-out per-instance / detached-trace
-        # parenting are deferred from this version of the observer
-        # (no fixtures exercise them); future PRs add per-spec-§8.3
-        # synthetic dispatch observations.
+        # Walk namespace ancestors longest-prefix-first looking for the
+        # innermost open observation; fall back to None (Trace becomes
+        # the parent). The outer loop counts down from len(namespace)-1
+        # so the deepest matching ancestor wins.
+        #
+        # First-match-by-iteration is approximate when multiple open
+        # observations share the same namespace prefix at different
+        # _StackKey slots (multiple retry attempts, multiple fan-out
+        # instances). In practice retry middleware ends one attempt
+        # before opening the next, so concurrent same-namespace
+        # observations only arise under fan-out. Spec §8.3 mandates
+        # dedicated dispatch Span observations for subgraphs and
+        # per-instance fan-out spans; those land in a follow-on PR
+        # alongside dedicated subgraph_observations /
+        # fan_out_instance_observations maps mirroring the OTel
+        # observer's structure. Until then this resolver covers the
+        # linear-graph and basic-LLM cases the v0.23.0 conformance
+        # fixtures exercise.
         for prefix_len in range(len(event.namespace) - 1, 0, -1):
             prefix = event.namespace[:prefix_len]
             for key, observation in inv_state.open_observations.items():
@@ -461,11 +473,14 @@ class LangfuseObserver:
         return cast("dict[str, Any]", entities).get("langfuse_prompt")
 
     def _maybe_truncate_for_input(self, value: Any) -> Any:
-        # Returns the native value when it fits the cap, or the
-        # truncated string-with-marker when it doesn't. §8.7's
-        # "raw truncated string" rule: the unparseable JSON IS the
-        # truncation signal, surfacing the marker rather than faking
-        # a parse.
+        # Returns the native value (list of message dicts) when it
+        # fits the cap, or the truncated marker-bearing string when
+        # it doesn't. The list-or-str union return is intentional per
+        # spec §8.7: the unparseable JSON IS the truncation signal —
+        # surfacing the marker preserves the diagnostic without
+        # faking a parse, and the Langfuse UI renders the string view
+        # rather than the structured-input view. Callers MUST NOT
+        # assume the return value is JSON-parseable.
         serialized = self._serialize_payload_value(value)
         truncated = _truncate(serialized, self.payload_byte_cap)
         if truncated is None:
@@ -480,8 +495,11 @@ class LangfuseObserver:
 
     def _maybe_truncate_for_extras(self, value: dict[str, Any]) -> Any:
         # request_extras goes on metadata as a native dict when it
-        # fits; falls through to the raw truncated string when it
-        # doesn't, matching §8.7's parse-fallthrough story.
+        # fits, or the truncated marker-bearing string when it
+        # doesn't. The dict-or-str union return mirrors
+        # _maybe_truncate_for_input's intentional shape per spec §8.7:
+        # the unparseable JSON IS the truncation signal, and the
+        # Langfuse UI renders the string view in that case.
         serialized = self._serialize_payload_value(value)
         truncated = _truncate(serialized, self.payload_byte_cap)
         if truncated is None:

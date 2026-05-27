@@ -135,6 +135,15 @@ small adapter class that implements `LangfuseClient` and delegates to
 the SDK call-by-call. The Protocol surface is narrow — four methods —
 so the adapter is on the order of 40 lines.
 
+**No specific `langfuse` SDK version is validated in CI as of this
+release.** The Protocol matches the SDK's documented low-level shape,
+but `langfuse` has shifted between major versions (v2 → v3 introduced
+API changes). A follow-on release pins a tested `[langfuse]` extras
+range and a runtime `isinstance(client, LangfuseClient)` check; until
+then, smoke-trace in your own environment with whichever `langfuse`
+version your stack already uses and write a thin adapter if any
+kwargs don't line up.
+
 For prompt linkage: in production, the
 `Prompt.observability_entities['langfuse_prompt']` value is the SDK's
 own Prompt-entity object (returned by `langfuse_client.get_prompt(...)`)
