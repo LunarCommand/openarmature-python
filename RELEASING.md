@@ -40,6 +40,14 @@ changelog entry.
       release that changed user-visible behavior is reflected in the
       upcoming version's section. The date matches the day the rc tag
       is pushed (refresh it again at the real-release step).
+- [ ] **`conformance.toml` is current.** Any proposal whose impl
+      landed in this cycle has its `[proposals."NNNN"]` entry — either
+      newly added (set `since` to the version about to ship) or
+      adjusted (e.g., `not-yet` → `implemented`). If the pinned spec
+      submodule was bumped, also bump `[manifest].spec_pin` to the new
+      tag. The CI guard at `scripts/check_conformance_manifest.py`
+      enforces structural consistency, but it can't check that
+      semantic status reflects reality — read the diff manually.
 - [ ] **Docs sweep for stale references.** For each behavior change in
       the upcoming release, grep the docs for the old wording, file
       paths, and flag descriptions; reconcile in the same PR as the

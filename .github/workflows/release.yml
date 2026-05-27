@@ -84,6 +84,13 @@ jobs:
           )
           PY
 
+      - name: Validate conformance.toml against pinned spec
+        # Mirrors the equivalent step in ci.yml. Catches drift between
+        # conformance.toml and the pinned spec submodule's proposals/
+        # at release time as well as PR time, so a tag push that
+        # bypassed PR review still fails before publishing.
+        run: uv run python scripts/check_conformance_manifest.py
+
       - name: Lint (ruff check)
         run: uv run ruff check .
 

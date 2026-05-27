@@ -57,6 +57,14 @@ jobs:
         # ``tests/unit/test_observability_otel.py``.
         run: uv sync --frozen --all-extras --group examples
 
+      - name: Validate conformance.toml against pinned spec
+        # Catches drift between conformance.toml and the pinned spec
+        # submodule's proposals/. External readers (notably the
+        # openarmature-spec docs build) fetch this manifest to surface
+        # python's impl status on the proposals index page, so a stale
+        # entry quietly serves wrong data to the docs site.
+        run: uv run python scripts/check_conformance_manifest.py
+
       - name: Lint (ruff check)
         run: uv run ruff check .
 
