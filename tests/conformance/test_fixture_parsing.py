@@ -49,9 +49,20 @@ _DEFERRED_FIXTURES: dict[str, str] = {
     # typed directives. The Langfuse harness lands in the next PR of
     # the batch (PR 3) and adds the matching directive model;
     # deferring here keeps the parser tests passing in the meantime.
-    "observability/022-langfuse-basic-trace": "Langfuse harness lands in PR 3 (proposal 0031)",
-    "observability/023-langfuse-generation-rendering": "Langfuse harness lands in PR 3 (proposal 0031)",
-    "observability/024-langfuse-prompt-linkage": "Langfuse harness lands in PR 3 (proposal 0031)",
+    # Langfuse fixtures (022-024) use a directive shape the cross-
+    # capability parser doesn't model (`langfuse_observer:`,
+    # `expected.langfuse_trace`, `prompt_backend:`). The capability-
+    # specific harness at tests/conformance/test_observability_langfuse.py
+    # parses these directly via yaml + tailored helpers.
+    "observability/022-langfuse-basic-trace": (
+        "Langfuse shape models live in the dedicated test_observability_langfuse harness"
+    ),
+    "observability/023-langfuse-generation-rendering": (
+        "Langfuse shape models live in the dedicated test_observability_langfuse harness"
+    ),
+    "observability/024-langfuse-prompt-linkage": (
+        "Langfuse shape models live in the dedicated test_observability_langfuse harness"
+    ),
     # proposal 0034 caller-supplied invocation metadata fixtures (PR 4).
     "observability/027-langfuse-caller-supplied-metadata": "Caller-metadata harness lands in PR 4 (0034)",
     "observability/028-caller-metadata-namespace-rejection": "Caller-metadata harness lands in PR 4 (0034)",

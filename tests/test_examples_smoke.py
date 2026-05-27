@@ -40,6 +40,7 @@ DEMOS = [
     "07-multimodal-prompt",
     "08-checkpointing-and-migration",
     "09-tool-use",
+    "10-langfuse-observability",
 ]
 
 

@@ -133,6 +133,7 @@ nav:
     - Multimodal prompt: examples/07-multimodal-prompt.md
     - Checkpointing and migration: examples/08-checkpointing-and-migration.md
     - Tool use: examples/09-tool-use.md
+    - Langfuse observability: examples/10-langfuse-observability.md
   - Model Providers:
     - model-providers/index.md
     - Authoring a Provider: model-providers/authoring.md
