@@ -46,6 +46,10 @@ class FixturePromptSpec(_StrictModel):
     version: str
     template: str
     template_hash: str
+    # Proposal 0033: optional typed sub-record + observability-entities
+    # mapping the mock backend attaches to the returned Prompt.
+    sampling: dict[str, Any] | None = None
+    observability_entities: dict[str, Any] | None = None
 
 
 class FixtureBackendSpec(_StrictModel):
@@ -54,8 +58,16 @@ class FixtureBackendSpec(_StrictModel):
     simulate_unavailable: bool = False
 
 
+class FixtureLabelResolverSpec(_StrictModel):
+    # Mapping shape per spec §7 informative example: `"default"` is
+    # the resolver's default-override (step 2 of the fallback chain);
+    # any other key is a per-name override (step 1).
+    mapping: dict[str, str]
+
+
 class FixtureManagerSpec(_StrictModel):
     backends: list[str]
+    label_resolver_ref: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -67,7 +79,15 @@ class BackendTarget(_StrictModel):
     backend: str
 
 
-CallTarget = BackendTarget | Literal["manager", "construct_prompt_group"]
+CallTarget = (
+    BackendTarget
+    | Literal[
+        "manager",
+        "secondary_manager",
+        "tertiary_manager",
+        "construct_prompt_group",
+    ]
+)
 
 
 class FixtureExpectedRaises(_PermissiveModel):
@@ -109,6 +129,10 @@ class FixtureCall(_StrictModel):
     # indicator (no separate operation field on the call).
     operation: Literal["fetch", "render", "get"] | None = None
     name: str | None = None
+    # `label` is optional per spec §6 v0.26.0: omitting it triggers
+    # the configured LabelResolver (step 2) or the spec fallback
+    # `"production"` (step 3). Distinct from ``label: null`` which
+    # YAML elides; pydantic still maps both to ``None``.
     label: str | None = None
     variables: dict[str, Any] | None = None
     # Render-only inputs — either an inline ``fetched_prompt`` (which
@@ -151,7 +175,20 @@ class FixtureExpectedResultEquivalence(_PermissiveModel):
     fields_must_differ: list[str] = []
 
 
-class FixtureExpectedTopLevel(_StrictModel):
+class FixtureExpectedTopLevel(_PermissiveModel):
+    """Top-level expected block.
+
+    Most fixtures set one or more of the typed sub-blocks below
+    (``prompt_group``, ``result_equivalence``, ``rendered_hash_*``).
+    Fixture 015 (label-resolver) introduces a capture-name-keyed
+    shape where each top-level key under ``expected:`` is a capture
+    name and the value is a dict of Prompt/PromptResult attributes
+    the harness MUST verify against the corresponding capture. Those
+    keys arrive on ``model_extra`` since the typed fields below don't
+    cover them; the runner walks ``model_extra`` to apply per-capture
+    assertions.
+    """
+
     prompt_group: FixtureExpectedPromptGroup | None = None
     result_equivalence: FixtureExpectedResultEquivalence | None = None
     # Some fixtures (012) have multiple result-equivalence blocks; keep
@@ -171,6 +208,25 @@ class FixtureExpectedTopLevel(_StrictModel):
 
 class PromptManagementFixture(_StrictModel):
     backends: list[FixtureBackendSpec]
+    # Fixture 016 uses a top-level ``cases:`` list to split into
+    # independent sub-cases that share the backends declaration but
+    # each have their own manager + calls. The runner walks the list
+    # and runs each case in declaration order; the per-case shape is
+    # the same as the top-level fixture (manager, calls, expected).
+    cases: list[dict[str, Any]] | None = None
     manager: FixtureManagerSpec | None = None
-    calls: list[FixtureCall]
+    calls: list[FixtureCall] = []
+    # Named LabelResolver specs; managers reference them by key name
+    # via ``label_resolver_ref``. Fixture 015 introduces three named
+    # slots — the primary `label_resolver` plus a `tertiary_label_resolver`
+    # for the no-default branch. Future fixtures MAY add more slots
+    # here; the harness resolves refs by attribute lookup.
+    label_resolver: FixtureLabelResolverSpec | None = None
+    tertiary_label_resolver: FixtureLabelResolverSpec | None = None
+    # Fixture 015's multi-manager shape. Each `<prefix>_manager` /
+    # `<prefix>_calls` pair runs independently with shared backends.
+    secondary_manager: FixtureManagerSpec | None = None
+    secondary_calls: list[FixtureCall] = []
+    tertiary_manager: FixtureManagerSpec | None = None
+    tertiary_calls: list[FixtureCall] = []
     expected: FixtureExpectedTopLevel | None = None

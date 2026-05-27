@@ -420,3 +420,126 @@ async def test_manager_render_signature_returns_user_message() -> None:
     assert isinstance(result.messages[0], UserMessage)
     msg_content: Any = result.messages[0].content
     assert msg_content == "Hello, Alice!"
+
+
+# Wish 5 (proposal 0033 python-side ergonomic): the StrictUndefined
+# default matches spec §8 (was §7), but callers MAY opt out by passing
+# a different Jinja Undefined subclass at PromptManager construction.
+
+
+def test_manager_jinja_undefined_opt_out_renders_empty_for_missing_var() -> None:
+    import jinja2
+
+    from openarmature.prompts import PromptManager
+
+    prompt = Prompt(
+        name="opt_out",
+        version="v1",
+        label="production",
+        template="Hello, {{ user }}!",
+        template_hash="sha256:opt-out",
+        fetched_at=datetime.now(UTC),
+    )
+    manager = PromptManager(_StubBackend(prompt), jinja_undefined=jinja2.Undefined)
+    result = manager.render(prompt, {})  # `user` deliberately omitted
+    msg_content: Any = result.messages[0].content
+    # Default Jinja Undefined renders to empty string; StrictUndefined
+    # would have raised PromptRenderError here.
+    assert msg_content == "Hello, !"
+
+
+# Wish 1 (proposal 0033 python-side ergonomic): FilesystemPromptBackend
+# accepts a ``layout`` constructor flag. ``per-label`` (default) keeps
+# v0.5.0 behavior; ``flat`` reads `<root>/<name>.j2` ignoring label and
+# returns the requested label on the resulting Prompt verbatim.
+
+
+async def test_filesystem_backend_flat_layout(tmp_path: Path) -> None:
+    (tmp_path / "greet.j2").write_text("Hello, {{ user }}!", encoding="utf-8")
+    backend = FilesystemPromptBackend(tmp_path, layout="flat")
+
+    # Both label requests return the same template; .label echoes the request.
+    p_prod = await backend.fetch("greet", "production")
+    p_stage = await backend.fetch("greet", "staging")
+
+    assert p_prod.template == p_stage.template == "Hello, {{ user }}!"
+    assert p_prod.label == "production"
+    assert p_stage.label == "staging"
+
+
+# Spec §5 informative filesystem-sidecar convention. The
+# FilesystemPromptBackend opts in via ``sampling_source``.
+
+
+async def test_filesystem_backend_per_prompt_sidecar(tmp_path: Path) -> None:
+    (tmp_path / "production").mkdir()
+    (tmp_path / "production" / "summarize.j2").write_text("Summarize: {{ text }}", encoding="utf-8")
+    (tmp_path / "production" / "summarize.config.json").write_text(
+        '{"temperature": 0.0, "max_tokens": 256, "extras": {"repetition_penalty": 1.05}}',
+        encoding="utf-8",
+    )
+
+    backend = FilesystemPromptBackend(tmp_path, sampling_source="per-prompt-sidecar")
+    prompt = await backend.fetch("summarize", "production")
+
+    assert prompt.sampling is not None
+    assert prompt.sampling.temperature == 0.0
+    assert prompt.sampling.max_tokens == 256
+    # Vendor extra rides through the extras-allow bag.
+    assert (prompt.sampling.model_extra or {}).get("repetition_penalty") == 1.05
+
+
+async def test_filesystem_backend_unified_sampling(tmp_path: Path) -> None:
+    (tmp_path / "production").mkdir()
+    (tmp_path / "production" / "classify.j2").write_text("Classify: {{ topic }}", encoding="utf-8")
+    (tmp_path / "production" / "extract.j2").write_text("Extract: {{ text }}", encoding="utf-8")
+    (tmp_path / "prompt_configs.json").write_text(
+        '{"classify": {"temperature": 0.0}, "extract": {"temperature": 0.7, "max_tokens": 1024}}',
+        encoding="utf-8",
+    )
+
+    backend = FilesystemPromptBackend(tmp_path, sampling_source="unified")
+
+    classify = await backend.fetch("classify", "production")
+    extract = await backend.fetch("extract", "production")
+
+    assert classify.sampling is not None
+    assert classify.sampling.temperature == 0.0
+    assert extract.sampling is not None
+    assert extract.sampling.max_tokens == 1024
+
+
+# LabelResolver fallback chain — covered by fixture 015 end-to-end,
+# but the resolver class is python-only and a focused unit test
+# documents the precedence rules in code.
+
+
+def test_mapping_label_resolver_per_name_override() -> None:
+    from openarmature.prompts import MappingLabelResolver
+
+    resolver = MappingLabelResolver({"default": "production", "experimental": "staging"})
+    assert resolver.resolve("experimental") == "staging"
+
+
+def test_mapping_label_resolver_default_override() -> None:
+    from openarmature.prompts import MappingLabelResolver
+
+    resolver = MappingLabelResolver({"default": "canary", "other": "staging"})
+    assert resolver.resolve("anything-not-listed") == "canary"
+
+
+def test_mapping_label_resolver_spec_fallback_when_no_default() -> None:
+    from openarmature.prompts import MappingLabelResolver
+
+    resolver = MappingLabelResolver({"experimental": "staging"})
+    assert resolver.resolve("anything-not-listed") == "production"
+
+
+class _StubBackend:
+    """Minimal PromptBackend that returns a single canned prompt."""
+
+    def __init__(self, prompt: Prompt) -> None:
+        self._prompt = prompt
+
+    async def fetch(self, name: str, label: str = "production") -> Prompt:
+        return self._prompt

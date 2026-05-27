@@ -8,6 +8,21 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field
 
 from openarmature.llm.messages import Message
+from openarmature.llm.response import RuntimeConfig
+
+
+# SamplingConfig mirrors RuntimeConfig's declared-fields-plus-extras
+# shape so `prompt.sampling` splats directly into `provider.complete()`
+# without per-field translation (spec §12 cross-spec touchpoint;
+# proposal 0033). Subclass rather than alias so the type system
+# distinguishes the two names — a fetch returning
+# ``SamplingConfig | None`` is meaningfully different in signatures
+# from a provider call's ``RuntimeConfig`` argument. The subclass is
+# empty today; future divergence (e.g., fields meaningful for prompts-
+# at-rest but not for direct provider calls) lands on SamplingConfig
+# without touching RuntimeConfig.
+class SamplingConfig(RuntimeConfig):
+    """Per-prompt sampling configuration. Shape-compatible with ``RuntimeConfig``."""
 
 
 class Prompt(BaseModel):
@@ -32,6 +47,12 @@ class Prompt(BaseModel):
             When a caching backend serves a cached result,
             ``fetched_at`` MUST reflect the original fetch time, not
             the cache hit time.
+        sampling: Optional per-prompt sampling configuration. Splats
+            into ``provider.complete(config=...)`` without translation.
+        observability_entities: Optional backend-keyed references to
+            first-class entities the prompt has been registered as in
+            observability backends. Spec-normative key:
+            ``langfuse_prompt`` (the Langfuse SDK Prompt-entity ref).
         metadata: Optional backend-supplied metadata.
     """
 
@@ -43,6 +64,8 @@ class Prompt(BaseModel):
     template: str
     template_hash: str
     fetched_at: datetime
+    sampling: SamplingConfig | None = None
+    observability_entities: dict[str, Any] | None = None
     metadata: dict[str, Any] | None = None
 
 
@@ -87,3 +110,7 @@ class PromptResult(BaseModel):
     variables: dict[str, Any]
     fetched_at: datetime
     rendered_at: datetime
+    # Per spec §4: propagated verbatim from the source Prompt.
+    # Rendering does NOT modify or reinterpret either field.
+    sampling: SamplingConfig | None = None
+    observability_entities: dict[str, Any] | None = None

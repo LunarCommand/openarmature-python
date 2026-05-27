@@ -100,7 +100,79 @@ a working-but-wrong prompt, often invisibly. If you need
 lenient behavior, wrap your variables in your own defaulting
 layer before passing them to `render()`.
 
-The Python implementation uses Jinja2's `StrictUndefined`.
+The Python implementation uses Jinja2's `StrictUndefined`. To opt
+out, pass a different `Undefined` subclass at `PromptManager`
+construction:
+
+```python
+import jinja2
+
+manager = PromptManager(backend, jinja_undefined=jinja2.Undefined)
+```
+
+`jinja2.Undefined` renders a missing variable as the empty string;
+`jinja2.ChainableUndefined` is the other common opt-out for
+templates that walk nested attributes. Reach for these only when the
+strict default is actively wrong for your workflow.
+
+## Per-prompt sampling parameters
+
+A `Prompt` carries an optional `sampling` field — a `SamplingConfig`
+sub-record mirroring `RuntimeConfig`'s seven declared fields
+(`temperature`, `max_tokens`, `top_p`, `seed`, `frequency_penalty`,
+`presence_penalty`, `stop_sequences`) plus the extras pass-through
+bag. Backends that source per-prompt config (Langfuse's
+`prompt.config`, a filesystem sidecar) populate it; backends that
+don't leave it `None`.
+
+```python
+prompt = await manager.fetch("classify", "production")
+if prompt.sampling is not None:
+    response = await provider.complete(messages, config=prompt.sampling)
+else:
+    response = await provider.complete(messages)
+```
+
+`SamplingConfig` is a subclass of `RuntimeConfig`, so it splats
+directly into `provider.complete()` without translation.
+`PromptResult.sampling` carries the value verbatim from the source
+`Prompt`; rendering doesn't touch it.
+
+The `FilesystemPromptBackend` reads sidecar config when constructed
+with `sampling_source="per-prompt-sidecar"` (reading
+`<root>/<label>/<name>.config.json` next to each template) or
+`sampling_source="unified"` (reading `<root>/prompt_configs.json`
+once at construction, keyed by prompt name).
+
+## Deployment-time label routing with `LabelResolver`
+
+`PromptManager.fetch(name)` without an explicit `label` consults a
+configured `LabelResolver` and falls back to `"production"`. This
+lets one prompt be A/B-tested or canaried without code changes —
+edit the resolver's data, not the call sites.
+
+```python
+from openarmature.prompts import MappingLabelResolver, PromptManager
+
+resolver = MappingLabelResolver({
+    "default": "production",
+    "experimental_classifier": "staging",
+    "extract_claims": "variant-a",
+})
+manager = PromptManager(backend, label_resolver=resolver)
+
+# Resolver returns "staging" — staging template fetched.
+classify = await manager.fetch("experimental_classifier")
+# Resolver returns "production" (the default) — production fetched.
+greet = await manager.fetch("greet")
+# Explicit label bypasses the resolver entirely.
+audit = await manager.fetch("greet", "audit")
+```
+
+`LabelResolver` is a Protocol with one method, `resolve(name) -> str`.
+The reference implementation is `MappingLabelResolver`, but any
+class with the right shape works (a JSON-file-backed resolver, a
+remote-config-service-backed resolver).
 
 ## Composite backends and fallback
 
@@ -211,6 +283,18 @@ related calls into a single workflow view.
 Nesting is innermost-wins. If you activate a result inside
 another active result, the inner one wins for the duration
 of the inner block.
+
+### Backend-keyed observability entity references
+
+A `Prompt` also carries an optional `observability_entities`
+mapping for backend-keyed references to first-class entities
+the prompt has been registered as in observability backends. The
+spec-normative key is `langfuse_prompt`, holding the Langfuse SDK
+`Prompt` reference. The Langfuse observer (when it ships) reads
+this field to establish the native Generation → Prompt link
+rather than reaching into the implementation-defined `metadata`
+mapping. Backends that don't surface such references leave the
+field `None`.
 
 ## Determinism and content-addressed caching
 

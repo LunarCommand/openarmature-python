@@ -3,54 +3,144 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any, Literal, cast
 
 from ..errors import PromptNotFound, PromptStoreUnavailable
 from ..hashing import compute_template_hash
-from ..prompt import Prompt
+from ..prompt import Prompt, SamplingConfig
 
 
 class FilesystemPromptBackend:
     """Reads prompts from a directory tree.
 
-    Layout convention: ``<root>/<label>/<name>.j2``. The ``label``
-    subdirectory keeps name-collisions across labels distinct
-    (e.g., ``prompts/production/greeting.j2`` and
-    ``prompts/staging/greeting.j2``). Spec §5 permits filesystem
-    backends to interpret label as "a subdirectory or filename
-    suffix"; this backend picks subdirectory.
+    Two layouts are supported via the constructor:
+
+    - ``layout="per-label"`` (default): ``<root>/<label>/<name>.j2``.
+      The ``label`` subdirectory keeps name-collisions across labels
+      distinct (e.g., ``prompts/production/greeting.j2`` and
+      ``prompts/staging/greeting.j2``). Spec §5 permits filesystem
+      backends to interpret label as "a subdirectory or filename
+      suffix"; this is the subdirectory variant.
+    - ``layout="flat"``: ``<root>/<name>.j2``. The same template
+      is returned regardless of which label was requested; the
+      Prompt's ``label`` field is the requested label verbatim.
+      Useful when label-based A/B routing is driven by a
+      :class:`~openarmature.prompts.label_resolver.LabelResolver`
+      rather than a directory tree.
 
     The ``version`` field is derived from the template content hash
     (first 16 hex chars of the SHA-256, ~64 bits) so two file
     contents map deterministically to two distinct version strings
-    without needing a sidecar metadata file. Per spec §3, this
-    satisfies the "stable identifier" requirement. The 16-char
-    prefix puts the birthday-paradox collision boundary at ~4B
-    distinct templates; well past any realistic single-backend
-    exposure. Higher-scale backends should widen further or pick a
-    different stable identifier (semver from a sidecar metadata
-    file, git short-SHAs, etc.).
+    without needing a sidecar metadata file. The 16-char prefix puts
+    the birthday-paradox collision boundary at ~4B distinct templates,
+    well past any realistic single-backend exposure.
 
-    This backend reads from disk on every fetch; no caching. A
-    caching backend (e.g., openarmature-langfuse) that returns
-    cached results MUST preserve the original ``fetched_at`` on the
-    returned Prompt, not the cache-hit time, per spec §3.
+    Optional ``sampling_source`` populates ``Prompt.sampling`` from a
+    sidecar file, per the spec §5 informative filesystem convention:
+
+    - ``"none"`` (default): never populate ``sampling``.
+    - ``"per-prompt-sidecar"``: read ``<name>.config.json`` from the
+      same directory as the template (i.e., ``<root>/<label>/<name>.config.json``
+      under ``per-label`` layout, ``<root>/<name>.config.json`` under
+      ``flat``). A missing sidecar leaves ``sampling = None``.
+    - ``"unified"``: read ``<root>/prompt_configs.json`` at backend
+      construction time and key into it by prompt name. A name not in
+      the unified map leaves ``sampling = None``. Construction raises
+      :class:`PromptStoreUnavailable` if the file exists but cannot
+      be parsed.
+
+    This backend reads templates from disk on every fetch; no caching.
     """
 
-    def __init__(self, root: Path) -> None:
+    def __init__(
+        self,
+        root: Path,
+        *,
+        layout: Literal["per-label", "flat"] = "per-label",
+        sampling_source: Literal["none", "per-prompt-sidecar", "unified"] = "none",
+    ) -> None:
         self._root = root
+        self._layout = layout
+        self._sampling_source = sampling_source
+        # Unified mode: load and parse at construction so the cost is
+        # paid once. Backend instances are typically long-lived
+        # process-wide singletons, so a single read on startup is
+        # cheaper than re-reading per fetch.
+        self._unified_sampling: dict[str, dict[str, Any]] | None = None
+        if sampling_source == "unified":
+            self._unified_sampling = self._load_unified_configs()
+
+    def _load_unified_configs(self) -> dict[str, dict[str, Any]]:
+        path = self._root / "prompt_configs.json"
+        if not path.exists():
+            return {}
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise PromptStoreUnavailable(
+                f"failed to load unified prompt_configs.json at {path}: {exc}",
+                name="",
+                label="",
+            ) from exc
+        if not isinstance(data, dict):
+            raise PromptStoreUnavailable(
+                f"unified prompt_configs.json at {path} is not a JSON object",
+                name="",
+                label="",
+            )
+        return cast(dict[str, dict[str, Any]], data)
+
+    def _template_path(self, name: str, label: str) -> Path:
+        if self._layout == "flat":
+            return self._root / f"{name}.j2"
+        return self._root / label / f"{name}.j2"
+
+    def _sidecar_path(self, name: str, label: str) -> Path:
+        if self._layout == "flat":
+            return self._root / f"{name}.config.json"
+        return self._root / label / f"{name}.config.json"
+
+    def _resolve_sampling(self, name: str, label: str) -> SamplingConfig | None:
+        if self._sampling_source == "none":
+            return None
+        if self._sampling_source == "unified":
+            assert self._unified_sampling is not None
+            raw = self._unified_sampling.get(name)
+            if raw is None:
+                return None
+            return _sampling_from_dict(raw)
+        # per-prompt-sidecar
+        path = self._sidecar_path(name, label)
+        if not path.exists():
+            return None
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise PromptStoreUnavailable(
+                f"failed to load sidecar {path} for ({name!r}, {label!r}): {exc}",
+                name=name,
+                label=label,
+            ) from exc
+        if not isinstance(raw, dict):
+            raise PromptStoreUnavailable(
+                f"sidecar {path} is not a JSON object",
+                name=name,
+                label=label,
+            )
+        return _sampling_from_dict(cast(dict[str, Any], raw))
 
     async def fetch(self, name: str, label: str = "production") -> Prompt:
-        """Read ``<root>/<label>/<name>.j2`` and return the prompt.
+        """Read the prompt template and (optionally) its sidecar sampling config.
 
-        Reads on every call (no caching). The returned prompt's
-        ``version`` is the leading 16 hex chars of the template's
-        SHA-256, and ``template_hash`` is the full digest. Raises
-        ``PromptNotFound`` when the file is missing and
-        ``PromptStoreUnavailable`` on any other I/O error.
+        Returns a ``Prompt`` whose ``version`` is the leading 16 hex
+        chars of the template's SHA-256 and ``template_hash`` is the
+        full digest. Raises ``PromptNotFound`` when the template is
+        missing and ``PromptStoreUnavailable`` on other I/O errors.
         """
-        path = self._root / label / f"{name}.j2"
+        path = self._template_path(name, label)
         try:
             template_source = await asyncio.to_thread(path.read_text, encoding="utf-8")
         except FileNotFoundError as exc:
@@ -67,6 +157,7 @@ class FilesystemPromptBackend:
                 label=label,
             ) from exc
 
+        sampling = await asyncio.to_thread(self._resolve_sampling, name, label)
         template_hash = compute_template_hash(template_source)
         version = template_hash.removeprefix("sha256:")[:16]
         return Prompt(
@@ -76,4 +167,18 @@ class FilesystemPromptBackend:
             template=template_source,
             template_hash=template_hash,
             fetched_at=datetime.now(UTC),
+            sampling=sampling,
         )
+
+
+def _sampling_from_dict(data: dict[str, Any]) -> SamplingConfig:
+    # Top-level `extras` is flattened so caller-supplied vendor knobs
+    # end up in SamplingConfig's extras-allow bag rather than as a
+    # single literal `extras` key. Matches the YAML conformance-fixture
+    # convention from llm-provider/032 + the spec §5 sidecar example.
+    flat: dict[str, Any] = {k: v for k, v in data.items() if k != "extras"}
+    extras = data.get("extras")
+    if isinstance(extras, dict):
+        for k, v in cast(dict[str, Any], extras).items():
+            flat.setdefault(k, v)
+    return SamplingConfig(**flat)

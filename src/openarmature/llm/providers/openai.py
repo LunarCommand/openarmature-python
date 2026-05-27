@@ -59,8 +59,13 @@ from openarmature.observability.correlation import (
     current_namespace_prefix,
 )
 from openarmature.observability.llm_event import LlmEventPayload
-from openarmature.prompts.context import current_prompt_group, current_prompt_result
 
+# ``current_prompt_group`` / ``current_prompt_result`` are imported
+# lazily inside :meth:`OpenAIProvider.complete` to avoid a module-load
+# cycle: ``openarmature.prompts.prompt`` imports ``RuntimeConfig`` from
+# this package (for the ``SamplingConfig`` subclass), so a top-level
+# import here would re-enter prompts.prompt before its types finish
+# defining.
 from ..errors import (
     LlmProviderError,
     ProviderAuthentication,
@@ -310,6 +315,12 @@ class OpenAIProvider:
         # from inside the observer in the worker task returns ``None``
         # even when a node body opened a ``with_active_prompt`` block.
         # Snapshot here; the observer reads from the event payload.
+        # Lazy import: see module-level comment for the cycle reason.
+        from openarmature.prompts.context import (
+            current_prompt_group,
+            current_prompt_result,
+        )
+
         active_prompt = current_prompt_result()
         active_prompt_group = current_prompt_group()
         # Payload data the §5.5.1 / §5.5.2 / §5.5.3 attributes are
