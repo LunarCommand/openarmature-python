@@ -58,9 +58,12 @@ def parse_spec_proposals() -> dict[str, str]:
     return result
 
 
-def load_manifest() -> dict[str, dict[str, Any]]:
-    # Returns {proposal_id: entry_dict} for every [proposals."NNNN"]
-    # section in conformance.toml.
+def load_manifest() -> dict[str, Any]:
+    # Returns {proposal_id: entry} for every [proposals."NNNN"] section
+    # in conformance.toml. Each `entry` is typed as Any rather than
+    # dict because TOML lets a user accidentally write a scalar value
+    # under [proposals]; the caller validates the type per-entry and
+    # emits a structured error on shape drift.
     if not MANIFEST_PATH.is_file():
         sys.exit(f"::error::manifest not found at {MANIFEST_PATH}")
 
@@ -70,7 +73,7 @@ def load_manifest() -> dict[str, dict[str, Any]]:
     proposals = data.get("proposals", {})
     if not isinstance(proposals, dict):
         sys.exit("::error::conformance.toml [proposals] table malformed")
-    return cast(dict[str, dict[str, Any]], proposals)
+    return cast(dict[str, Any], proposals)
 
 
 def main() -> int:
@@ -101,7 +104,15 @@ def main() -> int:
             )
 
     for pid in sorted(manifest_ids):
-        entry = manifest[pid]
+        raw_entry = manifest[pid]
+        if not isinstance(raw_entry, dict):
+            errors.append(
+                f"conformance.toml entry {pid} is not a table "
+                f'(got {type(raw_entry).__name__}); check the [proposals."{pid}"] '
+                f"section is a table, not a scalar"
+            )
+            continue
+        entry = cast(dict[str, Any], raw_entry)
         status = entry.get("status")
         if status not in ALLOWED_STATUSES:
             errors.append(
@@ -119,6 +130,11 @@ def main() -> int:
         else:
             if since is None:
                 errors.append(f"conformance.toml entry {pid} has status={status!r} but no `since` field")
+            elif not isinstance(since, str):
+                errors.append(
+                    f"conformance.toml entry {pid} `since` value {since!r} is not a string "
+                    f"(got {type(since).__name__}); did you forget to quote it?"
+                )
             elif not SINCE_RE.match(since):
                 errors.append(
                     f"conformance.toml entry {pid} `since` value {since!r} is not in MAJOR.MINOR.PATCH form"
