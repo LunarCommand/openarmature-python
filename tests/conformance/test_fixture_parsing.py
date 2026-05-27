@@ -52,6 +52,24 @@ _DEFERRED_FIXTURES: dict[str, str] = {
     "observability/022-langfuse-basic-trace": "Langfuse harness lands in PR 3 (proposal 0031)",
     "observability/023-langfuse-generation-rendering": "Langfuse harness lands in PR 3 (proposal 0031)",
     "observability/024-langfuse-prompt-linkage": "Langfuse harness lands in PR 3 (proposal 0031)",
+    # proposal 0034 caller-supplied invocation metadata fixtures (PR 4).
+    "observability/027-langfuse-caller-supplied-metadata": "Caller-metadata harness lands in PR 4 (0034)",
+    "observability/028-caller-metadata-namespace-rejection": "Caller-metadata harness lands in PR 4 (0034)",
+    "observability/029-caller-metadata-fan-out-per-instance": "Caller-metadata harness lands in PR 4 (0034)",
+    "observability/030-caller-metadata-parallel-branches-per-branch": (
+        "Caller-metadata harness lands in PR 4 (0034)"
+    ),
+    # proposal 0033 added typed directive shapes (`secondary_manager`,
+    # `label_resolver`, `cases`) the canonical parser doesn't model.
+    # The capability-specific harness at
+    # tests/conformance/harness/prompt_management.py models the new
+    # shapes; defer the cross-capability parser until that catches up.
+    "prompt-management/015-label-resolver-fallback-chain": (
+        "Label-resolver shape models live in the PM-specific capability harness"
+    ),
+    "prompt-management/016-prompt-observability-entities-propagation": (
+        "Cases shape models live in the PM-specific capability harness"
+    ),
 }
 
 

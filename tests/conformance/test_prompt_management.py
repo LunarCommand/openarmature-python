@@ -12,12 +12,13 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 import yaml
 
 from openarmature.prompts import (
+    MappingLabelResolver,
     Prompt,
     PromptError,
     PromptGroup,
@@ -25,6 +26,7 @@ from openarmature.prompts import (
     PromptNotFound,
     PromptResult,
     PromptStoreUnavailable,
+    SamplingConfig,
 )
 
 from .harness.loader import CONFORMANCE_ROOT
@@ -32,6 +34,7 @@ from .harness.prompt_management import (
     FixtureBackendSpec,
     FixtureCall,
     FixtureExpectedResultEquivalence,
+    FixtureManagerSpec,
     PromptManagementFixture,
 )
 
@@ -71,6 +74,18 @@ class MockPromptBackend:
         self._prompts: dict[tuple[str, str], Prompt] = {}
         now = datetime.now(UTC)
         for ps in spec.prompts:
+            # Sampling sub-record (fixture 013): flatten the fixture's
+            # `extras:` sub-block into top-level kwargs so caller-
+            # supplied vendor knobs land in SamplingConfig's extras-
+            # allow bag rather than as a literal `extras` key.
+            sampling: SamplingConfig | None = None
+            if ps.sampling is not None:
+                flat: dict[str, Any] = {k: v for k, v in ps.sampling.items() if k != "extras"}
+                extras = ps.sampling.get("extras")
+                if isinstance(extras, dict):
+                    for k, v in cast(dict[str, Any], extras).items():
+                        flat.setdefault(k, v)
+                sampling = SamplingConfig(**flat)
             self._prompts[(ps.name, ps.label)] = Prompt(
                 name=ps.name,
                 version=ps.version,
@@ -78,6 +93,10 @@ class MockPromptBackend:
                 template=ps.template,
                 template_hash=ps.template_hash,
                 fetched_at=now,
+                sampling=sampling,
+                observability_entities=(
+                    dict(ps.observability_entities) if ps.observability_entities is not None else None
+                ),
             )
         self.call_count = 0
 
@@ -125,10 +144,14 @@ async def _run_call(
             members = [captures[ref] for ref in call.members_refs]
             return PromptGroup(group_name=call.group_name, members=members), None
 
-        if isinstance(target, str) and target == "manager":
+        if isinstance(target, str) and target in {"manager", "secondary_manager", "tertiary_manager"}:
+            # All three manager targets dispatch to the currently-active
+            # manager in the per-pair iteration loop. The naming exists
+            # only to keep fixture YAML self-describing under a
+            # multi-manager shape (e.g., fixture 015).
             assert manager is not None
             if operation == "fetch":
-                assert call.name is not None and call.label is not None
+                assert call.name is not None
                 return await manager.fetch(call.name, call.label), None
             if operation == "render":
                 # Either inline fetched_prompt or a ref to a capture.
@@ -140,7 +163,7 @@ async def _run_call(
                     prompt = fetched
                 return manager.render(prompt, call.variables or {}), None
             if operation == "get":
-                assert call.name is not None and call.label is not None
+                assert call.name is not None
                 return await manager.get(call.name, call.label, call.variables or {}), None
             raise AssertionError(f"unsupported manager operation: {operation!r}")
 
@@ -271,29 +294,137 @@ def _assert_result_equivalence(
 # ---------------------------------------------------------------------------
 
 
+def _build_manager(
+    spec: FixtureManagerSpec,
+    backends_map: dict[str, MockPromptBackend],
+    resolvers_map: dict[str, MappingLabelResolver],
+) -> PromptManager:
+    ordered = [backends_map[name] for name in spec.backends]
+    resolver: MappingLabelResolver | None = None
+    if spec.label_resolver_ref is not None:
+        if spec.label_resolver_ref not in resolvers_map:
+            raise AssertionError(f"unknown label_resolver_ref: {spec.label_resolver_ref!r}")
+        resolver = resolvers_map[spec.label_resolver_ref]
+    return PromptManager(*ordered, label_resolver=resolver)
+
+
+def _assert_capture_attrs(capture_name: str, actual: Any, expected: dict[str, Any]) -> None:
+    # Walk fixture-supplied expected attributes against a captured
+    # Prompt / PromptResult. Handles sampling (flatten extras + dump),
+    # *_absent flags, and dict-typed observability_entities.
+    for key, expected_value in expected.items():
+        if key == "sampling_absent":
+            if expected_value:
+                actual_sampling = getattr(actual, "sampling", None)
+                assert actual_sampling is None, (
+                    f"{capture_name}.sampling: expected absent, got {actual_sampling!r}"
+                )
+            continue
+        if key == "observability_entities_absent":
+            if expected_value:
+                actual_oe = getattr(actual, "observability_entities", None)
+                assert actual_oe is None, (
+                    f"{capture_name}.observability_entities: expected absent, got {actual_oe!r}"
+                )
+            continue
+        if key == "sampling":
+            actual_sampling = getattr(actual, "sampling", None)
+            assert actual_sampling is not None, f"{capture_name}.sampling: expected present, got None"
+            # Spec sidecar convention nests vendor extras under
+            # `extras:`; SamplingConfig.model_dump() flattens them to
+            # the top level (extra="allow"). Normalize the expected
+            # shape before equality compare.
+            expected_flat = {k: v for k, v in expected_value.items() if k != "extras"}
+            if isinstance(expected_value.get("extras"), dict):
+                expected_flat.update(expected_value["extras"])
+            actual_flat = actual_sampling.model_dump(exclude_none=True)
+            assert actual_flat == expected_flat, (
+                f"{capture_name}.sampling: expected {expected_flat!r}, got {actual_flat!r}"
+            )
+            continue
+        actual_value = getattr(actual, key)
+        assert actual_value == expected_value, (
+            f"{capture_name}.{key}: expected {expected_value!r}, got {actual_value!r}"
+        )
+
+
 @pytest.mark.parametrize("fixture_path", _fixture_paths(), ids=_fixture_id)
 async def test_prompt_management_fixture(fixture_path: Path) -> None:
     raw: Any = yaml.safe_load(fixture_path.read_text())
     fixture = PromptManagementFixture.model_validate(raw)
 
     backends: dict[str, MockPromptBackend] = {spec.name: MockPromptBackend(spec) for spec in fixture.backends}
-    manager: PromptManager | None = None
-    if fixture.manager is not None:
-        ordered = [backends[name] for name in fixture.manager.backends]
-        manager = PromptManager(*ordered)
+
+    # Named LabelResolvers; managers reference them by their fixture-
+    # top-level key name via ``label_resolver_ref``.
+    resolvers_map: dict[str, MappingLabelResolver] = {}
+    if fixture.label_resolver is not None:
+        resolvers_map["label_resolver"] = MappingLabelResolver(fixture.label_resolver.mapping)
+    if fixture.tertiary_label_resolver is not None:
+        resolvers_map["tertiary_label_resolver"] = MappingLabelResolver(
+            fixture.tertiary_label_resolver.mapping
+        )
 
     captures: dict[str, Any] = {}
-    for call in fixture.calls:
-        result, raised = await _run_call(call, backends, manager, captures)
-        _assert_per_call(call, result, raised, backends)
-        if call.capture_as is not None and raised is None:
-            captures[call.capture_as] = result
+
+    # Fixture 015 introduces secondary/tertiary manager+calls slots
+    # that run independently with shared backends. Run each (manager,
+    # calls) pair in declaration order; the captures dict is shared
+    # so cross-manager assertions on capture names still work.
+    manager_pairs = [
+        (fixture.manager, fixture.calls),
+        (fixture.secondary_manager, fixture.secondary_calls),
+        (fixture.tertiary_manager, fixture.tertiary_calls),
+    ]
+    for manager_spec, manager_calls in manager_pairs:
+        if manager_spec is None:
+            continue
+        manager = _build_manager(manager_spec, backends, resolvers_map)
+        for call in manager_calls:
+            result, raised = await _run_call(call, backends, manager, captures)
+            _assert_per_call(call, result, raised, backends)
+            if call.capture_as is not None and raised is None:
+                captures[call.capture_as] = result
+
+    # Cases-form fixtures (016) split into independent sub-cases that
+    # share the backends but use their own per-case manager + calls.
+    cases = raw.get("cases")
+    if cases:
+        for case in cases:
+            # Strip case-level metadata (``name``, ``description``)
+            # that PromptManagementFixture doesn't model; the runner
+            # doesn't need them.
+            case_payload = {
+                **{k: v for k, v in raw.items() if k not in {"cases", "expected"}},
+                **{k: v for k, v in case.items() if k not in {"name", "description"}},
+            }
+            case_fixture = PromptManagementFixture.model_validate(case_payload)
+            case_manager_pairs = [
+                (case_fixture.manager, case_fixture.calls),
+                (case_fixture.secondary_manager, case_fixture.secondary_calls),
+                (case_fixture.tertiary_manager, case_fixture.tertiary_calls),
+            ]
+            for manager_spec, manager_calls in case_manager_pairs:
+                if manager_spec is None:
+                    continue
+                manager = _build_manager(manager_spec, backends, resolvers_map)
+                for call in manager_calls:
+                    result, raised = await _run_call(call, backends, manager, captures)
+                    _assert_per_call(call, result, raised, backends)
+                    if call.capture_as is not None and raised is None:
+                        captures[call.capture_as] = result
+            if case_fixture.expected is not None:
+                _apply_top_level_expected(case_fixture.expected, captures)
 
     if fixture.expected is None:
         return
 
-    if fixture.expected.prompt_group is not None:
-        pg_expected = fixture.expected.prompt_group
+    _apply_top_level_expected(fixture.expected, captures)
+
+
+def _apply_top_level_expected(expected: Any, captures: dict[str, Any]) -> None:
+    if expected.prompt_group is not None:
+        pg_expected = expected.prompt_group
         group = captures[pg_expected.of]
         assert isinstance(group, PromptGroup)
         assert group.group_name == pg_expected.group_name
@@ -301,18 +432,31 @@ async def test_prompt_management_fixture(fixture_path: Path) -> None:
         if pg_expected.member_names is not None:
             assert [m.name for m in group.members] == pg_expected.member_names
 
-    if fixture.expected.result_equivalence is not None:
-        _assert_result_equivalence(fixture.expected.result_equivalence, captures)
-    for eq in fixture.expected.result_equivalences:
+    if expected.result_equivalence is not None:
+        _assert_result_equivalence(expected.result_equivalence, captures)
+    for eq in expected.result_equivalences:
         _assert_result_equivalence(eq, captures)
 
-    for pair in fixture.expected.rendered_hash_equal:
+    for pair in expected.rendered_hash_equal:
         a, b = pair
         assert captures[a].rendered_hash == captures[b].rendered_hash, (
             f"rendered_hash differs between {a!r} and {b!r} but fixture expects equal"
         )
-    for pair in fixture.expected.rendered_hash_different:
+    for pair in expected.rendered_hash_different:
         a, b = pair
         assert captures[a].rendered_hash != captures[b].rendered_hash, (
             f"rendered_hash matches between {a!r} and {b!r} but fixture expects different"
         )
+
+    # Fixtures 013-016 use capture-name-keyed top-level expected
+    # entries instead of the per-call expected:{prompt|prompt_result}
+    # shape. Walk those via pydantic's model_extra (FixtureExpectedTopLevel
+    # is permissive) and assert each capture matches the supplied
+    # attribute dict.
+    model_extra: dict[str, Any] = expected.model_extra or {}
+    for capture_name, expected_attrs in model_extra.items():
+        if not isinstance(expected_attrs, dict):
+            continue
+        if capture_name not in captures:
+            raise AssertionError(f"expected capture {capture_name!r} not found in captures")
+        _assert_capture_attrs(capture_name, captures[capture_name], cast(dict[str, Any], expected_attrs))

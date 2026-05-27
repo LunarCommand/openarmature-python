@@ -20,15 +20,19 @@ from .errors import (
 )
 from .group import PromptGroup
 from .hashing import compute_rendered_hash, compute_template_hash
+from .label_resolver import SPEC_FALLBACK_LABEL, LabelResolver, MappingLabelResolver
 from .manager import PromptManager
-from .prompt import Prompt, PromptResult
+from .prompt import Prompt, PromptResult, SamplingConfig
 
 __all__ = [
     "PROMPT_NOT_FOUND",
     "PROMPT_RENDER_ERROR",
     "PROMPT_STORE_UNAVAILABLE",
     "PROMPT_TRANSIENT_CATEGORIES",
+    "SPEC_FALLBACK_LABEL",
     "FilesystemPromptBackend",
+    "LabelResolver",
+    "MappingLabelResolver",
     "Prompt",
     "PromptBackend",
     "PromptError",
@@ -38,6 +42,7 @@ __all__ = [
     "PromptRenderError",
     "PromptResult",
     "PromptStoreUnavailable",
+    "SamplingConfig",
     "compute_rendered_hash",
     "compute_template_hash",
     "current_prompt_group",
