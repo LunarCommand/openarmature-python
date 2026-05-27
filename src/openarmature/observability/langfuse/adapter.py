@@ -328,6 +328,27 @@ class LangfuseSDKAdapter:
         )
         return _SpanHandle(obs)
 
+    def force_flush(self, timeout_ms: int = 30_000) -> bool:
+        """Best-effort flush of the underlying Langfuse client.
+
+        ``timeout_ms`` is accepted for Protocol compatibility but
+        **ignored**: the v4 Langfuse SDK's ``flush()`` method takes
+        no timeout parameter and discards the underlying
+        ``TracerProvider.force_flush()`` return value. The call is
+        nonetheless synchronous — internally ``flush()`` waits on
+        OTel's ``force_flush`` (default 30 s) and then ``.join()`` on
+        the SDK's score and media ingestion queues — so by the time
+        we return the OTel batch processor and ingestion queues have
+        either drained or hit the SDK's internal default deadlines.
+
+        Returns ``True`` once the SDK call completes without raising;
+        a tight-deadline caller should pair this with its own
+        wall-clock guard rather than relying on the return value.
+        """
+        del timeout_ms
+        self._client.flush()
+        return True
+
     def _start_observation(
         self,
         *,

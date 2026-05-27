@@ -1382,3 +1382,16 @@ async def test_prompt_context_propagates_cross_task_via_provider_complete() -> N
     assert attrs.get("openarmature.prompt.label") == "production"
     assert attrs.get("openarmature.prompt.template_hash") == "sha256:tpl"
     assert attrs.get("openarmature.prompt.rendered_hash") == "sha256:rendered"
+
+
+def test_force_flush_delegates_to_provider() -> None:
+    # Public force_flush wraps TracerProvider.force_flush so downstream
+    # users don't reach into observer._provider to drain the
+    # BatchSpanProcessor buffer in fast-teardown harnesses.
+    exporter = InMemorySpanExporter()
+    observer = OTelObserver(span_processor=SimpleSpanProcessor(exporter))
+    try:
+        assert observer.force_flush() is True
+        assert observer.force_flush(timeout_ms=1000) is True
+    finally:
+        observer.shutdown()

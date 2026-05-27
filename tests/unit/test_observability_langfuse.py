@@ -108,6 +108,25 @@ def test_in_memory_recorder_observation_id_is_unique_per_recorder() -> None:
     assert a.id != b.id
 
 
+def test_observer_force_flush_delegates_to_client() -> None:
+    # LangfuseObserver.force_flush() calls into the client; the
+    # InMemoryLangfuseClient's force_flush is a no-op that returns
+    # True, so this just verifies the delegation wires correctly.
+    client = InMemoryLangfuseClient()
+    observer = LangfuseObserver(client=client)
+    assert observer.force_flush() is True
+    assert observer.force_flush(timeout_ms=1000) is True
+
+
+def test_in_memory_recorder_force_flush_is_no_op() -> None:
+    # In-memory recorder has no outbound buffer; force_flush returns
+    # True immediately. The timeout_ms parameter is accepted for
+    # Protocol compatibility but unused.
+    client = InMemoryLangfuseClient()
+    assert client.force_flush() is True
+    assert client.force_flush(timeout_ms=5000) is True
+
+
 def test_in_memory_recorder_children_of_walks_parent_links() -> None:
     client = InMemoryLangfuseClient()
     client.trace(id="t1")

@@ -1445,6 +1445,32 @@ class OTelObserver:
         self._run_enrichers(open_span.span, None)
         open_span.span.end()
 
+    def force_flush(self, timeout_ms: int = 30_000) -> bool:
+        """Flush any pending spans through every registered span processor.
+
+        Returns ``True`` when all processors finish flushing within the
+        deadline, ``False`` otherwise. Wraps the underlying OTel
+        :class:`TracerProvider`'s ``force_flush`` so callers don't have
+        to reach into the private ``_provider`` attribute.
+
+        **When to call.** Distinct from :meth:`drain` on
+        :class:`~openarmature.graph.compiled.CompiledGraph` (which covers
+        the engine's observer-event queue): this method covers the
+        outbound span-export buffer of each registered
+        :class:`SpanProcessor`. Under fast or unusual teardown
+        orderings (FastAPI ``TestClient`` teardown, CLI one-shots,
+        serverless functions) the :class:`BatchSpanProcessor`'s export
+        thread can be cut off before its buffer drains; calling
+        ``force_flush()`` from a ``finally`` block right before process
+        exit is the canonical hardening.
+
+        The default 30 s ``timeout_ms`` matches the OTel SDK's own
+        default. Pass a smaller value when running under a hard
+        deadline (a serverless function's max execution time, an
+        ASGI lifespan timeout).
+        """
+        return self._provider.force_flush(timeout_millis=timeout_ms)
+
     def shutdown(self) -> None:
         """Close any still-open spans across all in-flight invocations
         and shut down the underlying provider. Each per-invocation
@@ -1459,8 +1485,7 @@ class OTelObserver:
         thread finishes), the flush may not complete in time and spans
         can appear dropped. Workarounds:
 
-        - Call ``observer._provider.force_flush(timeout_millis=…)``
-          explicitly before this method.
+        - Call :meth:`force_flush` explicitly before this method.
         - Use :class:`SimpleSpanProcessor` instead of
           :class:`BatchSpanProcessor` in tests; it exports synchronously
           and is unaffected by teardown timing.
