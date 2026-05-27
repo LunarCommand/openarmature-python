@@ -42,6 +42,13 @@ otel = [
     # below 1.0; revisit when 1.0 lands.
     "opentelemetry-instrumentation-logging>=0.62.0b1",
 ]
+# Spec observability §8 Langfuse mapping. Optional per charter §3.1
+# principle 5; matches the [otel] extras' shape. Validated against
+# Langfuse Python SDK 4.6.x; bridge from the SDK's v4 API onto the
+# LangfuseClient Protocol lives in ``observability.langfuse.adapter``.
+langfuse = [
+    "langfuse>=4.6,<5",
+]
 
 [project.urls]
 Repository = "https://github.com/LunarCommand/openarmature-python"
@@ -105,3 +112,11 @@ select = ["E", "F", "I", "B", "UP"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+# Opt-in markers for tests that hit real external services. CI skips
+# these by default — run with `-m integration` to include them after
+# setting the relevant env vars (LANGFUSE_PUBLIC_KEY / SECRET_KEY for
+# Langfuse Cloud, etc).
+markers = [
+    "integration: tests that exercise real external services (Langfuse Cloud, HyperDX). Skipped by default.",
+]
+addopts = ["-m", "not integration"]
