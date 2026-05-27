@@ -23,6 +23,7 @@
 from __future__ import annotations
 
 import json
+import uuid
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, cast
 
@@ -73,6 +74,12 @@ class _OpenObservation:
     handle: LangfuseSpanHandle | LangfuseGenerationHandle
 
 
+def _empty_str_frozenset() -> frozenset[str]:
+    """Typed empty frozenset factory for ``detached_subgraphs`` /
+    ``detached_fan_outs`` defaults."""
+    return frozenset()
+
+
 @dataclass
 class _InvState:
     """Per-invocation state, isolated by invocation_id.
@@ -87,6 +94,55 @@ class _InvState:
         default_factory=dict[_StackKey, _OpenObservation]
     )
     open_llm_observations: dict[str, _OpenObservation] = field(default_factory=dict[str, _OpenObservation])
+    # Synthetic subgraph dispatch Span observations, keyed by namespace
+    # prefix. Per spec §8.3 each subgraph wrapper produces a Span
+    # observation in its parent's Trace; descendant node observations
+    # parent under it. For a detached subgraph, this dictionary holds
+    # the dispatch Span observation that lives in the DETACHED Trace
+    # (so descendants in that subtree parent under it via the detached
+    # Trace's observation tree); the main Trace carries a separate
+    # link observation surfacing metadata.detached_child_trace_ids
+    # that's opened and closed in one shot, not tracked here.
+    subgraph_observations: dict[tuple[str, ...], _OpenObservation] = field(
+        default_factory=dict[tuple[str, ...], _OpenObservation]
+    )
+    # Per-instance fan-out dispatch Span observations (non-detached),
+    # keyed by ``prefix + (str(fan_out_index),)``. Parents under the
+    # fan-out node's own Span observation; inner-node observations
+    # parent under this dispatch instead of the shared fan-out node
+    # span. Closed when the fan-out node's completed event fires.
+    fan_out_instance_observations: dict[tuple[str, ...], _OpenObservation] = field(
+        default_factory=dict[tuple[str, ...], _OpenObservation]
+    )
+    # Maps a namespace prefix to the detached Langfuse trace_id when
+    # that subtree is configured detached (per the observer's
+    # ``detached_subgraphs`` / ``detached_fan_outs`` knobs). The
+    # presence of a prefix here switches descendant observations onto
+    # the detached Trace.
+    detached_traces: dict[tuple[str, ...], str] = field(default_factory=dict[tuple[str, ...], str])
+    # Set of detached fan-out instance prefixes
+    # (``prefix + (str(fan_out_index),)``) — distinguished from
+    # detached subgraph prefixes because they're closed when the
+    # fan-out node's completed event fires, not when the namespace
+    # cursor leaves the subtree.
+    fan_out_instance_root_prefixes: set[tuple[str, ...]] = field(default_factory=set[tuple[str, ...]])
+    # ``parent_node_name`` cache for per-instance attribution
+    # (spec proposal 0013 v0.10.0 — inner events from inside a
+    # non-detached fan-out instance don't carry fan_out_config
+    # themselves; the cache bridges the lookup so the synthetic
+    # per-instance dispatch observation can attach
+    # metadata.fan_out_parent_node_name).
+    fan_out_parent_node_name: dict[tuple[str, ...], str] = field(default_factory=dict[tuple[str, ...], str])
+    # Side-cache: accumulator for `metadata.detached_child_trace_ids`
+    # on dispatch observations that spawn detached children. Keyed by
+    # the dispatch observation's prefix (the fan-out node's namespace,
+    # or the detached-subgraph parent's prefix). Each new detached
+    # child append-then-snapshot lets us preserve §8.5's string-array
+    # shape across multiple instances without re-reading metadata
+    # from the client (the Protocol doesn't expose a read accessor).
+    detached_child_trace_ids: dict[tuple[str, ...], list[str]] = field(
+        default_factory=dict[tuple[str, ...], list[str]]
+    )
 
 
 @dataclass
@@ -113,6 +169,14 @@ class LangfuseObserver:
       ``payload_max_bytes`` semantic — emission preserves the raw
       truncated string when the §5.5.5 marker is present (per §8.7).
       Default 64 KiB; same minimum (256 bytes) applies.
+    - ``detached_subgraphs``: set of subgraph wrapper node names that
+      run in their own Langfuse Trace per §8.5. Each such subgraph
+      gets a fresh trace_id; the main Trace's dispatch observation
+      surfaces the link via ``metadata.detached_child_trace_ids``.
+    - ``detached_fan_outs``: set of fan-out node names whose instances
+      each get their own Langfuse Trace. Same link mechanism on the
+      fan-out node observation: each per-instance detached trace_id
+      lands in the array.
 
     The observer reads the spec version from the package at
     construction time. Safe to share across concurrent invocations
@@ -124,6 +188,8 @@ class LangfuseObserver:
     disable_llm_spans: bool = False
     disable_llm_payload: bool = True
     payload_byte_cap: int = 65536
+    detached_subgraphs: frozenset[str] = field(default_factory=_empty_str_frozenset)
+    detached_fan_outs: frozenset[str] = field(default_factory=_empty_str_frozenset)
     spec_version: str = field(default_factory=_read_spec_version)
 
     # Internal state populated during invocation.
@@ -177,6 +243,14 @@ class LangfuseObserver:
             self._open_trace(invocation_id, correlation_id, event)
 
         inv_state = self._inv_states[invocation_id]
+        # Cache the fan-out node's parent_node_name from its own
+        # started event so synthetic per-instance dispatch observations
+        # can attach metadata.fan_out_parent_node_name (the inner
+        # events from inside the fan-out don't carry fan_out_config
+        # themselves; this cache bridges).
+        if event.fan_out_config is not None and event.fan_out_index is None:
+            inv_state.fan_out_parent_node_name[event.namespace] = event.fan_out_config.parent_node_name
+
         key = self._key_for(event)
         if key in inv_state.open_observations:
             # Idempotent: a second started for the same (namespace,
@@ -184,10 +258,16 @@ class LangfuseObserver:
             # the OTel observer's behavior under retry-replay).
             return
 
+        # Synthesize any subgraph dispatch / fan-out per-instance
+        # dispatch observations the leaf needs as ancestors. Also
+        # closes dispatch observations whose subtree we've left.
+        self._sync_subgraph_observations(inv_state, correlation_id, event)
+
         parent_observation_id = self._resolve_parent_observation_id(inv_state, event)
         metadata = self._observation_metadata(event, correlation_id)
+        target_trace_id = self._trace_id_for(inv_state, event.namespace, event.fan_out_index)
         handle = self.client.span(
-            trace_id=inv_state.trace_id,
+            trace_id=target_trace_id,
             name=event.node_name,
             metadata=metadata,
             parent_observation_id=parent_observation_id,
@@ -203,6 +283,30 @@ class LangfuseObserver:
         inv_state = self._inv_states.get(invocation_id)
         if inv_state is None:
             return
+
+        # If this is the fan-out node's own completion (event.fan_out_index
+        # is None) AND the fan-out is configured detached, close any
+        # detached per-instance Trace dispatch observations the fan-out
+        # spawned. Done BEFORE the regular pop so the close ordering is
+        # children-before-parents.
+        if event.fan_out_index is None and event.namespace and event.namespace[0] in self.detached_fan_outs:
+            for prefix in list(inv_state.fan_out_instance_root_prefixes):
+                if len(prefix) > len(event.namespace) and prefix[: len(event.namespace)] == event.namespace:
+                    # Detached per-instance dispatches live in
+                    # fan_out_instance_observations (same map as
+                    # non-detached); close via the matching helper.
+                    self._close_fan_out_instance_dispatch_observation(inv_state, prefix)
+                    inv_state.fan_out_instance_root_prefixes.discard(prefix)
+                    inv_state.detached_traces.pop(prefix, None)
+        # Per spec proposal 0013 (v0.10.0): when the fan-out node's
+        # own completion fires, close all per-instance dispatch
+        # observations synthesized for it. Children-before-parents.
+        if event.fan_out_index is None and event.fan_out_config is not None:
+            for prefix in list(inv_state.fan_out_instance_observations.keys()):
+                if len(prefix) > len(event.namespace) and prefix[: len(event.namespace)] == event.namespace:
+                    self._close_fan_out_instance_dispatch_observation(inv_state, prefix)
+            inv_state.fan_out_parent_node_name.pop(event.namespace, None)
+
         key = self._key_for(event)
         observation = inv_state.open_observations.pop(key, None)
         if observation is None:
@@ -213,6 +317,9 @@ class LangfuseObserver:
             observation.handle.end(level="ERROR", status_message=event.error.category)
         else:
             observation.handle.end()
+        # If this was a detached subgraph root prefix, drop the
+        # detached_traces entry so a subsequent re-entry mints fresh.
+        inv_state.detached_traces.pop(event.namespace, None)
 
     def _open_trace(self, invocation_id: str, correlation_id: str | None, event: NodeEvent) -> None:
         metadata: dict[str, Any] = {
@@ -233,29 +340,349 @@ class LangfuseObserver:
         return (event.namespace, event.attempt_index, event.fan_out_index)
 
     def _resolve_parent_observation_id(self, inv_state: _InvState, event: NodeEvent) -> str | None:
-        # Walk namespace ancestors longest-prefix-first looking for the
-        # innermost open observation; fall back to None (Trace becomes
-        # the parent). The outer loop counts down from len(namespace)-1
-        # so the deepest matching ancestor wins.
-        #
-        # First-match-by-iteration is approximate when multiple open
-        # observations share the same namespace prefix at different
-        # _StackKey slots (multiple retry attempts, multiple fan-out
-        # instances). In practice retry middleware ends one attempt
-        # before opening the next, so concurrent same-namespace
-        # observations only arise under fan-out. Spec §8.3 mandates
-        # dedicated dispatch Span observations for subgraphs and
-        # per-instance fan-out spans; those land in a follow-on PR
-        # alongside dedicated subgraph_observations /
-        # fan_out_instance_observations maps mirroring the OTel
-        # observer's structure. Until then this resolver covers the
-        # linear-graph and basic-LLM cases the v0.23.0 conformance
-        # fixtures exercise.
+        # Parent precedence (innermost wins):
+        #   1. Per-instance fan-out dispatch observation at
+        #      namespace[:1] + (str(fan_out_index),) — both detached
+        #      (where the dispatch observation lives in the detached
+        #      Trace) and non-detached (where it lives in the main
+        #      Trace) cases route here when event is inside a fan-out
+        #      instance.
+        #   2. Subgraph dispatch observation at any matching ancestor
+        #      prefix, walked longest-first.
+        #   3. Leaf node observation at any matching ancestor prefix,
+        #      walked longest-first.
+        #   4. None — the Trace itself becomes the implicit parent.
+        if event.fan_out_index is not None and event.namespace:
+            instance_key = event.namespace[:1] + (str(event.fan_out_index),)
+            dispatch = inv_state.fan_out_instance_observations.get(instance_key)
+            if dispatch is not None:
+                return dispatch.handle.id
+        for prefix_len in range(len(event.namespace) - 1, 0, -1):
+            prefix = event.namespace[:prefix_len]
+            sg = inv_state.subgraph_observations.get(prefix)
+            if sg is not None:
+                return sg.handle.id
+        # Open leaf-node observation fallback. The outer loop already
+        # walks longest-first; the inner scan picks the first matching
+        # open observation, which is fine for the cases dispatch
+        # synthesis didn't cover (no subgraph wrapping the namespace).
         for prefix_len in range(len(event.namespace) - 1, 0, -1):
             prefix = event.namespace[:prefix_len]
             for key, observation in inv_state.open_observations.items():
                 if key[0] == prefix:
                     return observation.handle.id
+        return None
+
+    def _trace_id_for(
+        self,
+        inv_state: _InvState,
+        namespace: tuple[str, ...],
+        fan_out_index: int | None,
+    ) -> str:
+        # Walk ancestor prefixes longest-first to find the innermost
+        # detached Trace mapping; fall back to the main invocation
+        # Trace. Detached fan-out instance Traces are keyed by
+        # ``namespace[:1] + (str(fan_out_index),)`` so check that
+        # specific composite first.
+        if fan_out_index is not None and namespace:
+            instance_key = namespace[:1] + (str(fan_out_index),)
+            if instance_key in inv_state.detached_traces:
+                return inv_state.detached_traces[instance_key]
+        for prefix_len in range(len(namespace), 0, -1):
+            prefix = namespace[:prefix_len]
+            if prefix in inv_state.detached_traces:
+                return inv_state.detached_traces[prefix]
+        return inv_state.trace_id
+
+    def _sync_subgraph_observations(
+        self,
+        inv_state: _InvState,
+        correlation_id: str | None,
+        event: NodeEvent,
+    ) -> None:
+        # Open synthetic subgraph dispatch / fan-out per-instance
+        # dispatch observations for any ancestor prefix of this
+        # event's namespace that doesn't have one yet. Also closes
+        # subgraph dispatch observations whose subtree we've left.
+        #
+        # Called BEFORE opening the leaf observation, so descendants
+        # find the right parent via _resolve_parent_observation_id.
+        namespace = event.namespace
+        # 1. Close subgraph dispatch observations whose prefix is no
+        #    longer an ancestor of the current namespace.
+        for prefix in list(inv_state.subgraph_observations.keys()):
+            if prefix in inv_state.fan_out_instance_root_prefixes:
+                # Detached fan-out instance dispatches close with the
+                # fan-out's completed event, not on namespace moves.
+                continue
+            if not (len(prefix) < len(namespace) and namespace[: len(prefix)] == prefix):
+                self._close_subgraph_observation(inv_state, prefix)
+                inv_state.detached_traces.pop(prefix, None)
+        # 2. Open ancestor dispatch observations for prefixes that
+        #    don't have one yet.
+        for depth in range(1, len(namespace)):
+            prefix = namespace[:depth]
+            if prefix in inv_state.subgraph_observations:
+                continue
+            # Non-detached per-instance dispatch for the current
+            # event's own fan-out instance gets opened below; skip
+            # the regular subgraph path here so we don't double-open.
+            if (
+                depth == 1
+                and event.fan_out_index is not None
+                and (prefix + (str(event.fan_out_index),)) in inv_state.fan_out_instance_observations
+            ):
+                continue
+            # Detached subgraph: the first segment matches a
+            # configured detached_subgraphs name → mint a fresh
+            # detached Trace + open the dispatch observation in it.
+            if depth == 1 and prefix[0] in self.detached_subgraphs:
+                self._open_detached_subgraph_trace(inv_state, correlation_id, prefix)
+                continue
+            # Detached fan-out: the fan-out instance gets its own
+            # Trace per spec §8.5. The fan-out node's Span observation
+            # in the parent Trace already exists (opened on the
+            # fan-out node's started event); the detached dispatch
+            # observation goes into the new Trace.
+            if depth == 1 and event.fan_out_index is not None and prefix[0] in self.detached_fan_outs:
+                self._open_detached_fan_out_instance_trace(inv_state, correlation_id, prefix, event)
+                continue
+            # Non-detached fan-out: synthesize per-instance dispatch
+            # observation under the fan-out node observation (proposal
+            # 0013 v0.10.0). Only triggers when the inner event is
+            # inside a fan-out instance AND the fan-out node's
+            # parent_node_name has been cached (i.e., the fan-out
+            # node's own started event was seen).
+            if (
+                depth == 1
+                and event.fan_out_index is not None
+                and prefix[0] not in self.detached_fan_outs
+                and prefix in inv_state.fan_out_parent_node_name
+            ):
+                self._open_fan_out_instance_dispatch_observation(inv_state, correlation_id, prefix, event)
+                continue
+            # Plain non-detached subgraph dispatch.
+            self._open_subgraph_observation(inv_state, correlation_id, prefix)
+
+    def _open_subgraph_observation(
+        self,
+        inv_state: _InvState,
+        correlation_id: str | None,
+        prefix: tuple[str, ...],
+    ) -> None:
+        # Parent is the nearest enclosing subgraph dispatch (if any),
+        # else None (the Trace is the implicit parent for top-level
+        # subgraphs).
+        parent_observation_id: str | None = None
+        for plen in range(len(prefix) - 1, 0, -1):
+            outer = prefix[:plen]
+            sg = inv_state.subgraph_observations.get(outer)
+            if sg is not None:
+                parent_observation_id = sg.handle.id
+                break
+        metadata: dict[str, Any] = {"subgraph_name": prefix[-1]}
+        if correlation_id is not None:
+            metadata["correlation_id"] = correlation_id
+        handle = self.client.span(
+            trace_id=inv_state.trace_id,
+            name=prefix[-1],
+            metadata=metadata,
+            parent_observation_id=parent_observation_id,
+        )
+        inv_state.subgraph_observations[prefix] = _OpenObservation(handle=handle)
+
+    def _open_fan_out_instance_dispatch_observation(
+        self,
+        inv_state: _InvState,
+        correlation_id: str | None,
+        prefix: tuple[str, ...],
+        event: NodeEvent,
+    ) -> None:
+        # Non-detached per-instance dispatch lives in the parent
+        # Trace under the fan-out node's own Span observation.
+        fan_out_open = self._find_fan_out_node_observation(inv_state, prefix)
+        parent_observation_id = fan_out_open.handle.id if fan_out_open is not None else None
+        parent_node_name = inv_state.fan_out_parent_node_name.get(prefix, prefix[-1])
+        metadata: dict[str, Any] = {
+            "fan_out_parent_node_name": parent_node_name,
+            "fan_out_index": event.fan_out_index,
+        }
+        if correlation_id is not None:
+            metadata["correlation_id"] = correlation_id
+        handle = self.client.span(
+            trace_id=inv_state.trace_id,
+            name=prefix[-1],
+            metadata=metadata,
+            parent_observation_id=parent_observation_id,
+        )
+        instance_key = prefix + (str(event.fan_out_index),)
+        inv_state.fan_out_instance_observations[instance_key] = _OpenObservation(handle=handle)
+
+    def _open_detached_subgraph_trace(
+        self,
+        inv_state: _InvState,
+        correlation_id: str | None,
+        prefix: tuple[str, ...],
+    ) -> None:
+        # Mint a fresh Trace for the detached subtree. The main Trace's
+        # dispatch observation surfaces the link via
+        # metadata.detached_child_trace_ids; the detached Trace gets
+        # its own dispatch observation that descendants parent under.
+        #
+        # Asymmetry note vs. _open_detached_fan_out_instance_trace:
+        # subgraphs are namespace-prefix-only constructs with no
+        # per-subgraph node event of their own. The observer never
+        # opens a leaf Span observation for the subgraph itself, only
+        # synthesized dispatch observations. To carry the cross-Trace
+        # link in the main Trace's shape, this helper opens an extra
+        # "link" Span observation in the main Trace — a small
+        # observation whose subtree is empty but whose
+        # detached_child_trace_ids metadata points at the new Trace.
+        # Dashboard users see two observations named ``prefix[-1]``:
+        # one in the main Trace (link with link metadata, no subtree)
+        # and one in the detached Trace (the real dispatch with the
+        # subgraph subtree under it).
+        #
+        # Detached fan-out instances, by contrast, already have a
+        # parent observation in the main Trace (the fan-out node's
+        # leaf observation opened on its own started event). The
+        # link metadata accumulates on that pre-existing observation
+        # instead of synthesizing a separate link observation.
+        detached_trace_id = str(uuid.uuid4())
+        # Open the link observation in the main Trace and update its
+        # metadata immediately — the array-form preserves §8.5's
+        # "string array, one entry per detached child" shape so
+        # later detached siblings under the same parent can append.
+        link_metadata: dict[str, Any] = {
+            "subgraph_name": prefix[-1],
+            "detached_child_trace_ids": [detached_trace_id],
+        }
+        if correlation_id is not None:
+            link_metadata["correlation_id"] = correlation_id
+        parent_observation_id: str | None = None
+        for plen in range(len(prefix) - 1, 0, -1):
+            outer = prefix[:plen]
+            sg = inv_state.subgraph_observations.get(outer)
+            if sg is not None:
+                parent_observation_id = sg.handle.id
+                break
+        self.client.span(
+            trace_id=inv_state.trace_id,
+            name=prefix[-1],
+            metadata=link_metadata,
+            parent_observation_id=parent_observation_id,
+        )
+        # Open the detached Trace + the dispatch observation that
+        # subtree descendants parent under.
+        detached_metadata: dict[str, Any] = {"detached_from_invocation_id": inv_state.trace_id}
+        if correlation_id is not None:
+            detached_metadata["correlation_id"] = correlation_id
+        self.client.trace(id=detached_trace_id, name=prefix[-1], metadata=detached_metadata)
+        dispatch_metadata: dict[str, Any] = {
+            "subgraph_name": prefix[-1],
+            "detached": True,
+        }
+        if correlation_id is not None:
+            dispatch_metadata["correlation_id"] = correlation_id
+        handle = self.client.span(
+            trace_id=detached_trace_id,
+            name=prefix[-1],
+            metadata=dispatch_metadata,
+            parent_observation_id=None,
+        )
+        inv_state.subgraph_observations[prefix] = _OpenObservation(handle=handle)
+        inv_state.detached_traces[prefix] = detached_trace_id
+
+    def _open_detached_fan_out_instance_trace(
+        self,
+        inv_state: _InvState,
+        correlation_id: str | None,
+        prefix: tuple[str, ...],
+        event: NodeEvent,
+    ) -> None:
+        # Mint a fresh Trace per instance. The fan-out node's own
+        # Span observation in the parent Trace accumulates the
+        # detached_child_trace_ids array (one entry per instance);
+        # each detached Trace gets its own per-instance dispatch
+        # observation that inner-node observations parent under.
+        #
+        # See _open_detached_subgraph_trace's docstring for why the
+        # detached-fan-out path doesn't synthesize a separate "link"
+        # observation in the main Trace: the fan-out node already
+        # has a leaf observation there (opened on its started event),
+        # so the link metadata accumulates on that existing
+        # observation rather than on a parallel link observation.
+        detached_trace_id = str(uuid.uuid4())
+        # Accumulate the per-fan-out link-ids list via the side cache
+        # so each new instance appends to the array on the fan-out
+        # node's observation rather than overwriting the previous
+        # instance's entry.
+        ids_list = inv_state.detached_child_trace_ids.setdefault(prefix, [])
+        ids_list.append(detached_trace_id)
+        fan_out_open = self._find_fan_out_node_observation(inv_state, prefix)
+        if fan_out_open is not None:
+            link_metadata: dict[str, Any] = {
+                "detached_child_trace_ids": list(ids_list),
+            }
+            if correlation_id is not None:
+                link_metadata["correlation_id"] = correlation_id
+            fan_out_open.handle.update(metadata=link_metadata)
+        # Open the detached Trace + per-instance dispatch observation.
+        detached_metadata: dict[str, Any] = {
+            "detached_from_invocation_id": inv_state.trace_id,
+            "fan_out_index": event.fan_out_index,
+        }
+        if correlation_id is not None:
+            detached_metadata["correlation_id"] = correlation_id
+        self.client.trace(
+            id=detached_trace_id,
+            name=prefix[-1],
+            metadata=detached_metadata,
+        )
+        parent_node_name = inv_state.fan_out_parent_node_name.get(prefix, prefix[-1])
+        dispatch_metadata: dict[str, Any] = {
+            "fan_out_parent_node_name": parent_node_name,
+            "fan_out_index": event.fan_out_index,
+            "detached": True,
+        }
+        if correlation_id is not None:
+            dispatch_metadata["correlation_id"] = correlation_id
+        handle = self.client.span(
+            trace_id=detached_trace_id,
+            name=prefix[-1],
+            metadata=dispatch_metadata,
+            parent_observation_id=None,
+        )
+        instance_key = prefix + (str(event.fan_out_index),)
+        inv_state.fan_out_instance_observations[instance_key] = _OpenObservation(handle=handle)
+        inv_state.detached_traces[instance_key] = detached_trace_id
+        inv_state.fan_out_instance_root_prefixes.add(instance_key)
+
+    def _close_subgraph_observation(self, inv_state: _InvState, prefix: tuple[str, ...]) -> None:
+        observation = inv_state.subgraph_observations.pop(prefix, None)
+        if observation is None:
+            return
+        observation.handle.end()
+
+    def _close_fan_out_instance_dispatch_observation(
+        self, inv_state: _InvState, prefix: tuple[str, ...]
+    ) -> None:
+        observation = inv_state.fan_out_instance_observations.pop(prefix, None)
+        if observation is None:
+            return
+        observation.handle.end()
+
+    def _find_fan_out_node_observation(
+        self, inv_state: _InvState, prefix: tuple[str, ...]
+    ) -> _OpenObservation | None:
+        # Find the fan-out node's open leaf observation at the given
+        # prefix. Retry middleware wrapping a fan-out bumps the
+        # attempt_index; this scans for any entry at ``prefix`` with
+        # ``fan_out_index is None``. Only one such entry is open at a
+        # time (retry opens and closes within an attempt's lifecycle).
+        for key, observation in inv_state.open_observations.items():
+            if key[0] == prefix and key[2] is None:
+                return observation
         return None
 
     def _observation_metadata(self, event: NodeEvent, correlation_id: str | None) -> dict[str, Any]:
@@ -314,8 +741,11 @@ class LangfuseObserver:
             metadata, model_parameters, input_value, output_value = self._llm_metadata_and_payload(
                 payload, correlation_id, phase="started"
             )
+            target_trace_id = self._trace_id_for(
+                inv_state, payload.calling_namespace_prefix, payload.calling_fan_out_index
+            )
             handle = self.client.generation(
-                trace_id=inv_state.trace_id,
+                trace_id=target_trace_id,
                 name="openarmature.llm.complete",
                 model=payload.model,
                 model_parameters=model_parameters,
@@ -353,9 +783,11 @@ class LangfuseObserver:
         self, inv_state: _InvState, payload: LlmEventPayload
     ) -> str | None:
         # Calling-node identity comes from the payload (set at
-        # dispatch time per llm-provider §5.5). Resolve the calling
-        # node's open observation; fall back to None (Trace parent)
-        # if not found.
+        # dispatch time per llm-provider §5.5). Try the exact-match
+        # leaf node first; if absent (LLM call fired from a wrapper
+        # node only, or the calling node already completed), fall
+        # back to the per-instance / subgraph dispatch chain, then to
+        # the leaf ancestor walk.
         key: _StackKey = (
             payload.calling_namespace_prefix,
             payload.calling_attempt_index,
@@ -364,6 +796,18 @@ class LangfuseObserver:
         observation = inv_state.open_observations.get(key)
         if observation is not None:
             return observation.handle.id
+        # Per-instance fan-out dispatch.
+        if payload.calling_fan_out_index is not None and payload.calling_namespace_prefix:
+            instance_key = payload.calling_namespace_prefix[:1] + (str(payload.calling_fan_out_index),)
+            dispatch = inv_state.fan_out_instance_observations.get(instance_key)
+            if dispatch is not None:
+                return dispatch.handle.id
+        # Subgraph dispatch, longest-prefix-first.
+        for prefix_len in range(len(payload.calling_namespace_prefix), 0, -1):
+            prefix = payload.calling_namespace_prefix[:prefix_len]
+            sg = inv_state.subgraph_observations.get(prefix)
+            if sg is not None:
+                return sg.handle.id
         return None
 
     def _llm_metadata_and_payload(
