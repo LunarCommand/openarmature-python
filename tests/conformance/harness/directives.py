@@ -346,6 +346,10 @@ class RuntimeConfigSpec(_AllowExtras):
     max_tokens: int | None = None
     top_p: float | None = None
     seed: int | None = None
+    # Three declared fields promoted by proposal 0032 (spec v0.24.0).
+    frequency_penalty: float | None = None
+    presence_penalty: float | None = None
+    stop_sequences: list[str] | None = None
     extras: dict[str, Any] | None = None
 
 

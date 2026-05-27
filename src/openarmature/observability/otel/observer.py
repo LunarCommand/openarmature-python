@@ -765,6 +765,17 @@ class OTelObserver:
                     attrs["gen_ai.request.top_p"] = request_params["top_p"]
                 if "seed" in request_params:
                     attrs["gen_ai.request.seed"] = request_params["seed"]
+                # Three new request-param attrs from proposal 0032
+                # (spec v0.24.0). The §8.4.3 Langfuse mapping picks
+                # these up by inclusion via the gen_ai.request.* →
+                # generation.modelParameters.<suffix> rule with no
+                # §8 edit.
+                if "frequency_penalty" in request_params:
+                    attrs["gen_ai.request.frequency_penalty"] = request_params["frequency_penalty"]
+                if "presence_penalty" in request_params:
+                    attrs["gen_ai.request.presence_penalty"] = request_params["presence_penalty"]
+                if "stop_sequences" in request_params:
+                    attrs["gen_ai.request.stop_sequences"] = request_params["stop_sequences"]
             # §5.5.1 payload attributes (gated by ``disable_llm_payload``).
             # ``input.messages`` and ``request.extras`` go on the started
             # span; ``output.content`` lands on the completed branch.

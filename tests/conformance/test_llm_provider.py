@@ -303,6 +303,19 @@ def _assert_wire_expectations(
                             "requires a dict response_schema on the call"
                         )
                     assert_system_references_schema(body, cast("dict[str, Any]", response_schema))
+            elif key.endswith("_absent"):
+                # Generic ``<field>_absent: true`` assertion: the
+                # wire body MUST NOT carry the named field. Used by
+                # fixture 032 (null-skip) to verify unset declared
+                # fields don't serialize as JSON null.
+                if value is True:
+                    field = key[: -len("_absent")]
+                    if field in body:
+                        raise AssertionError(
+                            f"expected_wire_request_checks.{key}: "
+                            f"field {field!r} present in wire body "
+                            f"with value {body[field]!r}"
+                        )
             else:
                 raise AssertionError(f"unknown expected_wire_request_checks key: {key!r}")
 
@@ -480,7 +493,18 @@ async def _run_one_call(
     response_schema = call_spec.get("response_schema")
     retry_mw_cfg = cast("Mapping[str, Any] | None", call_spec.get("retry_middleware"))
     config_block = call_spec.get("config")
-    config = RuntimeConfig(**cast("Mapping[str, Any]", config_block)) if config_block else None
+    # YAML convention: `config.extras: {...}` is the sub-block for
+    # undeclared (provider-specific) RuntimeConfig fields. Flatten it
+    # into the kwargs splat so the extras land in RuntimeConfig's
+    # model_extra rather than as a single `extras` key.
+    if config_block:
+        block = dict(cast("Mapping[str, Any]", config_block))
+        extras_block = cast("Mapping[str, Any] | None", block.pop("extras", None))
+        if extras_block:
+            block.update(extras_block)
+        config = RuntimeConfig(**block)
+    else:
+        config = None
 
     if operation == "complete":
         # Per spec §3 "Validation timing" — complete() validates at

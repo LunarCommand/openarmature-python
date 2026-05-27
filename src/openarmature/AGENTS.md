@@ -1,6 +1,6 @@
 # OpenArmature — Agent documentation
 
-*This is the agent guide bundled with the openarmature Python package, version 0.9.0 (spec v0.22.1). For the full docs site see [openarmature.ai](https://openarmature.ai). For the canonical spec text see [openarmature.org/capabilities](https://openarmature.org/capabilities/). For project-specific conventions for the code you're editing, see the host project's `AGENTS.md` or `CLAUDE.md`.*
+*This is the agent guide bundled with the openarmature Python package, version 0.9.0 (spec v0.24.0). For the full docs site see [openarmature.ai](https://openarmature.ai). For the canonical spec text see [openarmature.org/capabilities](https://openarmature.org/capabilities/). For project-specific conventions for the code you're editing, see the host project's `AGENTS.md` or `CLAUDE.md`.*
 
 ## TL;DR
 
@@ -10,7 +10,7 @@ OpenArmature is a workflow framework for LLM pipelines and tool-calling agents �
 
 ## Capability contracts
 
-_Sourced from openarmature-spec v0.22.1. Each entry below reproduces §1 (Purpose) and §2 (Concepts) of the capability's `spec.md`. For the full spec text (execution model, error semantics, determinism, observer hooks, etc.) see the linked docs site._
+_Sourced from openarmature-spec v0.24.0. Each entry below reproduces §1 (Purpose) and §2 (Concepts) of the capability's `spec.md`. For the full spec text (execution model, error semantics, determinism, observer hooks, etc.) see the linked docs site._
 
 ### Capability: `graph-engine`
 
@@ -274,13 +274,13 @@ The observability capability defines normative mappings from OpenArmature's runt
 well-known external observability backends. The substrate is provider-neutral; the capability is
 where each concrete backend's translation lives.
 
-This first version specifies the **OpenTelemetry** mapping. Future proposals add other backends
-(Langfuse, etc.) as sibling sections of this same spec; the OTel mapping serves as the reference
-shape for cross-backend equivalence.
+This spec defines two concrete backend mappings: the **OpenTelemetry** mapping in §3–§7 and the
+**Langfuse** mapping in §8. Future proposals add additional backends as further sibling sections
+of this same spec; the OTel mapping serves as the reference shape for cross-backend equivalence.
 
 The capability does NOT introduce new graph-engine primitives. It consumes the existing observer
 event stream — `started` events open spans, `completed` events close them. An implementation that
-emits OTel spans is built on top of §6, not into the engine.
+emits OTel spans (or Langfuse observations, per §8) is built on top of §6, not into the engine.
 
 #### 2. Concepts
 
@@ -310,7 +310,8 @@ and is intended to be visible in every backend the implementation emits to. A us
 LLM workflow with both an OTel backend (system traces, logs) and a Langfuse backend
 (LLM-specific traces) uses the `correlation_id` as a join key between them: find a slow request
 in Langfuse, search for its `correlation_id` in OTel logs, and see the surrounding
-infrastructure activity. See §3 (architectural contract) and §5.6 (OTel attribute realization).
+infrastructure activity. See §3 (architectural contract), §5.6 (OTel attribute realization),
+and §8.5 (Langfuse attribute realization).
 
 ### Capability: `prompt-management`
 

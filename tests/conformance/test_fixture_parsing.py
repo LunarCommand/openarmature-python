@@ -44,6 +44,14 @@ _DEFERRED_FIXTURES: dict[str, str] = {
     # content-block message shape via LlmCallSpec's permissive
     # ``messages: list[dict[str, Any]]`` typing without needing
     # model extensions.
+    # proposal 0031's Langfuse fixtures (022-024) introduce a
+    # ``langfuse_trace:`` expected-block shape unknown to the current
+    # typed directives. The Langfuse harness lands in the next PR of
+    # the batch (PR 3) and adds the matching directive model;
+    # deferring here keeps the parser tests passing in the meantime.
+    "observability/022-langfuse-basic-trace": "Langfuse harness lands in PR 3 (proposal 0031)",
+    "observability/023-langfuse-generation-rendering": "Langfuse harness lands in PR 3 (proposal 0031)",
+    "observability/024-langfuse-prompt-linkage": "Langfuse harness lands in PR 3 (proposal 0031)",
 }
 
 

@@ -15,8 +15,7 @@ users who need them can reach through the abstraction directly.
 
 ``RuntimeConfig`` is the optional per-call sampling-parameter record.
 Implementations MAY accept additional provider-specific fields; the
-four declared here (temperature, max_tokens, top_p, seed) are the
-mandated minimum.
+seven declared here are the mandated minimum.
 """
 
 from __future__ import annotations
@@ -107,12 +106,13 @@ class Response(BaseModel):
     response_model: str | None = None
 
 
+# Spec §6 declared-field surface: seven optional fields. Undeclared
+# fields supplied by callers MUST be forwarded to the wire body
+# untouched (extras pass-through); declared fields with value ``None``
+# MUST be omitted from the wire body (null-skip). Both rules are
+# enforced by the §8 wire-format mapping, not by RuntimeConfig itself.
 class RuntimeConfig(BaseModel):
-    """Per-call sampling parameters and budget hints.
-
-    All four fields are optional. Implementations MAY accept
-    additional provider-specific fields; this is the minimum.
-    """
+    """Per-call sampling parameters and budget hints."""
 
     model_config = ConfigDict(extra="allow")
 
@@ -122,6 +122,32 @@ class RuntimeConfig(BaseModel):
     # Per spec §6: setting ``seed`` does NOT guarantee determinism; see
     # §9. Best-effort only, useful for providers that support it.
     seed: int | None = None
+    # Promoted from extras to a declared field in proposal 0032 (spec
+    # v0.24.0). Cross-vendor: OpenAI / Mistral / Cohere accept this
+    # name directly; Anthropic and Gemini map to vendor-specific
+    # equivalents at the wire layer (per §8.2 / §8.3 when those land).
+    frequency_penalty: float | None = None
+    presence_penalty: float | None = None
+    # Declared field name matches the cross-vendor OpenTelemetry GenAI
+    # semconv (``gen_ai.request.stop_sequences``) and Anthropic /
+    # Gemini wire-key conventions. The §8.1 OpenAI-compatible wire
+    # mapping translates ``stop_sequences`` to OpenAI's shorter body
+    # key ``stop`` on emission. OpenAI is the outlier on the shorter
+    # name; the declared layer matches the cross-vendor norm.
+    stop_sequences: list[str] | None = None
+
+    # Pure Python ergonomic, not a spec contract. The wire-layer
+    # null-skip rule already drops ``None``-valued declared fields, so
+    # this helper exists solely to let callers splat a dict whose
+    # entries may be ``None`` without filtering at the call site.
+    @classmethod
+    def from_partial(cls, **kwargs: Any) -> RuntimeConfig:
+        """Construct a config, dropping kwargs whose value is ``None``.
+
+        >>> RuntimeConfig.from_partial(temperature=0.7, top_p=None).top_p is None
+        True
+        """
+        return cls(**{k: v for k, v in kwargs.items() if v is not None})
 
 
 __all__ = [
