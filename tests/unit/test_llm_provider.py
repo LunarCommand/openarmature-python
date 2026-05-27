@@ -476,6 +476,12 @@ def test_runtime_config_from_partial_drops_nones() -> None:
 
     assert config.temperature == 0.7
     assert config.top_p == 0.9
+    # max_tokens and seed default to None on a base RuntimeConfig, so
+    # `is None` alone doesn't prove the drop. model_fields_set carries
+    # only explicitly-set fields, so its absence proves from_partial
+    # filtered the None kwargs before __init__ ran.
+    assert "max_tokens" not in config.model_fields_set
+    assert "seed" not in config.model_fields_set
     assert config.max_tokens is None
     assert config.seed is None
 
