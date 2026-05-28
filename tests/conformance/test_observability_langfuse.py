@@ -46,15 +46,24 @@ _LANGFUSE_FIXTURES = frozenset(
         "022-langfuse-basic-trace",
         "023-langfuse-generation-rendering",
         "024-langfuse-prompt-linkage",
-        # 031 / 032 / 033 (proposal 0035, spec v0.26.1): harness
-        # extension below (subgraph / fan_out / detached-trace topology)
-        # already runs these end-to-end, but the fixtures assert
-        # `metadata.subgraph_name = <subgraph identity>` while both the
-        # Langfuse + OTel observers emit `subgraph_name = <wrapper node
-        # name>`. Resolution queued in coord thread
-        # `clarify-subgraph-name-semantics`; un-defer (and apply any
-        # required impl change) once spec picks among the three
-        # options laid out there.
+        # 031 / 032 / 033 — proposal 0035 (spec v0.26.1). The
+        # subgraph_identity wiring (per coord thread
+        # `clarify-subgraph-name-semantics` msg 02 — Option A) is
+        # landed: SubgraphNode.subgraph_identity / FanOutConfig.
+        # subgraph_identity flow through NodeEvent.subgraph_identities
+        # to observer-side metadata.subgraph_name emission. Two
+        # remaining spec/fixture ambiguities block fixture activation:
+        # (1) ``step`` semantics on the wrapper synth observation vs.
+        # ``outer_out``: fixture 031 expects ``outer_out`` at step 2
+        # but graph-engine §6 says "subgraph-internal node executions
+        # increment the same counter" so the python engine emits
+        # step 3 (outer_in=0, inner_x=1, inner_y=2, outer_out=3).
+        # (2) ``namespace`` rewrite for observations inside a
+        # detached trace: fixture 033 case 1 expects
+        # ``namespace: ["long_running_workflow", "step"]`` (using
+        # subgraph identity for the wrapper component) but the
+        # engine's event carries the wrapper node name (``"dispatch"``).
+        # Both queued for spec input via a follow-up coord thread.
     }
 )
 

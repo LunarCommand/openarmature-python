@@ -80,6 +80,28 @@ def _empty_str_frozenset() -> frozenset[str]:
     return frozenset()
 
 
+def _subgraph_identity_at(event: NodeEvent, depth: int) -> str:
+    """Return the compiled-subgraph identity for the wrapper at the
+    given 1-based namespace depth, or the empty string when no
+    identity is tracked at that depth.
+
+    Per observability §5.3 + the coord-thread
+    ``clarify-subgraph-name-semantics`` resolution: the empty-string
+    fallback matches the spec's "if the implementation tracks one"
+    clause for implementations / direct ``SubgraphNode(...)`` callers
+    that don't wire an identity through. Conformance fixtures
+    031/032/033 lock identity as the required value; the empty-string
+    path keeps direct callers conformant with §5.3 but failing those
+    fixtures.
+    """
+    idx = depth - 1
+    if 0 <= idx < len(event.subgraph_identities):
+        identity = event.subgraph_identities[idx]
+        if identity is not None:
+            return identity
+    return ""
+
+
 @dataclass
 class _InvState:
     """Per-invocation state, isolated by invocation_id.
@@ -453,7 +475,7 @@ class LangfuseObserver:
             # configured detached_subgraphs name → mint a fresh
             # detached Trace + open the dispatch observation in it.
             if depth == 1 and prefix[0] in self.detached_subgraphs:
-                self._open_detached_subgraph_trace(inv_state, correlation_id, prefix)
+                self._open_detached_subgraph_trace(inv_state, correlation_id, prefix, event)
                 continue
             # Detached fan-out: the fan-out instance gets its own
             # Trace per spec §8.5. The fan-out node's Span observation
@@ -478,13 +500,14 @@ class LangfuseObserver:
                 self._open_fan_out_instance_dispatch_observation(inv_state, correlation_id, prefix, event)
                 continue
             # Plain non-detached subgraph dispatch.
-            self._open_subgraph_observation(inv_state, correlation_id, prefix)
+            self._open_subgraph_observation(inv_state, correlation_id, prefix, event)
 
     def _open_subgraph_observation(
         self,
         inv_state: _InvState,
         correlation_id: str | None,
         prefix: tuple[str, ...],
+        event: NodeEvent,
     ) -> None:
         # Parent is the nearest enclosing subgraph dispatch (if any),
         # else None (the Trace is the implicit parent for top-level
@@ -496,7 +519,18 @@ class LangfuseObserver:
             if sg is not None:
                 parent_observation_id = sg.handle.id
                 break
-        metadata: dict[str, Any] = {"subgraph_name": prefix[-1]}
+        # Subgraph wrappers don't dispatch their own events, so the
+        # synthetic wrapper observation inherits its scalar metadata
+        # from the FIRST inner event that triggered the synthesis.
+        # ``attempt_index`` is hardcoded to 0: the wrapper has no
+        # engine-managed retry counter of its own (inner nodes own
+        # their own attempt_index independently).
+        metadata: dict[str, Any] = {
+            "namespace": list(prefix),
+            "step": event.step,
+            "attempt_index": 0,
+            "subgraph_name": _subgraph_identity_at(event, len(prefix)),
+        }
         if correlation_id is not None:
             metadata["correlation_id"] = correlation_id
         handle = self.client.span(
@@ -519,9 +553,16 @@ class LangfuseObserver:
         fan_out_open = self._find_fan_out_node_observation(inv_state, prefix)
         parent_observation_id = fan_out_open.handle.id if fan_out_open is not None else None
         parent_node_name = inv_state.fan_out_parent_node_name.get(prefix, prefix[-1])
+        # Per-instance dispatch is synthesized from the first inner
+        # event inside the instance subtree; inherit scalar metadata
+        # from that event (same pattern as ``_open_subgraph_observation``).
         metadata: dict[str, Any] = {
+            "namespace": list(prefix),
+            "step": event.step,
+            "attempt_index": 0,
             "fan_out_parent_node_name": parent_node_name,
             "fan_out_index": event.fan_out_index,
+            "subgraph_name": _subgraph_identity_at(event, len(prefix)),
         }
         if correlation_id is not None:
             metadata["correlation_id"] = correlation_id
@@ -539,6 +580,7 @@ class LangfuseObserver:
         inv_state: _InvState,
         correlation_id: str | None,
         prefix: tuple[str, ...],
+        event: NodeEvent,
     ) -> None:
         # Mint a fresh Trace for the detached subtree. The main Trace's
         # dispatch observation surfaces the link via
@@ -604,16 +646,26 @@ class LangfuseObserver:
         detached_metadata: dict[str, Any] = {"detached_from_invocation_id": inv_state.trace_id}
         if correlation_id is not None:
             detached_metadata["correlation_id"] = correlation_id
-        self.client.trace(id=detached_trace_id, name=prefix[-1], metadata=detached_metadata)
+        identity = _subgraph_identity_at(event, len(prefix))
+        # The detached trace's wrapper observation IS the migrated
+        # SubgraphNode wrapper. Per the resolution in coord thread
+        # ``clarify-subgraph-name-semantics`` and fixture 033's
+        # expected shape, its name and ``metadata.subgraph_name`` use
+        # the compiled-subgraph identity (e.g., ``"long_running_workflow"``)
+        # rather than the wrapper node name. Falls back to the wrapper
+        # node name when identity is empty (observability §5.3's
+        # "if the implementation tracks one" clause).
+        wrapper_obs_name = identity or prefix[-1]
+        self.client.trace(id=detached_trace_id, name=wrapper_obs_name, metadata=detached_metadata)
         dispatch_metadata: dict[str, Any] = {
-            "subgraph_name": prefix[-1],
+            "subgraph_name": identity,
             "detached": True,
         }
         if correlation_id is not None:
             dispatch_metadata["correlation_id"] = correlation_id
         handle = self.client.span(
             trace_id=detached_trace_id,
-            name=prefix[-1],
+            name=wrapper_obs_name,
             metadata=dispatch_metadata,
             parent_observation_id=None,
         )

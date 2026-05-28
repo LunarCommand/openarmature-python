@@ -669,6 +669,7 @@ def build_graph(
                 projection=projection,
                 trace_list=trace,
                 middleware=per_node_mw,
+                subgraph_identity=sub_name,
             )
             continue
         if "fan_out" in node_spec:
@@ -936,6 +937,7 @@ def _add_fan_out_node(
         extra_outputs=cfg.get("extra_outputs"),
         errors_field=cfg.get("errors_field"),
         instance_middleware=instance_middleware,
+        subgraph_identity=sub_name,
     )
 
     # Swap the registered FanOutNode for a tracing variant so the

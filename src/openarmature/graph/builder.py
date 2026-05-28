@@ -148,6 +148,7 @@ class GraphBuilder[StateT: State]:
         instance_middleware: Iterable[Middleware] | None = None,
         errors_field: str | None = None,
         middleware: Iterable[Middleware] | None = None,
+        subgraph_identity: str | None = None,
     ) -> Self:
         """Register a fan-out node.
 
@@ -262,6 +263,7 @@ class GraphBuilder[StateT: State]:
             extra_outputs=dict(extra_outputs or {}),
             instance_middleware=tuple(instance_middleware or ()),
             errors_field=errors_field,
+            subgraph_identity=subgraph_identity,
         )
         # FanOutNode satisfies the Node[StateT] structural protocol (run
         # returns a partial update; name and middleware are present),

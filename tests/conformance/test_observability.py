@@ -324,7 +324,12 @@ async def _run_fixture_002(spec: Mapping[str, Any]) -> None:
     assert sub_dispatch.context is not None
     sub_dispatch_id = sub_dispatch.context.span_id
     sub_dispatch_attrs = dict(sub_dispatch.attributes or {})
-    assert sub_dispatch_attrs.get("openarmature.subgraph.name") == "outer_sub"
+    # Per observability §5.3 + coord thread `clarify-subgraph-name-
+    # semantics` Option A: `openarmature.subgraph.name` carries the
+    # compiled subgraph's identity, NOT the wrapper node name. The
+    # conformance adapter sets ``subgraph_identity = "inner"`` when
+    # compiling the fixture's ``subgraph: { name: inner }`` block.
+    assert sub_dispatch_attrs.get("openarmature.subgraph.name") == "inner"
 
     # Inner-node spans parent under the subgraph dispatch span and
     # carry the nested namespace.

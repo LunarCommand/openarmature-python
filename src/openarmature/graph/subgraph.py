@@ -50,6 +50,17 @@ class SubgraphNode[ParentT: State, ChildT: State]:
         default_factory=FieldNameMatching[ParentT, ChildT]
     )
     middleware: tuple[Middleware, ...] = field(default_factory=tuple[Middleware, ...])
+    # The compiled subgraph's identity (the registry key under which
+    # the subgraph is declared, distinct from the wrapper node's
+    # ``name`` in the parent graph). Optional and BC-preserving:
+    # callers that don't pass it get an empty string emitted as the
+    # observability §5.3 ``subgraph_name`` attribute (matching the
+    # spec's "if the implementation tracks one" fallback). Setting
+    # it lets dashboards filter or aggregate across observations from
+    # the same compiled subgraph wrapped under different node names
+    # (e.g., a ``validator`` subgraph used as both ``validate_input``
+    # and ``validate_output``).
+    subgraph_identity: str | None = None
 
     async def run(
         self,
@@ -116,6 +127,7 @@ class SubgraphNode[ParentT: State, ChildT: State]:
                 subgraph_node_name=self.name,
                 parent_state=state,
                 sub_attached=tuple(self.compiled._attached_observers),
+                subgraph_identity=self.subgraph_identity,
             )
             sub_final = await self.compiled._invoke(sub_initial, child_context)
         return self.projection.project_out(sub_final, state, self.compiled.state_cls)

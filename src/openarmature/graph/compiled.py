@@ -1987,6 +1987,7 @@ class CompiledGraph[StateT: State]:
                 fan_out_index=context.fan_out_index,
                 fan_out_config=fan_out_config,
                 branch_name=current_branch_name(),
+                subgraph_identities=context.subgraph_identities,
             ),
         )
 
@@ -2020,6 +2021,7 @@ class CompiledGraph[StateT: State]:
                 fan_out_index=context.fan_out_index,
                 fan_out_config=fan_out_config,
                 branch_name=current_branch_name(),
+                subgraph_identities=context.subgraph_identities,
             ),
         )
 
@@ -2202,5 +2204,6 @@ class CompiledGraph[StateT: State]:
                 parent_states=context.parent_states_prefix,
                 attempt_index=attempt_index,
                 fan_out_index=None,
+                subgraph_identities=context.subgraph_identities,
             ),
         )
