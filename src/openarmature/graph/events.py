@@ -13,11 +13,20 @@ validation fails (with ``error`` populated).
 Frozen dataclass; observers receive a snapshot, not a live handle.
 """
 
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, field
+from types import MappingProxyType
 from typing import Any, Literal
+
+from openarmature.observability.metadata import AttributeValue
 
 from .errors import RuntimeGraphError
 from .state import State
+
+# Sentinel empty metadata mapping for events constructed without a
+# live caller-metadata snapshot (test helpers, synthetic events).
+# Read-only proxy keeps the default allocation-free.
+_EMPTY_METADATA: MappingProxyType[str, AttributeValue] = MappingProxyType({})
 
 
 # Spec: realizes observability §5.4 fan-out attributes via the
@@ -205,6 +214,21 @@ class NodeEvent:
     # empty string when ``None`` per §5.3's "if the implementation
     # tracks one" clause.
     subgraph_identities: tuple[str | None, ...] = ()
+    # Per observability §3.4 + §5.6 (proposal 0034): snapshot of the
+    # caller-supplied invocation metadata at event-construction
+    # time. The engine reads ``current_invocation_metadata()`` when
+    # it constructs the event (in the engine task / node body's
+    # Context); the observer reads from the snapshot on the event
+    # rather than re-reading the ContextVar at observer time —
+    # critical because the observer runs on the engine's
+    # ``deliver_loop`` task whose Context is frozen at invoke time
+    # (asyncio.create_task copies the parent Context at task
+    # creation), so the live ContextVar value in the deliver_loop
+    # would NOT reflect mid-invocation augmentations made by node
+    # bodies running in the main engine task. Observers emit each
+    # entry as ``openarmature.user.<key>`` (OTel, §5.6) /
+    # ``metadata.<key>`` (Langfuse, §8.4.1+§8.4.2).
+    caller_invocation_metadata: Mapping[str, AttributeValue] = field(default_factory=lambda: _EMPTY_METADATA)
 
 
 __all__ = ["FanOutEventConfig", "NodeEvent"]

@@ -78,6 +78,12 @@ from openarmature.observability.correlation import (
     current_active_observer_span,
     current_attempt_index,
 )
+from openarmature.observability.metadata import (
+    _reset_invocation_metadata,
+    _set_invocation_metadata,
+    current_invocation_metadata,
+    validate_invocation_metadata,
+)
 
 from .edges import END, ConditionalEdge, EndSentinel, StaticEdge
 from .errors import (
@@ -767,6 +773,7 @@ class CompiledGraph[StateT: State]:
         *,
         correlation_id: str | None = None,
         resume_invocation: str | None = None,
+        metadata: Mapping[str, Any] | None = None,
     ) -> StateT:
         """Run the graph from ``initial_state`` to END and return the
         final state.
@@ -805,8 +812,33 @@ class CompiledGraph[StateT: State]:
           own retry logic if transient backend failures should be
           reattempted.
 
+        **Caller-supplied invocation metadata (proposal 0034).**
+
+        - ``metadata`` is an optional mapping of arbitrary
+          ``key → value`` entries the framework propagates to every
+          observability backend. Values MUST be OTel-attribute-
+          compatible scalars (``str`` / ``int`` / ``float`` / ``bool``)
+          or homogeneous arrays of those types. Keys MUST NOT use
+          the ``openarmature.*`` or ``gen_ai.*`` reserved namespaces.
+          Validation runs synchronously at the API boundary; rule
+          violations raise ``ValueError`` BEFORE any work begins.
+        - Per spec §5.6 the OTel observer emits each entry as an
+          ``openarmature.user.<key>`` cross-cutting span attribute on
+          every span and OTel log record. The Langfuse observer
+          merges each entry into ``trace.metadata`` AND every
+          ``observation.metadata`` (top level, sibling to
+          ``correlation_id``).
+        - Mid-invocation augmentation via
+          :func:`openarmature.observability.set_invocation_metadata`
+          merges into the same ContextVar with the same validation
+          rules; affects spans emitted AFTER the call returns.
+
         Raises one of the runtime error categories on failure.
         """
+        # Validate caller-supplied metadata at the API boundary so any
+        # rule violation surfaces synchronously before the worker task
+        # is created or any node body runs.
+        validated_metadata = validate_invocation_metadata(metadata)
 
         invocation_scoped = tuple(_coerce_subscribed(o) for o in (observers or ()))
         queue: asyncio.Queue[_QueuedItem | None] = asyncio.Queue()
@@ -943,6 +975,7 @@ class CompiledGraph[StateT: State]:
         # "per-invocation is OUTERMOST invoke" wording).
         correlation_token = _set_correlation_id(resolved_correlation_id)
         invocation_token = _set_invocation_id(invocation_id)
+        metadata_token = _set_invocation_metadata(validated_metadata)
         worker = asyncio.create_task(deliver_loop(queue, context.drain_counters))
         self._active_workers[worker] = context
         # Auto-prune: when the worker completes (after the sentinel is
@@ -973,11 +1006,13 @@ class CompiledGraph[StateT: State]:
                     post_state=None,
                     error=None,
                     parent_states=(),
+                    caller_invocation_metadata=current_invocation_metadata(),
                 ),
             )
         try:
             return await self._invoke(starting_state, context)
         finally:
+            _reset_invocation_metadata(metadata_token)
             _reset_invocation_id(invocation_token)
             _reset_correlation_id(correlation_token)
             # Sentinel terminates the worker after it processes events
@@ -1988,6 +2023,7 @@ class CompiledGraph[StateT: State]:
                 fan_out_config=fan_out_config,
                 branch_name=current_branch_name(),
                 subgraph_identities=context.subgraph_identities,
+                caller_invocation_metadata=current_invocation_metadata(),
             ),
         )
 
@@ -2022,6 +2058,7 @@ class CompiledGraph[StateT: State]:
                 fan_out_config=fan_out_config,
                 branch_name=current_branch_name(),
                 subgraph_identities=context.subgraph_identities,
+                caller_invocation_metadata=current_invocation_metadata(),
             ),
         )
 
@@ -2205,5 +2242,6 @@ class CompiledGraph[StateT: State]:
                 attempt_index=attempt_index,
                 fan_out_index=None,
                 subgraph_identities=context.subgraph_identities,
+                caller_invocation_metadata=current_invocation_metadata(),
             ),
         )

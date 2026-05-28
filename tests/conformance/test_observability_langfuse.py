@@ -53,6 +53,10 @@ _LANGFUSE_FIXTURES = frozenset(
         "022-langfuse-basic-trace",
         "023-langfuse-generation-rendering",
         "024-langfuse-prompt-linkage",
+        # 027 — proposal 0034 (caller-supplied metadata propagation
+        # into ``trace.metadata`` + every ``observation.metadata``
+        # per §8.4.1 + §8.4.2).
+        "027-langfuse-caller-supplied-metadata",
         # 031 / 032 / 033 — proposal 0035 (spec v0.26.1). The
         # subgraph_identity wiring (per coord thread
         # `clarify-subgraph-name-semantics` msg 02 — Option A) is
@@ -309,6 +313,9 @@ async def _run_case(case: Mapping[str, Any]) -> None:
     invoke_kwargs: dict[str, Any] = {}
     if correlation_id is not None:
         invoke_kwargs["correlation_id"] = correlation_id
+    caller_metadata = cast("dict[str, Any] | None", case.get("caller_metadata"))
+    if caller_metadata is not None:
+        invoke_kwargs["metadata"] = caller_metadata
     await graph.invoke(initial_state_factory(), **invoke_kwargs)
     await graph.drain()
     if provider is not None:

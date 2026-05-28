@@ -75,7 +75,7 @@ carries an OTel :class:`Link` to the detached trace.
 from __future__ import annotations
 
 import json
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, cast
 
@@ -146,6 +146,23 @@ def _read_spec_version() -> str:
     from openarmature import __spec_version__
 
     return __spec_version__
+
+
+def _apply_caller_metadata(attrs: dict[str, Any], metadata: Mapping[str, Any]) -> None:
+    """Merge caller-supplied invocation metadata into a span's
+    attribute dict as ``openarmature.user.<key>`` entries per
+    observability §5.6.
+
+    Called at every span-emission site so the metadata family is
+    cross-cutting (invocation span, every node span, subgraph
+    dispatch, fan-out instance dispatch, LLM provider span,
+    detached roots). Source values may come from
+    ``NodeEvent.caller_invocation_metadata`` for graph events or
+    from ``LlmEventPayload.caller_invocation_metadata`` for LLM
+    events; both are dispatch-time snapshots.
+    """
+    for key, value in metadata.items():
+        attrs[f"openarmature.user.{key}"] = value
 
 
 def _subgraph_identity_at(event: NodeEvent, depth: int) -> str:
@@ -665,6 +682,7 @@ class OTelObserver:
         cid = current_correlation_id()
         if cid is not None:
             attrs["openarmature.correlation_id"] = cid
+        _apply_caller_metadata(attrs, event.caller_invocation_metadata)
         span = self._tracer.start_span(
             name="openarmature.checkpoint.migrate",
             context=parent_ctx,
@@ -698,6 +716,7 @@ class OTelObserver:
         cid = current_correlation_id()
         if cid is not None:
             attrs["openarmature.correlation_id"] = cid
+        _apply_caller_metadata(attrs, event.caller_invocation_metadata)
         span = self._tracer.start_span(
             name="openarmature.checkpoint.save",
             context=cast("Any", parent_ctx),
@@ -751,6 +770,7 @@ class OTelObserver:
             cid = current_correlation_id()
             if cid is not None:
                 attrs["openarmature.correlation_id"] = cid
+            _apply_caller_metadata(attrs, payload.caller_invocation_metadata)
             # Prompt-identity attributes: sourced from the dispatch-
             # time snapshot on the payload. Reading the ContextVar
             # here would return None because the dispatch worker
@@ -925,6 +945,7 @@ class OTelObserver:
         }
         if correlation_id is not None:
             attrs["openarmature.correlation_id"] = correlation_id
+        _apply_caller_metadata(attrs, event.caller_invocation_metadata)
         span = self._tracer.start_span(
             name="openarmature.invocation",
             kind=SpanKind.INTERNAL,
@@ -1112,6 +1133,7 @@ class OTelObserver:
         }
         if correlation_id is not None:
             attrs["openarmature.correlation_id"] = correlation_id
+        _apply_caller_metadata(attrs, event.caller_invocation_metadata)
         span = self._tracer.start_span(
             name=prefix[-1],
             context=cast("Any", parent_ctx),
@@ -1166,6 +1188,7 @@ class OTelObserver:
         }
         if correlation_id is not None:
             attrs_parent["openarmature.correlation_id"] = correlation_id
+        _apply_caller_metadata(attrs_parent, event.caller_invocation_metadata)
         parent_dispatch = self._tracer.start_span(
             name=prefix[-1],
             context=cast("Any", parent_ctx_for_dispatch),
@@ -1235,6 +1258,7 @@ class OTelObserver:
         }
         if correlation_id is not None:
             attrs["openarmature.correlation_id"] = correlation_id
+        _apply_caller_metadata(attrs, event.caller_invocation_metadata)
         instance_root = self._tracer.start_span(
             name=prefix[-1],
             context=cast("Any", detached_parent_ctx),
@@ -1289,6 +1313,7 @@ class OTelObserver:
         }
         if correlation_id is not None:
             attrs["openarmature.correlation_id"] = correlation_id
+        _apply_caller_metadata(attrs, event.caller_invocation_metadata)
         instance_span = self._tracer.start_span(
             name=prefix[-1],
             context=cast("Any", parent_ctx),
@@ -1370,6 +1395,7 @@ class OTelObserver:
             attrs["openarmature.fan_out.item_count"] = cfg.item_count
             attrs["openarmature.fan_out.concurrency"] = 0 if cfg.concurrency is None else cfg.concurrency
             attrs["openarmature.fan_out.error_policy"] = cfg.error_policy
+        _apply_caller_metadata(attrs, event.caller_invocation_metadata)
         return attrs
 
     # ------------------------------------------------------------------

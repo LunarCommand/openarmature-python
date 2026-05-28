@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import json
 import uuid
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, cast
 
@@ -78,6 +79,28 @@ def _empty_str_frozenset() -> frozenset[str]:
     """Typed empty frozenset factory for ``detached_subgraphs`` /
     ``detached_fan_outs`` defaults."""
     return frozenset()
+
+
+def _apply_caller_metadata(metadata: dict[str, Any], caller_metadata: Mapping[str, Any]) -> None:
+    """Merge caller-supplied invocation metadata into a Trace's or
+    Observation's metadata bag at top level per observability §8.4.1
+    + §8.4.2 (proposal 0034).
+
+    Top-level placement is by spec: Langfuse UI filters on
+    ``metadata.<key>`` directly, so caller-supplied entries become
+    siblings to ``correlation_id`` / ``entry_node`` rather than
+    nested under a ``user`` sub-object.
+
+    Reserved-key collision with §8.4.1 / §8.4.2 keys
+    (``correlation_id``, ``entry_node``, ``spec_version``,
+    ``namespace``, etc.) is not currently checked here: the spec
+    permits the rejection to happen at either boundary, and the
+    ``invoke()`` API-boundary validation already rejects
+    ``openarmature.*`` / ``gen_ai.*`` prefixed keys. Per-Langfuse-
+    backend collision rejection is queued as a follow-up.
+    """
+    for key, value in caller_metadata.items():
+        metadata[key] = value
 
 
 def _subgraph_identity_at(event: NodeEvent, depth: int) -> str:
@@ -366,6 +389,7 @@ class LangfuseObserver:
         }
         if correlation_id is not None:
             metadata["correlation_id"] = correlation_id
+        _apply_caller_metadata(metadata, event.caller_invocation_metadata)
         # §8.6 trace name: caller-supplied invocation label takes
         # precedence; entry-node name is the spec-recommended fallback.
         # The caller-supplied path lands in proposal 0034 (PR 4) — for
@@ -533,6 +557,7 @@ class LangfuseObserver:
         }
         if correlation_id is not None:
             metadata["correlation_id"] = correlation_id
+        _apply_caller_metadata(metadata, event.caller_invocation_metadata)
         handle = self.client.span(
             trace_id=inv_state.trace_id,
             name=prefix[-1],
@@ -566,6 +591,7 @@ class LangfuseObserver:
         }
         if correlation_id is not None:
             metadata["correlation_id"] = correlation_id
+        _apply_caller_metadata(metadata, event.caller_invocation_metadata)
         handle = self.client.span(
             trace_id=inv_state.trace_id,
             name=prefix[-1],
@@ -622,6 +648,7 @@ class LangfuseObserver:
         }
         if correlation_id is not None:
             link_metadata["correlation_id"] = correlation_id
+        _apply_caller_metadata(link_metadata, event.caller_invocation_metadata)
         parent_observation_id: str | None = None
         for plen in range(len(prefix) - 1, 0, -1):
             outer = prefix[:plen]
@@ -646,6 +673,7 @@ class LangfuseObserver:
         detached_metadata: dict[str, Any] = {"detached_from_invocation_id": inv_state.trace_id}
         if correlation_id is not None:
             detached_metadata["correlation_id"] = correlation_id
+        _apply_caller_metadata(detached_metadata, event.caller_invocation_metadata)
         identity = _subgraph_identity_at(event, len(prefix))
         # The detached trace's wrapper observation IS the migrated
         # SubgraphNode wrapper. Per the resolution in coord thread
@@ -673,6 +701,7 @@ class LangfuseObserver:
         }
         if correlation_id is not None:
             dispatch_metadata["correlation_id"] = correlation_id
+        _apply_caller_metadata(dispatch_metadata, event.caller_invocation_metadata)
         handle = self.client.span(
             trace_id=detached_trace_id,
             name=wrapper_obs_name,
@@ -715,6 +744,7 @@ class LangfuseObserver:
             }
             if correlation_id is not None:
                 link_metadata["correlation_id"] = correlation_id
+            _apply_caller_metadata(link_metadata, event.caller_invocation_metadata)
             fan_out_open.handle.update(metadata=link_metadata)
         # Open the detached Trace + per-instance dispatch observation.
         detached_metadata: dict[str, Any] = {
@@ -723,6 +753,7 @@ class LangfuseObserver:
         }
         if correlation_id is not None:
             detached_metadata["correlation_id"] = correlation_id
+        _apply_caller_metadata(detached_metadata, event.caller_invocation_metadata)
         self.client.trace(
             id=detached_trace_id,
             name=prefix[-1],
@@ -736,6 +767,7 @@ class LangfuseObserver:
         }
         if correlation_id is not None:
             dispatch_metadata["correlation_id"] = correlation_id
+        _apply_caller_metadata(dispatch_metadata, event.caller_invocation_metadata)
         handle = self.client.span(
             trace_id=detached_trace_id,
             name=prefix[-1],
@@ -866,6 +898,7 @@ class LangfuseObserver:
             metadata["fan_out_item_count"] = cfg.item_count
             metadata["fan_out_concurrency"] = 0 if cfg.concurrency is None else cfg.concurrency
             metadata["fan_out_error_policy"] = cfg.error_policy
+        _apply_caller_metadata(metadata, event.caller_invocation_metadata)
         return metadata
 
     # ------------------------------------------------------------------
@@ -1005,6 +1038,7 @@ class LangfuseObserver:
         active_group = payload.active_prompt_group
         if active_group is not None:
             metadata["prompt_group_name"] = active_group.group_name
+        _apply_caller_metadata(metadata, payload.caller_invocation_metadata)
 
         model_parameters: dict[str, Any] = {}
         request_params = payload.request_params or {}

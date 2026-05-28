@@ -37,7 +37,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 # Sentinel namespace the LLM provider emits to signal "this is an LLM
 # event, not a regular node event." Backend mappings (the OTel observer
@@ -112,6 +112,18 @@ class LlmEventPayload(BaseModel):
     response_id: str | None = None
     response_model: str | None = None
     genai_system: str = "openai"
+    # Per proposal 0034 / observability §3.4 + §5.6: snapshot of
+    # caller-supplied invocation metadata captured at LLM-event
+    # dispatch time (in the calling node's Context). Backend
+    # observers read from the snapshot rather than re-reading the
+    # ContextVar at observer time — the OTel + Langfuse observers
+    # run on the engine's ``deliver_loop`` task whose Context is
+    # frozen at invoke time, so mid-invocation augmentations made
+    # by node bodies running in the main engine task are NOT visible
+    # there. The snapshot pattern mirrors the existing
+    # ``calling_namespace_prefix`` / ``calling_attempt_index`` /
+    # ``calling_fan_out_index`` fields.
+    caller_invocation_metadata: dict[str, Any] = Field(default_factory=dict)
 
 
 __all__ = ["LLM_NAMESPACE", "LlmEventPayload"]

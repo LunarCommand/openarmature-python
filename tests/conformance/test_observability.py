@@ -106,6 +106,16 @@ _SUPPORTED_FIXTURES = frozenset(
         # v0.24.0 — proposal 0032 (three new declared RuntimeConfig
         # fields surfaced as gen_ai.request.* attributes).
         "025-otel-llm-request-params-extended",
+        # v0.10.0 — proposal 0034 (caller-supplied invocation metadata
+        # cross-cutting on every span). 026 verifies the
+        # ``openarmature.user.*`` attribute family lands on the
+        # invocation span, every node span, and the LLM provider span.
+        "026-otel-caller-supplied-metadata",
+        # 028 — proposal 0034 API-boundary rejection: caller-supplied
+        # metadata keys under reserved namespaces (openarmature.*,
+        # gen_ai.*) MUST raise at the ``invoke()`` boundary before
+        # any work begins. Two cases (one per reserved prefix).
+        "028-caller-metadata-namespace-rejection",
     }
 )
 
@@ -169,6 +179,8 @@ async def test_observability_fixture(fixture_path: Path) -> None:
         await _run_fixture_010(spec)
     elif fixture_id == "011-otel-determinism":
         await _run_fixture_011(spec)
+    elif fixture_id == "028-caller-metadata-namespace-rejection":
+        await _run_fixture_028(spec)
     elif fixture_id in {
         "012-otel-llm-payload-default-off",
         "013-otel-llm-payload-enabled",
@@ -181,6 +193,7 @@ async def test_observability_fixture(fixture_path: Path) -> None:
         "020-otel-llm-genai-system-override",
         "021-otel-llm-disable-genai-semconv",
         "025-otel-llm-request-params-extended",
+        "026-otel-caller-supplied-metadata",
     }:
         await _run_llm_payload_fixture(spec)
     else:
@@ -843,6 +856,93 @@ async def _run_fixture_011_case(case: Mapping[str, Any]) -> None:
         f"deterministic span content MUST match across runs; "
         f"first divergence: run_0={sig_run_0!r} vs run_1={sig_run_1!r}"
     )
+
+
+async def _run_fixture_028(spec: Mapping[str, Any]) -> None:
+    """Proposal 0034 §3.4: caller-supplied metadata keys under
+    reserved namespaces (``openarmature.*``, ``gen_ai.*``) MUST
+    raise at the ``invoke()`` boundary before any work begins.
+    The harness asserts:
+
+    - The invocation raises ``ValueError`` synchronously.
+    - No OTel spans are emitted (the OTel observer attached
+      to the graph never saw a single event).
+    - No Langfuse observations are emitted (the Langfuse
+      observer attached likewise saw nothing).
+    """
+    from opentelemetry.sdk.trace.export import SimpleSpanProcessor  # noqa: PLC0415
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import (  # noqa: PLC0415
+        InMemorySpanExporter,
+    )
+
+    from openarmature.graph import END, GraphBuilder  # noqa: PLC0415
+    from openarmature.observability.langfuse import (  # noqa: PLC0415
+        InMemoryLangfuseClient,
+        LangfuseObserver,
+    )
+
+    cases = cast("list[dict[str, Any]]", spec["cases"])
+    for case in cases:
+        case_name = cast("str", case["name"])
+        try:
+            # Build a minimal graph from the case's nodes/edges. The
+            # fixture's node is a noop update — we never expect it to
+            # run since the boundary rejects before any worker spins
+            # up.
+            from .adapter import build_state_cls  # noqa: PLC0415
+
+            state_cls = build_state_cls("RejectionFixtureState", case["state"]["fields"])
+            builder = GraphBuilder(state_cls)
+            nodes_spec = cast("dict[str, Any]", case["nodes"])
+            for node_name, node_spec in nodes_spec.items():
+                node_dict = cast("dict[str, Any]", node_spec)
+                update_block = cast("dict[str, Any]", node_dict["update"])
+
+                def _make_body(payload: dict[str, Any]) -> Any:
+                    async def _body(_s: Any) -> dict[str, Any]:
+                        return dict(payload)
+
+                    return _body
+
+                builder.add_node(node_name, _make_body(update_block))
+            for edge in cast("list[dict[str, str]]", case["edges"]):
+                target_raw = edge["to"]
+                target = END if target_raw == "END" else target_raw
+                builder.add_edge(edge["from"], target)
+            builder.set_entry(cast("str", case["entry"]))
+            graph = builder.compile()
+
+            exporter = InMemorySpanExporter()
+            otel_observer = OTelObserver(span_processor=SimpleSpanProcessor(exporter))
+            langfuse_client = InMemoryLangfuseClient()
+            langfuse_observer = LangfuseObserver(client=langfuse_client)
+            graph.attach_observer(otel_observer)
+            graph.attach_observer(langfuse_observer)
+
+            caller_metadata = cast("dict[str, Any]", case["caller_metadata"])
+            try:
+                with pytest.raises(ValueError, match="reserved namespace prefix"):
+                    await graph.invoke(state_cls(), metadata=caller_metadata)
+            finally:
+                otel_observer.shutdown()
+
+            expected = cast("dict[str, Any]", case["expected"])
+            if expected.get("invoke_rejects_at_api_boundary"):
+                # Already verified above via pytest.raises.
+                pass
+            if expected.get("no_spans_emitted"):
+                spans = exporter.get_finished_spans()
+                assert len(spans) == 0, f"expected zero spans, got {[s.name for s in spans]}"
+            if expected.get("no_langfuse_observations_emitted"):
+                # Trace MAY exist (lazy-open on first event); the
+                # invariant is "no observations are emitted." Since
+                # invoke rejects before any event fires, neither
+                # trace nor observations should be created.
+                assert len(langfuse_client.traces) == 0, (
+                    f"expected zero Langfuse traces, got {sorted(langfuse_client.traces.keys())}"
+                )
+        except AssertionError as e:
+            raise AssertionError(f"case {case_name!r}: {e}") from e
 
 
 def _normalize_attr_value(value: Any) -> Any:
@@ -1849,7 +1949,15 @@ async def _run_llm_payload_case(case: Mapping[str, Any]) -> None:
     # ---- Resolve harness primitives (content_repeat, base64_data_synthetic)
     nodes_spec = cast("dict[str, Any]", case["nodes"])
     entry_name = cast("str", case["entry"])
-    calls_llm_spec = cast("dict[str, Any]", nodes_spec[entry_name]["calls_llm"])
+    # Most LLM-payload fixtures are single-node (the entry IS the
+    # calls_llm node); fixture 026 has a non-LLM ``prep`` step
+    # before the LLM call. Find whichever node carries ``calls_llm``
+    # and treat the others as plain ``update`` nodes.
+    llm_node_name = next(
+        (name for name, spec in nodes_spec.items() if isinstance(spec, dict) and "calls_llm" in spec),
+        entry_name,
+    )
+    calls_llm_spec = cast("dict[str, Any]", nodes_spec[llm_node_name]["calls_llm"])
     raw_messages = cast("list[dict[str, Any]]", calls_llm_spec.get("messages", []))
     materialized_messages, full_input_serialization = _materialize_messages(
         raw_messages,
@@ -1918,12 +2026,40 @@ async def _run_llm_payload_case(case: Mapping[str, Any]) -> None:
         )
         return {stores_in: response.message.content or ""}
 
-    builder = (
-        GraphBuilder(state_cls)
-        .add_node(entry_name, ask_llm_body)
-        .add_edge(entry_name, END)
-        .set_entry(entry_name)
-    )
+    # Build the graph: the calls_llm node uses ``ask_llm_body``; any
+    # other node carries an ``update:`` block translated to a simple
+    # async function that returns it verbatim. Edges come from the
+    # fixture's ``edges:`` list when present (multi-node case); the
+    # single-node case falls back to ``entry → END``.
+    builder = GraphBuilder(state_cls)
+    for node_name, node_spec in nodes_spec.items():
+        if node_name == llm_node_name:
+            builder.add_node(node_name, ask_llm_body)
+            continue
+        node_dict = cast("dict[str, Any]", node_spec)
+        update_block = cast("dict[str, Any] | None", node_dict.get("update"))
+        if update_block is None:
+            raise AssertionError(
+                f"non-LLM node {node_name!r} in LLM fixture has neither "
+                f"`calls_llm` nor `update`; harness needs an extension"
+            )
+
+        def _make_update_body(payload: dict[str, Any]) -> Any:
+            async def _body(_s: Any) -> dict[str, Any]:
+                return dict(payload)
+
+            return _body
+
+        builder.add_node(node_name, _make_update_body(update_block))
+    edges_spec = cast("list[dict[str, str]] | None", case.get("edges"))
+    if edges_spec is None:
+        builder.add_edge(llm_node_name, END)
+    else:
+        for edge in edges_spec:
+            target_raw = edge["to"]
+            target = END if target_raw == "END" else target_raw
+            builder.add_edge(edge["from"], target)
+    builder.set_entry(entry_name)
     graph = builder.compile()
 
     # ---- Observer
@@ -1940,7 +2076,11 @@ async def _run_llm_payload_case(case: Mapping[str, Any]) -> None:
 
     # ---- Run + collect spans
     initial_state_cls = graph.state_cls
-    await graph.invoke(initial_state_cls())
+    invoke_kwargs: dict[str, Any] = {}
+    caller_metadata = cast("dict[str, Any] | None", case.get("caller_metadata"))
+    if caller_metadata is not None:
+        invoke_kwargs["metadata"] = caller_metadata
+    await graph.invoke(initial_state_cls(), **invoke_kwargs)
     await graph.drain()
     observer.shutdown()
     spans = exporter.get_finished_spans()

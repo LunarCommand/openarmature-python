@@ -41,6 +41,16 @@ from .correlation import (
 # ``opentelemetry-sdk`` dependency) along.
 from .llm_event import LLM_NAMESPACE, LlmEventPayload
 
+# v0.10.0 (proposal 0034): caller-supplied invocation metadata surface.
+# `set_invocation_metadata` is the public augmentation helper users
+# call from inside node bodies / middleware / observers;
+# `current_invocation_metadata` is the public reader observers and
+# capability code consume.
+from .metadata import (
+    current_invocation_metadata,
+    set_invocation_metadata,
+)
+
 __all__ = [
     "LLM_NAMESPACE",
     "LlmEventPayload",
@@ -50,5 +60,7 @@ __all__ = [
     "current_dispatch",
     "current_fan_out_index",
     "current_invocation_id",
+    "current_invocation_metadata",
     "current_namespace_prefix",
+    "set_invocation_metadata",
 ]
