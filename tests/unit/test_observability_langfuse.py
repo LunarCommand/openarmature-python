@@ -196,6 +196,32 @@ def _find_observation(trace: LangfuseTrace, name: str) -> LangfuseObservation:
     raise AssertionError(f"observation {name!r} not in trace {trace.id!r}")
 
 
+async def test_entry_node_resolves_to_wrapper_when_entry_is_subgraph() -> None:
+    # When the outer entry IS a SubgraphNode, the first event the
+    # observer sees comes from inside the subgraph
+    # (event.namespace = (wrapper, inner), event.node_name = inner).
+    # `entry_node` and trace.name MUST resolve to the wrapper node
+    # name (event.namespace[0]), not the inner node name.
+    inner = (
+        GraphBuilder(_S)
+        .add_node("inner_a", lambda _s: _record("inner_a"))
+        .add_edge("inner_a", END)
+        .set_entry("inner_a")
+        .compile()
+    )
+    parent = GraphBuilder(_S).add_subgraph_node("sub", inner).add_edge("sub", END).set_entry("sub").compile()
+    graph, client, _ = _attach(parent)
+
+    await graph.invoke(_S())
+    await graph.drain()
+
+    trace = next(iter(client.traces.values()))
+    assert trace.name == "sub", f"trace name should be the wrapper, got {trace.name!r}"
+    assert trace.metadata.get("entry_node") == "sub", (
+        f"entry_node should be the wrapper, got {trace.metadata.get('entry_node')!r}"
+    )
+
+
 async def test_subgraph_dispatch_observation_parents_inner_node() -> None:
     inner = (
         GraphBuilder(_S)
@@ -292,6 +318,40 @@ async def test_detached_subgraph_opens_separate_trace() -> None:
     assert detached_dispatch.parent_observation_id is None
     inner_node = _find_observation(detached, "inner_a")
     assert inner_node.parent_observation_id == detached_dispatch.id
+
+
+async def test_detached_subgraph_subgraph_name_placement() -> None:
+    # Per coord thread `discuss-observability-langfuse-mapping` msg 07
+    # and the wrapper-role-migration framing: in detached mode the
+    # wrapper role migrates to the detached trace. The parent trace's
+    # link observation IS the SubgraphNode span (no wrapper role) and
+    # MUST NOT carry `subgraph_name`. The detached trace's dispatch
+    # observation IS the migrated wrapper and MUST carry it.
+    inner = (
+        GraphBuilder(_S)
+        .add_node("inner_a", lambda _s: _record("inner_a"))
+        .add_edge("inner_a", END)
+        .set_entry("inner_a")
+        .compile()
+    )
+    parent = GraphBuilder(_S).add_subgraph_node("sub", inner).add_edge("sub", END).set_entry("sub").compile()
+    graph, client, _ = _attach_with_detached(parent, detached_subgraphs=frozenset({"sub"}))
+
+    await graph.invoke(_S())
+    await graph.drain()
+
+    main = next(t for t in client.traces.values() if "detached_from_invocation_id" not in t.metadata)
+    detached = next(t for t in client.traces.values() if "detached_from_invocation_id" in t.metadata)
+
+    link_obs = _find_observation(main, "sub")
+    assert "subgraph_name" not in link_obs.metadata, (
+        f"link observation MUST NOT carry subgraph_name; got {link_obs.metadata!r}"
+    )
+
+    detached_dispatch = _find_observation(detached, "sub")
+    assert "subgraph_name" in detached_dispatch.metadata, (
+        f"detached dispatch MUST carry subgraph_name; got {detached_dispatch.metadata!r}"
+    )
 
 
 async def test_detached_fan_out_each_instance_gets_trace() -> None:

@@ -1,8 +1,15 @@
-# Spec mapping (observability §8): drives the Langfuse mapping fixtures
-# (022/023/024 basic/generation/prompt-linkage, plus 031/032/033 graph
-# topology) against the in-memory LangfuseObserver client. Sibling of
-# test_observability.py (OTel mapping); shares no harness state with
-# the OTel side — each fixture builds its own graph + observer instance.
+# Spec mapping (observability §8): drives the Langfuse mapping
+# fixtures (022 basic-trace, 023 generation-rendering, 024
+# prompt-linkage) against the in-memory LangfuseObserver client.
+# Sibling of test_observability.py (OTel mapping); shares no harness
+# state with the OTel side — each fixture builds its own graph +
+# observer instance.
+#
+# The harness also supports the graph-topology shapes used by
+# 031/032/033 (subgraph / fan-out / detached-trace) via the
+# cross-capability adapter.build_graph helper, but activation of
+# those three fixtures is currently deferred — see the
+# `_LANGFUSE_FIXTURES` frozenset comment for the gating questions.
 
 """Run spec observability Langfuse conformance fixtures."""
 
@@ -245,7 +252,7 @@ async def _run_case(case: Mapping[str, Any]) -> None:
     # ---- Graph build
     # Two paths: topology fixtures (031/032/033) need the full
     # ``adapter.build_graph`` machinery for subgraph / fan_out shapes;
-    # LLM/prompt fixtures (022/023/024/027) use the simpler hand-rolled
+    # LLM/prompt fixtures (022/023/024) use the simpler hand-rolled
     # per-node build that knows about ``calls_llm`` / ``renders_prompt``.
     if _has_topology_constructs(case):
         subgraphs = _compile_subgraphs(case)
