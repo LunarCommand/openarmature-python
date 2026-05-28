@@ -302,6 +302,98 @@ though their `invocation_id`s differ. It's exported from the
 `current_invocation_id` (and friends) for code that needs to thread
 the IDs explicitly.
 
+## Caller-supplied invocation metadata
+
+`correlation_id` is one string; if you also need to attach
+business-domain identifiers — tenant IDs, request IDs, feature
+flags, A/B cohort labels — pass them as a structured mapping at
+`invoke()` time:
+
+```python
+await compiled.invoke(
+    initial_state,
+    metadata={
+        "tenantId": "acme-corp",
+        "requestId": "req-12345",
+        "featureFlag": "v2-canary",
+        "seatCount": 42,
+    },
+)
+```
+
+Every observability backend picks the entries up:
+
+- **OTel** emits each entry as an `openarmature.user.<key>`
+  cross-cutting span attribute on every span — invocation, node,
+  subgraph wrapper, fan-out instance, LLM provider, retry attempt.
+  Backends that consume OTel attributes (Phoenix / Arize, Honeycomb,
+  Datadog APM, HyperDX, Grafana Tempo, custom collectors) see them
+  uniformly without per-backend wiring.
+- **Langfuse** merges each entry as a top-level key into
+  `trace.metadata` AND into every `observation.metadata`. The
+  Langfuse UI filters on `metadata.<key>` directly, so dashboard
+  queries like "show me all traces for `tenantId == acme-corp`"
+  work without any custom dashboard config.
+
+Validation runs at the `invoke()` boundary before any work begins.
+Two rules:
+
+- **Keys** MUST NOT start with `openarmature.` or `gen_ai.`
+  (reserved for spec-normative attribute namespaces; collisions
+  would silently overwrite OA-emitted state).
+- **Values** MUST be OTel-attribute-compatible scalars (`str`,
+  `int`, `float`, `bool`) or homogeneous arrays of those types.
+  `None`, nested objects, and mixed-type arrays are rejected.
+
+Violations raise `ValueError` synchronously — no spans emitted, no
+work runs.
+
+### Adding entries mid-invocation
+
+From inside a node body, middleware, or observer, augment the
+in-scope metadata via the public helper:
+
+```python
+from openarmature.observability import set_invocation_metadata
+
+async def evaluate_product(state: PipelineState) -> dict[str, Any]:
+    set_invocation_metadata(productId=state.product_id, productCategory=state.category)
+    # Spans emitted AFTER this call carry productId + productCategory
+    # in addition to whatever the original invoke() metadata supplied.
+    response = await provider.complete(messages)
+    return {"score": parse_score(response.message.content)}
+```
+
+Spans already closed are NOT retroactively updated. Spans emitted
+after the call (the current node's `completed` event, the next
+node's `started`, any LLM call inside) pick up the new entries.
+
+**Per-async-context scoping.** The metadata mapping lives in a
+`ContextVar`, which Python copies on async-task creation. Fan-out
+instances and parallel-branches each receive their own copy at
+dispatch time — an instance that calls `set_invocation_metadata`
+does NOT leak its augmentation to sibling instances. This is the
+canonical pattern for per-instance identifiers:
+
+```python
+# Each fan-out instance adds its own productId; siblings stay clean
+async def evaluate_product(state: ProductState) -> dict[str, Any]:
+    set_invocation_metadata(productId=state.product_id)
+    return await score_product(state)
+```
+
+Augmentation within the parent context (before fan-out dispatch, or
+in code that runs serially) flows forward to subsequent spans in
+that context, per normal `ContextVar` semantics.
+
+### Reading the in-scope metadata
+
+`openarmature.observability.current_invocation_metadata()` returns
+the live mapping (or an empty `MappingProxyType` outside an
+invocation). Observers and capability code read this to surface
+the entries on backend-specific records; user code typically uses
+`set_invocation_metadata` to write and lets the framework propagate.
+
 ## OpenTelemetry mapping (opt-in)
 
 Install with the `[otel]` extra:

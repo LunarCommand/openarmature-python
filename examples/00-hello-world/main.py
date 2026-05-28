@@ -94,7 +94,8 @@ _provider_instance: OpenAIProvider | None = None
 # API allows" but not strictly deterministic (providers vary at the
 # infra level even at temp 0). Useful for tutorial output; production
 # usually wants some sampling variety.
-# RuntimeConfig also surfaces max_tokens, top_p, and seed; only
+# RuntimeConfig also surfaces max_tokens, top_p, seed,
+# frequency_penalty, presence_penalty, and stop_sequences; only
 # temperature is set here so the others fall through to provider
 # defaults.
 _DETERMINISTIC = RuntimeConfig(temperature=0.0)
