@@ -33,8 +33,10 @@ from openarmature.graph import (
     State,
     SubgraphNode,
     append,
+    concat_flatten,
     last_write_wins,
     merge,
+    merge_all,
 )
 from openarmature.graph.events import NodeEvent
 from openarmature.graph.observer import Observer
@@ -46,6 +48,8 @@ REDUCERS: dict[str, Reducer] = {
     "last_write_wins": last_write_wins,
     "append": append,
     "merge": merge,
+    "concat_flatten": concat_flatten,
+    "merge_all": merge_all,
 }
 
 
@@ -62,9 +66,14 @@ def _parse_type(s: str) -> Any:
     # Unparameterized container types — parallel-branches fixtures
     # 034/035/037 use ``dict`` and ``list<dict>`` as state-field types
     # for accumulator slots (branch_errors, merged_dict, collected_labels)
-    # where the element shape is heterogeneous across branches.
+    # where the element shape is heterogeneous across branches. The
+    # proposal-0036 reducer fixtures (026/027) use bare ``list`` /
+    # ``dict`` deliberately so the reducer (not the typed-state layer)
+    # is the gatekeeper for the list-of-lists / list-of-mappings shape.
     if s == "dict":
         return dict[str, Any]
+    if s == "list":
+        return list[Any]
     if s == "list<dict>":
         return list[dict[str, Any]]
     # proposal-0009 fixture 052: ``error_entry`` is the spec's shorthand
