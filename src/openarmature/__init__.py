@@ -25,4 +25,4 @@ your environment can reach:
 """
 
 __version__ = "0.9.0"
-__spec_version__ = "0.26.0"
+__spec_version__ = "0.26.1"

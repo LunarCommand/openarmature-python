@@ -80,6 +80,15 @@ class FanOutConfig:
     extra_outputs: Mapping[str, str] = field(default_factory=dict[str, str])
     instance_middleware: tuple[Middleware, ...] = ()
     errors_field: str | None = None
+    # The identity of the compiled inner subgraph (the key under
+    # which the subgraph is declared in a ``subgraphs:`` registry).
+    # Threaded onto every per-instance event so observers can emit
+    # ``observation.metadata.subgraph_name`` on each per-instance
+    # dispatch observation (Langfuse) /
+    # ``openarmature.subgraph.name`` on the corresponding span
+    # (OTel). Optional and BC-preserving — direct callers that don't
+    # supply it get the empty-string fallback per observability §5.3.
+    subgraph_identity: str | None = None
 
 
 @dataclass(frozen=True)
@@ -271,6 +280,7 @@ class FanOutNode[ParentT: State, ChildT: State]:
                 parent_state=state,
                 sub_attached=tuple(cfg.subgraph._attached_observers),  # noqa: SLF001
                 fan_out_index=idx,
+                subgraph_identity=cfg.subgraph_identity,
             )
 
             async def innermost(s: ChildT) -> Mapping[str, Any]:

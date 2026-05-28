@@ -191,6 +191,20 @@ class NodeEvent:
     # simultaneously when a branch's subgraph contains a fan-out
     # (and vice versa).
     branch_name: str | None = None
+    # Per observability §5.3 + the coord-thread
+    # ``clarify-subgraph-name-semantics`` resolution: chain of
+    # compiled-subgraph identities parallel to the wrapper-depth
+    # positions of ``namespace``. Index ``i`` is the identity for
+    # the wrapper at ``namespace[i]`` (or ``None`` when that
+    # wrapper has no tracked identity); chain length equals the
+    # depth of wrapper nesting (always ``< len(namespace)`` since
+    # the last element of ``namespace`` is the current node, not
+    # a wrapper). Observers read by depth and emit it as
+    # ``observation.metadata.subgraph_name`` (Langfuse) /
+    # ``openarmature.subgraph.name`` (OTel), falling back to the
+    # empty string when ``None`` per §5.3's "if the implementation
+    # tracks one" clause.
+    subgraph_identities: tuple[str | None, ...] = ()
 
 
 __all__ = ["FanOutEventConfig", "NodeEvent"]

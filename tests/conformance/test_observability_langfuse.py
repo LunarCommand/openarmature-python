@@ -1,10 +1,17 @@
-# Spec mapping (observability §8): drives the three Langfuse mapping
-# fixtures (022 basic trace, 023 Generation rendering + truncation, 024
-# prompt linkage) against the in-memory LangfuseObserver client. Sibling
-# of test_observability.py (OTel mapping); shares no harness state with
-# the OTel side — each fixture builds its own graph + observer instance.
+# Spec mapping (observability §8): drives the Langfuse mapping
+# fixtures (022 basic-trace, 023 generation-rendering, 024
+# prompt-linkage) against the in-memory LangfuseObserver client.
+# Sibling of test_observability.py (OTel mapping); shares no harness
+# state with the OTel side — each fixture builds its own graph +
+# observer instance.
+#
+# The harness also supports the graph-topology shapes used by
+# 031/032/033 (subgraph / fan-out / detached-trace) via the
+# cross-capability adapter.build_graph helper, but activation of
+# those three fixtures is currently deferred — see the
+# `_LANGFUSE_FIXTURES` frozenset comment for the gating questions.
 
-"""Run spec observability Langfuse conformance fixtures (022-024)."""
+"""Run spec observability Langfuse conformance fixtures."""
 
 from __future__ import annotations
 
@@ -34,7 +41,7 @@ from openarmature.prompts import (
 )
 from openarmature.prompts.context import with_active_prompt
 
-from .adapter import build_state_cls
+from .adapter import build_graph, build_state_cls
 
 CONFORMANCE_DIR = (
     Path(__file__).resolve().parents[2] / "openarmature-spec" / "spec" / "observability" / "conformance"
@@ -46,6 +53,24 @@ _LANGFUSE_FIXTURES = frozenset(
         "022-langfuse-basic-trace",
         "023-langfuse-generation-rendering",
         "024-langfuse-prompt-linkage",
+        # 031 / 032 / 033 — proposal 0035 (spec v0.26.1). The
+        # subgraph_identity wiring (per coord thread
+        # `clarify-subgraph-name-semantics` msg 02 — Option A) is
+        # landed: SubgraphNode.subgraph_identity / FanOutConfig.
+        # subgraph_identity flow through NodeEvent.subgraph_identities
+        # to observer-side metadata.subgraph_name emission. Two
+        # remaining spec/fixture ambiguities block fixture activation:
+        # (1) ``step`` semantics on the wrapper synth observation vs.
+        # ``outer_out``: fixture 031 expects ``outer_out`` at step 2
+        # but graph-engine §6 says "subgraph-internal node executions
+        # increment the same counter" so the python engine emits
+        # step 3 (outer_in=0, inner_x=1, inner_y=2, outer_out=3).
+        # (2) ``namespace`` rewrite for observations inside a
+        # detached trace: fixture 033 case 1 expects
+        # ``namespace: ["long_running_workflow", "step"]`` (using
+        # subgraph identity for the wrapper component) but the
+        # engine's event carries the wrapper node name (``"dispatch"``).
+        # Both queued for spec input via a follow-up coord thread.
     }
 )
 
@@ -141,6 +166,64 @@ async def test_langfuse_fixture(fixture_path: Path) -> None:
         await _run_case(spec)
 
 
+def _has_topology_constructs(case: Mapping[str, Any]) -> bool:
+    """Return True when the fixture uses subgraph / fan_out / parallel_branches
+    constructs. Such fixtures need the full ``adapter.build_graph`` machinery
+    rather than the simpler per-node hand-rolled path used for the
+    LLM/prompt-only fixtures."""
+    if "subgraph" in case or "subgraphs" in case:
+        return True
+    nodes_spec = cast("dict[str, Any]", case.get("nodes") or {})
+    for node_spec in nodes_spec.values():
+        if not isinstance(node_spec, dict):
+            continue
+        node_dict = cast("dict[str, Any]", node_spec)
+        if "subgraph" in node_dict or "fan_out" in node_dict or "parallel_branches" in node_dict:
+            return True
+    return False
+
+
+def _compile_subgraphs(spec: Mapping[str, Any]) -> dict[str, Any]:
+    """Build any subgraphs declared by the fixture and return a
+    name→compiled-graph registry the adapter consumes. Mirrors the
+    OTel-side helper in ``test_observability.py``."""
+    subgraph_specs: dict[str, Any] = {}
+    if "subgraph" in spec:
+        single = cast("Mapping[str, Any]", spec["subgraph"])
+        name = single.get("name") or "subgraph"
+        subgraph_specs[name] = single
+    if "subgraphs" in spec:
+        for k, v in cast("dict[str, Any]", spec["subgraphs"]).items():
+            subgraph_specs[k] = v
+    compiled_subgraphs: dict[str, Any] = {}
+    for name, sub_spec in subgraph_specs.items():
+        sub_built = build_graph(sub_spec, trace=[])
+        compiled_subgraphs[name] = sub_built.builder.compile()
+    return compiled_subgraphs
+
+
+def _resolve_detached_wrapper_names(case: Mapping[str, Any]) -> frozenset[str]:
+    """Translate fixture-level ``detached_subgraphs`` (a list of SUBGRAPH
+    IDENTITY names) into the set of WRAPPER NODE names the observer keys
+    on. The fixture identifies detached subgraphs by their declaration name
+    in ``subgraphs:`` (e.g., ``long_running_workflow``), but the
+    LangfuseObserver matches by the wrapper node name in the parent graph
+    that references the subgraph (e.g., ``dispatch``).
+    """
+    detached_identities = set(cast("list[str]", case.get("detached_subgraphs") or []))
+    if not detached_identities:
+        return frozenset()
+    nodes_spec = cast("dict[str, Any]", case.get("nodes") or {})
+    wrappers: set[str] = set()
+    for wrapper_name, node_spec in nodes_spec.items():
+        if not isinstance(node_spec, dict):
+            continue
+        sub_id = cast("dict[str, Any]", node_spec).get("subgraph")
+        if isinstance(sub_id, str) and sub_id in detached_identities:
+            wrappers.add(wrapper_name)
+    return frozenset(wrappers)
+
+
 async def _run_case(case: Mapping[str, Any]) -> None:
     # ---- Mock LLM transport (if the graph has an LLM call)
     mock_responses = cast("list[dict[str, Any]] | None", case.get("mock_llm"))
@@ -167,29 +250,40 @@ async def _run_case(case: Mapping[str, Any]) -> None:
         prompt_manager = PromptManager(backend)
 
     # ---- Graph build
-    state_fields = cast("dict[str, dict[str, Any]]", case["state"]["fields"])
-    state_cls = build_state_cls("LangfuseFixtureState", state_fields)
-    nodes_spec = cast("dict[str, Any]", case["nodes"])
-    entry = cast("str", case["entry"])
-    edges = cast("list[dict[str, str]]", case["edges"])
-    render_variables = cast("dict[str, Any]", case.get("render_variables") or {})
+    # Two paths: topology fixtures (031/032/033) need the full
+    # ``adapter.build_graph`` machinery for subgraph / fan_out shapes;
+    # LLM/prompt fixtures (022/023/024) use the simpler hand-rolled
+    # per-node build that knows about ``calls_llm`` / ``renders_prompt``.
+    if _has_topology_constructs(case):
+        subgraphs = _compile_subgraphs(case)
+        built = build_graph(case, subgraphs=subgraphs, trace=[])
+        graph = built.builder.compile()
+        initial_state_factory = lambda: built.initial_state(case.get("initial_state", {}))  # noqa: E731
+    else:
+        state_fields = cast("dict[str, dict[str, Any]]", case["state"]["fields"])
+        state_cls = build_state_cls("LangfuseFixtureState", state_fields)
+        nodes_spec = cast("dict[str, Any]", case["nodes"])
+        entry = cast("str", case["entry"])
+        edges = cast("list[dict[str, str]]", case["edges"])
+        render_variables = cast("dict[str, Any]", case.get("render_variables") or {})
 
-    builder = GraphBuilder(state_cls)
-    for node_name, node_spec in nodes_spec.items():
-        node_body = _build_node_body(
-            node_name=node_name,
-            node_spec=cast("dict[str, Any]", node_spec),
-            provider=provider,
-            prompt_manager=prompt_manager,
-            render_variables=render_variables,
-        )
-        builder.add_node(node_name, node_body)
-    for edge in edges:
-        target_raw = edge["to"]
-        target = END if target_raw == "END" else target_raw
-        builder.add_edge(edge["from"], target)
-    builder.set_entry(entry)
-    graph = builder.compile()
+        builder = GraphBuilder(state_cls)
+        for node_name, node_spec in nodes_spec.items():
+            node_body = _build_node_body(
+                node_name=node_name,
+                node_spec=cast("dict[str, Any]", node_spec),
+                provider=provider,
+                prompt_manager=prompt_manager,
+                render_variables=render_variables,
+            )
+            builder.add_node(node_name, node_body)
+        for edge in edges:
+            target_raw = edge["to"]
+            target = END if target_raw == "END" else target_raw
+            builder.add_edge(edge["from"], target)
+        builder.set_entry(entry)
+        graph = builder.compile()
+        initial_state_factory = graph.state_cls
 
     # ---- Observer
     observer_cfg = cast("dict[str, Any]", case.get("langfuse_observer") or {})
@@ -200,29 +294,39 @@ async def _run_case(case: Mapping[str, Any]) -> None:
         observer_kwargs["disable_llm_spans"] = bool(observer_cfg["disable_llm_spans"])
     if "payload_byte_cap" in observer_cfg:
         observer_kwargs["payload_byte_cap"] = int(observer_cfg["payload_byte_cap"])
+    detached_subgraphs = _resolve_detached_wrapper_names(case)
+    if detached_subgraphs:
+        observer_kwargs["detached_subgraphs"] = detached_subgraphs
+    detached_fan_outs = frozenset(cast("list[str]", case.get("detached_fan_outs") or []))
+    if detached_fan_outs:
+        observer_kwargs["detached_fan_outs"] = detached_fan_outs
     client = InMemoryLangfuseClient()
     observer = LangfuseObserver(client=client, **observer_kwargs)
     graph.attach_observer(observer)
 
     # ---- Run
-    initial_state_cls = graph.state_cls
     correlation_id = cast("str | None", case.get("caller_correlation_id"))
     invoke_kwargs: dict[str, Any] = {}
     if correlation_id is not None:
         invoke_kwargs["correlation_id"] = correlation_id
-    await graph.invoke(initial_state_cls(), **invoke_kwargs)
+    await graph.invoke(initial_state_factory(), **invoke_kwargs)
     await graph.drain()
     if provider is not None:
         await provider.aclose()
 
     # ---- Assert
+    # Single-trace fixtures use ``langfuse_trace:``; detached / multi-trace
+    # fixtures use ``langfuse_traces:`` (a list). Branch on which the
+    # fixture supplies.
     expected = cast("dict[str, Any]", case["expected"])
-    expected_trace = cast("dict[str, Any]", expected["langfuse_trace"])
-    assert len(client.traces) == 1, f"expected exactly one Trace, got {len(client.traces)}"
-    trace = next(iter(client.traces.values()))
-    _assert_trace(
-        trace, expected_trace, expected_invariants=cast("dict[str, Any]", expected.get("invariants") or {})
-    )
+    expected_invariants = cast("dict[str, Any]", expected.get("invariants") or {})
+    if "langfuse_traces" in expected:
+        _assert_multi_traces(client, expected, expected_invariants)
+    else:
+        expected_trace = cast("dict[str, Any]", expected["langfuse_trace"])
+        assert len(client.traces) == 1, f"expected exactly one Trace, got {len(client.traces)}"
+        trace = next(iter(client.traces.values()))
+        _assert_trace(trace, expected_trace, expected_invariants=expected_invariants)
 
 
 def _resolve_llm_model(case: Mapping[str, Any]) -> str:
@@ -343,6 +447,127 @@ def _runtime_config_from_spec(config_spec: dict[str, Any] | None) -> RuntimeConf
 # ---------------------------------------------------------------------------
 # Assertion helpers
 # ---------------------------------------------------------------------------
+
+
+# Per-trace invariants — invariants ``_assert_trace`` knows how to
+# check on a single Trace. The multi-trace runner filters
+# ``expected_invariants`` to this set when delegating per-Trace
+# assertions; the rest (``distinct_trace_ids``,
+# ``correlation_id_consistent_across_traces``, etc.) stay in
+# ``_assert_multi_traces`` as cross-Trace checks.
+_PER_TRACE_INVARIANTS = frozenset({"trace_id_equals_invocation_id", "correlation_id_consistency"})
+
+
+def _assert_multi_traces(
+    client: InMemoryLangfuseClient,
+    expected: dict[str, Any],
+    expected_invariants: dict[str, Any],
+) -> None:
+    """Detached-trace fixtures (033) span multiple Traces. The expected
+    block's ``langfuse_traces:`` list names the parent Trace explicitly;
+    the additional detached Traces are either fully enumerated (subgraph
+    case) or counted via ``detached_trace_count`` (fan-out case where
+    only the parent's shape is asserted explicitly and the per-instance
+    Traces share an identical shape).
+    """
+    expected_traces = cast("list[dict[str, Any]]", expected.get("langfuse_traces") or [])
+    detached_trace_count = cast("int | None", expected.get("detached_trace_count"))
+    # If the fixture enumerates all Traces explicitly, the actual count
+    # MUST match. Otherwise, ``detached_trace_count`` indicates how many
+    # additional traces beyond the enumerated parent the fixture expects.
+    expected_total = (
+        len(expected_traces) + detached_trace_count
+        if detached_trace_count is not None
+        else len(expected_traces)
+    )
+    assert len(client.traces) == expected_total, (
+        f"expected {expected_total} Traces, got {len(client.traces)}: "
+        f"{[t.name for t in client.traces.values()]}"
+    )
+
+    # Match each enumerated expected Trace to an actual Trace by name
+    # compatibility (literal match, or wildcard ``<...>`` placeholder)
+    # then by root-observation count. Tracks consumed traces so two
+    # expected entries can't bind to the same actual one.
+    consumed: set[str] = set()
+    for exp in expected_traces:
+        exp_name = cast("str", exp.get("name") or "")
+        is_wildcard = exp_name.startswith("<") and exp_name.endswith(">")
+        expected_obs_count = len(cast("list[Any]", exp.get("observations") or []))
+        candidates = [
+            t for t in client.traces.values() if t.id not in consumed and (is_wildcard or t.name == exp_name)
+        ]
+        # Prefer candidates whose root-observation count matches the
+        # expected structure; the fan-out case has multiple traces of
+        # the same name where the parent is the only one with a
+        # populated observation tree.
+        matching = [t for t in candidates if len(t.children_of(None)) == expected_obs_count]
+        assert matching or candidates, (
+            f"no Trace matches expected name={exp_name!r} (consumed={sorted(consumed)})"
+        )
+        trace = matching[0] if matching else candidates[0]
+        consumed.add(trace.id)
+        per_trace_invariants = {k: v for k, v in expected_invariants.items() if k in _PER_TRACE_INVARIANTS}
+        _assert_trace(trace, exp, expected_invariants=per_trace_invariants)
+
+    # Invariants that span multiple Traces.
+    if expected_invariants.get("distinct_trace_ids"):
+        trace_ids = {t.id for t in client.traces.values()}
+        assert len(trace_ids) == len(client.traces), f"trace ids not all distinct: {sorted(trace_ids)}"
+    if expected_invariants.get("all_instance_trace_ids_distinct"):
+        trace_ids = {t.id for t in client.traces.values()}
+        assert len(trace_ids) == len(client.traces), (
+            f"instance trace ids not all distinct: {sorted(trace_ids)}"
+        )
+    expected_child_count = cast(
+        "int | None", expected_invariants.get("dispatch_detached_child_trace_id_count")
+    )
+    if expected_child_count is not None:
+        # Find the parent-trace observation whose metadata carries
+        # detached_child_trace_ids; assert its length.
+        found = False
+        for trace in client.traces.values():
+            for obs in trace.observations:
+                child_ids_raw = obs.metadata.get("detached_child_trace_ids")
+                if isinstance(child_ids_raw, list):
+                    child_ids = cast("list[Any]", child_ids_raw)
+                    assert len(child_ids) == expected_child_count, (
+                        f"observation {obs.name!r} detached_child_trace_ids length: "
+                        f"expected {expected_child_count}, got {len(child_ids)}"
+                    )
+                    found = True
+        assert found, "no observation carried metadata.detached_child_trace_ids"
+    if expected_invariants.get("correlation_id_consistent_across_traces"):
+        correlation_ids = {
+            cast("str | None", t.metadata.get("correlation_id")) for t in client.traces.values()
+        }
+        correlation_ids.discard(None)
+        if len(correlation_ids) > 1:
+            sorted_ids = sorted(c for c in correlation_ids if c is not None)
+            raise AssertionError(f"correlation_id not consistent across Traces: {sorted_ids}")
+    if expected_invariants.get("no_instance_spans_in_parent_trace"):
+        # The parent Trace is the one named in expected_traces (singular).
+        if len(expected_traces) == 1:
+            parent_name = cast("str", expected_traces[0]["name"])
+            parents = [t for t in client.traces.values() if t.name == parent_name]
+            # If multiple Traces share the parent name (fan-out case where
+            # detached per-instance Traces inherit the fan-out node name),
+            # the actual parent is the one with a non-empty observation
+            # tree. Per-instance Traces have their own subtree under their
+            # own dispatch observation; their leaf shapes are different
+            # from the parent's flat fan-out node observation.
+            for t in parents:
+                # Parent observations must be limited to the fan-out
+                # dispatch (no leaked per-instance inner-node names).
+                root_obs = t.children_of(None)
+                for obs in root_obs:
+                    if obs.name != parent_name:
+                        # If we got here, an inner-node observation
+                        # leaked into the parent Trace.
+                        raise AssertionError(
+                            f"unexpected observation {obs.name!r} in parent Trace {t.id!r}; "
+                            f"parent should only contain the fan-out dispatch observation"
+                        )
 
 
 def _assert_trace(
@@ -484,6 +709,13 @@ def _parse_messages(value: Any) -> list[dict[str, Any]]:
     raise AssertionError(f"input attribute did not parse as a message list: {value!r}")
 
 
+def _is_placeholder(value: Any) -> bool:
+    """``<anything>`` literals in fixtures are wildcards: they assert
+    shape (non-empty string) without binding a specific value. Cross-
+    occurrence consistency lives in the ``invariants:`` block."""
+    return isinstance(value, str) and value.startswith("<") and value.endswith(">")
+
+
 def _assert_metadata_subset(
     label: str,
     actual: Mapping[str, Any],
@@ -495,12 +727,9 @@ def _assert_metadata_subset(
     for key, expected_value in expected.items():
         assert key in actual, f"{label}: missing key {key!r}; got keys {sorted(actual)}"
         actual_value = actual[key]
-        if isinstance(expected_value, str) and (
-            expected_value == "<any-string>" or expected_value.startswith("<corr_id_")
-        ):
-            # Placeholder match — any non-empty string passes.
+        if _is_placeholder(expected_value):
             assert isinstance(actual_value, str) and len(actual_value) > 0, (
-                f"{label}.{key}: expected placeholder match, got {actual_value!r}"
+                f"{label}.{key}: expected placeholder {expected_value!r} match, got {actual_value!r}"
             )
             continue
         if isinstance(expected_value, dict) and isinstance(actual_value, dict):
@@ -510,6 +739,24 @@ def _assert_metadata_subset(
                 cast("Mapping[str, Any]", expected_value),
             )
             continue
+        if isinstance(expected_value, list) and isinstance(actual_value, list):
+            # List values may contain placeholders element-by-element
+            # (e.g., ``detached_child_trace_ids: ["<trace_id_detached>"]``).
+            # Length must match; each element matches by placeholder
+            # rules or strict equality.
+            expected_list = cast("list[Any]", expected_value)
+            actual_list = cast("list[Any]", actual_value)
+            assert len(actual_list) == len(expected_list), (
+                f"{label}.{key} length: expected {len(expected_list)}, got {len(actual_list)}"
+            )
+            for i, (exp_el, act_el) in enumerate(zip(expected_list, actual_list, strict=True)):
+                if _is_placeholder(exp_el):
+                    assert isinstance(act_el, str) and len(act_el) > 0, (
+                        f"{label}.{key}[{i}]: expected placeholder {exp_el!r}, got {act_el!r}"
+                    )
+                else:
+                    assert act_el == exp_el, f"{label}.{key}[{i}]: expected {exp_el!r}, got {act_el!r}"
+            continue
         assert actual_value == expected_value, (
             f"{label}.{key}: expected {expected_value!r}, got {actual_value!r}"
         )
@@ -518,7 +765,16 @@ def _assert_metadata_subset(
 def _assert_string_or_placeholder(label: str, actual: str | None, expected: Any) -> None:
     if expected is None:
         return
-    if isinstance(expected, str) and (expected == "<uuid>" or expected == "<any-string>"):
+    # Any ``<placeholder>`` form is treated as a wildcard that requires
+    # a non-empty string. Cross-occurrence consistency (e.g., the same
+    # ``<corr_id_1>`` appearing on multiple Traces must resolve to the
+    # same value) is enforced by the fixture's ``invariants:`` block
+    # (``correlation_id_consistent_across_traces``, etc.), not by
+    # placeholder-binding here. Known shape-only placeholders:
+    # ``<uuid>``, ``<any-string>``, ``<corr_id_N>``,
+    # ``<trace_id_parent>``, ``<trace_id_child>``,
+    # ``<trace_id_instance_N>``.
+    if isinstance(expected, str) and expected.startswith("<") and expected.endswith(">"):
         assert isinstance(actual, str) and len(actual) > 0, (
             f"{label}: expected non-empty string, got {actual!r}"
         )

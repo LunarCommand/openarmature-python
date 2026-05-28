@@ -148,6 +148,25 @@ def _read_spec_version() -> str:
     return __spec_version__
 
 
+def _subgraph_identity_at(event: NodeEvent, depth: int) -> str:
+    """Return the compiled-subgraph identity for the wrapper at the
+    given 1-based namespace depth, or the empty string when no
+    identity is tracked at that depth.
+
+    Per observability §5.3 + the coord-thread
+    ``clarify-subgraph-name-semantics`` resolution: empty-string
+    fallback matches the spec's "if the implementation tracks one"
+    clause for callers using ``SubgraphNode(name=..., compiled=...)``
+    without supplying ``subgraph_identity``.
+    """
+    idx = depth - 1
+    if 0 <= idx < len(event.subgraph_identities):
+        identity = event.subgraph_identities[idx]
+        if identity is not None:
+            return identity
+    return ""
+
+
 def _empty_str_frozenset() -> frozenset[str]:
     """Typed empty frozenset factory for ``detached_subgraphs`` /
     ``detached_fan_outs`` defaults."""
@@ -1033,7 +1052,7 @@ class OTelObserver:
             # If this prefix's first segment is configured as a
             # detached subgraph, mint a fresh trace.
             if depth == 1 and prefix[0] in self.detached_subgraphs:
-                self._open_detached_subgraph_root(inv_state, invocation_id, correlation_id, prefix)
+                self._open_detached_subgraph_root(inv_state, invocation_id, correlation_id, prefix, event)
                 continue
             # If this is a fan-out instance namespace (event.fan_out_index
             # populated, prefix == namespace[:1]), and the fan-out
@@ -1057,7 +1076,7 @@ class OTelObserver:
             ):
                 self._open_fan_out_instance_dispatch_span(inv_state, correlation_id, prefix, event)
                 continue
-            self._open_subgraph_span(inv_state, invocation_id, correlation_id, prefix)
+            self._open_subgraph_span(inv_state, invocation_id, correlation_id, prefix, event)
 
     def _open_subgraph_span(
         self,
@@ -1065,6 +1084,7 @@ class OTelObserver:
         invocation_id: str,
         correlation_id: str | None,
         prefix: tuple[str, ...],
+        event: NodeEvent,
     ) -> None:
         """Open a synthetic subgraph dispatch span for the given
         namespace prefix. Parent is the next-outer subgraph span (or
@@ -1088,7 +1108,7 @@ class OTelObserver:
                 parent_ctx = set_span_in_context(inv.span)
         attrs: dict[str, Any] = {
             "openarmature.node.name": prefix[-1],
-            "openarmature.subgraph.name": prefix[-1],
+            "openarmature.subgraph.name": _subgraph_identity_at(event, len(prefix)),
         }
         if correlation_id is not None:
             attrs["openarmature.correlation_id"] = correlation_id
@@ -1114,6 +1134,7 @@ class OTelObserver:
         invocation_id: str,
         correlation_id: str | None,
         prefix: tuple[str, ...],
+        event: NodeEvent,
     ) -> None:
         """Mint a fresh trace for a detached subgraph entry. The
         detached root span lives in the new trace; the parent trace's
@@ -1141,7 +1162,7 @@ class OTelObserver:
             parent_ctx_for_dispatch = set_span_in_context(inv.span)
         attrs_parent: dict[str, Any] = {
             "openarmature.node.name": prefix[-1],
-            "openarmature.subgraph.name": prefix[-1],
+            "openarmature.subgraph.name": _subgraph_identity_at(event, len(prefix)),
         }
         if correlation_id is not None:
             attrs_parent["openarmature.correlation_id"] = correlation_id
@@ -1264,6 +1285,7 @@ class OTelObserver:
             "openarmature.node.name": prefix[-1],
             "openarmature.fan_out.parent_node_name": parent_node_name,
             "openarmature.node.fan_out_index": event.fan_out_index,
+            "openarmature.subgraph.name": _subgraph_identity_at(event, len(prefix)),
         }
         if correlation_id is not None:
             attrs["openarmature.correlation_id"] = correlation_id

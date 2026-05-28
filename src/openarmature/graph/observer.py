@@ -336,6 +336,18 @@ class _InvocationContext:
     step_counter: list[int] = field(default_factory=lambda: [0])
     namespace_prefix: tuple[str, ...] = ()
     parent_states_prefix: tuple[State, ...] = ()
+    # Per observability §5.3 + the coord-thread `clarify-subgraph-name-
+    # semantics` resolution. Parallel to ``namespace_prefix`` — index
+    # ``i`` is the compiled-subgraph identity for the wrapper at
+    # ``namespace_prefix[i]``, or ``None`` for wrappers constructed
+    # without an identity. Used by observers to emit
+    # ``metadata.subgraph_name`` (Langfuse) and
+    # ``openarmature.subgraph.name`` (OTel) on the wrapper observation
+    # / span at each depth. The chain shape lets nested subgraphs
+    # carry distinct identities at distinct depths even though
+    # v0.10.0's conformance fixtures only exercise single-level
+    # nesting.
+    subgraph_identities: tuple[str | None, ...] = ()
     # Per pipeline-utilities §9 + graph-engine §6: nodes inside a
     # fan-out instance fire events tagged with the instance's 0-based
     # index. Set when descending into a fan-out instance, inherited
@@ -426,6 +438,8 @@ class _InvocationContext:
         subgraph_node_name: str,
         parent_state: State,
         sub_attached: tuple[SubscribedObserver, ...],
+        *,
+        subgraph_identity: str | None = None,
     ) -> _InvocationContext:
         """Build the context for a subgraph-as-node call.
 
@@ -447,6 +461,7 @@ class _InvocationContext:
             step_counter=self.step_counter,
             namespace_prefix=self.namespace_prefix + (subgraph_node_name,),
             parent_states_prefix=self.parent_states_prefix + (parent_state,),
+            subgraph_identities=self.subgraph_identities + (subgraph_identity,),
             fan_out_index=self.fan_out_index,
             invocation_id=self.invocation_id,
             correlation_id=self.correlation_id,
@@ -466,6 +481,8 @@ class _InvocationContext:
         parent_state: State,
         sub_attached: tuple[SubscribedObserver, ...],
         fan_out_index: int,
+        *,
+        subgraph_identity: str | None = None,
     ) -> _InvocationContext:
         """Build the context for one fan-out instance's subgraph invocation.
 
@@ -491,6 +508,7 @@ class _InvocationContext:
             step_counter=self.step_counter,
             namespace_prefix=self.namespace_prefix + (fan_out_node_name,),
             parent_states_prefix=self.parent_states_prefix + (parent_state,),
+            subgraph_identities=self.subgraph_identities + (subgraph_identity,),
             fan_out_index=fan_out_index,
             invocation_id=self.invocation_id,
             correlation_id=self.correlation_id,
@@ -541,6 +559,12 @@ class _InvocationContext:
             step_counter=self.step_counter,
             namespace_prefix=self.namespace_prefix + (parallel_branches_node_name,),
             parent_states_prefix=self.parent_states_prefix + (parent_state,),
+            # Parallel-branches don't reify a single inner subgraph
+            # identity at the wrapper position — each branch can hold a
+            # different subgraph — so we extend the chain with ``None``
+            # at this depth. Per-branch identity handling (if ever
+            # needed) is a future addition.
+            subgraph_identities=self.subgraph_identities + (None,),
             fan_out_index=self.fan_out_index,
             invocation_id=self.invocation_id,
             correlation_id=self.correlation_id,

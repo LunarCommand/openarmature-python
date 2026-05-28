@@ -63,6 +63,19 @@ _DEFERRED_FIXTURES: dict[str, str] = {
     "observability/024-langfuse-prompt-linkage": (
         "Langfuse shape models live in the dedicated test_observability_langfuse harness"
     ),
+    # Proposal 0035 (spec v0.26.1) Langfuse graph-topology fixtures
+    # (031/032/033) introduce a ``langfuse_traces:`` (plural) expected
+    # shape for detached / multi-trace cases. Same deferral rationale as
+    # 022-024 — Langfuse shape models live in the dedicated harness.
+    "observability/031-langfuse-subgraph-span-hierarchy": (
+        "Langfuse shape models live in the dedicated test_observability_langfuse harness"
+    ),
+    "observability/032-langfuse-fan-out-per-instance-spans": (
+        "Langfuse shape models live in the dedicated test_observability_langfuse harness"
+    ),
+    "observability/033-langfuse-detached-trace-mode": (
+        "Langfuse shape models live in the dedicated test_observability_langfuse harness"
+    ),
     # proposal 0034 caller-supplied invocation metadata fixtures (PR 4).
     "observability/027-langfuse-caller-supplied-metadata": "Caller-metadata harness lands in PR 4 (0034)",
     "observability/028-caller-metadata-namespace-rejection": "Caller-metadata harness lands in PR 4 (0034)",
