@@ -449,6 +449,15 @@ def _runtime_config_from_spec(config_spec: dict[str, Any] | None) -> RuntimeConf
 # ---------------------------------------------------------------------------
 
 
+# Per-trace invariants — invariants ``_assert_trace`` knows how to
+# check on a single Trace. The multi-trace runner filters
+# ``expected_invariants`` to this set when delegating per-Trace
+# assertions; the rest (``distinct_trace_ids``,
+# ``correlation_id_consistent_across_traces``, etc.) stay in
+# ``_assert_multi_traces`` as cross-Trace checks.
+_PER_TRACE_INVARIANTS = frozenset({"trace_id_equals_invocation_id", "correlation_id_consistency"})
+
+
 def _assert_multi_traces(
     client: InMemoryLangfuseClient,
     expected: dict[str, Any],
@@ -498,7 +507,8 @@ def _assert_multi_traces(
         )
         trace = matching[0] if matching else candidates[0]
         consumed.add(trace.id)
-        _assert_trace(trace, exp, expected_invariants={})
+        per_trace_invariants = {k: v for k, v in expected_invariants.items() if k in _PER_TRACE_INVARIANTS}
+        _assert_trace(trace, exp, expected_invariants=per_trace_invariants)
 
     # Invariants that span multiple Traces.
     if expected_invariants.get("distinct_trace_ids"):

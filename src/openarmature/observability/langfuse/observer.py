@@ -650,11 +650,21 @@ class LangfuseObserver:
         # The detached trace's wrapper observation IS the migrated
         # SubgraphNode wrapper. Per the resolution in coord thread
         # ``clarify-subgraph-name-semantics`` and fixture 033's
-        # expected shape, its name and ``metadata.subgraph_name`` use
-        # the compiled-subgraph identity (e.g., ``"long_running_workflow"``)
-        # rather than the wrapper node name. Falls back to the wrapper
-        # node name when identity is empty (observability §5.3's
-        # "if the implementation tracks one" clause).
+        # expected shape, the observation name uses the compiled-
+        # subgraph identity (e.g., ``"long_running_workflow"``); its
+        # ``metadata.subgraph_name`` carries the same identity.
+        #
+        # When the identity is empty (BC path — ``SubgraphNode``
+        # constructed without ``subgraph_identity``), the two
+        # diverge intentionally: the observation NAME falls back to
+        # the wrapper node name (an empty observation name is worse
+        # UX than a wrapper-named one), but ``metadata.subgraph_name``
+        # stays empty per §5.3's "empty string when no identity is
+        # tracked" contract. Filtering on
+        # ``metadata.subgraph_name == "X"`` then matches only
+        # wrappers explicitly registered with
+        # ``subgraph_identity = "X"``, not every wrapper that
+        # happens to be named ``X``.
         wrapper_obs_name = identity or prefix[-1]
         self.client.trace(id=detached_trace_id, name=wrapper_obs_name, metadata=detached_metadata)
         dispatch_metadata: dict[str, Any] = {
