@@ -208,6 +208,76 @@ def test_validate_tools_duplicate_names_rejected() -> None:
 
 
 # ---------------------------------------------------------------------------
+# OpenAIProvider base_url validation
+# ---------------------------------------------------------------------------
+
+
+def test_openai_provider_rejects_v1_suffix() -> None:
+    with pytest.raises(ValueError, match=r"base_url must not end with '/v1'"):
+        OpenAIProvider(base_url="http://localhost:8090/v1", model="m", api_key="k")
+
+
+def test_openai_provider_rejects_v1_suffix_with_trailing_slash() -> None:
+    with pytest.raises(ValueError, match=r"base_url must not end with '/v1'"):
+        OpenAIProvider(base_url="http://localhost:8090/v1/", model="m", api_key="k")
+
+
+def test_openai_provider_rejects_openai_cloud_with_v1() -> None:
+    # The motivating real-world case: api.openai.com/v1 is in the
+    # OpenAI docs as the API endpoint, but for OpenAIProvider's
+    # base_url the /v1 must be omitted.
+    with pytest.raises(ValueError, match=r"base_url must not end with '/v1'"):
+        OpenAIProvider(base_url="https://api.openai.com/v1", model="gpt-4", api_key="k")
+
+
+def test_openai_provider_accepts_host_root() -> None:
+    provider = OpenAIProvider(base_url="https://api.openai.com", model="gpt-4", api_key="k")
+    assert provider.base_url == "https://api.openai.com"
+
+
+def test_openai_provider_accepts_host_root_with_trailing_slash() -> None:
+    provider = OpenAIProvider(base_url="http://localhost:8090/", model="m", api_key="k")
+    assert provider.base_url == "http://localhost:8090"
+
+
+def test_openai_provider_accepts_non_v1_path() -> None:
+    # Proxy prefixes (Cloudflare AI Gateway, internal reverse proxies)
+    # are intentional and left alone.
+    provider = OpenAIProvider(
+        base_url="https://gateway.example.com/openai-proxy",
+        model="m",
+        api_key="k",
+    )
+    assert provider.base_url == "https://gateway.example.com/openai-proxy"
+
+
+def test_openai_provider_accepts_v1_in_middle_of_path() -> None:
+    # Only a trailing /v1 is rejected — proxies that include /v1
+    # somewhere mid-path are intentional.
+    provider = OpenAIProvider(
+        base_url="https://gateway.example.com/v1/openai-proxy",
+        model="m",
+        api_key="k",
+    )
+    assert provider.base_url == "https://gateway.example.com/v1/openai-proxy"
+
+
+def test_openai_provider_rejects_v1_with_query_string() -> None:
+    # The trailing slash on the path is followed by a query string,
+    # so a URL-level rstrip("/") doesn't normalize it. The parsed
+    # path's own trailing slash MUST be stripped before the suffix
+    # check or this case slips through.
+    with pytest.raises(ValueError, match=r"base_url must not end with '/v1'"):
+        OpenAIProvider(base_url="https://host/v1/?token=abc", model="m", api_key="k")
+
+
+def test_openai_provider_rejects_v1_with_fragment() -> None:
+    # Same shape as the query-string case but with a URL fragment.
+    with pytest.raises(ValueError, match=r"base_url must not end with '/v1'"):
+        OpenAIProvider(base_url="https://host/v1/#frag", model="m", api_key="k")
+
+
+# ---------------------------------------------------------------------------
 # Error categories — canonical string contract + __cause__ preservation
 # ---------------------------------------------------------------------------
 

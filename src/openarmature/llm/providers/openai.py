@@ -46,6 +46,7 @@ import re
 import uuid
 from collections.abc import Sequence
 from typing import Any, Literal, cast
+from urllib.parse import urlparse
 
 import httpx
 import jsonschema
@@ -111,6 +112,19 @@ class OpenAIProvider:
     drives the conformance fixtures by intercepting HTTP calls and
     returning canned responses, exercising the same wire-mapping
     code production traffic would.
+
+    **``base_url`` shape.** Pass the host root only — e.g.
+    ``"https://api.openai.com"`` or ``"http://localhost:8000"``. The
+    provider appends ``/v1/chat/completions`` and ``/v1/models``
+    itself. A trailing ``/v1`` on ``base_url`` raises ``ValueError``:
+    httpx joins paths by appending, so an unprefixed ``base_url``
+    suffix would produce a doubled ``/v1/v1/...`` wire path that
+    silently 404/405s on most backends (some — like Bifrost — return
+    200 for ``GET /v1/v1/models`` while rejecting ``POST
+    /v1/v1/chat/completions``, leaving the readiness probe green and
+    every completion broken). Trailing slashes are stripped; other
+    non-empty paths (proxy prefixes like ``/api/openai-proxy``) are
+    left intact for intentional proxy setups.
     """
 
     def __init__(
@@ -124,7 +138,7 @@ class OpenAIProvider:
         force_prompt_augmentation_fallback: bool = False,
         genai_system: str = "openai",
     ) -> None:
-        self.base_url = base_url.rstrip("/")
+        self.base_url = _validate_and_normalize_base_url(base_url)
         self.model = model
         # ``force_prompt_augmentation_fallback`` switches structured-output
         # calls from the native response_format wire path to the
@@ -587,6 +601,46 @@ class OpenAIProvider:
             response_id=response_id,
             response_model=response_model,
         )
+
+
+# ---------------------------------------------------------------------------
+# base_url validation
+# ---------------------------------------------------------------------------
+
+
+# Rejects base_urls that end in /v1 or /v1/ because httpx joins paths by
+# appending — a base_url with a trailing /v1 produces a doubled /v1/v1/...
+# wire path. The failure mode is sneaky: some backends (Bifrost was the
+# motivating case) return 200 for GET /v1/v1/models while rejecting POST
+# /v1/v1/chat/completions, so the readiness probe stays green while every
+# completion fails. Strict rejection is safer than silent strip — it keeps
+# the bug visible at construction time.
+def _validate_and_normalize_base_url(base_url: str) -> str:
+    """Validate ``base_url`` and return its normalized form.
+
+    Strips trailing slashes. Raises :class:`ValueError` when the path
+    component ends in ``/v1`` (with or without a trailing slash) — the
+    provider appends ``/v1/`` segments itself, so a base_url with a
+    ``/v1`` suffix would produce a doubled path on the wire. Other
+    non-empty paths (e.g., proxy prefixes like ``/api/openai-proxy``)
+    are left intact.
+    """
+    normalized = base_url.rstrip("/")
+    # ``rstrip`` on the full URL is a no-op when a query string or
+    # fragment follows the path (e.g., ``https://host/v1/?token=...``
+    # ends in ``c`` so the URL-level rstrip leaves the parsed path's
+    # trailing slash intact). Strip the parsed path itself so the
+    # suffix check catches those shapes too.
+    path = urlparse(normalized).path.rstrip("/")
+    if path == "/v1" or path.endswith("/v1"):
+        raise ValueError(
+            f"OpenAIProvider base_url must not end with '/v1' — the provider "
+            f"appends '/v1/chat/completions' and '/v1/models' itself, and "
+            f"httpx would produce a doubled '/v1/v1/...' wire path. Pass the "
+            f"host root instead (e.g., 'https://api.openai.com'). "
+            f"Got: {base_url!r}"
+        )
+    return normalized
 
 
 # ---------------------------------------------------------------------------

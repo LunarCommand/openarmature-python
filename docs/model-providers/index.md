@@ -186,7 +186,7 @@ from openarmature.llm import OpenAIProvider, UserMessage
 
 async def main() -> None:
     provider = OpenAIProvider(
-        base_url="http://localhost:8000/v1",  # any OpenAI-compatible endpoint
+        base_url="http://localhost:8000",  # any OpenAI-compatible endpoint; host root only, /v1 added by provider
         model="some-model",
         api_key="optional-for-local-servers",
     )
