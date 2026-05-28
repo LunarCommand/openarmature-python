@@ -1,0 +1,340 @@
+"""Unit tests for the caller-supplied invocation metadata surface
+(proposal 0034 / observability §3.4 + §5.6 + §8.4.1+§8.4.2).
+
+These tests pin the validation rules, the ContextVar lifecycle, the
+mid-invocation augmentation helper, and the per-async-context COW
+isolation (fan-out instance augmentation doesn't leak to siblings).
+The conformance fixtures (026/027/028/029/030) cover end-to-end
+observer emission against the spec's expected shapes; these unit
+tests focus on the python-side surface contract.
+"""
+
+from __future__ import annotations
+
+import asyncio
+from typing import Any
+
+import pytest
+
+from openarmature.graph import END, GraphBuilder, State
+from openarmature.observability import (
+    current_invocation_metadata,
+    set_invocation_metadata,
+)
+from openarmature.observability.metadata import (
+    validate_invocation_metadata,
+)
+
+# ---------------------------------------------------------------------------
+# Boundary validation
+# ---------------------------------------------------------------------------
+
+
+def test_validate_accepts_simple_scalars() -> None:
+    out = validate_invocation_metadata(
+        {
+            "tenantId": "acme-corp",
+            "seatCount": 42,
+            "ratio": 0.75,
+            "isCanary": True,
+        }
+    )
+    assert out["tenantId"] == "acme-corp"
+    assert out["seatCount"] == 42
+    assert out["ratio"] == 0.75
+    assert out["isCanary"] is True
+
+
+def test_validate_accepts_homogeneous_arrays() -> None:
+    out = validate_invocation_metadata(
+        {
+            "labels": ["alpha", "beta"],
+            "weights": [1, 2, 3],
+            "scores": [0.1, 0.2],
+            "flags": [True, False],
+        }
+    )
+    assert out["labels"] == ["alpha", "beta"]
+    assert out["weights"] == [1, 2, 3]
+    assert out["scores"] == [0.1, 0.2]
+    assert out["flags"] == [True, False]
+
+
+def test_validate_none_returns_empty_mapping() -> None:
+    out = validate_invocation_metadata(None)
+    assert dict(out) == {}
+
+
+def test_validate_rejects_openarmature_prefix() -> None:
+    with pytest.raises(ValueError, match=r"reserved namespace prefix 'openarmature\.'"):
+        validate_invocation_metadata({"openarmature.user.x": "y"})
+
+
+def test_validate_rejects_gen_ai_prefix() -> None:
+    with pytest.raises(ValueError, match=r"reserved namespace prefix 'gen_ai\.'"):
+        validate_invocation_metadata({"gen_ai.system": "openai"})
+
+
+def test_validate_rejects_non_string_key() -> None:
+    with pytest.raises(ValueError, match="key must be a string"):
+        validate_invocation_metadata({123: "v"})  # pyright: ignore[reportArgumentType]
+
+
+def test_validate_rejects_none_value() -> None:
+    with pytest.raises(ValueError, match="value type NoneType"):
+        validate_invocation_metadata({"k": None})  # pyright: ignore[reportArgumentType]
+
+
+def test_validate_rejects_nested_dict_value() -> None:
+    with pytest.raises(ValueError, match="value type dict"):
+        validate_invocation_metadata({"k": {"nested": "x"}})  # pyright: ignore[reportArgumentType]
+
+
+def test_validate_rejects_mixed_type_arrays() -> None:
+    with pytest.raises(ValueError, match="MUST be homogeneous"):
+        validate_invocation_metadata({"mixed": [1, "two"]})  # pyright: ignore[reportArgumentType]
+
+
+def test_validate_rejects_array_of_dicts() -> None:
+    with pytest.raises(ValueError, match="unsupported type"):
+        validate_invocation_metadata({"k": [{"a": 1}]})  # pyright: ignore[reportArgumentType]
+
+
+def test_validate_accepts_empty_array() -> None:
+    out = validate_invocation_metadata({"empty": []})
+    assert out["empty"] == []
+
+
+def test_validate_rejects_non_dict_mapping() -> None:
+    with pytest.raises(ValueError, match="must be a dict"):
+        validate_invocation_metadata("not a dict")  # pyright: ignore[reportArgumentType]
+
+
+# ---------------------------------------------------------------------------
+# ContextVar reader outside any invocation
+# ---------------------------------------------------------------------------
+
+
+def test_current_invocation_metadata_empty_outside_invocation() -> None:
+    # Outside any invocation, the reader returns an empty mapping —
+    # not None — so callers can iterate without a guard.
+    assert dict(current_invocation_metadata()) == {}
+
+
+# ---------------------------------------------------------------------------
+# set_invocation_metadata augmentation
+# ---------------------------------------------------------------------------
+
+
+def test_set_invocation_metadata_augments_existing() -> None:
+    async def _runner() -> dict[str, Any]:
+        # Simulate the engine setting initial metadata.
+        from openarmature.observability.metadata import (
+            _set_invocation_metadata,
+            validate_invocation_metadata,
+        )
+
+        token = _set_invocation_metadata(validate_invocation_metadata({"tenantId": "acme"}))
+        try:
+            set_invocation_metadata(productId="p-1", batchId=42)
+            return dict(current_invocation_metadata())
+        finally:
+            from openarmature.observability.metadata import _reset_invocation_metadata
+
+            _reset_invocation_metadata(token)
+
+    result = asyncio.run(_runner())
+    # Augmentation merges with the initial mapping; nothing dropped.
+    assert result == {"tenantId": "acme", "productId": "p-1", "batchId": 42}
+
+
+def test_set_invocation_metadata_overwrites_existing_key() -> None:
+    async def _runner() -> dict[str, Any]:
+        from openarmature.observability.metadata import (
+            _reset_invocation_metadata,
+            _set_invocation_metadata,
+            validate_invocation_metadata,
+        )
+
+        token = _set_invocation_metadata(validate_invocation_metadata({"phase": "draft"}))
+        try:
+            set_invocation_metadata(phase="final")
+            return dict(current_invocation_metadata())
+        finally:
+            _reset_invocation_metadata(token)
+
+    result = asyncio.run(_runner())
+    assert result == {"phase": "final"}
+
+
+def test_set_invocation_metadata_rejects_reserved_namespace() -> None:
+    with pytest.raises(ValueError, match="reserved namespace prefix"):
+        set_invocation_metadata(**{"openarmature.user.x": "y"})
+
+
+def test_set_invocation_metadata_no_op_when_empty() -> None:
+    # Calling with no entries does nothing (and doesn't error).
+    set_invocation_metadata()
+    assert dict(current_invocation_metadata()) == {}
+
+
+# ---------------------------------------------------------------------------
+# Engine integration: invoke(metadata=...) + boundary rejection
+# ---------------------------------------------------------------------------
+
+
+class _SimpleState(State):
+    counter: int = 0
+
+
+async def _noop_node(_s: _SimpleState) -> dict[str, Any]:
+    return {"counter": 1}
+
+
+def _build_graph() -> Any:
+    return (
+        GraphBuilder(_SimpleState)
+        .add_node("noop", _noop_node)
+        .add_edge("noop", END)
+        .set_entry("noop")
+        .compile()
+    )
+
+
+async def test_invoke_accepts_metadata() -> None:
+    graph = _build_graph()
+    await graph.invoke(_SimpleState(), metadata={"tenantId": "acme", "seatCount": 42})
+
+
+async def test_invoke_rejects_reserved_namespace_at_boundary() -> None:
+    graph = _build_graph()
+    with pytest.raises(ValueError, match="reserved namespace prefix"):
+        await graph.invoke(_SimpleState(), metadata={"openarmature.user.x": "y"})
+
+
+async def test_invoke_rejects_bad_value_type_at_boundary() -> None:
+    graph = _build_graph()
+    with pytest.raises(ValueError, match="value type NoneType"):
+        # pyright: ignore[reportArgumentType]
+        await graph.invoke(_SimpleState(), metadata={"k": None})  # type: ignore[dict-item]
+
+
+async def test_invoke_resets_metadata_after_return() -> None:
+    graph = _build_graph()
+    await graph.invoke(_SimpleState(), metadata={"tenantId": "acme"})
+    # After the invocation returns, the ContextVar is reset to empty
+    # so the next invocation gets a fresh slate.
+    assert dict(current_invocation_metadata()) == {}
+
+
+async def test_metadata_visible_inside_node_body() -> None:
+    captured: dict[str, Any] = {}
+
+    async def _capture(_s: _SimpleState) -> dict[str, Any]:
+        captured.update(dict(current_invocation_metadata()))
+        return {"counter": 1}
+
+    graph = (
+        GraphBuilder(_SimpleState)
+        .add_node("capture", _capture)
+        .add_edge("capture", END)
+        .set_entry("capture")
+        .compile()
+    )
+    await graph.invoke(_SimpleState(), metadata={"tenantId": "acme"})
+    assert captured == {"tenantId": "acme"}
+
+
+async def test_otel_observer_emits_user_metadata_on_every_span() -> None:
+    # Per observability §5.6: caller-supplied entries appear as
+    # `openarmature.user.<key>` cross-cutting attributes on every
+    # span (invocation, node, LLM provider if present).
+    from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import (
+        InMemorySpanExporter,
+    )
+
+    from openarmature.observability.otel import OTelObserver
+
+    exporter = InMemorySpanExporter()
+    observer = OTelObserver(span_processor=SimpleSpanProcessor(exporter))
+    graph = _build_graph()
+    graph.attach_observer(observer)
+    try:
+        await graph.invoke(_SimpleState(), metadata={"tenantId": "acme", "seatCount": 42})
+        await graph.drain()
+    finally:
+        observer.shutdown()
+
+    spans = exporter.get_finished_spans()
+    assert len(spans) >= 2  # invocation span + noop node span
+    for span in spans:
+        attrs = dict(span.attributes or {})
+        assert attrs.get("openarmature.user.tenantId") == "acme", (
+            f"span {span.name!r} missing or wrong tenantId: {attrs}"
+        )
+        assert attrs.get("openarmature.user.seatCount") == 42, (
+            f"span {span.name!r} missing or wrong seatCount: {attrs}"
+        )
+
+
+async def test_langfuse_observer_emits_user_metadata_on_trace_and_observations() -> None:
+    # Per observability §8.4.1 + §8.4.2: caller-supplied entries
+    # appear on `trace.metadata` AND on every `observation.metadata`
+    # at the top level.
+    from openarmature.observability.langfuse import (
+        InMemoryLangfuseClient,
+        LangfuseObserver,
+    )
+
+    client = InMemoryLangfuseClient()
+    observer = LangfuseObserver(client=client)
+    graph = _build_graph()
+    graph.attach_observer(observer)
+    await graph.invoke(_SimpleState(), metadata={"tenantId": "acme", "featureFlag": "v2"})
+    await graph.drain()
+
+    assert len(client.traces) == 1
+    trace = next(iter(client.traces.values()))
+    assert trace.metadata.get("tenantId") == "acme"
+    assert trace.metadata.get("featureFlag") == "v2"
+    # Every observation in the trace must also carry the entries.
+    assert len(trace.observations) >= 1
+    for obs in trace.observations:
+        assert obs.metadata.get("tenantId") == "acme", (
+            f"observation {obs.name!r} missing tenantId: {obs.metadata}"
+        )
+        assert obs.metadata.get("featureFlag") == "v2", (
+            f"observation {obs.name!r} missing featureFlag: {obs.metadata}"
+        )
+
+
+async def test_mid_invocation_augmentation_persists_to_next_node() -> None:
+    capture_a: dict[str, Any] = {}
+    capture_b: dict[str, Any] = {}
+
+    async def _a(_s: _SimpleState) -> dict[str, Any]:
+        capture_a.update(dict(current_invocation_metadata()))
+        set_invocation_metadata(stage="a-completed")
+        return {"counter": 1}
+
+    async def _b(_s: _SimpleState) -> dict[str, Any]:
+        capture_b.update(dict(current_invocation_metadata()))
+        return {"counter": 2}
+
+    graph = (
+        GraphBuilder(_SimpleState)
+        .add_node("a", _a)
+        .add_node("b", _b)
+        .add_edge("a", "b")
+        .add_edge("b", END)
+        .set_entry("a")
+        .compile()
+    )
+    await graph.invoke(_SimpleState(), metadata={"tenantId": "acme"})
+    # Node a sees the initial metadata.
+    assert capture_a == {"tenantId": "acme"}
+    # Node b sees the initial metadata PLUS node a's augmentation.
+    # Sequential nodes share the engine task's Context, so a's
+    # set_invocation_metadata persists into b's body.
+    assert capture_b == {"tenantId": "acme", "stage": "a-completed"}

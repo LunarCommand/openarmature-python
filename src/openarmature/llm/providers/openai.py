@@ -60,6 +60,7 @@ from openarmature.observability.correlation import (
     current_namespace_prefix,
 )
 from openarmature.observability.llm_event import LlmEventPayload
+from openarmature.observability.metadata import current_invocation_metadata
 
 # ``current_prompt_group`` / ``current_prompt_result`` are imported
 # lazily inside :meth:`OpenAIProvider.complete` to avoid a module-load
@@ -1264,6 +1265,7 @@ def _make_llm_event(
         response_id=response_id,
         response_model=response_model,
         genai_system=genai_system,
+        caller_invocation_metadata=dict(current_invocation_metadata()),
     )
     return NodeEvent(
         node_name="openarmature.llm.complete",

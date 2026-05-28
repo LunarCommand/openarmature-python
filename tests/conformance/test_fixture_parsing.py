@@ -76,12 +76,33 @@ _DEFERRED_FIXTURES: dict[str, str] = {
     "observability/033-langfuse-detached-trace-mode": (
         "Langfuse shape models live in the dedicated test_observability_langfuse harness"
     ),
-    # proposal 0034 caller-supplied invocation metadata fixtures (PR 4).
-    "observability/027-langfuse-caller-supplied-metadata": "Caller-metadata harness lands in PR 4 (0034)",
-    "observability/028-caller-metadata-namespace-rejection": "Caller-metadata harness lands in PR 4 (0034)",
-    "observability/029-caller-metadata-fan-out-per-instance": "Caller-metadata harness lands in PR 4 (0034)",
+    # Proposal 0034 Langfuse caller-metadata fixture uses the
+    # ``langfuse_observer`` / ``langfuse_trace`` directive shapes the
+    # cross-capability parser doesn't model. The capability-specific
+    # harness at tests/conformance/test_observability_langfuse.py
+    # parses these directly via yaml + tailored helpers.
+    "observability/027-langfuse-caller-supplied-metadata": (
+        "Langfuse shape models live in the dedicated test_observability_langfuse harness"
+    ),
+    # Proposal 0034 boundary-rejection fixture uses rejection
+    # invariants (``invoke_rejects_at_api_boundary``, ``no_spans_emitted``,
+    # ``no_langfuse_observations_emitted``) the cross-capability
+    # parser doesn't model. Driven by the dedicated runner
+    # ``_run_fixture_028`` in test_observability.py.
+    "observability/028-caller-metadata-namespace-rejection": (
+        "Rejection invariants live in the dedicated _run_fixture_028 runner"
+    ),
+    # Proposal 0034 fan-out / parallel-branches caller-metadata
+    # fixtures need the harness primitive
+    # ``augment_metadata_from_field`` (per-instance / per-branch
+    # ``set_invocation_metadata`` calls). The 026/027/028 fixtures
+    # (cross-cutting + boundary rejection) shipped with PR 4; the
+    # augmentation primitive lands in a follow-up.
+    "observability/029-caller-metadata-fan-out-per-instance": (
+        "Per-instance augmentation harness primitive lands in a follow-up"
+    ),
     "observability/030-caller-metadata-parallel-branches-per-branch": (
-        "Caller-metadata harness lands in PR 4 (0034)"
+        "Per-branch augmentation harness primitive lands in a follow-up"
     ),
     # proposal 0033 added typed directive shapes (`secondary_manager`,
     # `label_resolver`, `cases`) the canonical parser doesn't model.
