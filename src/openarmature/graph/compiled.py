@@ -1006,6 +1006,7 @@ class CompiledGraph[StateT: State]:
                     post_state=None,
                     error=None,
                     parent_states=(),
+                    caller_invocation_metadata=current_invocation_metadata(),
                 ),
             )
         try:
