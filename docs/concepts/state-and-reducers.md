@@ -107,17 +107,29 @@ engine applies the merge consistently. If two nodes write the same
 field and the merge strategy is wrong, the fix is one line on the
 schema, not surgery across call sites.
 
-## Three built-in reducers
+## Five built-in reducers
 
-| Reducer           | Semantics                                | Typical use                           |
-| ----------------- | ---------------------------------------- | ------------------------------------- |
-| `last_write_wins` | `partial` replaces `prior` *(default)*   | Scalars owned by a single node        |
-| `append`          | `[*prior, *partial]` for list fields     | Traces, message history, accumulators |
-| `merge`           | `{**prior, **partial}` (shallow)         | Metadata bags, namespaced state       |
+| Reducer           | Semantics                                       | Typical use                           |
+| ----------------- | ----------------------------------------------- | ------------------------------------- |
+| `last_write_wins` | `partial` replaces `prior` *(default)*          | Scalars owned by a single node        |
+| `append`          | `[*prior, *partial]` for list fields            | Traces, message history, accumulators |
+| `merge`           | `{**prior, **partial}` (shallow)                | Metadata bags, namespaced state       |
+| `concat_flatten`  | `[*prior, *(x for sub in partial for x in sub)]` | Fan-out collecting `list[X]` per instance |
+| `merge_all`       | fold `list[dict]` into `prior` (last-write-wins) | Fan-out collecting `dict[str, X]` per instance |
 
 ```python
-from openarmature.graph import append, last_write_wins, merge
+from openarmature.graph import append, concat_flatten, last_write_wins, merge, merge_all
 ```
+
+`concat_flatten` and `merge_all` exist for the fan-out collection
+shapes: when a fan-out subgraph emits `list[X]` per instance, the
+parent's `target_field` receives `list[list[X]]` (which `append`
+would leave nested); when it emits `dict[str, X]`, the parent
+receives `list[dict]` (which `merge` can't consume). Both are
+strict like their single-level counterparts — they raise
+`ReducerError` when an update element isn't the expected
+list/mapping shape. See the [fan-out](fan-out.md) page for the
+full pattern.
 
 You can write your own. A reducer is any named callable matching the
 `(prior, partial) -> new` contract.

@@ -57,24 +57,17 @@ _LANGFUSE_FIXTURES = frozenset(
         # into ``trace.metadata`` + every ``observation.metadata``
         # per §8.4.1 + §8.4.2).
         "027-langfuse-caller-supplied-metadata",
-        # 031 / 032 / 033 — proposal 0035 (spec v0.26.1). The
-        # subgraph_identity wiring (per coord thread
-        # `clarify-subgraph-name-semantics` msg 02 — Option A) is
-        # landed: SubgraphNode.subgraph_identity / FanOutConfig.
-        # subgraph_identity flow through NodeEvent.subgraph_identities
-        # to observer-side metadata.subgraph_name emission. Two
-        # remaining spec/fixture ambiguities block fixture activation:
-        # (1) ``step`` semantics on the wrapper synth observation vs.
-        # ``outer_out``: fixture 031 expects ``outer_out`` at step 2
-        # but graph-engine §6 says "subgraph-internal node executions
-        # increment the same counter" so the python engine emits
-        # step 3 (outer_in=0, inner_x=1, inner_y=2, outer_out=3).
-        # (2) ``namespace`` rewrite for observations inside a
-        # detached trace: fixture 033 case 1 expects
-        # ``namespace: ["long_running_workflow", "step"]`` (using
-        # subgraph identity for the wrapper component) but the
-        # engine's event carries the wrapper node name (``"dispatch"``).
-        # Both queued for spec input via a follow-up coord thread.
+        # 031 / 032 / 033 — proposal 0035. Activated against spec
+        # v0.27.1, which patched the two fixture-vs-impl ambiguities
+        # raised in coord thread `clarify-subgraph-name-semantics`
+        # (msg 04): fixture 031's `outer_out` step corrected 2 → 3
+        # (graph-engine §6 shared-counter), and fixture 033's
+        # detached-trace inner namespace corrected to the wrapper
+        # node name (`["dispatch", "step"]`). The Option A
+        # subgraph_identity wiring on main satisfies both.
+        "031-langfuse-subgraph-span-hierarchy",
+        "032-langfuse-fan-out-per-instance-spans",
+        "033-langfuse-detached-trace-mode",
     }
 )
 
@@ -187,6 +180,33 @@ def _has_topology_constructs(case: Mapping[str, Any]) -> bool:
     return False
 
 
+def _patch_unsupported_directives(spec: Mapping[str, Any]) -> None:
+    """Replace inner-node test-seam directives the cross-capability
+    adapter doesn't translate (``update_pure_from_state``) with a
+    benign ``update_pure: {}`` no-op. The topology fixtures assert
+    observation structure (parenting, trace ids, subgraph_name,
+    correlation_id), not computed state values, so the swap is safe.
+    Mirrors the OTel harness's helper of the same name."""
+
+    def patch_nodes(graph_block: Mapping[str, Any] | None) -> None:
+        if not graph_block:
+            return
+        nodes = cast("dict[str, Any]", graph_block.get("nodes") or {})
+        for node_spec_any in nodes.values():
+            if not isinstance(node_spec_any, dict):
+                continue
+            node_spec = cast("dict[str, Any]", node_spec_any)
+            if "update_pure_from_state" in node_spec:
+                node_spec.pop("update_pure_from_state")
+                node_spec.setdefault("update_pure", {})
+
+    patch_nodes(spec)
+    if "subgraph" in spec:
+        patch_nodes(cast("Mapping[str, Any]", spec["subgraph"]))
+    for sub in cast("dict[str, Any]", spec.get("subgraphs") or {}).values():
+        patch_nodes(cast("Mapping[str, Any]", sub))
+
+
 def _compile_subgraphs(spec: Mapping[str, Any]) -> dict[str, Any]:
     """Build any subgraphs declared by the fixture and return a
     name→compiled-graph registry the adapter consumes. Mirrors the
@@ -259,6 +279,14 @@ async def _run_case(case: Mapping[str, Any]) -> None:
     # LLM/prompt fixtures (022/023/024) use the simpler hand-rolled
     # per-node build that knows about ``calls_llm`` / ``renders_prompt``.
     if _has_topology_constructs(case):
+        # The topology fixtures (031/032/033) use inner-node test-seam
+        # directives the cross-capability adapter doesn't translate
+        # (``update_pure_from_state`` computes a value the assertions
+        # don't inspect — they check span / observation structure, not
+        # state values). Swap those for a benign ``update_pure: {}``
+        # no-op so the graph is runnable, mirroring the OTel harness's
+        # ``_patch_unsupported_directives``.
+        _patch_unsupported_directives(case)
         subgraphs = _compile_subgraphs(case)
         built = build_graph(case, subgraphs=subgraphs, trace=[])
         graph = built.builder.compile()

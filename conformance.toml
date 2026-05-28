@@ -29,7 +29,7 @@
 
 [manifest]
 implementation = "openarmature-python"
-spec_pin = "v0.26.0"
+spec_pin = "v0.27.1"
 
 # Status values:
 #   implemented   — shipped behavior matches the proposal's contract
@@ -150,9 +150,9 @@ status = "textual-only"
 since = "0.9.0"
 note = "Drain snapshot semantic and timeout-input validation already implemented as part of the proposal 0010 impl PR (v0.9.0); no additional module-level work needed."
 
-# Spec v0.23.0-v0.26.1 batch (proposals 0031, 0032, 0033, 0034, 0035).
-# All five have impl work landing across the v0.10.0 release cycle;
-# status stays `not-yet` until the release PR flips them to
+# Spec v0.23.0-v0.27.1 batch (proposals 0031, 0032, 0033, 0034, 0035,
+# 0036). All six have impl work landing across the v0.10.0 release
+# cycle; status stays `not-yet` until the release PR flips them to
 # `implemented` with `since = "0.10.0"`. The pinned spec submodule
 # advances ahead of the impl status because newer fixtures need to be
 # visible to the conformance harness as each PR lands.
@@ -169,4 +169,7 @@ status = "not-yet"
 status = "not-yet"
 
 [proposals."0035"]
+status = "not-yet"
+
+[proposals."0036"]
 status = "not-yet"

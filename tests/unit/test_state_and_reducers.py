@@ -5,7 +5,15 @@ from typing import Annotated
 import pytest
 from pydantic import Field, ValidationError
 
-from openarmature.graph import END, State, append, last_write_wins, merge
+from openarmature.graph import (
+    END,
+    State,
+    append,
+    concat_flatten,
+    last_write_wins,
+    merge,
+    merge_all,
+)
 from openarmature.graph.state import field_reducers, resolve_reducer
 
 
@@ -58,3 +66,67 @@ def test_merge_reducer_rejects_non_mapping_prior() -> None:
 def test_merge_reducer_rejects_non_mapping_update() -> None:
     with pytest.raises(TypeError):
         merge({"k": "v"}, "not-a-dict")
+
+
+# Proposal 0036 — concat_flatten (list-of-lists → flat list).
+
+
+def test_concat_flatten_concatenates_and_flattens() -> None:
+    assert concat_flatten(["a", "b"], [["c"], ["d", "e"], []]) == ["a", "b", "c", "d", "e"]
+
+
+def test_concat_flatten_empty_update_is_noop() -> None:
+    assert concat_flatten(["a"], []) == ["a"]
+
+
+def test_concat_flatten_empty_sublists_contribute_nothing() -> None:
+    assert concat_flatten([], [[], []]) == []
+
+
+def test_concat_flatten_rejects_non_list_prior() -> None:
+    with pytest.raises(TypeError):
+        concat_flatten("not-a-list", [["x"]])
+
+
+def test_concat_flatten_rejects_non_list_update() -> None:
+    with pytest.raises(TypeError):
+        concat_flatten([], "not-a-list")
+
+
+def test_concat_flatten_rejects_non_list_element() -> None:
+    with pytest.raises(TypeError):
+        concat_flatten([], [["a"], "not_a_list"])
+
+
+# Proposal 0036 — merge_all (list-of-mappings → folded mapping).
+
+
+def test_merge_all_folds_with_last_write_wins() -> None:
+    result = merge_all(
+        {"seed": "prior", "retained": "kept"},
+        [{"a": "1"}, {"seed": "overwritten", "b": "2"}, {"a": "1_wins"}],
+    )
+    assert result == {"seed": "overwritten", "retained": "kept", "a": "1_wins", "b": "2"}
+
+
+def test_merge_all_empty_update_is_noop() -> None:
+    assert merge_all({"k": "v"}, []) == {"k": "v"}
+
+
+def test_merge_all_empty_mappings_contribute_nothing() -> None:
+    assert merge_all({"prior": "value"}, [{}, {}]) == {"prior": "value"}
+
+
+def test_merge_all_rejects_non_mapping_prior() -> None:
+    with pytest.raises(TypeError):
+        merge_all("not-a-dict", [{"k": "v"}])
+
+
+def test_merge_all_rejects_non_list_update() -> None:
+    with pytest.raises(TypeError):
+        merge_all({}, {"k": "v"})
+
+
+def test_merge_all_rejects_non_mapping_element() -> None:
+    with pytest.raises(TypeError):
+        merge_all({}, [{"k": "1"}, "not_a_mapping"])

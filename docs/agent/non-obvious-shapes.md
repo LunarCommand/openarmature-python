@@ -196,24 +196,35 @@ attributed_candidates.0  Input should be a valid dictionary or
   input_type=list]
 ```
 
-The right fix is a flattening reducer. Until OA ships the spec-blessed built-ins (proposal 0036 — `concat_flatten` for the list-of-lists case, `merge_all` for the dict-of-mappings case — accepted in spec v0.27.0 but not yet absorbed into the python impl), use a small custom reducer:
+The fix is the `concat_flatten` built-in reducer (proposal 0036) — the list-of-lists analog of `append`. Declare it on the parent's collection field:
 
 ```python
-from openarmature.graph import Reducer
+from typing import Annotated
 
-class _ConcatFlatten(Reducer):
-    name = "concat_flatten"
+from pydantic import Field
 
-    def __call__(self, prior: list[Any], update: list[list[Any]]) -> list[Any]:
-        return [*prior, *(item for sublist in update for item in sublist)]
-
-concat_flatten = _ConcatFlatten()
+from openarmature.graph import State, concat_flatten
 
 class PipelineState(State):
-    attributed_candidates: Annotated[list[ClaimCandidate], concat_flatten] = ...
+    attributed_candidates: Annotated[list[ClaimCandidate], concat_flatten] = Field(default_factory=list)
 ```
 
-Single-record-per-instance fan-outs (`collect_field: str`, parent field `Annotated[list[X], append]`) don't hit this — the engine still wraps each instance's value as one element, but `append` flattens it correctly since each element is already an `X`. The list-of-lists shape only emerges when the per-instance value is itself a list.
+`concat_flatten` folds the per-instance lists into one flat list (`[*prior, *(item for sublist in update for item in sublist)]`), strict like `append` — it raises `ReducerError` if any element of the update isn't itself a list.
+
+The dict-shaped analog is `merge_all` (also proposal 0036): when each fan-out instance contributes a `dict[str, X]`, the parent's `target_field` receives `list[dict]`, which plain `merge` can't consume. `merge_all` folds the sequence of mappings into the prior with shallow last-write-wins per key:
+
+```python
+from typing import Annotated
+
+from pydantic import Field
+
+from openarmature.graph import State, merge_all
+
+class PipelineState(State):
+    keyed_results: Annotated[dict[str, Result], merge_all] = Field(default_factory=dict)
+```
+
+Single-record-per-instance fan-outs (`collect_field: str`, parent field `Annotated[list[X], append]`) don't hit this — the engine still wraps each instance's value as one element, but `append` flattens it correctly since each element is already an `X`. The two non-flat shapes emerge only when the per-instance value is itself a container: a `list[X]` per instance lands `list[list[X]]` (use `concat_flatten`), and a `dict[str, X]` per instance lands `list[dict]` (use `merge_all`).
 
 If a parent field is populated by BOTH direct node writes AND fan-out collection, that's an architectural ambiguity worth fixing upstream — split into two fields, or pick one path.
 

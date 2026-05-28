@@ -51,7 +51,7 @@ from .nodes import FunctionNode, Node
 from .observer import DrainSummary, Observer, RemoveHandle, SubscribedObserver
 from .parallel_branches import BranchSpec, ParallelBranchesNode
 from .projection import ExplicitMapping, FieldNameMatching, ProjectionStrategy
-from .reducers import Reducer, append, last_write_wins, merge
+from .reducers import Reducer, append, concat_flatten, last_write_wins, merge, merge_all
 from .state import State
 from .subgraph import SubgraphNode
 
@@ -106,9 +106,11 @@ __all__ = [
     "TimingRecord",
     "UnreachableNode",
     "append",
+    "concat_flatten",
     "default_classifier",
     "deterministic_backoff",
     "exponential_jitter_backoff",
     "last_write_wins",
     "merge",
+    "merge_all",
 ]

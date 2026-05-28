@@ -100,6 +100,29 @@ containing:
 - `on_empty="noop"` for an empty items_field → all the above with empty
   lists; `count_field` set to 0.
 
+### Choosing the `target_field` reducer
+
+The engine writes `target_field` as a list with one entry per
+successful instance: `[instance_0_value, instance_1_value, …]`. The
+reducer you declare on the parent field decides how that list folds
+into prior state:
+
+- Each instance emits a single value (`collect_field: X`) →
+  declare `append` on `Annotated[list[X], append]`. Each instance's
+  value is already an `X`; `append` concatenates cleanly.
+- Each instance emits a `list[X]` (0..N records per instance) → the
+  engine lands `list[list[X]]`. Declare `concat_flatten` instead —
+  it flattens one level so the parent field stays `list[X]`. Plain
+  `append` would leave the nesting and fail Pydantic validation.
+- Each instance emits a `dict[str, X]` → the engine lands
+  `list[dict]`. Declare `merge_all`, which folds the mappings into
+  the parent dict with last-write-wins per key. Plain `merge` can't
+  consume a `list[dict]`.
+
+`concat_flatten` and `merge_all` are strict — they raise
+`ReducerError` if an update element isn't the expected list/mapping
+shape. See [state and reducers](state-and-reducers.md#five-built-in-reducers).
+
 ## Empty fan-outs
 
 If `items_field` is set and the parent list is empty (or `count`

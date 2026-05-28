@@ -1,6 +1,6 @@
 # OpenArmature — Agent documentation
 
-*This is the agent guide bundled with the openarmature Python package, version 0.9.0 (spec v0.26.1). For the full docs site see [openarmature.ai](https://openarmature.ai). For the canonical spec text see [openarmature.org/capabilities](https://openarmature.org/capabilities/). For project-specific conventions for the code you're editing, see the host project's `AGENTS.md` or `CLAUDE.md`.*
+*This is the agent guide bundled with the openarmature Python package, version 0.9.0 (spec v0.27.1). For the full docs site see [openarmature.ai](https://openarmature.ai). For the canonical spec text see [openarmature.org/capabilities](https://openarmature.org/capabilities/). For project-specific conventions for the code you're editing, see the host project's `AGENTS.md` or `CLAUDE.md`.*
 
 ## TL;DR
 
@@ -10,7 +10,7 @@ OpenArmature is a workflow framework for LLM pipelines and tool-calling agents �
 
 ## Capability contracts
 
-_Sourced from openarmature-spec v0.26.1. Each entry below reproduces §1 (Purpose) and §2 (Concepts) of the capability's `spec.md`. For the full spec text (execution model, error semantics, determinism, observer hooks, etc.) see the linked docs site._
+_Sourced from openarmature-spec v0.27.1. Each entry below reproduces §1 (Purpose) and §2 (Concepts) of the capability's `spec.md`. For the full spec text (execution model, error semantics, determinism, observer hooks, etc.) see the linked docs site._
 
 ### Capability: `graph-engine`
 
@@ -46,8 +46,31 @@ engine constant, not a reserved node name, so a user node may happen to be named
 
 **Reducer.** A function that merges a node's partial update into the prior state for a given field. Each state
 field has exactly one reducer. The default reducer is _last-write-wins_ (the new value replaces the old).
-Implementations MUST provide at least: `last_write_wins`, `append` (for list-typed fields), and `merge`
-(for mapping-typed fields). Users MAY register custom reducers per field.
+Implementations MUST provide at least: `last_write_wins`, `append` (for list-typed fields), `merge`
+(for mapping-typed fields), `concat_flatten` (for list-typed fields whose updates are lists of lists —
+e.g., fan-out target fields collecting list-emitting per-instance values), and `merge_all` (for
+mapping-typed fields whose updates are lists of mappings — e.g., fan-out target fields collecting
+dict-emitting per-instance values). Users MAY register custom reducers per field.
+
+**`concat_flatten` semantics.** `concat_flatten(prior, update)` returns the concatenation of `prior` with the
+one-level flattening of `update`. Both `prior` and `update` MUST be lists, and every element of `update` MUST
+itself be a list. Violations raise `ReducerError` per §4 (the engine MUST surface the offending field, the
+reducer name, and a root-cause naming the non-list value). Empty `update` is a no-op (returns `prior`
+unchanged). Empty sub-lists inside `update` contribute zero elements (the one-to-many fan-out case where an
+instance legitimately produces zero records). Implementations MUST NOT auto-detect whether `update` is a list
+of lists vs. a flat list — `concat_flatten` is strictly the two-level reducer; callers with mixed-shape
+requirements MUST register a custom reducer rather than rely on shape-dependent behavior.
+
+**`merge_all` semantics.** `merge_all(prior, update)` folds the sequence of mappings in `update` into `prior`,
+applying the same shallow merge semantics as `merge` (later writes win on key conflict; non-conflicting keys
+from `prior` are preserved). For `update = [d_1, d_2, ..., d_n]`, the result is equivalent to applying `merge`
+N times sequentially: `merge(merge(...merge(merge(prior, d_1), d_2)...), d_n)`, so within `update`
+last-write-wins applies across all N dicts (e.g., if `d_2` and `d_n` both set key `k`, `d_n`'s value wins).
+`prior` MUST be a mapping, `update` MUST be a list, and every element of `update` MUST itself be a mapping.
+Violations raise `ReducerError` per §4. Empty `update` is a no-op (returns `prior` unchanged). Empty mappings
+inside `update` contribute zero keys. Implementations MUST NOT auto-detect whether `update` is a list of
+mappings vs. a single mapping — `merge_all` is strictly the list-of-mappings reducer; callers needing both
+behaviors on the same field MUST register a custom reducer rather than rely on shape-dependent behavior.
 
 **Subgraph.** A compiled graph used as a node inside another graph. A subgraph executes against its own state
 schema and produces a partial update that is merged into the parent's state. The merge uses the same reducer
@@ -1035,24 +1058,35 @@ attributed_candidates.0  Input should be a valid dictionary or
   input_type=list]
 ```
 
-The right fix is a flattening reducer. Until OA ships the spec-blessed built-ins (proposal 0036 — `concat_flatten` for the list-of-lists case, `merge_all` for the dict-of-mappings case — accepted in spec v0.27.0 but not yet absorbed into the python impl), use a small custom reducer:
+The fix is the `concat_flatten` built-in reducer (proposal 0036) — the list-of-lists analog of `append`. Declare it on the parent's collection field:
 
 ```python
-from openarmature.graph import Reducer
+from typing import Annotated
 
-class _ConcatFlatten(Reducer):
-    name = "concat_flatten"
+from pydantic import Field
 
-    def __call__(self, prior: list[Any], update: list[list[Any]]) -> list[Any]:
-        return [*prior, *(item for sublist in update for item in sublist)]
-
-concat_flatten = _ConcatFlatten()
+from openarmature.graph import State, concat_flatten
 
 class PipelineState(State):
-    attributed_candidates: Annotated[list[ClaimCandidate], concat_flatten] = ...
+    attributed_candidates: Annotated[list[ClaimCandidate], concat_flatten] = Field(default_factory=list)
 ```
 
-Single-record-per-instance fan-outs (`collect_field: str`, parent field `Annotated[list[X], append]`) don't hit this — the engine still wraps each instance's value as one element, but `append` flattens it correctly since each element is already an `X`. The list-of-lists shape only emerges when the per-instance value is itself a list.
+`concat_flatten` folds the per-instance lists into one flat list (`[*prior, *(item for sublist in update for item in sublist)]`), strict like `append` — it raises `ReducerError` if any element of the update isn't itself a list.
+
+The dict-shaped analog is `merge_all` (also proposal 0036): when each fan-out instance contributes a `dict[str, X]`, the parent's `target_field` receives `list[dict]`, which plain `merge` can't consume. `merge_all` folds the sequence of mappings into the prior with shallow last-write-wins per key:
+
+```python
+from typing import Annotated
+
+from pydantic import Field
+
+from openarmature.graph import State, merge_all
+
+class PipelineState(State):
+    keyed_results: Annotated[dict[str, Result], merge_all] = Field(default_factory=dict)
+```
+
+Single-record-per-instance fan-outs (`collect_field: str`, parent field `Annotated[list[X], append]`) don't hit this — the engine still wraps each instance's value as one element, but `append` flattens it correctly since each element is already an `X`. The two non-flat shapes emerge only when the per-instance value is itself a container: a `list[X]` per instance lands `list[list[X]]` (use `concat_flatten`), and a `dict[str, X]` per instance lands `list[dict]` (use `merge_all`).
 
 If a parent field is populated by BOTH direct node writes AND fan-out collection, that's an architectural ambiguity worth fixing upstream — split into two fields, or pick one path.
 
