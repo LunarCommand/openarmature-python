@@ -1062,6 +1062,9 @@ The fix is the `concat_flatten` built-in reducer (proposal 0036) — the list-of
 
 ```python
 from typing import Annotated
+
+from pydantic import Field
+
 from openarmature.graph import State, concat_flatten
 
 class PipelineState(State):
@@ -1073,13 +1076,17 @@ class PipelineState(State):
 The dict-shaped analog is `merge_all` (also proposal 0036): when each fan-out instance contributes a `dict[str, X]`, the parent's `target_field` receives `list[dict]`, which plain `merge` can't consume. `merge_all` folds the sequence of mappings into the prior with shallow last-write-wins per key:
 
 ```python
+from typing import Annotated
+
+from pydantic import Field
+
 from openarmature.graph import State, merge_all
 
 class PipelineState(State):
     keyed_results: Annotated[dict[str, Result], merge_all] = Field(default_factory=dict)
 ```
 
-Single-record-per-instance fan-outs (`collect_field: str`, parent field `Annotated[list[X], append]`) don't hit this — the engine still wraps each instance's value as one element, but `append` flattens it correctly since each element is already an `X`. The list-of-lists shape only emerges when the per-instance value is itself a list (use `concat_flatten`) or a mapping (use `merge_all`).
+Single-record-per-instance fan-outs (`collect_field: str`, parent field `Annotated[list[X], append]`) don't hit this — the engine still wraps each instance's value as one element, but `append` flattens it correctly since each element is already an `X`. The two non-flat shapes emerge only when the per-instance value is itself a container: a `list[X]` per instance lands `list[list[X]]` (use `concat_flatten`), and a `dict[str, X]` per instance lands `list[dict]` (use `merge_all`).
 
 If a parent field is populated by BOTH direct node writes AND fan-out collection, that's an architectural ambiguity worth fixing upstream — split into two fields, or pick one path.
 
