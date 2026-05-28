@@ -110,23 +110,23 @@ The compiled graph stays usable for subsequent invocations after a timed-out dra
 
 Catching `Exception` works but is too broad; catching one hierarchy misses the other two. If you want to branch on category strings (e.g., for retry logic), catch the relevant base — `RuntimeGraphError` covers all five spec runtime categories, `LlmProviderError` covers all nine provider categories, `CheckpointError` covers all six checkpoint categories. The `TRANSIENT_CATEGORIES` frozenset in `openarmature.llm` enumerates which provider categories are retriable.
 
-### Reconcile `started` → `completed` pairs via a per-invocation dict keyed on `(namespace, attempt_index, fan_out_index)`
+### Reconcile `started` → `completed` pairs via a per-invocation dict keyed on `(namespace, branch_name, attempt_index, fan_out_index)`
 
 Observers receive `started` and `completed` events as a pair per node attempt, but the engine doesn't carry a `step_id`-like correlation field across the pair (it doesn't need one for its own logic — the events arrive serially per spec §6). Observer code that needs to thread per-call state — start timestamps, request payloads, custom IDs — between the two events has to reconcile manually.
 
-The pair identity is `(namespace, attempt_index, fan_out_index)`: that triple is unique within an invocation (per graph-engine §6 uniqueness invariants). Carry per-invocation state in a `dict[invocation_id, dict[tuple, value]]` and look up on `completed`:
+The pair identity is `(namespace, branch_name, attempt_index, fan_out_index)`: that tuple is unique within an invocation (per graph-engine §6 uniqueness invariants — `branch_name` and `fan_out_index` are independent slots, so a node inside a parallel-branches branch needs `branch_name` in the key to avoid colliding with the same-named node in a sibling branch). Carry per-invocation state in a `dict[invocation_id, dict[tuple, value]]` and look up on `completed`:
 
 ```python
 class StepTimingObserver:
     def __init__(self) -> None:
-        # invocation_id -> {(namespace, attempt_index, fan_out_index): start_ts}
+        # invocation_id -> {(namespace, branch_name, attempt_index, fan_out_index): start_ts}
         self._pending: dict[str, dict[tuple[Any, ...], float]] = {}
 
     async def __call__(self, event: NodeEvent) -> None:
         invocation_id = current_invocation_id()
         if invocation_id is None:
             return
-        key = (event.namespace, event.attempt_index, event.fan_out_index)
+        key = (event.namespace, event.branch_name, event.attempt_index, event.fan_out_index)
         if event.phase == "started":
             self._pending.setdefault(invocation_id, {})[key] = time.monotonic()
         elif event.phase == "completed":
@@ -153,7 +153,7 @@ async def __call__(self, event: NodeEvent) -> None:
     # … user-node handling
 ```
 
-`event.namespace[0]` is the safest discriminator (the leaf `event.node_name` would also work for LLM events but won't match the checkpoint sentinels since those repurpose `node_name` differently). The OA-internal events also intentionally don't carry an `invocation_id` in the way user-node events do — relying on `current_invocation_id() is None` as the filter would also work but couples to an internal detail; the namespace-prefix check is the stable contract.
+`event.namespace[0]` is the safest discriminator (the leaf `event.node_name` would also work for LLM events but won't match the checkpoint sentinels since those repurpose `node_name` differently). Don't try to filter on `current_invocation_id() is None` — OA-internal events are dispatched within the same invocation context as user-node events, so `invocation_id` is set for both; the namespace-prefix check is the stable contract.
 
 ### A `with_state_migration` recipe — register migrations alongside the state class, run on resume
 

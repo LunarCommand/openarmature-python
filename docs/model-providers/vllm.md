@@ -21,17 +21,16 @@ async def main() -> None:
         api_key=None,                       # vLLM doesn't require auth by default
         genai_system="vllm",                # surfaces on observability spans
     )
-    # await provider.ready()                # pre-flight; needs a live endpoint
-    # response = await provider.complete(
-    #     [UserMessage(content="hello")],
-    #     config=RuntimeConfig(temperature=0.0, max_tokens=128),
-    # )
+    messages = [UserMessage(content="hello")]
+    config = RuntimeConfig(temperature=0.0, max_tokens=128)
+    # await provider.ready()                          # pre-flight; needs a live endpoint
+    # response = await provider.complete(messages, config=config)
     # print(response.message.content)
+    _ = (messages, config)                            # used once the calls above are uncommented
     await provider.aclose()
 
 
-# asyncio.run(main())
-_ = (asyncio, RuntimeConfig, UserMessage)  # silence unused-import in this doc example
+asyncio.run(main())
 ```
 
 That's it for the happy path. The rest of the page covers the
@@ -156,17 +155,24 @@ output doesn't match.
 Recent vLLM releases (>=0.5.x) support `response_format` natively;
 leave the flag at its default `False` for those.
 
-## Readiness probe — `GET /v1/models` only
+## Readiness probe — `GET /v1/models`
 
-`provider.ready()` hits `GET /v1/models` and matches the bound model
-against the returned `data[].id` entries. vLLM's `/v1/models`
-endpoint returns the model that was loaded with `--model`, so the
-probe verifies the model name matches what you passed to the
-provider.
+`provider.ready()` hits `GET /v1/models` and:
 
-**Limitation.** The probe doesn't distinguish "model loaded and
-warmed" from "model configured but cold" — vLLM's `/v1/models`
-returns 200 even during a slow first-load. For deployments where
+- Matches the bound model against the returned `data[].id` entries;
+  raises `ProviderInvalidModel` if absent.
+- Consults an optional per-entry `status` field — if it contains
+  `loading` or `not_loaded`, raises `ProviderModelNotLoaded`. Local
+  servers that report load state (some LM Studio / vLLM builds) get a
+  real not-loaded signal through this path.
+- Maps 401/403 → `ProviderAuthentication`, 5xx / connection error →
+  `ProviderUnavailable`.
+
+**Limitation for vLLM specifically.** vLLM's `/v1/models` doesn't
+populate a `status` field — it returns the configured model with a
+200 even during a slow first-load. So the `status`-based not-loaded
+detection above doesn't fire for vLLM; the probe confirms the model
+name matches but can't tell warmed from cold. For deployments where
 cold-load takes seconds to minutes, layer your own warm-up call
 after `ready()`:
 
