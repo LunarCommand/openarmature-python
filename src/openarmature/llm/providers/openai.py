@@ -626,7 +626,12 @@ def _validate_and_normalize_base_url(base_url: str) -> str:
     are left intact.
     """
     normalized = base_url.rstrip("/")
-    path = urlparse(normalized).path
+    # ``rstrip`` on the full URL is a no-op when a query string or
+    # fragment follows the path (e.g., ``https://host/v1/?token=...``
+    # ends in ``c`` so the URL-level rstrip leaves the parsed path's
+    # trailing slash intact). Strip the parsed path itself so the
+    # suffix check catches those shapes too.
+    path = urlparse(normalized).path.rstrip("/")
     if path == "/v1" or path.endswith("/v1"):
         raise ValueError(
             f"OpenAIProvider base_url must not end with '/v1' — the provider "

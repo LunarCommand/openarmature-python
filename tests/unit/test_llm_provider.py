@@ -262,6 +262,21 @@ def test_openai_provider_accepts_v1_in_middle_of_path() -> None:
     assert provider.base_url == "https://gateway.example.com/v1/openai-proxy"
 
 
+def test_openai_provider_rejects_v1_with_query_string() -> None:
+    # The trailing slash on the path is followed by a query string,
+    # so a URL-level rstrip("/") doesn't normalize it. The parsed
+    # path's own trailing slash MUST be stripped before the suffix
+    # check or this case slips through.
+    with pytest.raises(ValueError, match=r"base_url must not end with '/v1'"):
+        OpenAIProvider(base_url="https://host/v1/?token=abc", model="m", api_key="k")
+
+
+def test_openai_provider_rejects_v1_with_fragment() -> None:
+    # Same shape as the query-string case but with a URL fragment.
+    with pytest.raises(ValueError, match=r"base_url must not end with '/v1'"):
+        OpenAIProvider(base_url="https://host/v1/#frag", model="m", api_key="k")
+
+
 # ---------------------------------------------------------------------------
 # Error categories — canonical string contract + __cause__ preservation
 # ---------------------------------------------------------------------------
