@@ -136,6 +136,7 @@ nav:
     - Langfuse observability: examples/10-langfuse-observability.md
   - Model Providers:
     - model-providers/index.md
+    - Self-hosted vLLM: model-providers/vllm.md
     - Authoring a Provider: model-providers/authoring.md
   - Reference:
     - reference/index.md

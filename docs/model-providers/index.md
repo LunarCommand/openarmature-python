@@ -205,6 +205,10 @@ nodes call it inside their bodies.
 
 ## Where to next
 
+- **[Self-hosted vLLM](vllm.md)**: configure `OpenAIProvider` to
+  talk to a self-hosted vLLM server. Covers the base-URL contract,
+  the legacy-server fallback flag, the `gen_ai.system` override,
+  and readiness-probe limitations.
 - **[Authoring a Provider](authoring.md)**: how to implement the
   Protocol for a non-default wire format. Includes a ~60-line
   skeleton + contract checklist.
