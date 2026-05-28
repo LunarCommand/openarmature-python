@@ -328,8 +328,18 @@ class LangfuseObserver:
         inv_state.detached_traces.pop(event.namespace, None)
 
     def _open_trace(self, invocation_id: str, correlation_id: str | None, event: NodeEvent) -> None:
+        # ``entry_node`` and the trace name MUST identify the outer-graph
+        # entry, not whichever node fired first. Subgraph wrappers do not
+        # emit their own events — when the outer entry is a SubgraphNode
+        # the first event the observer sees comes from inside the
+        # subgraph (with ``event.namespace = (wrapper, inner)`` and
+        # ``event.node_name = inner``). Using ``event.namespace[0]``
+        # walks back to the outermost prefix component, which IS the
+        # outer entry by construction (the graph engine fires inner
+        # events under the wrapper's namespace).
+        entry_node = event.namespace[0] if event.namespace else event.node_name
         metadata: dict[str, Any] = {
-            "entry_node": event.node_name,
+            "entry_node": entry_node,
             "spec_version": self.spec_version,
         }
         if correlation_id is not None:
@@ -338,7 +348,7 @@ class LangfuseObserver:
         # precedence; entry-node name is the spec-recommended fallback.
         # The caller-supplied path lands in proposal 0034 (PR 4) — for
         # now only the fallback is wired.
-        trace_name = event.node_name
+        trace_name = entry_node
         self.client.trace(id=invocation_id, name=trace_name, metadata=metadata)
         self._inv_states[invocation_id] = _InvState(trace_id=invocation_id)
 
@@ -559,8 +569,13 @@ class LangfuseObserver:
         # metadata immediately — the array-form preserves §8.5's
         # "string array, one entry per detached child" shape so
         # later detached siblings under the same parent can append.
+        #
+        # Note: `subgraph_name` is intentionally NOT on this link
+        # observation. Per §5.3 + §8.5, in detached mode the wrapper
+        # role migrates to the detached trace's dispatch observation;
+        # the main trace's link observation IS the SubgraphNode span
+        # (no wrapper role) and so does not carry `subgraph_name`.
         link_metadata: dict[str, Any] = {
-            "subgraph_name": prefix[-1],
             "detached_child_trace_ids": [detached_trace_id],
         }
         if correlation_id is not None:
