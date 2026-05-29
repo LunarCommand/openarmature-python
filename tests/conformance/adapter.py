@@ -38,7 +38,7 @@ from openarmature.graph import (
     merge,
     merge_all,
 )
-from openarmature.graph.events import NodeEvent
+from openarmature.graph.events import MetadataAugmentationEvent, NodeEvent
 from openarmature.graph.observer import Observer
 
 if TYPE_CHECKING:
@@ -855,7 +855,9 @@ def make_observer_fn(
     the event unrecorded and the counter shows it as undelivered.
     """
 
-    async def observer(event: NodeEvent) -> None:
+    async def observer(event: NodeEvent | MetadataAugmentationEvent) -> None:
+        if isinstance(event, MetadataAugmentationEvent):
+            return
         sleep_ms = _resolve_sleep_ms(fixture)
         if sleep_ms > 0:
             await asyncio.sleep(sleep_ms / 1000.0)

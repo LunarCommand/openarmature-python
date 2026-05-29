@@ -92,17 +92,22 @@ _DEFERRED_FIXTURES: dict[str, str] = {
     "observability/028-caller-metadata-namespace-rejection": (
         "Rejection invariants live in the dedicated _run_fixture_028 runner"
     ),
-    # Proposal 0034 fan-out / parallel-branches caller-metadata
-    # fixtures need the harness primitive
-    # ``augment_metadata_from_field`` (per-instance / per-branch
-    # ``set_invocation_metadata`` calls). The 026/027/028 fixtures
-    # (cross-cutting + boundary rejection) shipped with PR 4; the
-    # augmentation primitive lands in a follow-up.
+    # Proposal 0034 / 0040 fan-out / parallel-branches caller-metadata
+    # fixtures. The augmentation MECHANISM is implemented in v0.11.0
+    # (#22) and covered end-to-end by unit tests
+    # (test_observability_otel.py + test_observability_langfuse.py).
+    # The CONFORMANCE FIXTURES stay deferred for harness-shape gaps:
+    # - 029 omits ``collect_field`` / ``target_field`` on the fan-out
+    #   cfg AND a ``state:`` block on the inner subgraph (both
+    #   required by the cross-cap adapter).
+    # - 030 expects per-branch dispatch spans in the Langfuse tree;
+    #   the spec direction for that span layer is pending in coord
+    #   thread ``discuss-otel-parallel-branches-dispatch-span``.
     "observability/029-caller-metadata-fan-out-per-instance": (
-        "Per-instance augmentation harness primitive lands in a follow-up"
+        "Fixture-shape gaps (no collect_field/target_field/state); mechanism covered by unit tests"
     ),
     "observability/030-caller-metadata-parallel-branches-per-branch": (
-        "Per-branch augmentation harness primitive lands in a follow-up"
+        "Per-branch dispatch span shape pending spec; mechanism covered by unit tests"
     ),
     # proposal 0033 added typed directive shapes (`secondary_manager`,
     # `label_resolver`, `cases`) the canonical parser doesn't model.
@@ -153,8 +158,13 @@ _DEFERRED_FIXTURES: dict[str, str] = {
     ),
     # Proposal 0040 (open-span metadata update) — task #22 implements
     # the §6 augmentation-event mechanism + un-defers 029/030 + 034.
+    # Fixture 034 lands in the Langfuse-specific harness directly
+    # via the augment_metadata directive (see
+    # ``tests/conformance/test_observability_langfuse.py``); the
+    # cross-capability parser still doesn't model langfuse_trace, so
+    # defer the parser-side activation per the 022-024 pattern.
     "observability/034-caller-metadata-open-span-update-serial": (
-        "Open-span augmentation-event mechanism lands with #22 (0040 not-yet)"
+        "Langfuse shape models live in the dedicated test_observability_langfuse harness"
     ),
     # Proposal 0039 (caller-supplied invocation_id) Langfuse trace.id
     # derivation fixtures use the langfuse_trace expected shape the

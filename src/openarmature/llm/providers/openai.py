@@ -55,6 +55,7 @@ from pydantic import BaseModel, ValidationError
 from openarmature.graph.events import NodeEvent
 from openarmature.observability.correlation import (
     current_attempt_index,
+    current_branch_name,
     current_dispatch,
     current_fan_out_index,
     current_namespace_prefix,
@@ -1256,6 +1257,7 @@ def _make_llm_event(
         calling_namespace_prefix=current_namespace_prefix(),
         calling_attempt_index=current_attempt_index(),
         calling_fan_out_index=current_fan_out_index(),
+        calling_branch_name=current_branch_name(),
         active_prompt=active_prompt,
         active_prompt_group=active_prompt_group,
         input_messages=input_messages,

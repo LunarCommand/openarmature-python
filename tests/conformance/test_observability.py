@@ -884,25 +884,6 @@ async def _run_fixture_028(spec: Mapping[str, Any]) -> None:
     cases = cast("list[dict[str, Any]]", spec["cases"])
     for case in cases:
         case_name = cast("str", case["name"])
-        # Cases using the `augment_metadata` directive exercise §3.4
-        # mid-invocation rejection at set_invocation_metadata. The
-        # augment_metadata harness primitive (per fixture 034) lands
-        # with proposal 0040 / task #22; surface the deferral via
-        # warnings.warn so pytest's end-of-run summary lists it (rather
-        # than silently passing) and continue to the other cases.
-        nodes_check = cast("dict[str, Any]", case.get("nodes", {}))
-        if any(
-            isinstance(n, dict) and "augment_metadata" in cast("dict[str, Any]", n)
-            for n in nodes_check.values()
-        ):
-            import warnings  # noqa: PLC0415
-
-            warnings.warn(
-                f"028 case {case_name!r} deferred: augment_metadata harness primitive "
-                f"lands with proposal 0040 / #22",
-                stacklevel=2,
-            )
-            continue
         try:
             # Build a minimal graph from the case's nodes/edges. The
             # fixture's node is a noop update — we never expect it to
@@ -916,14 +897,29 @@ async def _run_fixture_028(spec: Mapping[str, Any]) -> None:
             for node_name, node_spec in nodes_spec.items():
                 node_dict = cast("dict[str, Any]", node_spec)
                 update_block = cast("dict[str, Any]", node_dict["update"])
+                augment_block = cast("dict[str, Any] | None", node_dict.get("augment_metadata"))
 
-                def _make_body(payload: dict[str, Any]) -> Any:
+                def _make_body(
+                    payload: dict[str, Any],
+                    augment: dict[str, Any] | None,
+                ) -> Any:
+                    # Per spec §3.4 + proposal 0040: the augment_metadata
+                    # primitive injects a ``set_invocation_metadata(**augment)``
+                    # call at the top of the node body. Used by 028's
+                    # mid-invocation-rejection case (reserved name `step`)
+                    # and by 034 for the open-span update demonstration.
+                    from openarmature.observability.metadata import (  # noqa: PLC0415
+                        set_invocation_metadata,
+                    )
+
                     async def _body(_s: Any) -> dict[str, Any]:
+                        if augment is not None:
+                            set_invocation_metadata(**augment)
                         return dict(payload)
 
                     return _body
 
-                builder.add_node(node_name, _make_body(update_block))
+                builder.add_node(node_name, _make_body(update_block, augment_block))
             for edge in cast("list[dict[str, str]]", case["edges"]):
                 target_raw = edge["to"]
                 target = END if target_raw == "END" else target_raw
@@ -939,20 +935,46 @@ async def _run_fixture_028(spec: Mapping[str, Any]) -> None:
             graph.attach_observer(langfuse_observer)
 
             caller_metadata = cast("dict[str, Any]", case["caller_metadata"])
+            expected = cast("dict[str, Any]", case["expected"])
+            expects_boundary_rejection = expected.get("invoke_rejects_at_api_boundary", False)
+            expects_call_site_rejection = expected.get("augment_rejects_at_call_site", False)
             try:
-                # Covers both rejection paths: the prefix-namespace
-                # rejection (openarmature.* / gen_ai.*, from 0034) and
-                # the exact-key-name rejection (0041's §8.4 reserved
-                # set). Both error messages contain "reserved".
-                with pytest.raises(ValueError, match="reserved"):
-                    await graph.invoke(state_cls(), metadata=caller_metadata)
+                if expects_boundary_rejection:
+                    # Boundary-rejection path: invoke()'s caller_metadata
+                    # validator rejects before any work begins. Covers
+                    # both the prefix-namespace rejection (openarmature.*
+                    # / gen_ai.*, from 0034) and the exact-key-name
+                    # rejection (0041's §8.4 reserved set). Both error
+                    # messages contain "reserved".
+                    with pytest.raises(ValueError, match="reserved"):
+                        await graph.invoke(state_cls(), metadata=caller_metadata)
+                elif expects_call_site_rejection:
+                    # Mid-invocation rejection path: caller_metadata
+                    # passes the boundary; the node body's
+                    # ``set_invocation_metadata(**augment)`` raises a
+                    # ValueError at the call site. The engine wraps the
+                    # node-body raise in NodeException whose
+                    # ``__cause__`` is the ValueError. The §3.4 contract
+                    # is that the helper raises at the call site — the
+                    # reserved key MUST NOT reach any emission, hence
+                    # no spans / no Langfuse observations afterward.
+                    from openarmature.graph import NodeException  # noqa: PLC0415
+
+                    with pytest.raises(NodeException) as exc_info:
+                        await graph.invoke(state_cls(), metadata=caller_metadata)
+                    cause = exc_info.value.__cause__
+                    assert isinstance(cause, ValueError), (
+                        f"expected NodeException.__cause__ to be ValueError; got {type(cause).__name__}"
+                    )
+                    assert "reserved" in str(cause), f"expected 'reserved' in cause message; got {cause!s}"
+                else:
+                    raise AssertionError(
+                        "case has neither invoke_rejects_at_api_boundary nor augment_rejects_at_call_site set"
+                    )
+                await graph.drain()
             finally:
                 otel_observer.shutdown()
 
-            expected = cast("dict[str, Any]", case["expected"])
-            if expected.get("invoke_rejects_at_api_boundary"):
-                # Already verified above via pytest.raises.
-                pass
             if expected.get("no_spans_emitted"):
                 spans = exporter.get_finished_spans()
                 assert len(spans) == 0, f"expected zero spans, got {[s.name for s in spans]}"
@@ -1140,6 +1162,20 @@ async def _run_fixture_005_case(case: Mapping[str, Any]) -> None:
         global_exporter = InMemorySpanExporter()
         global_provider = TracerProvider()
         global_provider.add_span_processor(SimpleSpanProcessor(global_exporter))
+        # OTel SDK 1.x's ``set_tracer_provider`` is guarded by a
+        # ``_TRACER_PROVIDER_SET_ONCE`` primitive — once a non-default
+        # provider is set, subsequent calls are silent no-ops (with a
+        # WARNING log "Overriding of current TracerProvider is not
+        # allowed"). If a prior test in the suite-run order left a
+        # non-default provider behind, the call below would no-op and
+        # this case's ``global_exporter`` would receive 0 spans. Reset
+        # both the value AND the Once explicitly so this case's set
+        # always wins. The finally block below restores ``prior_global``
+        # via the same direct reset so the next test starts clean.
+        once = otel_trace._TRACER_PROVIDER_SET_ONCE  # type: ignore[attr-defined]
+        with once._lock:  # pyright: ignore[reportPrivateUsage]
+            otel_trace._TRACER_PROVIDER = None  # type: ignore[attr-defined]
+            once._done = False  # pyright: ignore[reportPrivateUsage]
         otel_trace.set_tracer_provider(global_provider)
 
     try:

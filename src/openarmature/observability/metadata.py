@@ -119,22 +119,27 @@ def set_invocation_metadata(**entries: AttributeValue) -> None:
     overwritten; other keys are preserved.
 
     Per spec §3.4: affects spans / observations emitted AFTER the
-    call returns; spans already closed are NOT retroactively updated.
-    Implementations MAY update open root-level surfaces (e.g., the
-    Langfuse Trace's metadata) where the backend SDK supports it;
-    Langfuse's ``trace.update`` is the canonical example. The
-    framework's helper here just maintains the ContextVar; per-
-    backend update propagation is the observer's concern.
+    call returns. Open observations whose lineage covers the calling
+    context ARE updated in place per proposal 0040 — implementations
+    enqueue a :class:`~openarmature.graph.events.MetadataAugmentationEvent`
+    on the engine's serial observer-delivery queue carrying the
+    delta + the calling context's lineage tuple (namespace,
+    attempt_index, fan_out_index, branch_name); observers correlate
+    the lineage with their open observations and apply
+    ``observation.update(metadata=...)`` / ``span.set_attribute(...)``
+    in place. Spans already CLOSED at call time are NOT retroactively
+    updated.
 
     Raises :class:`ValueError` if any key violates the reserved-
     namespace rule or any value is not OTel-attribute-compatible.
 
     Outside any active invocation, this still updates the
     ContextVar (a fresh per-context override), but the value will
-    not be observed by any backend since no observer is in scope.
-    The empty-invocation case is supported for symmetry; users
-    typically call this from inside a node body, middleware, or
-    observer where an invocation is already in flight.
+    not be observed by any backend since no observer is in scope:
+    :func:`current_dispatch` returns ``None`` and no augmentation
+    event is emitted. The empty-invocation case is supported for
+    symmetry; users typically call this from inside a node body,
+    middleware, or observer where an invocation is already in flight.
     """
     if not entries:
         return
@@ -144,6 +149,37 @@ def set_invocation_metadata(**entries: AttributeValue) -> None:
     merged: dict[str, AttributeValue] = dict(_invocation_metadata_var.get())
     merged.update(entries)
     _invocation_metadata_var.set(MappingProxyType(merged))
+    # Proposal 0040: emit a MetadataAugmentationEvent so observers can
+    # update their open observations in place. Local imports break the
+    # observability -> graph -> observability cycle (events.py imports
+    # AttributeValue from this module; observer.py imports NodeEvent;
+    # correlation.py forward-declares both under TYPE_CHECKING).
+    # ``current_dispatch`` is ``None`` outside an invocation (boundary
+    # ``invoke()`` hasn't installed a dispatch closure yet) — we still
+    # mutated the ContextVar above so a node body called later in the
+    # same async context sees the entries; we just don't enqueue a
+    # delivery event for observers that don't exist.
+    from openarmature.graph.events import MetadataAugmentationEvent
+
+    from .correlation import (
+        current_attempt_index,
+        current_branch_name,
+        current_dispatch,
+        current_fan_out_index,
+        current_namespace_prefix,
+    )
+
+    dispatch = current_dispatch()
+    if dispatch is None:
+        return
+    event = MetadataAugmentationEvent(
+        entries=MappingProxyType(dict(entries)),
+        namespace=current_namespace_prefix(),
+        attempt_index=current_attempt_index(),
+        fan_out_index=current_fan_out_index(),
+        branch_name=current_branch_name(),
+    )
+    dispatch(event)
 
 
 def validate_invocation_metadata(mapping: object) -> MappingProxyType[str, AttributeValue]:

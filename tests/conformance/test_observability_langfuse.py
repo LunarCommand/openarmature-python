@@ -68,8 +68,149 @@ _LANGFUSE_FIXTURES = frozenset(
         "031-langfuse-subgraph-span-hierarchy",
         "032-langfuse-fan-out-per-instance-spans",
         "033-langfuse-detached-trace-mode",
+        # 034 — proposal 0040 outermost-serial open-span update.
+        # Single-node graph; the ``augment_metadata`` directive on
+        # the node body injects a ``set_invocation_metadata`` call
+        # before the LLM call, exercising the §3.4 MUST that open
+        # spans in the augmenting context's lineage update in place.
+        "034-caller-metadata-open-span-update-serial",
+        # 029 + 030 stay deferred in v0.11.0:
+        # - 029 (fan-out per-instance): fixture omits ``collect_field``
+        #   and ``target_field`` on the fan_out cfg, plus the inner
+        #   subgraph omits a ``state:`` block — both are required by
+        #   the cross-cap adapter. The augmentation behavior IS
+        #   verified end-to-end by the unit test
+        #   ``test_observability_langfuse.py::test_metadata_augmentation_in_fan_out_isolates_per_instance``
+        #   plus the OTel counterpart.
+        # - 030 (parallel-branches per-branch): the expected trace
+        #   requires a per-branch dispatch span the Langfuse mapping
+        #   doesn't synthesize today; the spec direction is in
+        #   ``discuss-otel-parallel-branches-dispatch-span``.
+        #   Sibling-skip behavior IS verified by the OTel unit test
+        #   ``test_metadata_augmentation_in_parallel_branches_skips_sibling``.
+        # Both fixtures land once spec settles the dispatch-span
+        # shape AND the adapter learns to infer fan-out aggregation
+        # defaults from inner subgraphs.
     }
 )
+
+
+def _normalize_fan_out_subgraph_keys(spec: dict[str, Any]) -> None:
+    """In-place rename of fan-out config keys that fixture 029 uses
+    but the cross-capability adapter doesn't:
+
+    - ``inner_subgraph`` → ``subgraph`` (within each ``fan_out`` block)
+    - top-level ``inner_subgraphs`` → ``subgraphs``
+
+    The directive intent is identical; only the key naming differs
+    across the spec fixture style and the cross-cap adapter's
+    parser. Keep the original keys intact in the source spec; this
+    function mutates a deepcopy in the harness wrapper.
+    """
+    if "inner_subgraphs" in spec and "subgraphs" not in spec:
+        spec["subgraphs"] = spec.pop("inner_subgraphs")
+    for node_spec in cast("dict[str, Any]", spec.get("nodes") or {}).values():
+        if not isinstance(node_spec, dict):
+            continue
+        node_dict = cast("dict[str, Any]", node_spec)
+        fan_out_cfg = cast("dict[str, Any] | None", node_dict.get("fan_out"))
+        if fan_out_cfg is None:
+            continue
+        if "inner_subgraph" in fan_out_cfg and "subgraph" not in fan_out_cfg:
+            fan_out_cfg["subgraph"] = fan_out_cfg.pop("inner_subgraph")
+
+
+def _build_augment_middlewares(
+    case: Mapping[str, Any],
+) -> tuple[
+    dict[str, list[Any]],  # fan_out_instance_middleware: node_name -> [Middleware]
+    dict[str, dict[str, list[Any]]],  # parallel_branches_branch_middleware: node -> branch -> [Middleware]
+]:
+    """Detect proposal-0040 augment directives in the case spec and
+    synthesize the middlewares that drive them via the adapter's
+    ``fan_out_instance_middleware`` / ``parallel_branches_branch_middleware``
+    hooks.
+
+    - Fan-out ``augment_metadata_from_field: {key: field_path}`` →
+      one instance middleware that reads ``current_fan_out_index()``,
+      indexes into the parent's ``items_field`` list captured at
+      fixture-build time, and calls ``set_invocation_metadata(**entries)``
+      where entries are pulled from the per-instance item via field_path.
+    - Parallel-branches ``branches.<name>.augment_metadata: {key: value}``
+      → per-branch middleware that calls
+      ``set_invocation_metadata(**entries)`` once at branch entry.
+    """
+    fan_out_mw: dict[str, list[Any]] = {}
+    branch_mw: dict[str, dict[str, list[Any]]] = {}
+    initial_state = cast("dict[str, Any]", case.get("initial_state") or {})
+
+    for node_name, node_spec_any in cast("dict[str, Any]", case.get("nodes") or {}).items():
+        if not isinstance(node_spec_any, dict):
+            continue
+        node_spec = cast("dict[str, Any]", node_spec_any)
+        fan_out_cfg = cast("dict[str, Any] | None", node_spec.get("fan_out"))
+        if fan_out_cfg is not None:
+            augment_field_map = cast("dict[str, str] | None", fan_out_cfg.get("augment_metadata_from_field"))
+            if augment_field_map:
+                items_field = cast("str | None", fan_out_cfg.get("items_field"))
+                items_list = (
+                    cast("list[dict[str, Any]]", initial_state.get(items_field, [])) if items_field else []
+                )
+                fan_out_mw[node_name] = [_make_augment_instance_middleware(augment_field_map, items_list)]
+        pb_cfg = cast("dict[str, Any] | None", node_spec.get("parallel_branches"))
+        if pb_cfg is not None:
+            branches_cfg = cast("dict[str, dict[str, Any]]", pb_cfg.get("branches") or {})
+            per_branch: dict[str, list[Any]] = {}
+            for branch_name, branch_cfg in branches_cfg.items():
+                augment_entries = cast("dict[str, Any] | None", branch_cfg.get("augment_metadata"))
+                if augment_entries:
+                    per_branch[branch_name] = [_make_augment_branch_middleware(augment_entries)]
+            if per_branch:
+                branch_mw[node_name] = per_branch
+    return fan_out_mw, branch_mw
+
+
+def _make_augment_instance_middleware(field_map: dict[str, str], items: list[dict[str, Any]]) -> Any:
+    """Per-instance fan-out middleware that calls
+    ``set_invocation_metadata`` with per-item entries pulled from
+    ``items[current_fan_out_index()][field_path]``. Captures ``items``
+    at fixture-build time so each instance reads the same list."""
+
+    class _AugmentInstanceMW:
+        async def __call__(self, state: Any, next_: Any, /) -> Any:
+            from openarmature.observability.correlation import (  # noqa: PLC0415
+                current_fan_out_index,
+            )
+            from openarmature.observability.metadata import (  # noqa: PLC0415
+                set_invocation_metadata,
+            )
+
+            idx = current_fan_out_index()
+            if idx is not None and 0 <= idx < len(items):
+                item = items[idx]
+                entries = {key: item[field_path] for key, field_path in field_map.items()}
+                set_invocation_metadata(**entries)
+            return await next_(state)
+
+    return _AugmentInstanceMW()
+
+
+def _make_augment_branch_middleware(entries: dict[str, Any]) -> Any:
+    """Per-branch middleware that calls ``set_invocation_metadata``
+    once at branch entry. Captures ``entries`` at fixture-build
+    time so the call inside the middleware doesn't need to read
+    the case spec at runtime."""
+
+    class _AugmentBranchMW:
+        async def __call__(self, state: Any, next_: Any, /) -> Any:
+            from openarmature.observability.metadata import (  # noqa: PLC0415
+                set_invocation_metadata,
+            )
+
+            set_invocation_metadata(**entries)
+            return await next_(state)
+
+    return _AugmentBranchMW()
 
 
 def _fixture_paths() -> list[Path]:
@@ -154,7 +295,18 @@ class _MockPromptBackend:
 async def test_langfuse_fixture(fixture_path: Path) -> None:
     spec = _load(fixture_path)
     if "cases" in spec:
+        # Fold fixture-level ``subgraphs`` / ``inner_subgraphs`` into
+        # each case so the per-case runner sees them locally. Fixture
+        # 030 declares its branch subgraphs at fixture-level (alongside
+        # ``cases:``); without this fold the per-case build can't
+        # resolve ``branches.fraud_check.subgraph: fraud_check``.
+        fixture_subgraphs = cast("dict[str, Any] | None", spec.get("subgraphs"))
+        fixture_inner_subgraphs = cast("dict[str, Any] | None", spec.get("inner_subgraphs"))
         for case in cast("list[dict[str, Any]]", spec["cases"]):
+            if fixture_subgraphs is not None and "subgraphs" not in case:
+                case["subgraphs"] = fixture_subgraphs
+            if fixture_inner_subgraphs is not None and "inner_subgraphs" not in case:
+                case["inner_subgraphs"] = fixture_inner_subgraphs
             try:
                 await _run_case(case)
             except AssertionError as e:
@@ -207,10 +359,25 @@ def _patch_unsupported_directives(spec: Mapping[str, Any]) -> None:
         patch_nodes(cast("Mapping[str, Any]", sub))
 
 
-def _compile_subgraphs(spec: Mapping[str, Any]) -> dict[str, Any]:
+def _compile_subgraphs(
+    spec: Mapping[str, Any],
+    *,
+    provider: OpenAIProvider | None = None,
+    prompt_manager: PromptManager | None = None,
+    render_variables: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """Build any subgraphs declared by the fixture and return a
     name→compiled-graph registry the adapter consumes. Mirrors the
-    OTel-side helper in ``test_observability.py``."""
+    OTel-side helper in ``test_observability.py``.
+
+    When ``provider`` is supplied, inner subgraph nodes carrying the
+    ``calls_llm:`` / ``renders_prompt:`` directives (fixtures 029 /
+    030) are built via the langfuse-specific
+    :func:`_build_node_body` rather than the cross-cap adapter — the
+    adapter doesn't model LLM directives. Outer subgraphs without
+    LLM directives still resolve through ``build_graph`` so the
+    existing 031/032/033 wiring is unchanged.
+    """
     subgraph_specs: dict[str, Any] = {}
     if "subgraph" in spec:
         single = cast("Mapping[str, Any]", spec["subgraph"])
@@ -221,9 +388,95 @@ def _compile_subgraphs(spec: Mapping[str, Any]) -> dict[str, Any]:
             subgraph_specs[k] = v
     compiled_subgraphs: dict[str, Any] = {}
     for name, sub_spec in subgraph_specs.items():
-        sub_built = build_graph(sub_spec, trace=[])
-        compiled_subgraphs[name] = sub_built.builder.compile()
+        if provider is not None and _has_llm_nodes(sub_spec):
+            compiled_subgraphs[name] = _build_inner_subgraph_with_llm(
+                sub_spec,
+                provider=provider,
+                prompt_manager=prompt_manager,
+                render_variables=render_variables or {},
+            )
+        else:
+            sub_built = build_graph(sub_spec, trace=[])
+            compiled_subgraphs[name] = sub_built.builder.compile()
     return compiled_subgraphs
+
+
+def _has_llm_nodes(spec: Mapping[str, Any]) -> bool:
+    """True iff any node in the subgraph spec declares an LLM
+    directive (``calls_llm`` / ``renders_prompt``) — those need the
+    langfuse-specific node body builder rather than the cross-cap
+    adapter."""
+    nodes_spec = cast("dict[str, Any]", spec.get("nodes") or {})
+    for node_spec in nodes_spec.values():
+        if not isinstance(node_spec, dict):
+            continue
+        node_dict = cast("dict[str, Any]", node_spec)
+        if "calls_llm" in node_dict or "renders_prompt" in node_dict:
+            return True
+    return False
+
+
+def _infer_state_fields_from_nodes(nodes_spec: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """Build a minimal state-fields block from nodes' partial-update
+    targets so an inner subgraph without an explicit ``state:`` block
+    (fixture 029) still compiles. Walks ``stores_response_in``
+    directives on ``calls_llm`` blocks; defaults each inferred field
+    to ``string``."""
+    fields: dict[str, dict[str, Any]] = {}
+    for node_spec_any in nodes_spec.values():
+        if not isinstance(node_spec_any, dict):
+            continue
+        node_spec = cast("dict[str, Any]", node_spec_any)
+        calls_llm = cast("dict[str, Any] | None", node_spec.get("calls_llm"))
+        if calls_llm is None:
+            continue
+        stores_in = cast("str | None", calls_llm.get("stores_response_in"))
+        if stores_in is not None and stores_in not in fields:
+            fields[stores_in] = {"type": "string", "default": ""}
+    return fields
+
+
+def _build_inner_subgraph_with_llm(
+    spec: Mapping[str, Any],
+    *,
+    provider: OpenAIProvider,
+    prompt_manager: PromptManager | None,
+    render_variables: dict[str, Any],
+) -> Any:
+    """Compile an inner subgraph spec into a CompiledGraph using the
+    langfuse-specific node body builder so ``calls_llm`` / ``renders_prompt``
+    directives resolve correctly. Used by fixtures 029 / 030 whose
+    branch / per-instance subgraphs each make an LLM call."""
+    # Some inner-subgraph specs (fixture 029) omit a ``state:`` block.
+    # Synthesize one from ``stores_response_in`` directives so the
+    # partial update each node returns has a corresponding field on
+    # the state class. Default field type is ``string`` with empty
+    # default, matching the canonical fixture convention.
+    state_block = cast("dict[str, Any] | None", spec.get("state"))
+    if state_block is not None:
+        state_fields = cast("dict[str, dict[str, Any]]", state_block["fields"])
+    else:
+        state_fields = _infer_state_fields_from_nodes(cast("dict[str, Any]", spec.get("nodes") or {}))
+    state_cls = build_state_cls("InnerSubgraphState", state_fields)
+    nodes_spec = cast("dict[str, Any]", spec["nodes"])
+    entry = cast("str", spec["entry"])
+    edges = cast("list[dict[str, str]]", spec["edges"])
+    builder = GraphBuilder(state_cls)
+    for node_name, node_spec in nodes_spec.items():
+        node_body = _build_node_body(
+            node_name=node_name,
+            node_spec=cast("dict[str, Any]", node_spec),
+            provider=provider,
+            prompt_manager=prompt_manager,
+            render_variables=render_variables,
+        )
+        builder.add_node(node_name, node_body)
+    for edge in edges:
+        target_raw = edge["to"]
+        target = END if target_raw == "END" else target_raw
+        builder.add_edge(edge["from"], target)
+    builder.set_entry(entry)
+    return builder.compile()
 
 
 def _resolve_detached_wrapper_names(case: Mapping[str, Any]) -> frozenset[str]:
@@ -287,8 +540,32 @@ async def _run_case(case: Mapping[str, Any]) -> None:
         # no-op so the graph is runnable, mirroring the OTel harness's
         # ``_patch_unsupported_directives``.
         _patch_unsupported_directives(case)
-        subgraphs = _compile_subgraphs(case)
-        built = build_graph(case, subgraphs=subgraphs, trace=[])
+        # Per proposal 0040 fixture 029: rename ``inner_subgraph(s)`` →
+        # ``subgraph(s)`` so the cross-cap adapter resolves the
+        # references. Pure key normalization; semantics unchanged.
+        if isinstance(case, dict):
+            _normalize_fan_out_subgraph_keys(case)
+        # Per proposal 0040 fixtures 029 / 030: synthesize the
+        # augmentation middlewares that drive the per-instance /
+        # per-branch ``set_invocation_metadata`` calls. Both flow into
+        # ``build_graph`` via the adapter's standard middleware hooks;
+        # the augmentation event then fires through the engine and
+        # the LangfuseObserver handles it via
+        # ``_handle_metadata_augmentation``.
+        fan_out_instance_mw, branch_mw = _build_augment_middlewares(case)
+        subgraphs = _compile_subgraphs(
+            case,
+            provider=provider,
+            prompt_manager=prompt_manager,
+            render_variables=cast("dict[str, Any]", case.get("render_variables") or {}),
+        )
+        built = build_graph(
+            case,
+            subgraphs=subgraphs,
+            trace=[],
+            fan_out_instance_middleware=fan_out_instance_mw or None,
+            parallel_branches_branch_middleware=branch_mw or None,
+        )
         graph = built.builder.compile()
         initial_state_factory = lambda: built.initial_state(case.get("initial_state", {}))  # noqa: E731
     else:
@@ -394,10 +671,26 @@ def _build_node_body(
     #     named prompt, then call the LLM under `with_active_prompt`
     #     so the Generation's prompt-linkage metadata + entity link
     #     populate per §8.4.4 (024).
+    # Per proposal 0040 fixture 034 the ``augment_metadata`` directive
+    # MAY wrap any of the above shapes: at body entry, the harness
+    # calls ``set_invocation_metadata(**augment)``. Open spans
+    # outermost-serial (the invocation span / the calling node span)
+    # MUST then carry the augmented keys in place.
+    augment_spec = cast("dict[str, Any] | None", node_spec.get("augment_metadata"))
+
+    def _maybe_augment() -> None:
+        if augment_spec is not None:
+            from openarmature.observability.metadata import (  # noqa: PLC0415
+                set_invocation_metadata,
+            )
+
+            set_invocation_metadata(**augment_spec)
+
     update_spec = cast("dict[str, Any] | None", node_spec.get("update"))
     if update_spec is not None:
 
         async def _node(_s: Any) -> dict[str, Any]:
+            _maybe_augment()
             return dict(update_spec)
 
         return _node
@@ -407,6 +700,7 @@ def _build_node_body(
 
     async def _llm_node(_s: Any) -> dict[str, Any]:
         assert provider is not None, f"node {node_name!r} has calls_llm but no mock_llm responses"
+        _maybe_augment()
         messages_spec = cast(
             "list[dict[str, Any]] | None",
             (calls_llm_spec or {}).get("messages"),

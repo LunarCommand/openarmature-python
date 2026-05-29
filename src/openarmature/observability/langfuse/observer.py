@@ -26,8 +26,10 @@ import json
 import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, cast
+from typing import Any, cast
 
+from openarmature.graph.events import MetadataAugmentationEvent, NodeEvent
+from openarmature.observability.lineage import is_prefix_or_equal, is_strict_prefix
 from openarmature.observability.llm_event import LLM_NAMESPACE, LlmEventPayload
 
 from .client import (
@@ -36,10 +38,6 @@ from .client import (
     LangfuseSpanHandle,
     LangfuseUsage,
 )
-
-if TYPE_CHECKING:
-    from openarmature.graph.events import NodeEvent
-
 
 # §5.5.5 / §8.7 truncation: when the serialized payload exceeds the
 # configured cap, the marker below is appended and the unparseable
@@ -62,10 +60,14 @@ def _read_spec_version() -> str:
 
 
 # In-flight Span observation handle, keyed by the standard span-stack
-# key (namespace, attempt_index, fan_out_index). Mirrors the OTel
-# observer's _OpenSpan shape but holds a Langfuse handle instead of an
-# OTel Span.
-_StackKey = tuple[tuple[str, ...], int, int | None]
+# key (namespace, attempt_index, fan_out_index, branch_name).
+# ``branch_name`` discriminates concurrent same-named inner nodes
+# across sibling parallel-branches branches (pipeline-utilities §11);
+# without it the two inner ``ask`` nodes of two branches with the
+# same namespace + fan_out_index would collide on the same key.
+# Mirrors the OTel observer's ``_StackKey`` shape but holds a
+# Langfuse handle instead of an OTel Span.
+_StackKey = tuple[tuple[str, ...], int, int | None, str | None]
 
 
 @dataclass
@@ -250,7 +252,10 @@ class LangfuseObserver:
                 f"minimum of {_PAYLOAD_MIN_BYTES} bytes"
             )
 
-    async def __call__(self, event: NodeEvent) -> None:
+    async def __call__(self, event: NodeEvent | MetadataAugmentationEvent) -> None:
+        if isinstance(event, MetadataAugmentationEvent):
+            self._handle_metadata_augmentation(event)
+            return
         # LLM provider events use a sentinel namespace per §5.5; route
         # them to the dedicated Generation path.
         if event.namespace == LLM_NAMESPACE:
@@ -372,6 +377,89 @@ class LangfuseObserver:
         # detached_traces entry so a subsequent re-entry mints fresh.
         inv_state.detached_traces.pop(event.namespace, None)
 
+    # ------------------------------------------------------------------
+    # Metadata augmentation (proposal 0040 §3.4 + §6)
+    # ------------------------------------------------------------------
+
+    def _handle_metadata_augmentation(self, event: MetadataAugmentationEvent) -> None:
+        # Spec proposal 0040 §3.4 MUST: open observations whose lineage
+        # ancestor-or-equals the augmenting context get the entries
+        # applied in place via the Langfuse handle's
+        # ``update(metadata=...)`` method. Sibling instances / branches
+        # and ancestors above the containment are skipped (same scoping
+        # rule as the OTel mapping — see
+        # ``OTelObserver._handle_metadata_augmentation`` for the algebra).
+        #
+        # For an outermost-serial augmenter (FI=None, BN=None), the
+        # invocation's Trace itself is updated via
+        # ``client.update_trace`` so the augmented keys land on
+        # ``trace.metadata.<key>`` for §8.4-style top-level filtering.
+        # Inside a fan-out instance / parallel-branches branch the
+        # Trace is OUT of scope (it's shared with siblings); only the
+        # innermost containment + the augmenter's own subtree update.
+        #
+        # Per-instance / per-branch isolation:
+        # ``set_invocation_metadata`` runs in the calling node's task
+        # whose Context already carries the per-async-context COW
+        # mapping (proposal 0034 §3.4). The augmentation event's
+        # ``entries`` are that delta only — applying them to matching
+        # open observations preserves the per-async-context isolation
+        # 029 / 030 encode.
+        from openarmature.observability.correlation import current_invocation_id
+
+        invocation_id = current_invocation_id()
+        if invocation_id is None or not event.entries:
+            return
+        inv_state = self._inv_states.get(invocation_id)
+        aug_fi = event.fan_out_index
+        aug_bn = event.branch_name
+        aug_ns = event.namespace
+        metadata_delta = dict(event.entries)
+
+        # Trace.metadata: only for outermost-serial. The Trace is
+        # shared across siblings, so a fan-out instance's per-item
+        # productId would leak across siblings if it updated the
+        # Trace — 029's fixture explicitly rules that out.
+        if aug_fi is None and aug_bn is None:
+            self.client.update_trace(id=invocation_id, metadata=metadata_delta)
+
+        if inv_state is None:
+            return
+
+        # Subgraph wrapper observations on the ancestor path
+        # (outermost-serial only — inside a fan-out instance the
+        # subgraph wrapper above the fan-out node is sibling-shared).
+        if aug_fi is None and aug_bn is None:
+            for prefix, observation in inv_state.subgraph_observations.items():
+                if is_strict_prefix(prefix, aug_ns):
+                    observation.handle.update(metadata=metadata_delta)
+
+        # Fan-out instance dispatch observation(s) when the augmenter
+        # is inside a fan-out instance. Keys are anchor_ns +
+        # (str(fan_out_index),) per
+        # ``_open_fan_out_instance_dispatch_observation``.
+        if aug_fi is not None:
+            fi_str = str(aug_fi)
+            for key, observation in inv_state.fan_out_instance_observations.items():
+                if not key or key[-1] != fi_str:
+                    continue
+                anchor_ns = key[:-1]
+                if is_strict_prefix(anchor_ns, aug_ns) or anchor_ns == aug_ns:
+                    observation.handle.update(metadata=metadata_delta)
+
+        # Open node observations on the augmenter's call stack. Match
+        # on ``fan_out_index`` AND ``branch_name`` to skip sibling
+        # instances / branches; namespace must prefix (or equal) the
+        # augmenter's.
+        for key, observation in inv_state.open_observations.items():
+            ns, _ai, fi, bn = key
+            if fi != aug_fi:
+                continue
+            if bn != aug_bn:
+                continue
+            if is_prefix_or_equal(ns, aug_ns):
+                observation.handle.update(metadata=metadata_delta)
+
     def _open_trace(self, invocation_id: str, correlation_id: str | None, event: NodeEvent) -> None:
         # ``entry_node`` and the trace name MUST identify the outer-graph
         # entry, not whichever node fired first. Subgraph wrappers do not
@@ -399,7 +487,7 @@ class LangfuseObserver:
         self._inv_states[invocation_id] = _InvState(trace_id=invocation_id)
 
     def _key_for(self, event: NodeEvent) -> _StackKey:
-        return (event.namespace, event.attempt_index, event.fan_out_index)
+        return (event.namespace, event.attempt_index, event.fan_out_index, event.branch_name)
 
     def _resolve_parent_observation_id(self, inv_state: _InvState, event: NodeEvent) -> str | None:
         # Parent precedence (innermost wins):
@@ -990,6 +1078,7 @@ class LangfuseObserver:
             payload.calling_namespace_prefix,
             payload.calling_attempt_index,
             payload.calling_fan_out_index,
+            payload.calling_branch_name,
         )
         observation = inv_state.open_observations.get(key)
         if observation is not None:

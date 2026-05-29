@@ -77,7 +77,7 @@ from __future__ import annotations
 import json
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, cast
+from typing import Any, cast
 
 from opentelemetry import context as otel_context
 from opentelemetry import trace as otel_trace
@@ -96,16 +96,18 @@ from opentelemetry.trace import (
 )
 from opentelemetry.trace.propagation import set_span_in_context
 
+from openarmature.graph.events import MetadataAugmentationEvent, NodeEvent
+from openarmature.observability.lineage import is_prefix_or_equal, is_strict_prefix
 from openarmature.observability.llm_event import LLM_NAMESPACE, LlmEventPayload
 
-if TYPE_CHECKING:
-    from openarmature.graph.events import NodeEvent
-
-
-# Span-stack key shape: ``(namespace, attempt_index, fan_out_index)``
-# — these three fields uniquely identify any node attempt within an
-# invocation.
-_StackKey = tuple[tuple[str, ...], int, int | None]
+# Span-stack key shape:
+# ``(namespace, attempt_index, fan_out_index, branch_name)`` — these
+# four fields jointly identify any node attempt within an invocation.
+# ``branch_name`` discriminates concurrent same-named inner nodes
+# across sibling parallel-branches branches (pipeline-utilities §11);
+# without it the two inner ``ask`` nodes of two branches with the
+# same namespace + fan_out_index would collide on the same key.
+_StackKey = tuple[tuple[str, ...], int, int | None, str | None]
 
 
 # Re-export the LLM-event namespace sentinel under the same name the
@@ -448,10 +450,14 @@ class OTelObserver:
         return state
 
     # ------------------------------------------------------------------
-    # Observer protocol — async callable accepting a NodeEvent
+    # Observer protocol — async callable accepting node events + the
+    # proposal-0040 metadata-augmentation event variant.
     # ------------------------------------------------------------------
 
-    async def __call__(self, event: NodeEvent) -> None:
+    async def __call__(self, event: NodeEvent | MetadataAugmentationEvent) -> None:
+        if isinstance(event, MetadataAugmentationEvent):
+            self._handle_metadata_augmentation(event)
+            return
         # LLM provider events use a sentinel namespace so we can route
         # them to the dedicated §5.5 span path.
         if event.namespace == _LLM_NAMESPACE:
@@ -631,6 +637,94 @@ class OTelObserver:
         # If this was a detached root prefix, drop the root entry so a
         # subsequent re-entry mints a fresh trace.
         inv_state.detached_roots.pop(event.namespace, None)
+
+    # ------------------------------------------------------------------
+    # Metadata augmentation (proposal 0040 §3.4 + §6)
+    # ------------------------------------------------------------------
+
+    def _handle_metadata_augmentation(self, event: MetadataAugmentationEvent) -> None:
+        # Spec proposal 0040: spans whose lineage ancestor-or-equals the
+        # augmenting context (within the same fan-out instance /
+        # parallel-branch boundary) get ``openarmature.user.<key>``
+        # applied in place. Sibling instances / branches and ancestors
+        # ABOVE the boundary are skipped.
+        #
+        # Match rule (using the augmentation event's lineage tuple
+        # ``(NS, AI, FI, BN)``):
+        # - Invocation span: included iff ``FI is None and BN is None``
+        #   (outermost-serial context). The shared fan-out node span and
+        #   the invocation span are explicitly out of scope when
+        #   augmenting from inside a fan-out instance or branch.
+        # - Subgraph wrapper spans: included on the outermost-serial
+        #   path when their namespace is a strict prefix of NS.
+        # - Fan-out instance dispatch spans: included iff the dispatch
+        #   span's FI suffix matches ``str(FI)`` and the anchor namespace
+        #   is a strict prefix of NS.
+        # - Per-attempt node spans (``open_spans``): included iff the
+        #   span's FI equals the augmenter's FI and its namespace is a
+        #   prefix of (or equal to) NS.
+        from openarmature.observability.correlation import current_invocation_id
+
+        invocation_id = current_invocation_id()
+        if invocation_id is None:
+            return
+        if not event.entries:
+            return
+        targets = self._collect_augmentation_targets(invocation_id, event)
+        for span in targets:
+            for key, value in event.entries.items():
+                # OTel forbids None as an attribute value; the metadata
+                # validator at the engine boundary rejects None already,
+                # so we can pass through directly.
+                span.set_attribute(f"openarmature.user.{key}", value)
+
+    def _collect_augmentation_targets(
+        self, invocation_id: str, event: MetadataAugmentationEvent
+    ) -> list[Span]:
+        targets: list[Span] = []
+        aug_fi = event.fan_out_index
+        aug_bn = event.branch_name
+        aug_ns = event.namespace
+        inv_state = self._inv_states.get(invocation_id)
+        if aug_fi is None and aug_bn is None:
+            # Outermost-serial context: the invocation span is in scope.
+            inv_open = self._invocation_span.get(invocation_id)
+            if inv_open is not None:
+                targets.append(inv_open.span)
+            if inv_state is not None:
+                # Subgraph wrapper spans on the ancestor path.
+                for prefix, open_span in inv_state.subgraph_spans.items():
+                    if is_strict_prefix(prefix, aug_ns):
+                        targets.append(open_span.span)
+        if inv_state is None:
+            return targets
+        if aug_fi is not None:
+            # Fan-out instance dispatch span(s) on the ancestor path.
+            # Keys are anchor_ns + (str(fan_out_index),) per
+            # ``_open_fan_out_instance_dispatch_span``.
+            fi_str = str(aug_fi)
+            for key, open_span in inv_state.fan_out_instance_spans.items():
+                if not key or key[-1] != fi_str:
+                    continue
+                anchor_ns = key[:-1]
+                if is_strict_prefix(anchor_ns, aug_ns) or anchor_ns == aug_ns:
+                    targets.append(open_span.span)
+        # Open node spans on the augmenter's call stack. Match on
+        # ``fan_out_index`` AND ``branch_name`` to skip sibling
+        # instances / branches; namespace must prefix (or equal) the
+        # augmenter's. The BN discriminator is what keeps two
+        # concurrent same-named inner nodes across sibling
+        # parallel-branches branches from leaking augmentation to
+        # each other.
+        for key, open_span in inv_state.open_spans.items():
+            ns, _ai, fi, bn = key
+            if fi != aug_fi:
+                continue
+            if bn != aug_bn:
+                continue
+            if is_prefix_or_equal(ns, aug_ns):
+                targets.append(open_span.span)
+        return targets
 
     # ------------------------------------------------------------------
     # Special-event paths
@@ -902,6 +996,7 @@ class OTelObserver:
             payload.calling_namespace_prefix,
             payload.calling_attempt_index,
             payload.calling_fan_out_index,
+            payload.calling_branch_name,
         )
         calling = inv_state.open_spans.get(calling_key)
         if calling is not None:
@@ -954,7 +1049,7 @@ class OTelObserver:
         self._invocation_span[invocation_id] = _OpenSpan(span=span)
 
     def _key_for(self, event: NodeEvent) -> _StackKey:
-        return (event.namespace, event.attempt_index, event.fan_out_index)
+        return (event.namespace, event.attempt_index, event.fan_out_index, event.branch_name)
 
     def _resolve_parent_context(
         self,
@@ -1358,7 +1453,7 @@ class OTelObserver:
         closes within each attempt's lifecycle), so a scan finds it
         unambiguously."""
         for key, open_span in inv_state.open_spans.items():
-            ns, _attempt, fan_idx = key
+            ns, _attempt, fan_idx, _bn = key
             if ns == prefix and fan_idx is None:
                 return open_span
         return None

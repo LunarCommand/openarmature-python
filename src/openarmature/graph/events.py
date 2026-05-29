@@ -231,4 +231,46 @@ class NodeEvent:
     caller_invocation_metadata: Mapping[str, AttributeValue] = field(default_factory=lambda: _EMPTY_METADATA)
 
 
-__all__ = ["FanOutEventConfig", "NodeEvent"]
+# Spec: realizes observability §3.4 + graph-engine §6 augmentation
+# event mechanism (proposal 0040). Emitted by
+# ``set_invocation_metadata`` when called mid-invocation; carries the
+# delta + the augmenting context's lineage identity so observers can
+# resolve which of their open observations belong to the augmenting
+# context's subtree and apply the entries in place.
+@dataclass(frozen=True)
+class MetadataAugmentationEvent:
+    """A metadata-augmentation event delivered to observers.
+
+    Emitted by :func:`openarmature.observability.metadata.set_invocation_metadata`
+    when called mid-invocation. Carries:
+
+    - ``entries``: the delta merged into the per-async-context
+      invocation metadata mapping by the call. Read-only view.
+    - ``namespace`` / ``attempt_index`` / ``fan_out_index`` /
+      ``branch_name``: the four lineage fields that jointly identify
+      the augmenting execution context (the calling node's identity
+      tuple). When ``set_invocation_metadata`` is called from outside
+      a node body, ``namespace`` is the empty tuple, ``attempt_index``
+      is ``0``, and both ``fan_out_index`` and ``branch_name`` are
+      ``None`` — the invocation-level identity.
+
+    Distinct from :class:`NodeEvent` because there is no node phase,
+    no pre/post state, and no error: this event reports a side-channel
+    augmentation, not a node-attempt boundary. Per graph-engine §6 the
+    event is NOT subject to the observer ``phases`` filter (which only
+    governs ``NodeEvent`` phases); the delivery worker forwards it to
+    every subscribed observer. Observers that handle it iterate their
+    open observations whose lineage is an ancestor of (or equal to)
+    the augmenting context's lineage and apply the entries as
+    ``openarmature.user.<key>`` (OTel, §5.6) /
+    ``metadata.<key>`` (Langfuse, §8.4.1+§8.4.2).
+    """
+
+    entries: Mapping[str, AttributeValue]
+    namespace: tuple[str, ...]
+    attempt_index: int = 0
+    fan_out_index: int | None = None
+    branch_name: str | None = None
+
+
+__all__ = ["FanOutEventConfig", "MetadataAugmentationEvent", "NodeEvent"]

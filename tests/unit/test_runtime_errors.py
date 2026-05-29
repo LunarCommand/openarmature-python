@@ -163,11 +163,12 @@ async def test_routing_error_lands_on_preceding_node_completed_event() -> None:
     preceding node's `completed` event with `error` populated, NOT in a
     separate event pair. The downstream node never fires events."""
     from openarmature.graph import RoutingError
-    from openarmature.graph.events import NodeEvent
+    from openarmature.graph.events import MetadataAugmentationEvent, NodeEvent
 
     received: list[NodeEvent] = []
 
-    async def observer(event: NodeEvent) -> None:
+    async def observer(event: NodeEvent | MetadataAugmentationEvent) -> None:
+        assert isinstance(event, NodeEvent)
         received.append(event)
 
     async def node_a(_state: Any) -> dict[str, Any]:
@@ -217,11 +218,12 @@ async def test_edge_exception_lands_on_preceding_node_completed_event() -> None:
     conditional edge function raising lands on the preceding node's
     `completed` event with `error` populated, NOT in a separate event
     pair. The downstream node never fires events."""
-    from openarmature.graph.events import NodeEvent
+    from openarmature.graph.events import MetadataAugmentationEvent, NodeEvent
 
     received: list[NodeEvent] = []
 
-    async def observer(event: NodeEvent) -> None:
+    async def observer(event: NodeEvent | MetadataAugmentationEvent) -> None:
+        assert isinstance(event, NodeEvent)
         received.append(event)
 
     async def node_a(_state: Any) -> dict[str, Any]:
