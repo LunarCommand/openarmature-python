@@ -1,4 +1,4 @@
-# Bypass-if-output-exists
+# Bypass if output exists
 
 **Problem.** How do I skip a node whose external output already
 exists?

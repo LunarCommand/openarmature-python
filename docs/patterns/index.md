@@ -25,11 +25,11 @@ docs composing existing primitives.
 
 - [Parameterized entry point](parameterized-entry-point.md) —
   start the graph at an arbitrary node via state-driven routing.
-- [Tool-dispatch-as-node](tool-dispatch-as-node.md) — model an
+- [Tool dispatch as node](tool-dispatch-as-node.md) — model an
   agent tool-call loop as a graph cycle.
-- [Session-as-checkpoint-resume](session-as-checkpoint-resume.md) —
+- [Session as checkpoint resume](session-as-checkpoint-resume.md) —
   carry multi-turn agent state across turns using the existing
   checkpointer.
-- [Bypass-if-output-exists](bypass-if-output-exists.md) —
+- [Bypass if output exists](bypass-if-output-exists.md) —
   short-circuit a node whose external output already exists, via
   middleware.
