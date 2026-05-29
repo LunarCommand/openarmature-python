@@ -1,4 +1,4 @@
-# Session-as-checkpoint-resume
+# Session as checkpoint resume
 
 **Problem.** How do I keep multi-turn agent state across turns?
 

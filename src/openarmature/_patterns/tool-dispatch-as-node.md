@@ -1,4 +1,4 @@
-# Tool-dispatch-as-node
+# Tool dispatch as node
 
 **Problem.** How do I run an agent tool-call loop?
 

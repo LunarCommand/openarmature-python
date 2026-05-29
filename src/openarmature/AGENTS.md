@@ -402,7 +402,7 @@ treats fetch and render as separable.
 
 _Recipes that compose the primitives. Not framework contracts — these are how to do common things idiomatically._
 
-### Bypass-if-output-exists
+### Bypass if output exists
 
 **Problem.** How do I skip a node whose external output already
 exists?
@@ -614,7 +614,7 @@ fields the chosen branch needs) and the graph routes accordingly.
 - [Checkpointing](https://openarmature.ai/concepts/checkpointing/)
 - Spec: [graph-engine](https://openarmature.org/capabilities/graph-engine/)
 
-### Session-as-checkpoint-resume
+### Session as checkpoint resume
 
 **Problem.** How do I keep multi-turn agent state across turns?
 
@@ -729,7 +729,7 @@ state and the session table holds the join keys.
   single-resume baseline.
 - Spec: [pipeline-utilities](https://openarmature.org/capabilities/pipeline-utilities/)
 
-### Tool-dispatch-as-node
+### Tool dispatch as node
 
 **Problem.** How do I run an agent tool-call loop?
 
