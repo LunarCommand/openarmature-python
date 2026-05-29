@@ -17,6 +17,7 @@ import asyncio
 from datetime import UTC, datetime
 from typing import Any, Protocol
 
+import httpx
 from langfuse.api import NotFoundError, ServiceUnavailableError
 from langfuse.model import ChatPromptClient, TextPromptClient
 
@@ -115,7 +116,12 @@ class LangfusePromptBackend:
                 label=label,
                 backend="langfuse",
             ) from exc
-        except ServiceUnavailableError as exc:
+        except (ServiceUnavailableError, httpx.TransportError) as exc:
+            # 503 plus transport-level failures (connect/read/timeout/
+            # network): the SDK surfaces raw httpx errors when there's no
+            # HTTP response to map to a typed error. Per the PromptBackend
+            # contract these are unavailability, so the manager can fall
+            # back. 4xx auth and other errors still propagate.
             raise PromptStoreUnavailable(
                 f"Langfuse unavailable fetching ({name!r}, {label!r}): {exc}",
                 name=name,

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any, cast
 
+import httpx
 import pytest
 
 pytest.importorskip("langfuse")
@@ -123,6 +124,16 @@ async def test_not_found_maps_to_prompt_not_found() -> None:
 
 async def test_service_unavailable_maps_to_store_unavailable() -> None:
     backend = LangfusePromptBackend(_FakeClient(exc=ServiceUnavailableError()))
+
+    with pytest.raises(PromptStoreUnavailable):
+        await backend.fetch("greeting", "production")
+
+
+async def test_transport_error_maps_to_store_unavailable() -> None:
+    # A connect/read/timeout/network failure surfaces as a raw httpx
+    # TransportError (no HTTP response to map to a typed SDK error); it
+    # must become PromptStoreUnavailable so PromptManager can fall back.
+    backend = LangfusePromptBackend(_FakeClient(exc=httpx.ConnectTimeout("timed out")))
 
     with pytest.raises(PromptStoreUnavailable):
         await backend.fetch("greeting", "production")

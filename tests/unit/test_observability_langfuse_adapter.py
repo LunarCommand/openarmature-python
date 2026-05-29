@@ -11,7 +11,7 @@ small graph end-to-end against real Langfuse Cloud. Use::
 
     LANGFUSE_PUBLIC_KEY=pk-lf-... \\
     LANGFUSE_SECRET_KEY=sk-lf-... \\
-    LANGFUSE_HOST=https://cloud.langfuse.com \\
+    LANGFUSE_BASE_URL=https://cloud.langfuse.com \\
         uv run pytest tests/unit/test_observability_langfuse_adapter.py \\
         -m integration -v
 
@@ -160,11 +160,11 @@ async def test_adapter_against_real_langfuse_cloud() -> None:
     if not public_key or not secret_key:
         pytest.skip("LANGFUSE_PUBLIC_KEY / LANGFUSE_SECRET_KEY not set")
 
-    # LANGFUSE_HOST is the canonical name (matches the SDK's ``host=``
-    # kwarg); LANGFUSE_BASE_URL is the common alias some downstream
-    # configs use. Accept either; LANGFUSE_HOST wins when both set.
+    # Mirror the SDK's precedence: Langfuse() reads LANGFUSE_BASE_URL
+    # first, then LANGFUSE_HOST. Resolve the same order here so this
+    # explicit host matches what a no-arg Langfuse() would pick up.
     host = (
-        os.environ.get("LANGFUSE_HOST") or os.environ.get("LANGFUSE_BASE_URL") or "https://cloud.langfuse.com"
+        os.environ.get("LANGFUSE_BASE_URL") or os.environ.get("LANGFUSE_HOST") or "https://cloud.langfuse.com"
     )
     client = Langfuse(
         public_key=public_key,
@@ -175,7 +175,7 @@ async def test_adapter_against_real_langfuse_cloud() -> None:
     # background export thread is just a logged warning and the test
     # passes while traces vanish.
     assert client.auth_check(), (
-        "Langfuse auth_check failed — verify LANGFUSE_PUBLIC_KEY / LANGFUSE_SECRET_KEY / LANGFUSE_HOST"
+        "Langfuse auth_check failed — verify LANGFUSE_PUBLIC_KEY / LANGFUSE_SECRET_KEY / LANGFUSE_BASE_URL"
     )
 
     observer = LangfuseObserver(client=LangfuseSDKAdapter(client))
