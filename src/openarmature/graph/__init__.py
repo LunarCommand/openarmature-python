@@ -35,7 +35,7 @@ from .errors import (
     StateValidationError,
     UnreachableNode,
 )
-from .events import NodeEvent
+from .events import MetadataAugmentationEvent, NodeEvent
 from .fan_out import FanOutConfig, FanOutNode
 from .middleware import (
     Middleware,
@@ -78,6 +78,7 @@ __all__ = [
     "GraphBuilder",
     "GraphError",
     "MappingReferencesUndeclaredField",
+    "MetadataAugmentationEvent",
     "Middleware",
     "MultipleOutgoingEdges",
     "NextCall",

@@ -78,6 +78,7 @@ from openarmature.graph import (
     END,
     CompiledGraph,
     GraphBuilder,
+    MetadataAugmentationEvent,
     NodeEvent,
     State,
     append,
@@ -296,7 +297,7 @@ def build_graph(error_policy: str = "fail_fast") -> CompiledGraph[BatchState]:
     )
 
 
-async def fan_out_config_observer(event: NodeEvent) -> None:
+async def fan_out_config_observer(event: NodeEvent | MetadataAugmentationEvent) -> None:
     """Print the fan-out node's resolved config when its dispatch event
     fires.
 
@@ -308,6 +309,8 @@ async def fan_out_config_observer(event: NodeEvent) -> None:
     ``concurrency`` are callable resolvers whose value isn't visible
     in code.
     """
+    if not isinstance(event, NodeEvent):
+        return
     if event.fan_out_config is None:
         return
     if event.phase != "started":

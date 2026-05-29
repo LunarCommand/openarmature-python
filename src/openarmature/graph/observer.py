@@ -34,19 +34,20 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import Any, Literal, Protocol
 
-from .events import NodeEvent
+from .events import MetadataAugmentationEvent, NodeEvent
 from .state import State
 
 
 class Observer(Protocol):
-    """The shape of a callable that receives node-boundary events.
+    """The shape of a callable that receives observer events.
 
     `Observer` is a structural Protocol; any async callable matching the
     signature qualifies, no subclass required. Plain functions, bound
     methods, and class instances with `__call__` all work::
 
-        async def log_observer(event: NodeEvent) -> None:
-            print(event.node_name, event.phase)
+        async def log_observer(event: NodeEvent | MetadataAugmentationEvent) -> None:
+            if isinstance(event, NodeEvent):
+                print(event.node_name, event.phase)
 
         compiled.attach_observer(log_observer)
 
@@ -62,6 +63,27 @@ class Observer(Protocol):
     The event parameter is positional-only (`event, /`) so structural
     conformance doesn't pin you to that name; any of `event`, `_event`,
     `e`, etc. matches.
+
+    Two event variants reach observers (graph-engine §6 + proposal
+    0040). The signature is the union; observers ``isinstance``-narrow
+    on the first line and choose which variants they handle.
+
+    - :class:`NodeEvent` — the started/completed/checkpoint phase
+      events. Subject to the ``phases`` filter on
+      :class:`SubscribedObserver`; observers whose phase set excludes
+      ``event.phase`` do NOT receive it.
+    - :class:`MetadataAugmentationEvent` — emitted by
+      :func:`openarmature.observability.metadata.set_invocation_metadata`
+      when called mid-invocation. Carries the augmenting context's
+      lineage tuple (``namespace``, ``attempt_index``,
+      ``fan_out_index``, ``branch_name``) so rich backends can update
+      their open observations in place
+      (``span.set_attribute(openarmature.user.<key>, v)`` for OTel,
+      ``observation.update(metadata=...)`` for Langfuse). Per spec §6
+      this variant is NOT subject to the ``phases`` filter — every
+      subscribed observer sees it and isinstance-narrows to decide
+      whether to act. Simple user observers typically early-return
+      after ``isinstance(event, NodeEvent)`` checks.
 
     Optional ``prepare_sync`` extension
     -----------------------------------
@@ -81,9 +103,13 @@ class Observer(Protocol):
     the synchronous prep entirely; observers that do define it run
     only for ``"started"``-phase events, with errors warned-not-
     propagated (same isolation contract as the async path).
+    ``prepare_sync`` is never invoked for
+    :class:`MetadataAugmentationEvent` (the synchronous-prep contract
+    is anchored on the ``started`` phase, which only ``NodeEvent``
+    carries).
     """
 
-    async def __call__(self, event: NodeEvent, /) -> None: ...
+    async def __call__(self, event: NodeEvent | MetadataAugmentationEvent, /) -> None: ...
 
 
 # Per spec v0.6.0 §6: the two valid phase strings. Used as the default
@@ -200,15 +226,22 @@ class _QueuedItem:
     receive it. The list is computed at dispatch time so events from
     different depths in nested subgraphs carry the correct observer chain
     without the worker needing to know the graph topology.
+
+    ``event`` is the union of ``NodeEvent`` (started / completed /
+    checkpoint phases) and ``MetadataAugmentationEvent`` (proposal
+    0040, side-channel augmentation). The delivery worker branches by
+    type to apply the right delivery contract (phase-filter for
+    ``NodeEvent``, no filter for the augmentation event).
     """
 
-    event: NodeEvent
+    event: NodeEvent | MetadataAugmentationEvent
     observers: tuple[SubscribedObserver, ...]
 
 
 # A sentinel value the engine puts on the queue to signal the worker to
 # return after draining the events ahead of it. None is unambiguous —
-# observers receive `NodeEvent` instances, never None.
+# the queue carries `NodeEvent` and `MetadataAugmentationEvent` instances
+# wrapped in `_QueuedItem`, never None.
 _DRAIN_SENTINEL = None
 
 
@@ -587,16 +620,29 @@ class _InvocationContext:
         return n
 
 
-def _dispatch(context: _InvocationContext, event: NodeEvent) -> None:
-    """Enqueue a node event for the delivery worker.
+def _dispatch(
+    context: _InvocationContext,
+    event: NodeEvent | MetadataAugmentationEvent,
+) -> None:
+    """Enqueue an event for the delivery worker.
 
-    For ``"started"``-phase events, also call any subscribed observer's
-    optional ``prepare_sync(event)`` synchronously — in the engine task,
-    BEFORE queueing — so observers that need to publish per-event state
-    the engine itself reads in the same engine-task scope (e.g., the
-    OTel observer setting ``current_active_observer_span`` for the
-    engine to attach into the OTel context) can do so before the node
-    body runs.
+    Handles two event variants:
+
+    - :class:`NodeEvent`: the started/completed/checkpoint pair model.
+      For ``"started"``-phase events, also calls any subscribed
+      observer's optional ``prepare_sync(event)`` synchronously — in
+      the engine task, BEFORE queueing — so observers that need to
+      publish per-event state the engine itself reads in the same
+      engine-task scope (e.g., the OTel observer setting
+      ``current_active_observer_span`` for the engine to attach into
+      the OTel context) can do so before the node body runs.
+    - :class:`MetadataAugmentationEvent` (proposal 0040): a side-
+      channel augmentation event emitted by
+      ``set_invocation_metadata`` mid-invocation. Bypasses the
+      ``prepare_sync`` branch entirely — the sync-prep contract is
+      anchored on ``"started"``, which only ``NodeEvent`` carries.
+      Queued onto the same serial worker so observers see it in
+      strict order with the surrounding node events.
 
     Phase-gated forwarding: ``prepare_sync`` only fires when ``"started"``
     is in the subscribed observer's ``phases`` set, mirroring how the
@@ -616,7 +662,7 @@ def _dispatch(context: _InvocationContext, event: NodeEvent) -> None:
     observers = context.full_observers()
     if not observers:
         return
-    if event.phase == "started":
+    if isinstance(event, NodeEvent) and event.phase == "started":
         for subscribed in observers:
             if "started" not in subscribed.phases:
                 continue
@@ -686,9 +732,15 @@ async def deliver_loop(
       each).
     - No observer receives event N+1 until everyone has finished N
       (the loop processes one item fully before pulling the next).
-    - Observers whose ``phases`` set excludes the event's phase do
-      NOT receive it. Phase filter applies at delivery, not dispatch;
-      the engine still produces both events for every attempt.
+    - For :class:`NodeEvent`, observers whose ``phases`` set excludes
+      the event's phase do NOT receive it. Phase filter applies at
+      delivery, not dispatch; the engine still produces both events
+      for every attempt.
+    - For :class:`MetadataAugmentationEvent` (proposal 0040), the
+      ``phases`` filter is bypassed entirely — the event isn't a
+      node-phase event, so every subscribed observer receives it
+      regardless of ``phases``. Observers ``isinstance``-narrow on
+      the first line and choose whether to act.
     - Observer exceptions don't propagate, don't break siblings,
       don't block subsequent events. Reported via ``warnings.warn``.
 
@@ -698,11 +750,12 @@ async def deliver_loop(
         item = await queue.get()
         if item is None:
             return
+        event = item.event
         for subscribed in item.observers:
-            if item.event.phase not in subscribed.phases:
+            if isinstance(event, NodeEvent) and event.phase not in subscribed.phases:
                 continue
             try:
-                await subscribed.observer(item.event)
+                await subscribed.observer(event)
             except Exception as e:
                 warnings.warn(
                     f"observer raised {type(e).__name__}: {e}",

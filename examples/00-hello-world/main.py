@@ -49,6 +49,7 @@ from openarmature.graph import (
     END,
     CompiledGraph,
     GraphBuilder,
+    MetadataAugmentationEvent,
     NodeEvent,
     State,
     append,
@@ -194,14 +195,18 @@ def route(state: PipelineState) -> str:
     return state.classification.intent
 
 
-async def trace(event: NodeEvent) -> None:
+async def trace(event: NodeEvent | MetadataAugmentationEvent) -> None:
     # OpenAIProvider emits NodeEvent-shaped events for LLM-span
     # tracking under a sentinel namespace; those have post_state=None.
+    # ``set_invocation_metadata`` from within a node body emits a
+    # MetadataAugmentationEvent; this tracer ignores those.
     # Filter to events that carry a PipelineState snapshot before
-    # reading it. The isinstance check both narrows the type for
+    # reading it. The isinstance checks both narrow the type for
     # static checkers (post_state is typed as the base State, not
-    # PipelineState) and acts as a defensive guard against any
+    # PipelineState) and act as a defensive guard against any
     # foreign-state observer event the engine might dispatch.
+    if not isinstance(event, NodeEvent):
+        return
     if event.phase == "completed" and event.error is None and isinstance(event.post_state, PipelineState):
         print(f"{event.node_name}: sources={event.post_state.sources}")
 

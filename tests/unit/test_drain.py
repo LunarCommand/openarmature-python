@@ -26,7 +26,7 @@ from openarmature.graph import (
     GraphBuilder,
     State,
 )
-from openarmature.graph.events import NodeEvent
+from openarmature.graph.events import MetadataAugmentationEvent, NodeEvent
 
 
 class _S(State):
@@ -75,10 +75,11 @@ async def test_drain_without_timeout_waits_for_all_events() -> None:
     # DrainSummary with the consistent shape.
     received: list[str] = []
 
-    async def slow_obs(event: NodeEvent) -> None:
+    async def slow_obs(event: NodeEvent | MetadataAugmentationEvent) -> None:
         # ~50ms per event; the 3-node graph fires 6 events
         # (3 nodes × started + completed) so ~300ms of work total.
         await asyncio.sleep(0.05)
+        assert isinstance(event, NodeEvent)
         received.append(event.node_name)
 
     compiled = _build_compiled()
@@ -102,7 +103,8 @@ async def test_drain_with_timeout_not_reached_for_fast_observers() -> None:
     # fast. Summary reports clean delivery.
     received: list[str] = []
 
-    async def fast_obs(event: NodeEvent) -> None:
+    async def fast_obs(event: NodeEvent | MetadataAugmentationEvent) -> None:
+        assert isinstance(event, NodeEvent)
         received.append(event.node_name)
 
     compiled = _build_compiled()
@@ -121,10 +123,11 @@ async def test_drain_with_timeout_fires_reports_undelivered() -> None:
     # generous slack for cancellation settlement).
     received: list[str] = []
 
-    async def slow_obs(event: NodeEvent) -> None:
+    async def slow_obs(event: NodeEvent | MetadataAugmentationEvent) -> None:
         # 200ms per event vs 100ms drain timeout; at most 0-1 events
         # complete before the deadline fires.
         await asyncio.sleep(0.2)
+        assert isinstance(event, NodeEvent)
         received.append(event.node_name)
 
     compiled = _build_compiled()
@@ -153,7 +156,7 @@ async def test_drain_after_timeout_leaves_graph_usable() -> None:
     call_count = [0]
     received_invocation_two: list[str] = []
 
-    async def obs(event: NodeEvent) -> None:
+    async def obs(event: NodeEvent | MetadataAugmentationEvent) -> None:
         # First invocation: slow enough to force the timeout to
         # fire. Second invocation: fast, so drain completes cleanly.
         # The mode is controlled by `call_count[0]`: we bump it
@@ -161,6 +164,7 @@ async def test_drain_after_timeout_leaves_graph_usable() -> None:
         if call_count[0] == 0:
             await asyncio.sleep(0.1)
         else:
+            assert isinstance(event, NodeEvent)
             received_invocation_two.append(event.node_name)
 
     compiled = _build_compiled()
@@ -201,8 +205,9 @@ async def test_drain_with_zero_timeout_fires_immediately() -> None:
     # immediately with whatever the worker hasn't gotten to yet.
     received: list[str] = []
 
-    async def obs(event: NodeEvent) -> None:
+    async def obs(event: NodeEvent | MetadataAugmentationEvent) -> None:
         await asyncio.sleep(0.05)
+        assert isinstance(event, NodeEvent)
         received.append(event.node_name)
 
     compiled = _build_compiled()

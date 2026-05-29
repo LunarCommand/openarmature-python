@@ -49,6 +49,7 @@ from openarmature.graph import (
     CompiledGraph,
     ExplicitMapping,
     GraphBuilder,
+    MetadataAugmentationEvent,
     NodeEvent,
     State,
     append,
@@ -349,7 +350,9 @@ def _fmt_state(state: Any) -> str:
     return " ".join(parts) if parts else "(empty)"
 
 
-async def depth_observer(event: NodeEvent) -> None:
+async def depth_observer(event: NodeEvent | MetadataAugmentationEvent) -> None:
+    if isinstance(event, MetadataAugmentationEvent):
+        return
     depth = len(event.namespace)
     indent = "  " * (depth - 1)
     ns = " > ".join(event.namespace)

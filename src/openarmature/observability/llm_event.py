@@ -95,6 +95,12 @@ class LlmEventPayload(BaseModel):
     calling_namespace_prefix: tuple[str, ...] = ()
     calling_attempt_index: int = 0
     calling_fan_out_index: int | None = None
+    # Calling-node branch_name (pipeline-utilities §11). Mirrors the
+    # other ``calling_*`` fields; the OTel observer's open-span key
+    # widening (``_StackKey`` now includes ``branch_name``) needs this
+    # to disambiguate concurrent same-named inner nodes across sibling
+    # branches.
+    calling_branch_name: str | None = None
     # Prompt-context snapshot captured at dispatch time. ``Any``
     # because the prompts package imports State indirectly; the typed
     # shapes are PromptResult / PromptGroup from openarmature.prompts.

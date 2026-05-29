@@ -427,3 +427,155 @@ async def test_subgraph_dispatch_observation_ended_on_invocation_close() -> None
     trace = next(iter(client.traces.values()))
     for obs in trace.observations:
         assert obs.ended, f"observation {obs.name!r} not ended after shutdown()"
+
+
+# ---------------------------------------------------------------------------
+# §3.4 mid-invocation augmentation (proposal 0040)
+# ---------------------------------------------------------------------------
+
+
+class _AugmentState(State):
+    answer: str = ""
+
+
+async def test_metadata_augmentation_updates_trace_and_node_for_outermost() -> None:
+    # Spec §3.4 MUST + proposal 0040 §6: an outermost-serial
+    # ``set_invocation_metadata`` call MUST update both the open Trace
+    # (via client.update_trace, surfacing the entries on
+    # trace.metadata.<key> for §8.4 top-level filtering) AND the
+    # calling node's open observation (via handle.update(metadata=)).
+    # Mirrors fixture 034's Langfuse expectations.
+    from openarmature.observability.metadata import set_invocation_metadata
+
+    async def node_augments(_s: _AugmentState) -> dict[str, str]:
+        set_invocation_metadata(request_id="req-xyz")
+        return {"answer": "ok"}
+
+    g = (
+        GraphBuilder(_AugmentState)
+        .add_node("ask", node_augments)
+        .add_edge("ask", END)
+        .set_entry("ask")
+        .compile()
+    )
+    graph, client, observer = _attach(g)
+    try:
+        await graph.invoke(_AugmentState())
+        await graph.drain()
+    finally:
+        observer.shutdown()
+
+    trace = next(iter(client.traces.values()))
+    # Trace metadata: augmented key landed on the open Trace.
+    assert trace.metadata.get("request_id") == "req-xyz"
+    # Calling node's observation: augmented key landed via in-place
+    # update before the observation closed.
+    ask_obs = _find_observation(trace, "ask")
+    assert ask_obs.metadata.get("request_id") == "req-xyz"
+
+
+async def test_metadata_augmentation_in_fan_out_isolates_per_instance() -> None:
+    # Fixture 029-shaped: each fan-out instance augments metadata with
+    # its own product_id. The Trace MUST NOT carry any product_id
+    # (it's shared across siblings); the per-instance dispatch
+    # observation AND the inner ask observation for each instance
+    # MUST carry that instance's OWN product_id.
+    import asyncio
+
+    from openarmature.observability.correlation import current_fan_out_index
+    from openarmature.observability.metadata import set_invocation_metadata
+
+    class _ParentState(State):
+        products: list[dict[str, str]] = []
+        results: list[str] = []
+
+    class _ChildState(State):
+        product: dict[str, str] = {}
+        out: str = ""
+
+    async def _ask(s: _ChildState) -> dict[str, str]:
+        await asyncio.sleep(0)
+        idx = current_fan_out_index()
+        assert idx is not None
+        product_id = s.product["id"]
+        set_invocation_metadata(product_id=product_id)
+        return {"out": f"ok-{product_id}"}
+
+    inner = (
+        GraphBuilder(_ChildState)
+        .add_node("inner_ask", _ask)
+        .add_edge("inner_ask", END)
+        .set_entry("inner_ask")
+        .compile()
+    )
+    parent = (
+        GraphBuilder(_ParentState)
+        .add_fan_out_node(
+            "fan",
+            subgraph=inner,
+            collect_field="out",
+            target_field="results",
+            items_field="products",
+            item_field="product",
+            concurrency=3,
+        )
+        .add_edge("fan", END)
+        .set_entry("fan")
+        .compile()
+    )
+    graph, client, observer = _attach(parent)
+    try:
+        products = [{"id": "prod-A"}, {"id": "prod-B"}, {"id": "prod-C"}]
+        await graph.invoke(_ParentState(products=products))
+        await graph.drain()
+    finally:
+        observer.shutdown()
+
+    trace = next(iter(client.traces.values()))
+    # Trace metadata MUST NOT carry per-instance product_id (sibling
+    # isolation — fixture 029's central invariant).
+    assert "product_id" not in trace.metadata, (
+        f"per-instance augmentation leaked onto Trace metadata: {trace.metadata}"
+    )
+    # Each per-instance dispatch observation carries ITS OWN product_id.
+    instance_obs = [
+        obs for obs in trace.observations if obs.name == "fan" and "fan_out_index" in obs.metadata
+    ]
+    assert len(instance_obs) == 3
+    seen_dispatch: dict[int, str] = {}
+    for obs in instance_obs:
+        fan_idx_value = obs.metadata.get("fan_out_index")
+        product_id_value = obs.metadata.get("product_id")
+        assert isinstance(fan_idx_value, int)
+        assert isinstance(product_id_value, str)
+        seen_dispatch[fan_idx_value] = product_id_value
+    assert seen_dispatch == {0: "prod-A", 1: "prod-B", 2: "prod-C"}
+
+
+async def test_metadata_augmentation_outside_invocation_is_silent() -> None:
+    # Plumbing safety: no invocation in scope means no dispatch and no
+    # observer event — set_invocation_metadata is a Context-only
+    # mutation. The Langfuse handler is never called in this path so
+    # no client / no Trace state is created.
+    from openarmature.observability.metadata import set_invocation_metadata
+
+    set_invocation_metadata(local_key="local_value")
+
+
+async def test_metadata_augmentation_no_op_when_no_entries() -> None:
+    # Direct-call safety: an augmentation event with empty entries
+    # should be a no-op on the observer side.
+    from openarmature.graph.events import MetadataAugmentationEvent
+
+    client = InMemoryLangfuseClient()
+    observer = LangfuseObserver(client=client)
+    event = MetadataAugmentationEvent(
+        entries={},
+        namespace=("ask",),
+        attempt_index=0,
+        fan_out_index=None,
+        branch_name=None,
+    )
+    observer._handle_metadata_augmentation(event)  # noqa: SLF001
+    # No Trace was opened (no invocation in scope) and no exception.
+    assert client.traces == {}

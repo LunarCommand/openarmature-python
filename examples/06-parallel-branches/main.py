@@ -70,6 +70,7 @@ from openarmature.graph import (
     BranchSpec,
     CompiledGraph,
     GraphBuilder,
+    MetadataAugmentationEvent,
     NodeEvent,
     State,
     append,
@@ -240,7 +241,7 @@ async def present(s: ArticleState) -> Mapping[str, Any]:
     return {"trace": ["present"]}
 
 
-async def branch_attribution_observer(event: NodeEvent) -> None:
+async def branch_attribution_observer(event: NodeEvent | MetadataAugmentationEvent) -> None:
     """Print which branch each inner-node event came from.
 
     NodeEvent carries ``branch_name`` on events from nodes that
@@ -250,6 +251,8 @@ async def branch_attribution_observer(event: NodeEvent) -> None:
     observer skips events with no branch attribution and prints
     ``(branch=…) node_name`` for the rest.
     """
+    if not isinstance(event, NodeEvent):
+        return
     if event.branch_name is None or event.phase != "started":
         return
     print(f"  [observer] (branch={event.branch_name}) inner node {event.node_name!r} started")

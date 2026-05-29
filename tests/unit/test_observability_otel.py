@@ -1395,3 +1395,311 @@ def test_force_flush_delegates_to_provider() -> None:
         assert observer.force_flush(timeout_ms=1000) is True
     finally:
         observer.shutdown()
+
+
+# ---------------------------------------------------------------------------
+# §3.4 mid-invocation augmentation (proposal 0040)
+# ---------------------------------------------------------------------------
+
+
+class _AugmentState(State):
+    answer: str = ""
+
+
+async def test_metadata_augmentation_updates_outermost_open_spans() -> None:
+    # Spec §3.4 MUST + proposal 0040 §6: when a node body calls
+    # ``set_invocation_metadata`` mid-invocation, every open span whose
+    # lineage ancestor-or-equals the calling context's MUST be updated
+    # in place to carry the augmented entries. In a single-node
+    # outermost-serial graph, that's the invocation root span AND the
+    # calling node's span.
+    from openarmature.observability.metadata import set_invocation_metadata
+
+    captured: dict[str, str] = {}
+
+    async def node_augments(_s: _AugmentState) -> dict[str, str]:
+        set_invocation_metadata(request_id="req-xyz")
+        captured["seen"] = "yes"
+        return {"answer": "ok"}
+
+    exporter = InMemorySpanExporter()
+    observer = OTelObserver(span_processor=SimpleSpanProcessor(exporter))
+    g = (
+        GraphBuilder(_AugmentState)
+        .add_node("ask", node_augments)
+        .add_edge("ask", END)
+        .set_entry("ask")
+        .compile()
+    )
+    g.attach_observer(observer)
+    try:
+        await g.invoke(_AugmentState())
+        await g.drain()
+    finally:
+        observer.shutdown()
+
+    spans = exporter.get_finished_spans()
+    invocation_spans = [s for s in spans if s.name == "openarmature.invocation"]
+    ask_spans = [s for s in spans if s.name == "ask"]
+    assert len(invocation_spans) == 1
+    assert len(ask_spans) == 1
+    inv_attrs = dict(invocation_spans[0].attributes or {})
+    ask_attrs = dict(ask_spans[0].attributes or {})
+    # Augmentation reached both the invocation span (open at the call)
+    # and the calling node's span (the augmenter itself).
+    assert inv_attrs.get("openarmature.user.request_id") == "req-xyz"
+    assert ask_attrs.get("openarmature.user.request_id") == "req-xyz"
+
+
+async def test_metadata_augmentation_outside_invocation_is_silent() -> None:
+    # Plumbing safety: ``set_invocation_metadata`` outside any active
+    # invocation updates the ContextVar but emits no augmentation event
+    # (no dispatch is in scope). The observer never sees an event so
+    # no observer-side error surfaces.
+    from openarmature.observability.metadata import set_invocation_metadata
+
+    # No graph, no observer attached — should not raise.
+    set_invocation_metadata(local_only="value")
+
+
+async def test_metadata_augmentation_no_op_when_no_entries() -> None:
+    # Empty entries dict is a no-op at the public API (the helper
+    # short-circuits before validating or dispatching). The observer
+    # still must tolerate the case in any future direct test path.
+    from openarmature.graph.events import MetadataAugmentationEvent
+
+    observer = OTelObserver(span_processor=SimpleSpanProcessor(InMemorySpanExporter()))
+    try:
+        # Direct call to the handler bypasses the engine so we can
+        # confirm an empty-entries augmentation is silently dropped.
+        event = MetadataAugmentationEvent(
+            entries={},
+            namespace=("ask",),
+            attempt_index=0,
+            fan_out_index=None,
+            branch_name=None,
+        )
+        observer._handle_metadata_augmentation(event)  # noqa: SLF001
+    finally:
+        observer.shutdown()
+
+
+async def test_metadata_augmentation_in_fan_out_isolates_per_instance() -> None:
+    # Spec §3.4 + proposal 0040 scoping rule: a fan-out instance
+    # augmenting metadata MUST update its own instance dispatch span
+    # and its own inner-node span, but NOT the shared fan_out_node
+    # parent span, NOT the invocation span, and NOT sibling instances'
+    # spans. Each ``inner_ask`` span ends up tagged with its own
+    # ``product_id`` only.
+    import asyncio
+
+    from openarmature.observability.correlation import current_fan_out_index
+    from openarmature.observability.metadata import set_invocation_metadata
+
+    class _ParentState(State):
+        products: list[dict[str, str]] = Field(default_factory=list[dict[str, str]])
+        results: list[str] = Field(default_factory=list[str])
+
+    class _ChildState(State):
+        product: dict[str, str] = Field(default_factory=dict[str, str])
+        out: str = ""
+
+    async def _ask(s: _ChildState) -> dict[str, str]:
+        # Yield once so concurrent instances interleave their
+        # augmentation events on the observer queue.
+        await asyncio.sleep(0)
+        idx = current_fan_out_index()
+        assert idx is not None
+        product_id = s.product["id"]
+        set_invocation_metadata(product_id=product_id)
+        return {"out": f"ok-{product_id}"}
+
+    inner = (
+        GraphBuilder(_ChildState)
+        .add_node("inner_ask", _ask)
+        .add_edge("inner_ask", END)
+        .set_entry("inner_ask")
+        .compile()
+    )
+    parent = (
+        GraphBuilder(_ParentState)
+        .add_fan_out_node(
+            "fan",
+            subgraph=inner,
+            collect_field="out",
+            target_field="results",
+            items_field="products",
+            item_field="product",
+            concurrency=3,
+        )
+        .add_edge("fan", END)
+        .set_entry("fan")
+    )
+    exporter = InMemorySpanExporter()
+    observer = OTelObserver(span_processor=SimpleSpanProcessor(exporter))
+    compiled = parent.compile()
+    compiled.attach_observer(observer)
+    try:
+        products = [
+            {"id": "prod-A"},
+            {"id": "prod-B"},
+            {"id": "prod-C"},
+        ]
+        await compiled.invoke(_ParentState(products=products))
+        await compiled.drain()
+    finally:
+        observer.shutdown()
+
+    spans = exporter.get_finished_spans()
+    inner_spans = [s for s in spans if s.name == "inner_ask"]
+    assert len(inner_spans) == 3
+    seen: dict[str, str] = {}
+    for span in inner_spans:
+        attrs = dict(span.attributes or {})
+        product_id = attrs.get("openarmature.user.product_id")
+        fan_out_idx = attrs.get("openarmature.node.fan_out_index")
+        assert isinstance(product_id, str), f"missing per-instance augmentation on {span.name}"
+        assert isinstance(fan_out_idx, int)
+        seen[str(fan_out_idx)] = product_id
+    # Each instance carries its OWN product_id; no sibling leakage.
+    assert seen == {"0": "prod-A", "1": "prod-B", "2": "prod-C"}
+
+    # The shared fan-out parent node span and the invocation span MUST
+    # NOT carry any per-instance product_id. The PER-INSTANCE dispatch
+    # spans (synthesized for non-detached fan-outs per §5.4 + proposal
+    # 0013) are IN scope, so each one SHOULD carry its own product_id.
+    invocation_spans = [s for s in spans if s.name == "openarmature.invocation"]
+    fan_spans = [s for s in spans if s.name == "fan"]
+    assert len(invocation_spans) == 1
+    # The shared fan-out parent has ``openarmature.fan_out.item_count``
+    # set; per-instance dispatch spans don't.
+    parent_fan_spans = [s for s in fan_spans if "openarmature.fan_out.item_count" in dict(s.attributes or {})]
+    instance_fan_spans = [
+        s for s in fan_spans if "openarmature.fan_out.item_count" not in dict(s.attributes or {})
+    ]
+    assert len(parent_fan_spans) == 1
+    assert len(instance_fan_spans) == 3
+    # Parent + invocation: no per-instance product_id leakage.
+    for span in (*parent_fan_spans, *invocation_spans):
+        attrs = dict(span.attributes or {})
+        assert "openarmature.user.product_id" not in attrs, (
+            f"per-instance augmentation leaked onto {span.name} span"
+        )
+    # Per-instance dispatch spans: each one carries its own product_id.
+    seen_dispatch: dict[int, str] = {}
+    for span in instance_fan_spans:
+        attrs = dict(span.attributes or {})
+        idx_value = attrs.get("openarmature.node.fan_out_index")
+        product_value = attrs.get("openarmature.user.product_id")
+        assert isinstance(idx_value, int)
+        assert isinstance(product_value, str), f"per-instance dispatch span missing product_id; attrs={attrs}"
+        seen_dispatch[idx_value] = product_value
+    assert seen_dispatch == {0: "prod-A", 1: "prod-B", 2: "prod-C"}
+
+
+async def test_metadata_augmentation_in_parallel_branches_skips_sibling() -> None:
+    # Sibling-skip for parallel-branches: two concurrent branches each
+    # augment metadata with their own branch identifier. Each branch's
+    # inner-node span carries ONLY its own ``branch_label``; no
+    # cross-branch leakage. This also implicitly verifies that the
+    # OTel observer's open-span key disambiguates concurrent same-
+    # named inner nodes across sibling branches (pre-fix, both
+    # branches' ``ask`` opens collided on the same _StackKey).
+    import asyncio
+
+    from openarmature.graph import BranchSpec
+    from openarmature.observability.metadata import set_invocation_metadata
+
+    class _DispatchState(State):
+        fraud_result: str = ""
+        audit_result: str = ""
+
+    class _FraudState(State):
+        score: str = ""
+
+    class _AuditState(State):
+        summary: str = ""
+
+    async def _fraud_ask(_s: _FraudState) -> dict[str, str]:
+        await asyncio.sleep(0)
+        set_invocation_metadata(branch_label="fraud_check")
+        return {"score": "low"}
+
+    async def _audit_ask(_s: _AuditState) -> dict[str, str]:
+        await asyncio.sleep(0)
+        set_invocation_metadata(branch_label="policy_audit")
+        return {"summary": "compliant"}
+
+    fraud_subgraph = (
+        GraphBuilder(_FraudState).add_node("ask", _fraud_ask).add_edge("ask", END).set_entry("ask").compile()
+    )
+    audit_subgraph = (
+        GraphBuilder(_AuditState).add_node("ask", _audit_ask).add_edge("ask", END).set_entry("ask").compile()
+    )
+    exporter = InMemorySpanExporter()
+    observer = OTelObserver(span_processor=SimpleSpanProcessor(exporter))
+    g = (
+        GraphBuilder(_DispatchState)
+        .add_parallel_branches_node(
+            "dispatcher",
+            branches={
+                "fraud_check": BranchSpec(
+                    subgraph=fraud_subgraph,
+                    outputs={"fraud_result": "score"},
+                ),
+                "policy_audit": BranchSpec(
+                    subgraph=audit_subgraph,
+                    outputs={"audit_result": "summary"},
+                ),
+            },
+        )
+        .add_edge("dispatcher", END)
+        .set_entry("dispatcher")
+        .compile()
+    )
+    g.attach_observer(observer)
+    try:
+        await g.invoke(_DispatchState())
+        await g.drain()
+    finally:
+        observer.shutdown()
+
+    spans = exporter.get_finished_spans()
+    # Pre-fix: two concurrent ``ask`` spans would collide on the
+    # _StackKey, so only ONE ask span would land. Post-fix: both
+    # branches' ask spans land, each tagged with its own branch_name.
+    ask_spans = [s for s in spans if s.name == "ask"]
+    assert len(ask_spans) == 2
+    by_branch: dict[str, dict[str, Any]] = {}
+    for span in ask_spans:
+        attrs = dict(span.attributes or {})
+        bn = attrs.get("openarmature.branch_name")
+        assert isinstance(bn, str)
+        by_branch[bn] = attrs
+    # Each branch's ask carries its OWN branch_label augmentation.
+    assert by_branch["fraud_check"].get("openarmature.user.branch_label") == "fraud_check"
+    assert by_branch["policy_audit"].get("openarmature.user.branch_label") == "policy_audit"
+    # No cross-branch leakage: fraud's ask does NOT carry policy_audit's
+    # label and vice versa. The branch_label key is the same name; what
+    # matters is each span shows ONLY its own value.
+    assert by_branch["fraud_check"].get("openarmature.user.branch_label") != "policy_audit"
+    assert by_branch["policy_audit"].get("openarmature.user.branch_label") != "fraud_check"
+
+    # The parallel-branches NODE span(s) and the invocation span MUST
+    # NOT carry either branch's branch_label (per-async-context
+    # isolation). Note: the current OTel mapping synthesizes a
+    # subgraph wrapper at the parallel-branches NODE's namespace in
+    # addition to the NODE's own span — that's a pre-existing
+    # divergence from fixture 030's expected Langfuse shape that
+    # `discuss-otel-parallel-branches-dispatch-span` is asking spec
+    # to settle. For this test both dispatcher-named spans MUST be
+    # augmentation-clean.
+    dispatcher_spans = [s for s in spans if s.name == "dispatcher"]
+    invocation_spans = [s for s in spans if s.name == "openarmature.invocation"]
+    assert len(invocation_spans) == 1
+    assert len(dispatcher_spans) >= 1
+    for span in (*dispatcher_spans, *invocation_spans):
+        attrs = dict(span.attributes or {})
+        assert "openarmature.user.branch_label" not in attrs, (
+            f"per-branch augmentation leaked onto {span.name} span"
+        )

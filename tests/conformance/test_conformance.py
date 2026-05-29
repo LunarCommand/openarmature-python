@@ -27,7 +27,7 @@ from openarmature.graph import (
     State,
     SubscribedObserver,
 )
-from openarmature.graph.events import NodeEvent
+from openarmature.graph.events import MetadataAugmentationEvent, NodeEvent
 from openarmature.graph.observer import Observer
 
 from .adapter import (
@@ -605,7 +605,8 @@ async def _run_fixture_020_case(case: Mapping[str, Any]) -> None:
 
     received: list[NodeEvent] = []
 
-    async def observer(event: NodeEvent) -> None:
+    async def observer(event: NodeEvent | MetadataAugmentationEvent) -> None:
+        assert isinstance(event, NodeEvent)
         received.append(event)
 
     async def node_a(_state: Any) -> dict[str, Any]:
