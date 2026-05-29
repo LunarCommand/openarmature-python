@@ -100,6 +100,17 @@ if summary.timeout_reached:
 
 The compiled graph stays usable for subsequent invocations after a timed-out drain — workers are cancelled cleanly, no partial state leaks.
 
+### `install_log_bridge` skips its own handler when the application already attached one to the same `LoggerProvider`
+
+Two distinct classes both named `LoggingHandler` exist in the OTel Python ecosystem and both bridge stdlib log records to the OTel Logs SDK:
+
+- `opentelemetry.sdk._logs.LoggingHandler` (the SDK class). Typically attached by an application's own logging setup — e.g., a FastAPI `setup_logging(...)` step that wires up an OTLP-backed `LoggerProvider` for log export.
+- `opentelemetry.instrumentation.logging.handler.LoggingHandler` (the instrumentation class). What `openarmature.observability.otel.install_log_bridge` attaches when it runs.
+
+Different classes, same OTel-Logs export path. If both are attached against the same `LoggerProvider`, every stdlib log record fires through both handlers, both call `provider.get_logger(...).emit(...)`, and `BatchLogRecordProcessor` ships the record TWICE to the OTLP endpoint. The duplication is OTLP-only — a console handler attached separately is unaffected, which makes "OTLP rows are doubled, console isn't" a head-scratcher to diagnose.
+
+`install_log_bridge` detects either handler class against the same provider and skips its own `addHandler` accordingly; the `openarmature.correlation_id` LogRecord factory still installs. The check is provider-scoped, so an application that intentionally attaches a handler against a DIFFERENT `LoggerProvider` (a separate logs pipeline) still gets the OA bridge against the OA provider — the helper only dedups when the SAME provider would receive duplicate emissions.
+
 ### Three exception hierarchies; know which one your code catches
 
 `openarmature` exceptions split across three sibling hierarchies:

@@ -695,6 +695,91 @@ def test_install_log_bridge_is_idempotent() -> None:
         logging.setLogRecordFactory(prior_factory)
 
 
+def test_install_log_bridge_skips_when_sdk_handler_already_attached() -> None:
+    """Downstream report (HyperDX integration): if an application's
+    own logging setup attached
+    :class:`opentelemetry.sdk._logs.LoggingHandler` against the same
+    :class:`LoggerProvider` BEFORE ``install_log_bridge`` runs, the
+    helper MUST NOT attach a second
+    :class:`opentelemetry.instrumentation.logging.handler.LoggingHandler`
+    against the same provider — both classes bridge to the same OTel
+    Logs SDK and a second attach causes every record to ship to OTLP
+    twice. The correlation_id factory still installs."""
+    from opentelemetry.sdk._logs import LoggerProvider
+    from opentelemetry.sdk._logs import LoggingHandler as _SDKLoggingHandler
+
+    root = logging.getLogger()
+    prior_handlers = list(root.handlers)
+    prior_factory = logging.getLogRecordFactory()
+    try:
+        provider = LoggerProvider()
+        # Simulate the application's setup: attach the SDK handler
+        # against `provider` BEFORE OA's bridge runs.
+        sdk_handler = _SDKLoggingHandler(level=logging.NOTSET, logger_provider=provider)
+        root.addHandler(sdk_handler)
+        handler_count_before = len(root.handlers)
+
+        install_log_bridge(provider)
+
+        # No new handler attached — the SDK handler already bridges
+        # to `provider`, so installing the instrumentation handler
+        # would duplicate every emission.
+        assert len(root.handlers) == handler_count_before, (
+            f"install_log_bridge MUST NOT add a second OTel-Logs handler when an "
+            f"SDK handler is already wired to the same provider; "
+            f"got {len(root.handlers)} handlers (was {handler_count_before})"
+        )
+        # The correlation_id factory MUST install regardless — that's
+        # what the helper is for once handler bridging is already
+        # taken care of by the application.
+        current_factory = logging.getLogRecordFactory()
+        assert getattr(current_factory, "_openarmature_correlation_factory", False), (
+            "correlation_id factory MUST install even when the OTel-Logs handler "
+            "is skipped (application already attached one)"
+        )
+    finally:
+        root.handlers[:] = prior_handlers
+        logging.setLogRecordFactory(prior_factory)
+
+
+def test_install_log_bridge_adds_handler_when_pre_attached_uses_different_provider() -> None:
+    """An application MAY intentionally attach an SDK handler against
+    a DIFFERENT :class:`LoggerProvider` (e.g., a console-only logs
+    setup separate from the OA-managed OTLP provider). The
+    idempotency check is scoped to the SAME provider, so OA's helper
+    DOES attach its own handler against the OA provider in that
+    case — no false-positive dedup that would silently break the OA
+    bridge."""
+    from opentelemetry.sdk._logs import LoggerProvider
+    from opentelemetry.sdk._logs import LoggingHandler as _SDKLoggingHandler
+
+    root = logging.getLogger()
+    prior_handlers = list(root.handlers)
+    prior_factory = logging.getLogRecordFactory()
+    try:
+        # Application's pre-attached SDK handler points at a DIFFERENT
+        # LoggerProvider — its own logs pipeline.
+        unrelated_provider = LoggerProvider()
+        unrelated_handler = _SDKLoggingHandler(level=logging.NOTSET, logger_provider=unrelated_provider)
+        root.addHandler(unrelated_handler)
+        handler_count_before = len(root.handlers)
+
+        # OA's bridge installs against its OWN provider.
+        oa_provider = LoggerProvider()
+        install_log_bridge(oa_provider)
+
+        # One new handler MUST appear — the OA-installed
+        # instrumentation handler against `oa_provider`. The
+        # pre-existing unrelated handler is unaffected.
+        assert len(root.handlers) == handler_count_before + 1, (
+            f"install_log_bridge MUST attach when no handler bridges to the "
+            f"target provider; got {len(root.handlers)} (was {handler_count_before})"
+        )
+    finally:
+        root.handlers[:] = prior_handlers
+        logging.setLogRecordFactory(prior_factory)
+
+
 def test_log_bridge_exports_records_with_correlation_id() -> None:
     """Spec §7 end-to-end: a log record emitted on a CHILD logger
     under ``current_correlation_id`` flows through the bridge to

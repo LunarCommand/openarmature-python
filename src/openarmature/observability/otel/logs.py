@@ -95,24 +95,36 @@ def install_log_bridge(
     logger or handler dispatch, so every record gets the attribute
     regardless of which logger originated it.
 
-    Idempotent: re-calling is a no-op (we check for the existing
-    OA-tagged handler on the root logger AND for the OA-installed
-    factory marker on the current global factory).
+    Idempotent across both OTel-Logs handler classes. Two different
+    classes both named ``LoggingHandler`` exist in the OTel Python
+    ecosystem and both bridge stdlib records to the Logs SDK:
+
+    - :class:`opentelemetry.sdk._logs.LoggingHandler` (the SDK class,
+      what an application's own logging setup typically installs).
+    - :class:`opentelemetry.instrumentation.logging.handler.LoggingHandler`
+      (the instrumentation class, what this helper installs).
+
+    Different classes, same OTel-Logs export path. If an application
+    has already attached the SDK class against the same
+    :class:`LoggerProvider`, calling this helper would attach the
+    instrumentation class on top and every record would emit to OTLP
+    twice. The check below detects EITHER class against the same
+    provider and skips the ``addHandler`` step accordingly; the
+    correlation_id factory still installs. Re-calling with no prior
+    OA-installed handler is also a no-op via the OA marker check.
 
     The user retains responsibility for providing the
     :class:`LoggerProvider` (typically built with their preferred
     exporter; :class:`InMemoryLogRecordExporter` for tests,
     :class:`OTLPLogExporter` for production).
     """
-    from opentelemetry.instrumentation.logging.handler import LoggingHandler
+    from opentelemetry.instrumentation.logging.handler import (
+        LoggingHandler as _InstrLoggingHandler,
+    )
 
     root = logging.getLogger()
-    # Idempotency #1: don't double-add the OTel LoggingHandler.
-    handler_already_installed = any(
-        isinstance(h, LoggingHandler) and getattr(h, "_openarmature_installed", False) for h in root.handlers
-    )
-    if not handler_already_installed:
-        handler = LoggingHandler(level=level, logger_provider=provider)
+    if not _otel_logs_handler_already_bridges(root, provider):
+        handler = _InstrLoggingHandler(level=level, logger_provider=provider)
         # Direct assignment isn't typed on LoggingHandler; route
         # through ``object.__setattr__`` to avoid pyright's strict
         # attribute-access check without losing the idempotency-
@@ -121,6 +133,37 @@ def install_log_bridge(
         root.addHandler(handler)
     # Idempotency #2: don't stack the LogRecord factory.
     _install_correlation_id_factory()
+
+
+def _otel_logs_handler_already_bridges(root: logging.Logger, provider: LoggerProvider) -> bool:
+    """True iff the root logger already has an OTel-Logs
+    ``LoggingHandler`` (SDK class OR instrumentation class) wired to
+    ``provider`` — meaning every record will already reach the OTLP
+    export path and a second ``addHandler`` here would duplicate.
+
+    Handler-class isinstance covers the case where an application
+    attached the SDK handler in its own logging setup; the
+    ``_openarmature_installed`` marker covers the case where this
+    helper was already called previously. ``_logger_provider`` is
+    OTel-private on both handler classes today — if a future SDK
+    rename hides it, ``getattr`` returns ``None`` and we conclude
+    "doesn't bridge", falling back to adding our own handler. Worst
+    case is the pre-fix behavior (potential dup); we never crash.
+    """
+    from opentelemetry.instrumentation.logging.handler import (
+        LoggingHandler as _InstrLoggingHandler,
+    )
+    from opentelemetry.sdk._logs import LoggingHandler as _SDKLoggingHandler
+
+    handler_classes = (_SDKLoggingHandler, _InstrLoggingHandler)
+    for handler in root.handlers:
+        if not isinstance(handler, handler_classes):
+            continue
+        if getattr(handler, "_openarmature_installed", False):
+            return True
+        if getattr(handler, "_logger_provider", None) is provider:
+            return True
+    return False
 
 
 __all__ = [
