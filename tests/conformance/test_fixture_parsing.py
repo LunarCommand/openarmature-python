@@ -115,6 +115,61 @@ _DEFERRED_FIXTURES: dict[str, str] = {
     "prompt-management/016-prompt-observability-entities-propagation": (
         "Cases shape models live in the PM-specific capability harness"
     ),
+    # Proposal 0037 (Anthropic Messages mapping) shipped in spec v0.28.0
+    # but python marks it not-yet in conformance.toml — the Anthropic
+    # provider isn't implemented in this release. Defer the
+    # cross-capability parse tests for the 033-042 fixtures until that
+    # lands; the openai-strips-thinking-blocks side (043) is in
+    # test_llm_provider.py's own deferral.
+    "llm-provider/033-anthropic-basic-message-round-trip": (
+        "Anthropic provider not implemented (0037 not-yet in conformance.toml)"
+    ),
+    "llm-provider/034-anthropic-tool-call-flow": (
+        "Anthropic provider not implemented (0037 not-yet in conformance.toml)"
+    ),
+    "llm-provider/035-anthropic-image-content-blocks": (
+        "Anthropic provider not implemented (0037 not-yet in conformance.toml)"
+    ),
+    "llm-provider/036-anthropic-tool-choice-modes": (
+        "Anthropic provider not implemented (0037 not-yet in conformance.toml)"
+    ),
+    "llm-provider/037-anthropic-runtime-config-mapping": (
+        "Anthropic provider not implemented (0037 not-yet in conformance.toml)"
+    ),
+    "llm-provider/038-anthropic-max-tokens-required": (
+        "Anthropic provider not implemented (0037 not-yet in conformance.toml)"
+    ),
+    "llm-provider/039-anthropic-error-mapping": (
+        "Anthropic provider not implemented (0037 not-yet in conformance.toml)"
+    ),
+    "llm-provider/040-anthropic-structured-output-native": (
+        "Anthropic provider not implemented (0037 not-yet in conformance.toml)"
+    ),
+    "llm-provider/041-anthropic-structured-output-fallback": (
+        "Anthropic provider not implemented (0037 not-yet in conformance.toml)"
+    ),
+    "llm-provider/042-anthropic-thinking-block-round-trip": (
+        "Anthropic provider not implemented (0037 not-yet in conformance.toml)"
+    ),
+    # Proposal 0040 (open-span metadata update) — task #22 implements
+    # the §6 augmentation-event mechanism + un-defers 029/030 + 034.
+    "observability/034-caller-metadata-open-span-update-serial": (
+        "Open-span augmentation-event mechanism lands with #22 (0040 not-yet)"
+    ),
+    # Proposal 0039 (caller-supplied invocation_id) Langfuse trace.id
+    # derivation fixtures use the langfuse_trace expected shape the
+    # cross-capability parser doesn't model. The derivation itself is
+    # pinned by unit tests in test_observability_langfuse_adapter.py
+    # against the same spec vector fixture 036 uses
+    # (sha256("run_abc123")[:16].hex == 29b50a6c08dabfeaeb1696301f4fabe1);
+    # wiring into the langfuse-specific conformance harness is a
+    # follow-up.
+    "observability/035-caller-invocation-id-uuid": (
+        "Cross-capability parser doesn't model langfuse_trace; derivation pinned by unit tests"
+    ),
+    "observability/036-caller-invocation-id-non-uuid": (
+        "Cross-capability parser doesn't model langfuse_trace; derivation pinned by unit tests"
+    ),
 }
 
 
