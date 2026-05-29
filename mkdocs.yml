@@ -34,7 +34,8 @@ theme:
     - content.code.annotate
     - content.tabs.link
     - navigation.indexes
-    - navigation.sections
+    - navigation.tabs
+    - navigation.expand
     - navigation.tracking
     - navigation.footer
     - search.highlight
@@ -100,27 +101,33 @@ markdown_extensions:
       custom_checkbox: true
 
 nav:
-  - OpenArmature: index.md
-  - Getting Started:
-    - Quickstart: getting-started/index.md
-  - Concepts:
-    - concepts/index.md
-    - State and reducers: concepts/state-and-reducers.md
-    - Graphs: concepts/graphs.md
-    - Composition: concepts/composition.md
-    - Middleware: concepts/middleware.md
-    - Fan-out: concepts/fan-out.md
-    - Parallel branches: concepts/parallel-branches.md
-    - LLMs: concepts/llms.md
-    - Prompts: concepts/prompts.md
-    - Observability: concepts/observability.md
-    - Checkpointing: concepts/checkpointing.md
-  - Patterns:
-    - patterns/index.md
-    - Parameterized entry point: patterns/parameterized-entry-point.md
-    - Tool dispatch as node: patterns/tool-dispatch-as-node.md
-    - Session as checkpoint resume: patterns/session-as-checkpoint-resume.md
-    - Bypass if output exists: patterns/bypass-if-output-exists.md
+  - Documentation:
+    - OpenArmature: index.md
+    - Getting Started:
+      - Quickstart: getting-started/index.md
+    - Concepts:
+      - concepts/index.md
+      - State and reducers: concepts/state-and-reducers.md
+      - Graphs: concepts/graphs.md
+      - Composition: concepts/composition.md
+      - Middleware: concepts/middleware.md
+      - Fan-out: concepts/fan-out.md
+      - Parallel branches: concepts/parallel-branches.md
+      - LLMs: concepts/llms.md
+      - Prompts: concepts/prompts.md
+      - Observability: concepts/observability.md
+      - Checkpointing: concepts/checkpointing.md
+    - Model Providers:
+      - model-providers/index.md
+      - Self-hosted vLLM: model-providers/vllm.md
+      - Authoring a Provider: model-providers/authoring.md
+    - Reference:
+      - reference/index.md
+      - openarmature.graph: reference/graph.md
+      - openarmature.llm: reference/llm.md
+      - openarmature.prompts: reference/prompts.md
+      - openarmature.checkpoint: reference/checkpoint.md
+      - openarmature.observability: reference/observability.md
   - Examples:
     - examples/index.md
     - Hello, world: examples/00-hello-world.md
@@ -134,17 +141,12 @@ nav:
     - Checkpointing and migration: examples/08-checkpointing-and-migration.md
     - Tool use: examples/09-tool-use.md
     - Langfuse observability: examples/10-langfuse-observability.md
-  - Model Providers:
-    - model-providers/index.md
-    - Self-hosted vLLM: model-providers/vllm.md
-    - Authoring a Provider: model-providers/authoring.md
-  - Reference:
-    - reference/index.md
-    - openarmature.graph: reference/graph.md
-    - openarmature.llm: reference/llm.md
-    - openarmature.prompts: reference/prompts.md
-    - openarmature.checkpoint: reference/checkpoint.md
-    - openarmature.observability: reference/observability.md
+  - Patterns:
+    - patterns/index.md
+    - Parameterized entry point: patterns/parameterized-entry-point.md
+    - Tool dispatch as node: patterns/tool-dispatch-as-node.md
+    - Session as checkpoint resume: patterns/session-as-checkpoint-resume.md
+    - Bypass if output exists: patterns/bypass-if-output-exists.md
 
 extra:
   # Hide the "Made with Material for MkDocs" footer.
