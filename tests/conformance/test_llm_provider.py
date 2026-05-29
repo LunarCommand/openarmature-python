@@ -65,7 +65,23 @@ CONFORMANCE_DIR = (
 # Skip-marked here so a green test run at this commit means "everything we
 # claim to implement passes." Each subsequent PR drops its own rows as it
 # lands the underlying support.
-_DEFERRED_FIXTURES: dict[str, str] = {}
+_DEFERRED_FIXTURES: dict[str, str] = {
+    # Proposal 0037 (Anthropic Messages mapping) shipped in spec v0.28.0
+    # but python marks it not-yet in conformance.toml — the Anthropic
+    # provider isn't implemented in this release. 043 (the OpenAI side
+    # stripping anthropic thinking-block content) waits with it.
+    "033-anthropic-basic-message-round-trip": "Anthropic provider not implemented (0037 not-yet)",
+    "034-anthropic-tool-call-flow": "Anthropic provider not implemented (0037 not-yet)",
+    "035-anthropic-image-content-blocks": "Anthropic provider not implemented (0037 not-yet)",
+    "036-anthropic-tool-choice-modes": "Anthropic provider not implemented (0037 not-yet)",
+    "037-anthropic-runtime-config-mapping": "Anthropic provider not implemented (0037 not-yet)",
+    "038-anthropic-max-tokens-required": "Anthropic provider not implemented (0037 not-yet)",
+    "039-anthropic-error-mapping": "Anthropic provider not implemented (0037 not-yet)",
+    "040-anthropic-structured-output-native": "Anthropic provider not implemented (0037 not-yet)",
+    "041-anthropic-structured-output-fallback": "Anthropic provider not implemented (0037 not-yet)",
+    "042-anthropic-thinking-block-round-trip": "Anthropic provider not implemented (0037 not-yet)",
+    "043-openai-strips-thinking-blocks": "Anthropic provider not implemented (0037 not-yet)",
+}
 
 
 def _fixture_paths() -> list[Path]:

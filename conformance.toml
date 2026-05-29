@@ -22,14 +22,17 @@
 # between pinned-spec and spec-head is the consumer's job (e.g., the
 # spec docs site computes the difference and renders accordingly).
 #
-# Convention: this file is only updated as part of release PRs. Between
-# releases, the manifest reflects the most-recently-published version
-# so external readers never see a `since` referring to an unreleased
-# pre-tag commit.
+# Convention: this file is updated as part of release PRs AND as part
+# of feature PRs that bump the spec submodule pin (the manifest guard
+# requires entries for every Accepted proposal in the pinned spec, so
+# a submodule bump forces this file to update too). Such bump PRs set
+# `since` to the upcoming release version; between the bump PR and the
+# matching tag, external readers will see a `since` referring to the
+# upcoming, unreleased version.
 
 [manifest]
 implementation = "openarmature-python"
-spec_pin = "v0.27.1"
+spec_pin = "v0.31.0"
 
 # Status values:
 #   implemented   — shipped behavior matches the proposal's contract
@@ -175,3 +178,19 @@ since = "0.10.0"
 [proposals."0036"]
 status = "implemented"
 since = "0.10.0"
+
+# Spec v0.28.0-v0.31.0 (proposals 0037, 0039, 0040, 0041). 0038
+# (Gemini) is mid-accept on spec side and not in v0.31.0 yet.
+[proposals."0037"]
+status = "not-yet"
+
+[proposals."0039"]
+status = "implemented"
+since = "0.11.0"
+
+[proposals."0040"]
+status = "not-yet"
+
+[proposals."0041"]
+status = "implemented"
+since = "0.11.0"

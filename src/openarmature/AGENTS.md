@@ -1,6 +1,6 @@
 # OpenArmature — Agent documentation
 
-*This is the agent guide bundled with the openarmature Python package, version 0.10.0 (spec v0.27.1). For the full docs site see [openarmature.ai](https://openarmature.ai). For the canonical spec text see [openarmature.org/capabilities](https://openarmature.org/capabilities/). For project-specific conventions for the code you're editing, see the host project's `AGENTS.md` or `CLAUDE.md`.*
+*This is the agent guide bundled with the openarmature Python package, version 0.10.0 (spec v0.31.0). For the full docs site see [openarmature.ai](https://openarmature.ai). For the canonical spec text see [openarmature.org/capabilities](https://openarmature.org/capabilities/). For project-specific conventions for the code you're editing, see the host project's `AGENTS.md` or `CLAUDE.md`.*
 
 ## TL;DR
 
@@ -10,7 +10,7 @@ OpenArmature is a workflow framework for LLM pipelines and tool-calling agents �
 
 ## Capability contracts
 
-_Sourced from openarmature-spec v0.27.1. Each entry below reproduces §1 (Purpose) and §2 (Concepts) of the capability's `spec.md`. For the full spec text (execution model, error semantics, determinism, observer hooks, etc.) see the linked docs site._
+_Sourced from openarmature-spec v0.31.0. Each entry below reproduces §1 (Purpose) and §2 (Concepts) of the capability's `spec.md`. For the full spec text (execution model, error semantics, determinism, observer hooks, etc.) see the linked docs site._
 
 ### Capability: `graph-engine`
 
@@ -327,8 +327,9 @@ parent invocation's trace as nested spans. Implementations MUST also support an 
 its own trace and the parent's dispatch span carries an OTel `Link` to that new trace.
 
 **Correlation ID.** A per-invocation identifier that flows across observability backends.
-Distinct from `invocation_id` — the framework-generated `invocation_id` correlates spans within
-a single backend, while `correlation_id` is application-supplied (or auto-generated when absent)
+Distinct from `invocation_id` — the `invocation_id` (caller-supplied or framework-generated, per
+§5.1) correlates spans within a single backend, while `correlation_id` is application-supplied
+(or auto-generated when absent)
 and is intended to be visible in every backend the implementation emits to. A user running an
 LLM workflow with both an OTel backend (system traces, logs) and a Langfuse backend
 (LLM-specific traces) uses the `correlation_id` as a join key between them: find a slow request

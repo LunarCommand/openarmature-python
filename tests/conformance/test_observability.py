@@ -884,6 +884,25 @@ async def _run_fixture_028(spec: Mapping[str, Any]) -> None:
     cases = cast("list[dict[str, Any]]", spec["cases"])
     for case in cases:
         case_name = cast("str", case["name"])
+        # Cases using the `augment_metadata` directive exercise §3.4
+        # mid-invocation rejection at set_invocation_metadata. The
+        # augment_metadata harness primitive (per fixture 034) lands
+        # with proposal 0040 / task #22; surface the deferral via
+        # warnings.warn so pytest's end-of-run summary lists it (rather
+        # than silently passing) and continue to the other cases.
+        nodes_check = cast("dict[str, Any]", case.get("nodes", {}))
+        if any(
+            isinstance(n, dict) and "augment_metadata" in cast("dict[str, Any]", n)
+            for n in nodes_check.values()
+        ):
+            import warnings  # noqa: PLC0415
+
+            warnings.warn(
+                f"028 case {case_name!r} deferred: augment_metadata harness primitive "
+                f"lands with proposal 0040 / #22",
+                stacklevel=2,
+            )
+            continue
         try:
             # Build a minimal graph from the case's nodes/edges. The
             # fixture's node is a noop update — we never expect it to
@@ -921,7 +940,11 @@ async def _run_fixture_028(spec: Mapping[str, Any]) -> None:
 
             caller_metadata = cast("dict[str, Any]", case["caller_metadata"])
             try:
-                with pytest.raises(ValueError, match="reserved namespace prefix"):
+                # Covers both rejection paths: the prefix-namespace
+                # rejection (openarmature.* / gen_ai.*, from 0034) and
+                # the exact-key-name rejection (0041's §8.4 reserved
+                # set). Both error messages contain "reserved".
+                with pytest.raises(ValueError, match="reserved"):
                     await graph.invoke(state_cls(), metadata=caller_metadata)
             finally:
                 otel_observer.shutdown()
