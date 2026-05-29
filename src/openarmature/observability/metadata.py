@@ -29,6 +29,9 @@ Validation rules (apply at every entry point):
 - Keys MUST NOT start with ``openarmature.`` or ``gen_ai.`` (reserved
   for spec-normative attribute namespaces; collisions would silently
   overwrite OA-emitted state at the observer layer).
+- Keys MUST NOT exactly match a reserved OA-emitted top-level metadata
+  key name (the §8.4 Langfuse set plus ``invocation_id``; proposal
+  0041) for the same collision reason.
 - Values MUST be OTel-attribute-compatible scalars: ``str``, ``int``,
   ``float``, ``bool``, or a homogeneous list/tuple of those types.
   ``None``, nested objects, and mixed-type arrays are rejected.
@@ -62,6 +65,39 @@ _invocation_metadata_var: ContextVar[MappingProxyType[str, AttributeValue]] = Co
 # off-limits to caller-supplied metadata; the engine rejects at the
 # boundary so observers never see a colliding key.
 _RESERVED_PREFIXES: tuple[str, ...] = ("openarmature.", "gen_ai.")
+
+# Reserved exact key NAMES per §3.4 (proposal 0041): the top-level
+# metadata keys an OA-emitted §8 backend mapping writes alongside
+# caller keys (the §8.4 Langfuse set, plus invocation_id). A caller
+# key matching one exactly would silently overwrite an OA field in a
+# backend's flat top-level metadata, so it is rejected at the boundary
+# the same way as the prefix reservation. Backend-set-independent:
+# rejected regardless of which observers are attached.
+_RESERVED_KEY_NAMES: frozenset[str] = frozenset(
+    {
+        "correlation_id",
+        "entry_node",
+        "spec_version",
+        "detached_child_trace_ids",
+        "namespace",
+        "step",
+        "attempt_index",
+        "fan_out_index",
+        "subgraph_name",
+        "fan_out_item_count",
+        "fan_out_concurrency",
+        "fan_out_error_policy",
+        "fan_out_parent_node_name",
+        "prompt_group_name",
+        "request_extras",
+        "finish_reason",
+        "system",
+        "response_model",
+        "response_id",
+        "prompt",
+        "invocation_id",
+    }
+)
 
 
 def current_invocation_metadata() -> MappingProxyType[str, AttributeValue]:
@@ -144,6 +180,12 @@ def _validate_metadata_key(key: Any) -> None:
                 f"invocation metadata key {key!r} uses reserved namespace prefix {reserved!r}; "
                 f"reserved prefixes are for spec-normative attributes (openarmature.*, gen_ai.*)"
             )
+    if key in _RESERVED_KEY_NAMES:
+        raise ValueError(
+            f"invocation metadata key {key!r} is reserved: it exactly matches a top-level "
+            f"metadata key OA emits to observability backends, and would overwrite it. "
+            f"Rename the key."
+        )
 
 
 def _validate_metadata_value(key: str, value: Any) -> None:

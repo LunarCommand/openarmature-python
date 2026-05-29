@@ -34,11 +34,11 @@
 from __future__ import annotations
 
 import json
-import uuid as _uuid
 from contextlib import ExitStack
 from typing import TYPE_CHECKING, Any, cast
 
 from .client import LangfuseGenerationHandle, LangfuseSpanHandle, LangfuseUsage, ObservationLevel
+from .trace_id import _is_uuid, _to_otel_trace_id
 
 if TYPE_CHECKING:
     from langfuse import Langfuse
@@ -51,31 +51,6 @@ except ImportError as exc:  # pragma: no cover - exercised by extras-not-install
         "openarmature.observability.langfuse.adapter requires the optional `langfuse` extras. "
         "Install with: pip install 'openarmature[langfuse]'"
     ) from exc
-
-
-def _to_otel_trace_id(trace_id: str) -> str:
-    """Convert OA's UUID4-formatted invocation_id to OTel's 32-char
-    hex trace_id form (no dashes).
-
-    Langfuse v4 is OTel-based: trace IDs are 128-bit integers
-    serialized as 32 lowercase hex characters. OA's invocation_id is
-    a standard UUID4 (8-4-4-4-12 dashed hex); same 128 bits, different
-    representation. Passing the dashed form to Langfuse v4 fails with
-    ``int(..., 16)`` parsing in the SDK's internals.
-
-    Non-UUID inputs pass through unchanged so adapter consumers can
-    pass an already-OTel-formatted trace_id if they have one.
-
-    Trade-off: the spec §8.4.1 "trace.id MUST equal invocation_id
-    verbatim" contract is met content-wise (same 128 bits) but not
-    representation-wise. Users querying Langfuse for an OA
-    invocation_id need to strip dashes before searching. Documented
-    in the adapter's class docstring.
-    """
-    try:
-        return _uuid.UUID(trace_id).hex
-    except (ValueError, AttributeError):
-        return trace_id
 
 
 def _stringify_metadata(metadata: dict[str, Any] | None) -> dict[str, str]:
@@ -231,10 +206,14 @@ class LangfuseSDKAdapter:
         # it via propagate_attributes on every observation under this
         # trace_id so the trace's display name + metadata stay
         # consistent under v4's last-wins semantics.
-        self._trace_info[id] = {
-            "name": name,
-            "metadata": dict(metadata) if metadata is not None else {},
-        }
+        md: dict[str, Any] = dict(metadata) if metadata is not None else {}
+        # Non-UUID invocation_id: the derived trace.id is a hash, not
+        # reversible to the caller's id, so surface the raw id under
+        # trace.metadata.invocation_id for lookup (§8.4.1). The key is
+        # reserved (proposal 0041), so no caller metadata collides.
+        if not _is_uuid(id):
+            md.setdefault("invocation_id", id)
+        self._trace_info[id] = {"name": name, "metadata": md}
 
     def update_trace(
         self,

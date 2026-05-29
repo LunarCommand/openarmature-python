@@ -41,12 +41,14 @@ from .client import (
     ObservationType,
 )
 from .observer import LangfuseObserver
+from .trace_id import langfuse_trace_id
 
 # LangfuseSDKAdapter requires the [langfuse] optional dependency.
 # Surface it when available, but don't force the import on consumers
 # who only use the InMemoryLangfuseClient — the adapter module's own
 # guard raises an informative ImportError if anyone tries to use it
-# without the extras installed.
+# without the extras installed. `langfuse_trace_id` is pure
+# (uuid+hashlib only), so it's exported unconditionally above.
 try:
     from .adapter import LangfuseSDKAdapter as LangfuseSDKAdapter
 
@@ -65,6 +67,7 @@ __all__ = [
     "LangfuseUsage",
     "ObservationLevel",
     "ObservationType",
+    "langfuse_trace_id",
 ]
 if _adapter_available:
     __all__.append("LangfuseSDKAdapter")

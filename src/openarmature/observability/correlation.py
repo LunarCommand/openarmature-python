@@ -30,6 +30,7 @@ and is gated behind the ``[otel]`` extras.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable
 from contextvars import ContextVar, Token
 from typing import TYPE_CHECKING
@@ -117,6 +118,37 @@ def _set_invocation_id(value: str) -> Token[str | None]:
 
 def _reset_invocation_id(token: Token[str | None]) -> None:
     _invocation_id_var.reset(token)
+
+
+# Caller-supplied invocation_id validation (proposal 0039). Per §5.1 a
+# caller MAY supply its own id at invoke(); it MAY be any non-empty
+# URL-safe string (it need not be a UUID — the Langfuse trace.id
+# derivation in §8.4.1 handles non-UUID values). URL-safe here is the
+# RFC 3986 unreserved set.
+_INVOCATION_ID_RE = re.compile(r"^[A-Za-z0-9._~-]+$")
+
+
+def validate_invocation_id(value: object) -> str:
+    """Validate a caller-supplied ``invocation_id`` and return it.
+
+    Per observability §5.1 a caller-supplied id MAY be any non-empty
+    URL-safe string. Rejects empty / non-string / non-URL-safe values
+    at the ``invoke()`` boundary so the violation surfaces
+    synchronously to the caller rather than as a downstream trace-id
+    derivation failure. Typed ``object`` (like
+    :func:`validate_invocation_metadata`) so the boundary check guards
+    against untyped callers. Raises :class:`ValueError`.
+    """
+    if not isinstance(value, str):
+        raise ValueError(f"invocation_id must be a string; got {type(value).__name__}")
+    if not value:
+        raise ValueError("invocation_id must be a non-empty string")
+    if not _INVOCATION_ID_RE.match(value):
+        raise ValueError(
+            f"invocation_id {value!r} is not URL-safe; allowed characters are "
+            f"A-Z a-z 0-9 and -._~ (RFC 3986 unreserved set)"
+        )
+    return value
 
 
 # ---------------------------------------------------------------------------
@@ -398,6 +430,7 @@ __all__ = [
     "current_fan_out_index",
     "current_invocation_id",
     "current_namespace_prefix",
+    "validate_invocation_id",
     # Engine-internal lifecycle helpers — exported so the engine in
     # ``openarmature.graph.compiled`` can drive set/reset without
     # pyright's strict ``reportUnusedFunction`` flagging them as
