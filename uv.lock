@@ -966,6 +966,9 @@ docs = [
 examples = [
     { name = "openai" },
 ]
+observability = [
+    { name = "openarmature", extra = ["langfuse", "otel"] },
+]
 
 [package.metadata]
 requires-dist = [
@@ -1000,6 +1003,7 @@ docs = [
     { name = "pymdown-extensions", specifier = ">=10.0,<11" },
 ]
 examples = [{ name = "openai", specifier = ">=1.40" }]
+observability = [{ name = "openarmature", extras = ["otel", "langfuse"] }]
 
 [[package]]
 name = "opentelemetry-api"
