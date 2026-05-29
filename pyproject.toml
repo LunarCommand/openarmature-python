@@ -85,6 +85,18 @@ docs = [
 examples = [
     "openai>=1.40",
 ]
+# Self-references the project's public otel + langfuse extras so the
+# observability backends can be defaulted into the local env: uv can
+# default dependency groups but not extras.
+observability = ["openarmature[otel,langfuse]"]
+
+[tool.uv]
+# Default-synced env for local work so a plain `uv run` (mkdocs
+# serve, the examples, pytest) needs no per-command flags. Naming
+# default-groups overrides uv's built-in ["dev"] default, hence "dev"
+# is re-listed. The "observability" group carries the otel/langfuse
+# extras, which uv otherwise can't default.
+default-groups = ["dev", "docs", "examples", "observability"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/openarmature"]
