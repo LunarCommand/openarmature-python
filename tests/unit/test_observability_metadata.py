@@ -1,5 +1,6 @@
-"""Unit tests for the caller-supplied invocation metadata surface
-(proposal 0034 / observability §3.4 + §5.6 + §8.4.1+§8.4.2).
+"""Unit tests for the caller-supplied invocation surface: metadata
+(proposal 0034), the caller-supplied invocation_id (proposal 0039),
+and the reserved exact-key-name rejection (proposal 0041).
 
 These tests pin the validation rules, the ContextVar lifecycle, the
 mid-invocation augmentation helper, and the per-async-context COW
@@ -338,3 +339,110 @@ async def test_mid_invocation_augmentation_persists_to_next_node() -> None:
     # Sequential nodes share the engine task's Context, so a's
     # set_invocation_metadata persists into b's body.
     assert capture_b == {"tenantId": "acme", "stage": "a-completed"}
+
+
+# ---------------------------------------------------------------------------
+# Reserved exact key names (proposal 0041)
+# ---------------------------------------------------------------------------
+
+
+def test_validate_rejects_reserved_exact_key_name() -> None:
+    # An exact match to an OA-emitted top-level key is rejected at the
+    # boundary, the same as the namespace-prefix reservation.
+    with pytest.raises(ValueError, match="is reserved"):
+        validate_invocation_metadata({"namespace": "x"})
+
+
+def test_validate_rejects_invocation_id_key() -> None:
+    with pytest.raises(ValueError, match="is reserved"):
+        validate_invocation_metadata({"invocation_id": "abc"})
+
+
+def test_set_invocation_metadata_rejects_reserved_exact_key_name() -> None:
+    # The SAME reservation fires at the mid-invocation boundary, since
+    # both paths route through _validate_metadata_key.
+    with pytest.raises(ValueError, match="is reserved"):
+        set_invocation_metadata(correlation_id="c-2")
+
+
+async def test_invoke_rejects_reserved_exact_key_at_boundary() -> None:
+    graph = _build_graph()
+    with pytest.raises(ValueError, match="is reserved"):
+        await graph.invoke(_SimpleState(), metadata={"step": 3})
+
+
+# ---------------------------------------------------------------------------
+# Caller-supplied invocation_id (proposal 0039)
+# ---------------------------------------------------------------------------
+
+
+def test_validate_invocation_id_accepts_nanoid_and_uuid() -> None:
+    from openarmature.observability.correlation import validate_invocation_id
+
+    assert validate_invocation_id("V1StGXR8_Z5jdHi6B-myT") == "V1StGXR8_Z5jdHi6B-myT"
+    uid = "b24eda93-d06d-4eaa-9891-ca5e56f35722"
+    assert validate_invocation_id(uid) == uid
+
+
+def test_validate_invocation_id_rejects_bad() -> None:
+    from openarmature.observability.correlation import validate_invocation_id
+
+    with pytest.raises(ValueError, match="non-empty"):
+        validate_invocation_id("")
+    with pytest.raises(ValueError, match="not URL-safe"):
+        validate_invocation_id("has space")
+
+
+async def test_invoke_uses_caller_invocation_id() -> None:
+    from openarmature.observability.correlation import current_invocation_id
+
+    captured: dict[str, Any] = {}
+
+    async def _capture(_s: _SimpleState) -> dict[str, Any]:
+        captured["id"] = current_invocation_id()
+        return {"counter": 1}
+
+    graph = (
+        GraphBuilder(_SimpleState)
+        .add_node("capture", _capture)
+        .add_edge("capture", END)
+        .set_entry("capture")
+        .compile()
+    )
+    await graph.invoke(_SimpleState(), invocation_id="run_abc123")
+    assert captured["id"] == "run_abc123"
+
+
+async def test_invoke_mints_uuid_when_invocation_id_absent() -> None:
+    import uuid
+
+    from openarmature.observability.correlation import current_invocation_id
+
+    captured: dict[str, Any] = {}
+
+    async def _capture(_s: _SimpleState) -> dict[str, Any]:
+        captured["id"] = current_invocation_id()
+        return {"counter": 1}
+
+    graph = (
+        GraphBuilder(_SimpleState)
+        .add_node("capture", _capture)
+        .add_edge("capture", END)
+        .set_entry("capture")
+        .compile()
+    )
+    await graph.invoke(_SimpleState())
+    # Auto-minted in the absence of a caller id: a parseable UUID.
+    uuid.UUID(captured["id"])
+
+
+async def test_invoke_rejects_non_url_safe_invocation_id() -> None:
+    graph = _build_graph()
+    with pytest.raises(ValueError, match="not URL-safe"):
+        await graph.invoke(_SimpleState(), invocation_id="bad id!")
+
+
+async def test_invoke_rejects_empty_invocation_id() -> None:
+    graph = _build_graph()
+    with pytest.raises(ValueError, match="non-empty"):
+        await graph.invoke(_SimpleState(), invocation_id="")

@@ -77,6 +77,7 @@ from openarmature.observability.correlation import (
     _set_namespace_prefix,
     current_active_observer_span,
     current_attempt_index,
+    validate_invocation_id,
 )
 from openarmature.observability.metadata import (
     _reset_invocation_metadata,
@@ -772,6 +773,7 @@ class CompiledGraph[StateT: State]:
         observers: Iterable[Observer | SubscribedObserver] | None = None,
         *,
         correlation_id: str | None = None,
+        invocation_id: str | None = None,
         resume_invocation: str | None = None,
         metadata: Mapping[str, Any] | None = None,
     ) -> StateT:
@@ -797,6 +799,12 @@ class CompiledGraph[StateT: State]:
         - ``correlation_id`` is the per-invocation cross-backend join
           key. Caller-supplied or auto-generated UUIDv4 when absent.
           Preserved unchanged across ``resume_invocation``.
+        - ``invocation_id`` (proposal 0039) is the per-attempt id.
+          Caller-supplied or auto-generated UUIDv4 when absent; a
+          caller value MAY be any non-empty URL-safe string. Applies
+          to the fresh-invocation path only — a ``resume_invocation``
+          mints a fresh id regardless (each attempt is its own
+          invocation).
         - ``resume_invocation`` names a prior ``invocation_id`` to
           resume from. Requires a registered Checkpointer; raises
           ``CheckpointNotFound`` when the backend has no record for
@@ -848,7 +856,13 @@ class CompiledGraph[StateT: State]:
         # step 3) and pre-populate the skip-set + completed_positions.
         starting_state: StateT = initial_state
         resolved_correlation_id = correlation_id or str(uuid.uuid4())
-        invocation_id = str(uuid.uuid4())
+        # Caller-supplied invocation_id (proposal 0039) applies to the
+        # fresh-invocation path only; a resume mints a fresh id
+        # regardless (each attempt is its own invocation, §5.1).
+        if invocation_id is not None and resume_invocation is None:
+            invocation_id = validate_invocation_id(invocation_id)
+        else:
+            invocation_id = str(uuid.uuid4())
         resume_skip_set: frozenset[tuple[str, ...]] = frozenset()
         completed_positions: list[NodePosition] = []
         pending_resume_states: dict[int, Any] = {}

@@ -49,6 +49,7 @@ from .observer import LangfuseObserver
 # without the extras installed.
 try:
     from .adapter import LangfuseSDKAdapter as LangfuseSDKAdapter
+    from .adapter import langfuse_trace_id as langfuse_trace_id
 
     _adapter_available = True
 except ImportError:  # pragma: no cover - exercised by extras-not-installed path
@@ -68,3 +69,4 @@ __all__ = [
 ]
 if _adapter_available:
     __all__.append("LangfuseSDKAdapter")
+    __all__.append("langfuse_trace_id")

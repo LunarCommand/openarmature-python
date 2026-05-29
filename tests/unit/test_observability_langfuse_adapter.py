@@ -80,7 +80,9 @@ def test_adapter_caches_trace_info() -> None:
     assert "trace-1" in adapter._trace_info  # noqa: SLF001
     cached = adapter._trace_info["trace-1"]  # noqa: SLF001
     assert cached["name"] == "my-trace"
-    assert cached["metadata"] == {"correlation_id": "c-1"}
+    # "trace-1" is a non-UUID id, so the raw id is also surfaced under
+    # metadata.invocation_id (proposal 0039 / §8.4.1).
+    assert cached["metadata"] == {"correlation_id": "c-1", "invocation_id": "trace-1"}
 
 
 def test_adapter_converts_uuid_trace_id_to_otel_hex() -> None:
@@ -96,10 +98,34 @@ def test_adapter_converts_uuid_trace_id_to_otel_hex() -> None:
     assert _to_otel_trace_id("b24eda93-d06d-4eaa-9891-ca5e56f35722") == "b24eda93d06d4eaa9891ca5e56f35722"
     # Idempotent on already-hex input.
     assert _to_otel_trace_id("b24eda93d06d4eaa9891ca5e56f35722") == "b24eda93d06d4eaa9891ca5e56f35722"
-    # Non-UUID inputs pass through unchanged (consumers passing an
-    # already-OTel-formatted trace_id from elsewhere don't get
-    # mangled).
-    assert _to_otel_trace_id("custom-trace-id") == "custom-trace-id"
+
+
+def test_to_otel_trace_id_non_uuid_derivation() -> None:
+    import hashlib
+
+    from openarmature.observability.langfuse import langfuse_trace_id
+    from openarmature.observability.langfuse.adapter import _to_otel_trace_id
+
+    # Non-UUID -> first 16 bytes of SHA-256 as 32 hex (== Langfuse's
+    # create_trace_id(seed)); the public helper is the same mapping.
+    expected = hashlib.sha256(b"run_abc123").digest()[:16].hex()
+    assert _to_otel_trace_id("run_abc123") == expected
+    assert langfuse_trace_id("run_abc123") == expected
+    # Spec fixture 036 pins this vector.
+    assert expected == "29b50a6c08dabfeaeb1696301f4fabe1"
+    # UUID path still strips dashes; the helper agrees.
+    assert langfuse_trace_id("b24eda93-d06d-4eaa-9891-ca5e56f35722") == "b24eda93d06d4eaa9891ca5e56f35722"
+
+
+def test_adapter_trace_surfaces_raw_id_for_non_uuid() -> None:
+    adapter = LangfuseSDKAdapter(_dummy_client())
+    # Non-UUID id: raw id surfaced under metadata.invocation_id (§8.4.1).
+    adapter.trace(id="run_abc123", name="t", metadata=None)
+    assert adapter._trace_info["run_abc123"]["metadata"]["invocation_id"] == "run_abc123"  # noqa: SLF001
+    # UUID id: no invocation_id injected (its trace.id is reversible).
+    uid = "b24eda93-d06d-4eaa-9891-ca5e56f35722"
+    adapter.trace(id=uid, name="t", metadata=None)
+    assert "invocation_id" not in adapter._trace_info[uid]["metadata"]  # noqa: SLF001
 
 
 def test_adapter_update_trace_merges_into_cache() -> None:
@@ -111,7 +137,8 @@ def test_adapter_update_trace_merges_into_cache() -> None:
 
     cached = adapter._trace_info["trace-1"]  # noqa: SLF001
     assert cached["name"] == "renamed"
-    assert cached["metadata"] == {"key1": "v1", "key2": "v2"}
+    # "trace-1" is non-UUID, so trace() also surfaced metadata.invocation_id.
+    assert cached["metadata"] == {"key1": "v1", "key2": "v2", "invocation_id": "trace-1"}
 
 
 def test_adapter_force_flush_delegates_to_client() -> None:
