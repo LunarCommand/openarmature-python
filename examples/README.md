@@ -113,6 +113,17 @@ defaults shown:
 | `LLM_MODEL` | `gpt-4o-mini` | Any model the bound endpoint exposes. |
 | `LLM_API_KEY` | (none) | Required; pass empty for local servers that don't authenticate. |
 
+The Langfuse observer and the Langfuse prompt backend read the standard
+Langfuse SDK variables when pointed at a live Langfuse account;
+`Langfuse()` reads them automatically, so no credentials appear in the
+example code:
+
+| Env var | Notes |
+| --- | --- |
+| `LANGFUSE_PUBLIC_KEY` | From your Langfuse project settings. |
+| `LANGFUSE_SECRET_KEY` | From your Langfuse project settings. |
+| `LANGFUSE_BASE_URL` | Langfuse host (e.g. `https://cloud.langfuse.com`); the SDK also accepts `LANGFUSE_HOST`. |
+
 ## Running
 
 ```bash

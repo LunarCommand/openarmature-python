@@ -55,6 +55,17 @@ The OpenAI public-API defaults are:
 | `LLM_MODEL`     | `gpt-4o-mini`              | Any model the bound endpoint exposes.                                            |
 | `LLM_API_KEY`   | (none)                     | Required. Pass empty for local servers that don't authenticate.                  |
 
+The Langfuse observer and the Langfuse prompt backend read the
+standard Langfuse SDK variables when pointed at a live Langfuse
+account; `Langfuse()` picks them up automatically, so no credentials
+appear in the example code:
+
+| Env var               | Notes                                                                                    |
+| --------------------- | ---------------------------------------------------------------------------------------- |
+| `LANGFUSE_PUBLIC_KEY` | From your Langfuse project settings.                                                     |
+| `LANGFUSE_SECRET_KEY` | From your Langfuse project settings.                                                     |
+| `LANGFUSE_BASE_URL`   | Langfuse host (e.g. `https://cloud.langfuse.com`). The SDK also accepts `LANGFUSE_HOST`. |
+
 For a local OpenAI-compatible server (vLLM, LM Studio, llama.cpp,
 etc.), point `LLM_BASE_URL` at the host root (e.g.
 `http://localhost:8000`) and set `LLM_API_KEY` to whatever value the
