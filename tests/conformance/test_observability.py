@@ -887,12 +887,21 @@ async def _run_fixture_028(spec: Mapping[str, Any]) -> None:
         # Cases using the `augment_metadata` directive exercise §3.4
         # mid-invocation rejection at set_invocation_metadata. The
         # augment_metadata harness primitive (per fixture 034) lands
-        # with proposal 0040 / task #22; skip until then.
+        # with proposal 0040 / task #22; surface the deferral via
+        # warnings.warn so pytest's end-of-run summary lists it (rather
+        # than silently passing) and continue to the other cases.
         nodes_check = cast("dict[str, Any]", case.get("nodes", {}))
         if any(
             isinstance(n, dict) and "augment_metadata" in cast("dict[str, Any]", n)
             for n in nodes_check.values()
         ):
+            import warnings  # noqa: PLC0415
+
+            warnings.warn(
+                f"028 case {case_name!r} deferred: augment_metadata harness primitive "
+                f"lands with proposal 0040 / #22",
+                stacklevel=2,
+            )
             continue
         try:
             # Build a minimal graph from the case's nodes/edges. The

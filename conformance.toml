@@ -22,10 +22,13 @@
 # between pinned-spec and spec-head is the consumer's job (e.g., the
 # spec docs site computes the difference and renders accordingly).
 #
-# Convention: this file is only updated as part of release PRs. Between
-# releases, the manifest reflects the most-recently-published version
-# so external readers never see a `since` referring to an unreleased
-# pre-tag commit.
+# Convention: this file is updated as part of release PRs AND as part
+# of feature PRs that bump the spec submodule pin (the manifest guard
+# requires entries for every Accepted proposal in the pinned spec, so
+# a submodule bump forces this file to update too). Such bump PRs set
+# `since` to the upcoming release version; between the bump PR and the
+# matching tag, external readers will see a `since` referring to the
+# upcoming, unreleased version.
 
 [manifest]
 implementation = "openarmature-python"
