@@ -1202,6 +1202,20 @@ class CompiledGraph[StateT: State]:
                 step_result = await self._step_function_node(node, current, state, context)
             state = step_result.state
 
+            # Proposal 0043 (post-PR-99 review): restore the outer
+            # ``current`` to the shared box after a successful step.
+            # Descended `_step_*` calls (subgraph, fan-out, parallel-
+            # branches) write inner-node names into the box; without
+            # this restore, the wrapper's name leaks out of the box
+            # when the wrapper is the last node before the END-routing
+            # edge — and for parallel-branches the box would end with
+            # whichever branch's inner finished last (nondeterministic).
+            # On the failure path, the raise above bypasses this line,
+            # so the inner-most node that raised stays in the box as
+            # the failure-path ``final_node`` (matching spec §4
+            # attribution).
+            context.final_node_box[:] = [current]
+
             # Per spec graph-engine §3 step 3 (revised in proposal
             # 0012 / v0.9.0): the engine MUST dispatch the
             # ``completed`` event AFTER edge evaluation completes.

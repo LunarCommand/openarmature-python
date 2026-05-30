@@ -576,10 +576,20 @@ class LangfuseObserver:
         # objects fall through to a str representation. The serialized
         # form is what ends up on the Langfuse Trace's
         # ``input`` / ``output`` field.
+        #
+        # ``mode="json"`` (rather than the default Python mode) coerces
+        # non-JSON-native types — ``datetime``, ``UUID``, ``Decimal``,
+        # etc. — into JSON-compatible strings BEFORE the dict reaches
+        # the downstream ``json.dumps`` truncation path. Without it the
+        # truncation path raises ``TypeError`` and the observer's
+        # ``__call__`` raise is swallowed by the engine's warnings-only
+        # observer-isolation contract, leaving ``trace.input`` /
+        # ``trace.output`` silently blank on states containing those
+        # types.
         dumper = getattr(state, "model_dump", None)
         if callable(dumper):
             try:
-                return dumper()
+                return dumper(mode="json")
             except Exception:
                 return str(state)
         return str(state)
