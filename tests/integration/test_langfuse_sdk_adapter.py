@@ -49,6 +49,7 @@ def _poll_trace_with_retry(client: Any, hex_id: str, *, attempts: int = 12, slee
     )
 
 
+@pytest.mark.integration
 async def test_sdk_adapter_emits_trace_input_output_to_live_langfuse() -> None:
     """End-to-end: open a trace via LangfuseSDKAdapter, push input via
     update_trace at the start, push output via update_trace at the end,
@@ -103,6 +104,7 @@ async def test_sdk_adapter_emits_trace_input_output_to_live_langfuse() -> None:
     # synthetic carrier and reliably shows in the list).
 
 
+@pytest.mark.integration
 async def test_sdk_adapter_handles_invocation_with_no_real_observation() -> None:
     """Edge case: invocation fails before any node observation opens
     (resume-path validation failure, etc.). The cached pending_input
