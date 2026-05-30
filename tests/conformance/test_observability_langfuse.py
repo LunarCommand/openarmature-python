@@ -74,6 +74,16 @@ _LANGFUSE_FIXTURES = frozenset(
         # before the LLM call, exercising the §3.4 MUST that open
         # spans in the augmenting context's lineage update in place.
         "034-caller-metadata-open-span-update-serial",
+        # 037 stays deferred in v0.11.0: the conformance fixture
+        # exercises hook-based cases (caller-supplied callables) that
+        # the YAML-only fixture format can't express directly without
+        # a harness extension. The five-case decision tree
+        # (default stub / disable_state_payload=False / hooks
+        # non-null / hooks null-fallthrough / resume) is verified
+        # end-to-end by the unit tests in
+        # ``tests/unit/test_observability_langfuse.py::test_trace_input_output_*``.
+        # Wiring fixture 037 lands when the harness grows directive
+        # support for caller-supplied hook returns.
         # 029 + 030 stay deferred in v0.11.0:
         # - 029 (fan-out per-instance): fixture omits ``collect_field``
         #   and ``target_field`` on the fan_out cfg, plus the inner

@@ -24,11 +24,16 @@ from __future__ import annotations
 
 import json
 import uuid
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Any, cast
 
-from openarmature.graph.events import MetadataAugmentationEvent, NodeEvent
+from openarmature.graph.events import (
+    InvocationCompletedEvent,
+    InvocationStartedEvent,
+    MetadataAugmentationEvent,
+    NodeEvent,
+)
 from openarmature.observability.lineage import is_prefix_or_equal, is_strict_prefix
 from openarmature.observability.llm_event import LLM_NAMESPACE, LlmEventPayload
 
@@ -224,6 +229,23 @@ class LangfuseObserver:
       each get their own Langfuse Trace. Same link mechanism on the
       fan-out node observation: each per-instance detached trace_id
       lands in the array.
+    - ``disable_state_payload``: default ``True`` per §8.4.1 *Trace
+      input/output sourcing* (proposal 0043). When ``True`` the
+      observer does NOT serialize ``initial_state`` / final state
+      directly onto ``trace.input`` / ``trace.output``; the minimal
+      stub applies unless ``trace_input_from_state`` /
+      ``trace_output_from_state`` overrides. When ``False`` the raw
+      state object is serialized to the Trace fields, subject to
+      ``payload_byte_cap`` truncation. Independent of
+      ``disable_llm_payload`` — the two payloads carry distinct
+      threat models (LLM-call transcript vs. application state).
+    - ``trace_input_from_state``: optional caller hook returning the
+      value to use as ``trace.input``. Called once per invocation at
+      the ``InvocationStartedEvent``. Returning ``None`` falls
+      through to the next lever (raw state when
+      ``disable_state_payload=False``, minimal stub otherwise).
+    - ``trace_output_from_state``: same shape for ``trace.output``,
+      called once per invocation at the ``InvocationCompletedEvent``.
 
     The observer reads the spec version from the package at
     construction time. Safe to share across concurrent invocations
@@ -238,6 +260,10 @@ class LangfuseObserver:
     detached_subgraphs: frozenset[str] = field(default_factory=_empty_str_frozenset)
     detached_fan_outs: frozenset[str] = field(default_factory=_empty_str_frozenset)
     spec_version: str = field(default_factory=_read_spec_version)
+    # Proposal 0043 §8.4.1 *Trace input/output sourcing*.
+    disable_state_payload: bool = True
+    trace_input_from_state: Callable[[Any], Any] | None = None
+    trace_output_from_state: Callable[[Any], Any] | None = None
 
     # Internal state populated during invocation.
     _inv_states: dict[str, _InvState] = field(init=False, repr=False, default_factory=dict[str, _InvState])
@@ -252,7 +278,16 @@ class LangfuseObserver:
                 f"minimum of {_PAYLOAD_MIN_BYTES} bytes"
             )
 
-    async def __call__(self, event: NodeEvent | MetadataAugmentationEvent) -> None:
+    async def __call__(
+        self,
+        event: (NodeEvent | MetadataAugmentationEvent | InvocationStartedEvent | InvocationCompletedEvent),
+    ) -> None:
+        if isinstance(event, InvocationStartedEvent):
+            self._handle_invocation_started(event)
+            return
+        if isinstance(event, InvocationCompletedEvent):
+            self._handle_invocation_completed(event)
+            return
         if isinstance(event, MetadataAugmentationEvent):
             self._handle_metadata_augmentation(event)
             return
@@ -459,6 +494,119 @@ class LangfuseObserver:
                 continue
             if is_prefix_or_equal(ns, aug_ns):
                 observation.handle.update(metadata=metadata_delta)
+
+    # ------------------------------------------------------------------
+    # Invocation-boundary events (proposal 0043 §8.4.1 sourcing)
+    # ------------------------------------------------------------------
+
+    def _handle_invocation_started(self, event: InvocationStartedEvent) -> None:
+        # Spec proposal 0043 §8.4.1 *Trace input/output sourcing*.
+        # Lazy-open the Trace if this is the first signal for the
+        # invocation_id (no node event has fired yet), then resolve
+        # ``trace.input`` via the three-lever decision tree:
+        #   1. Hook supplied AND returns non-None → hook value.
+        #   2. ``disable_state_payload`` is False → raw initial_state
+        #      serialized (subject to payload_byte_cap truncation).
+        #   3. Otherwise → minimal stub:
+        #        {entry_node, correlation_id}.
+        # The stub carries no application payload — both fields are
+        # already in ``trace.metadata``; surfacing them on
+        # ``trace.input`` makes the Langfuse Traces list view
+        # scannable without revealing state shape.
+        if event.invocation_id not in self._inv_states:
+            self._open_trace_lazy(event.invocation_id, event.correlation_id, event.entry_node)
+        input_value = self._resolve_trace_input(event)
+        self.client.update_trace(id=event.invocation_id, input=input_value)
+
+    def _handle_invocation_completed(self, event: InvocationCompletedEvent) -> None:
+        # Spec proposal 0043 §8.4.1. Resolve ``trace.output`` via the
+        # same three-lever decision tree as input, with the minimal
+        # stub carrying {final_node, status}.
+        if event.invocation_id not in self._inv_states:
+            # Defensive: a fast-failure invocation may complete before
+            # any node event fired (e.g., resume-path validation
+            # rejected). Lazy-open the Trace so the stub still lands.
+            entry_node = event.final_node  # best-effort fallback
+            self._open_trace_lazy(event.invocation_id, event.correlation_id, entry_node)
+        output_value = self._resolve_trace_output(event)
+        self.client.update_trace(id=event.invocation_id, output=output_value)
+
+    def _resolve_trace_input(self, event: InvocationStartedEvent) -> Any:
+        # Lever 1: caller hook.
+        if self.trace_input_from_state is not None:
+            try:
+                hook_value = self.trace_input_from_state(event.initial_state)
+            except Exception:
+                # Hook raise: skip emission (defensive — caller code
+                # should not break observability). Fall through to the
+                # next lever rather than crash the observer.
+                hook_value = None
+            if hook_value is not None:
+                return self._maybe_truncate_for_extras(hook_value)
+        # Lever 2: raw state when knob is OFF.
+        if not self.disable_state_payload:
+            serialized = self._state_to_jsonable(event.initial_state)
+            return self._maybe_truncate_for_extras(serialized)
+        # Lever 3: minimal stub.
+        stub: dict[str, Any] = {"entry_node": event.entry_node}
+        if event.correlation_id is not None:
+            stub["correlation_id"] = event.correlation_id
+        return stub
+
+    def _resolve_trace_output(self, event: InvocationCompletedEvent) -> Any:
+        # Lever 1: caller hook.
+        if self.trace_output_from_state is not None:
+            try:
+                hook_value = self.trace_output_from_state(event.final_state)
+            except Exception:
+                hook_value = None
+            if hook_value is not None:
+                return self._maybe_truncate_for_extras(hook_value)
+        # Lever 2: raw state when knob is OFF.
+        if not self.disable_state_payload:
+            serialized = self._state_to_jsonable(event.final_state)
+            return self._maybe_truncate_for_extras(serialized)
+        # Lever 3: minimal stub.
+        return {"final_node": event.final_node, "status": event.status}
+
+    @staticmethod
+    def _state_to_jsonable(state: Any) -> Any:
+        # Best-effort conversion of a State instance to a JSON-able
+        # shape. Pydantic models expose ``model_dump`` directly; other
+        # objects fall through to a str representation. The serialized
+        # form is what ends up on the Langfuse Trace's
+        # ``input`` / ``output`` field.
+        dumper = getattr(state, "model_dump", None)
+        if callable(dumper):
+            try:
+                return dumper()
+            except Exception:
+                return str(state)
+        return str(state)
+
+    def _open_trace_lazy(
+        self,
+        invocation_id: str,
+        correlation_id: str | None,
+        entry_node: str,
+    ) -> None:
+        # Open the Trace from a non-NodeEvent path (the proposal 0043
+        # invocation-boundary events). The existing ``_open_trace``
+        # entry point reads ``entry_node`` and caller metadata from a
+        # NodeEvent; this lazy path doesn't have one. Caller metadata
+        # is still readable via ``current_invocation_metadata`` —
+        # ``_apply_caller_metadata`` mirrors the existing path.
+        from openarmature.observability.metadata import current_invocation_metadata
+
+        metadata: dict[str, Any] = {
+            "entry_node": entry_node,
+            "spec_version": self.spec_version,
+        }
+        if correlation_id is not None:
+            metadata["correlation_id"] = correlation_id
+        _apply_caller_metadata(metadata, current_invocation_metadata())
+        self.client.trace(id=invocation_id, name=entry_node, metadata=metadata)
+        self._inv_states[invocation_id] = _InvState(trace_id=invocation_id)
 
     def _open_trace(self, invocation_id: str, correlation_id: str | None, event: NodeEvent) -> None:
         # ``entry_node`` and the trace name MUST identify the outer-graph

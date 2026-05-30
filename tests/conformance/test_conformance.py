@@ -21,13 +21,14 @@ from openarmature.graph import (
     EdgeException,
     EndSentinel,
     GraphBuilder,
+    NodeEvent,
     NodeException,
+    ObserverEvent,
     RoutingError,
     RuntimeGraphError,
     State,
     SubscribedObserver,
 )
-from openarmature.graph.events import MetadataAugmentationEvent, NodeEvent
 from openarmature.graph.observer import Observer
 
 from .adapter import (
@@ -605,8 +606,9 @@ async def _run_fixture_020_case(case: Mapping[str, Any]) -> None:
 
     received: list[NodeEvent] = []
 
-    async def observer(event: NodeEvent | MetadataAugmentationEvent) -> None:
-        assert isinstance(event, NodeEvent)
+    async def observer(event: ObserverEvent) -> None:
+        if not isinstance(event, NodeEvent):
+            return
         received.append(event)
 
     async def node_a(_state: Any) -> dict[str, Any]:

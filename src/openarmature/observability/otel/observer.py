@@ -96,7 +96,12 @@ from opentelemetry.trace import (
 )
 from opentelemetry.trace.propagation import set_span_in_context
 
-from openarmature.graph.events import MetadataAugmentationEvent, NodeEvent
+from openarmature.graph.events import (
+    InvocationCompletedEvent,
+    InvocationStartedEvent,
+    MetadataAugmentationEvent,
+    NodeEvent,
+)
 from openarmature.observability.lineage import is_prefix_or_equal, is_strict_prefix
 from openarmature.observability.llm_event import LLM_NAMESPACE, LlmEventPayload
 
@@ -451,10 +456,23 @@ class OTelObserver:
 
     # ------------------------------------------------------------------
     # Observer protocol — async callable accepting node events + the
-    # proposal-0040 metadata-augmentation event variant.
+    # proposal-0040 metadata-augmentation event variant + the
+    # proposal-0043 invocation-boundary events (no-op on the OTel
+    # mapping; OTel has no Trace-level input/output concept per the
+    # proposal's Out-of-Scope section).
     # ------------------------------------------------------------------
 
-    async def __call__(self, event: NodeEvent | MetadataAugmentationEvent) -> None:
+    async def __call__(
+        self,
+        event: (NodeEvent | MetadataAugmentationEvent | InvocationStartedEvent | InvocationCompletedEvent),
+    ) -> None:
+        # Proposal 0043 invocation-boundary events: OTel has no
+        # Trace-level input/output payload concept (a trace is a
+        # collection of Spans sharing a trace_id; no Trace-level
+        # payload field). No-op gates here; isinstance early-return
+        # before any node-specific logic runs.
+        if isinstance(event, InvocationStartedEvent | InvocationCompletedEvent):
+            return
         if isinstance(event, MetadataAugmentationEvent):
             self._handle_metadata_augmentation(event)
             return

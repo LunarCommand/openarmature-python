@@ -273,4 +273,89 @@ class MetadataAugmentationEvent:
     branch_name: str | None = None
 
 
-__all__ = ["FanOutEventConfig", "MetadataAugmentationEvent", "NodeEvent"]
+# Spec: realizes observability §8.4.1 *Trace input/output sourcing*
+# (proposal 0043). Emitted by the engine at invocation entry, BEFORE
+# any node fires. Carries the initial state observers can use to
+# resolve trace.input via the three-lever decision tree (caller hook
+# → raw state when disable_state_payload is OFF → privacy-safe
+# minimal stub). Distinct from NodeEvent because there is no node
+# context — the event is invocation-scoped.
+@dataclass(frozen=True)
+class InvocationStartedEvent:
+    """An invocation-entry event delivered to observers.
+
+    Emitted once per invocation, before any node fires. Observers that
+    populate Trace-level input fields (the Langfuse observer, today)
+    consume it to resolve ``trace.input`` per the three-lever decision
+    tree in observability §8.4.1. Observers without a Trace-level
+    input concept (the OTel observer) treat it as a no-op.
+
+    Carries:
+
+    - ``initial_state``: the raw state object the engine constructed
+      from ``invoke()``'s arguments (the typed-state instance).
+    - ``invocation_id``: the invocation id (caller-supplied or
+      framework-generated per proposal 0039).
+    - ``correlation_id``: the §3 correlation id when present.
+    - ``entry_node``: the outermost-graph entry node name.
+
+    Per graph-engine §6 the event is NOT subject to the observer
+    ``phases`` filter (which only governs ``NodeEvent`` phases); the
+    delivery worker forwards it to every subscribed observer.
+    """
+
+    initial_state: Any
+    invocation_id: str
+    correlation_id: str | None
+    entry_node: str
+
+
+# Spec: realizes observability §8.4.1 *Trace input/output sourcing*
+# (proposal 0043). Emitted by the engine at invocation exit, on both
+# the success path (status="completed") and the failure path
+# (status="failed"). Carries the final state observers can use to
+# resolve trace.output via the three-lever decision tree, plus the
+# closed status enum for the privacy-safe minimal stub.
+@dataclass(frozen=True)
+class InvocationCompletedEvent:
+    """An invocation-exit event delivered to observers.
+
+    Emitted once per invocation, after the last node has fired (and
+    after a failure boundary on the failure path). Observers that
+    populate Trace-level output fields (the Langfuse observer, today)
+    consume it to resolve ``trace.output`` per the three-lever
+    decision tree in observability §8.4.1. Observers without a
+    Trace-level output concept (the OTel observer) treat it as a no-op.
+
+    Carries:
+
+    - ``final_state``: the state at invocation exit (the engine's
+      returned state on the success path; the state at point-of-
+      failure on the failure path).
+    - ``status``: closed enum ``"completed"`` (END reached) or
+      ``"failed"`` (any node, edge, reducer, or boundary validator
+      raised before END).
+    - ``final_node``: the name of the node whose execution preceded
+      the END-reached transition on the success path, or the node
+      that raised on the failure path.
+    - ``invocation_id`` / ``correlation_id``: the §3 / §5.1 ids.
+
+    Per graph-engine §6 the event is NOT subject to the observer
+    ``phases`` filter; the delivery worker forwards it to every
+    subscribed observer.
+    """
+
+    final_state: Any
+    status: Literal["completed", "failed"]
+    final_node: str
+    invocation_id: str
+    correlation_id: str | None
+
+
+__all__ = [
+    "FanOutEventConfig",
+    "InvocationCompletedEvent",
+    "InvocationStartedEvent",
+    "MetadataAugmentationEvent",
+    "NodeEvent",
+]

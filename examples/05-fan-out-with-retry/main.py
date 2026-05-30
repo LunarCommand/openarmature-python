@@ -78,8 +78,8 @@ from openarmature.graph import (
     END,
     CompiledGraph,
     GraphBuilder,
-    MetadataAugmentationEvent,
     NodeEvent,
+    ObserverEvent,
     State,
     append,
 )
@@ -297,7 +297,7 @@ def build_graph(error_policy: str = "fail_fast") -> CompiledGraph[BatchState]:
     )
 
 
-async def fan_out_config_observer(event: NodeEvent | MetadataAugmentationEvent) -> None:
+async def fan_out_config_observer(event: ObserverEvent) -> None:
     """Print the fan-out node's resolved config when its dispatch event
     fires.
 

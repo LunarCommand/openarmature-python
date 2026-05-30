@@ -6,14 +6,29 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). The
 
 ## [Unreleased]
 
+### Added
+
+- **`LangfuseObserver` Trace input/output sourcing** (proposal 0043, observability §8.4.1). New observer construction knobs populate `trace.input` and `trace.output` per the three-lever decision tree:
+  - **`disable_state_payload: bool = True`** — privacy knob symmetric to `disable_llm_payload`. When ON (default), Trace fields receive the minimal stub `{entry_node, correlation_id}` / `{final_node, status}`; when OFF, the raw state object is serialized.
+  - **`trace_input_from_state` / `trace_output_from_state`** — optional caller hooks returning the domain-shaped value to use for `trace.input` / `trace.output`. Returning `None` falls through to the next applicable lever.
+  - `status` is the closed `Literal["completed", "failed"]` enum from spec §8.4.1.
+- **Two new observer event types** delivered through the existing `graph.observer.Observer` queue:
+  - **`InvocationStartedEvent(initial_state, invocation_id, correlation_id, entry_node)`** — emitted once at invocation entry before any node fires.
+  - **`InvocationCompletedEvent(final_state, status, final_node, invocation_id, correlation_id)`** — emitted once at invocation exit on both the success path (`status="completed"`) and failure path (`status="failed"`).
+
+  The `Observer.__call__` signature widens to `NodeEvent | MetadataAugmentationEvent | InvocationStartedEvent | InvocationCompletedEvent`. The new `ObserverEvent` type alias (re-exported from `openarmature.graph`) gives observer authors a one-name handle on the union; existing observers that ignore non-`NodeEvent` variants early-return after an `isinstance(event, NodeEvent)` check.
+- **`LangfuseTrace.input` / `LangfuseTrace.output` dataclass fields** on the in-memory recorder, populated by the new observer paths.
+
 ### Changed
 
 - **Reserved-key extension** (proposal 0042, observability §3.4). Three additional bare key names — `branch_name`, `detached`, `detached_from_invocation_id` — are reserved against caller-supplied `invocation_metadata` and `set_invocation_metadata` collision; the framework rejects them at the `invoke()` boundary and at the mid-invocation augmentation helper with `ValueError`. The reserved-name set grows from 21 to 24. These three are top-level Langfuse metadata keys the observer mapping already writes; without reservation a caller key matching one would silently shadow the OA-emitted field.
 - **`observation.metadata.detached: true` moves to the parent-side dispatching observation** (proposal 0042, observability §8.4.2). The Langfuse mapping previously emitted `detached: true` on the dispatch observation inside the detached child trace; the §8.4.2 row added by 0042 places it on the **parent-side** dispatching observation that fires the detached child (the link observation in the main trace for detached subgraphs; the parent fan-out node observation for detached fan-outs). The detached-side observation no longer carries the flag.
+- **`LangfuseClient.update_trace` Protocol grows `input` / `output` keyword parameters** so observer-supplied values land on the Trace's headline fields.
 
 ### Notes
 
-- **Pinned spec version bumped from v0.31.0 to v0.34.0.** Absorbs proposals 0042 (reserved-key extension; observation.metadata.detached + branch_name + trace.metadata.detached_from_invocation_id rows), 0038 (Google Gemini wire-format mapping — not yet implemented in python), and 0020 (sessions capability — not yet implemented in python).
+- **Pinned spec version bumped from v0.31.0 to v0.35.0.** Absorbs proposals 0042 (reserved-key extension), 0043 (Langfuse trace.input/output sourcing), and the textual additions in v0.32.0 (Gemini wire-format mapping, 0038, not yet implemented) and v0.33.0 (sessions capability, 0020, not yet implemented).
+- The SDK adapter caches `input` / `output` in its `_trace_info` map; landing the values on the live Langfuse Trace from outside an active span context requires SDK-version-specific calls (v4's `langfuse.update_current_trace` works inside a context; cross-context REST updates need `client.api.trace.update`). The `InMemoryLangfuseClient` used by tests applies the fields directly. SDK-adapter end-to-end emit lands in a follow-up.
 
 ## [0.10.0] — 2026-05-27
 

@@ -49,8 +49,8 @@ from openarmature.graph import (
     END,
     CompiledGraph,
     GraphBuilder,
-    MetadataAugmentationEvent,
     NodeEvent,
+    ObserverEvent,
     State,
     append,
     merge,
@@ -195,7 +195,7 @@ def route(state: PipelineState) -> str:
     return state.classification.intent
 
 
-async def trace(event: NodeEvent | MetadataAugmentationEvent) -> None:
+async def trace(event: ObserverEvent) -> None:
     # OpenAIProvider emits NodeEvent-shaped events for LLM-span
     # tracking under a sentinel namespace; those have post_state=None.
     # ``set_invocation_metadata`` from within a node body emits a

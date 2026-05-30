@@ -12,8 +12,14 @@ import warnings
 from types import MappingProxyType
 from typing import Literal
 
-from openarmature.graph import Observer, State, SubscribedObserver
-from openarmature.graph.events import MetadataAugmentationEvent, NodeEvent
+from openarmature.graph import (
+    MetadataAugmentationEvent,
+    NodeEvent,
+    Observer,
+    ObserverEvent,
+    State,
+    SubscribedObserver,
+)
 from openarmature.graph.observer import (
     _DRAIN_SENTINEL,
     RemoveHandle,
@@ -64,7 +70,7 @@ async def _drain(queue: asyncio.Queue[_QueuedItem | None], worker: asyncio.Task[
 async def test_events_delivered_in_queue_order() -> None:
     received: list[str] = []
 
-    async def observer(event: NodeEvent | MetadataAugmentationEvent) -> None:
+    async def observer(event: ObserverEvent) -> None:
         assert isinstance(event, NodeEvent)
         received.append(event.node_name)
 
@@ -81,11 +87,11 @@ async def test_events_delivered_in_queue_order() -> None:
 async def test_multiple_observers_fire_in_registration_order() -> None:
     received: list[str] = []
 
-    async def obs1(event: NodeEvent | MetadataAugmentationEvent) -> None:
+    async def obs1(event: ObserverEvent) -> None:
         assert isinstance(event, NodeEvent)
         received.append(f"obs1:{event.node_name}")
 
-    async def obs2(event: NodeEvent | MetadataAugmentationEvent) -> None:
+    async def obs2(event: ObserverEvent) -> None:
         assert isinstance(event, NodeEvent)
         received.append(f"obs2:{event.node_name}")
 
@@ -106,7 +112,7 @@ async def test_multiple_observers_fire_in_registration_order() -> None:
 
 
 async def test_observer_exception_does_not_propagate_to_caller() -> None:
-    async def boom(_event: NodeEvent | MetadataAugmentationEvent) -> None:
+    async def boom(_event: ObserverEvent) -> None:
         raise RuntimeError("nope")
 
     queue: asyncio.Queue[_QueuedItem | None] = asyncio.Queue()
@@ -124,10 +130,10 @@ async def test_observer_exception_does_not_propagate_to_caller() -> None:
 async def test_raising_observer_does_not_block_siblings_on_same_event() -> None:
     received: list[str] = []
 
-    async def obs1(_event: NodeEvent | MetadataAugmentationEvent) -> None:
+    async def obs1(_event: ObserverEvent) -> None:
         raise RuntimeError("obs1 boom")
 
-    async def obs2(event: NodeEvent | MetadataAugmentationEvent) -> None:
+    async def obs2(event: ObserverEvent) -> None:
         assert isinstance(event, NodeEvent)
         received.append(event.node_name)
 
@@ -145,10 +151,10 @@ async def test_raising_observer_does_not_block_siblings_on_same_event() -> None:
 async def test_raising_observer_does_not_block_subsequent_events() -> None:
     received: list[str] = []
 
-    async def always_raises(_event: NodeEvent | MetadataAugmentationEvent) -> None:
+    async def always_raises(_event: ObserverEvent) -> None:
         raise RuntimeError("always boom")
 
-    async def silent(event: NodeEvent | MetadataAugmentationEvent) -> None:
+    async def silent(event: ObserverEvent) -> None:
         assert isinstance(event, NodeEvent)
         received.append(event.node_name)
 
@@ -171,7 +177,7 @@ async def test_raising_observer_does_not_block_subsequent_events() -> None:
 async def test_phase_filter_skips_unsubscribed_phase() -> None:
     received: list[tuple[str, str]] = []
 
-    async def obs(event: NodeEvent | MetadataAugmentationEvent) -> None:
+    async def obs(event: ObserverEvent) -> None:
         assert isinstance(event, NodeEvent)
         received.append((event.node_name, event.phase))
 
@@ -188,7 +194,7 @@ async def test_phase_filter_skips_unsubscribed_phase() -> None:
 
 
 async def test_subscribed_observer_rejects_empty_phases() -> None:
-    async def obs(_event: NodeEvent | MetadataAugmentationEvent) -> None:
+    async def obs(_event: ObserverEvent) -> None:
         pass
 
     try:
@@ -199,7 +205,7 @@ async def test_subscribed_observer_rejects_empty_phases() -> None:
 
 
 async def test_subscribed_observer_rejects_unknown_phase() -> None:
-    async def obs(_event: NodeEvent | MetadataAugmentationEvent) -> None:
+    async def obs(_event: ObserverEvent) -> None:
         pass
 
     try:
@@ -215,7 +221,7 @@ async def test_subscribed_observer_rejects_unknown_phase() -> None:
 async def test_sentinel_terminates_worker_after_processing_queued_events() -> None:
     received: list[str] = []
 
-    async def observer(event: NodeEvent | MetadataAugmentationEvent) -> None:
+    async def observer(event: ObserverEvent) -> None:
         assert isinstance(event, NodeEvent)
         received.append(event.node_name)
 
@@ -244,10 +250,10 @@ async def test_dispatch_skips_when_no_observers_for_depth() -> None:
 
 
 async def test_dispatch_enqueues_with_full_observer_chain_in_order() -> None:
-    async def graph_obs(_event: NodeEvent | MetadataAugmentationEvent) -> None:
+    async def graph_obs(_event: ObserverEvent) -> None:
         pass
 
-    async def invocation_obs(_event: NodeEvent | MetadataAugmentationEvent) -> None:
+    async def invocation_obs(_event: ObserverEvent) -> None:
         pass
 
     graph_subscribed = _wrap(graph_obs)
@@ -272,13 +278,13 @@ async def test_dispatch_enqueues_with_full_observer_chain_in_order() -> None:
 
 
 async def test_descend_extends_chain_namespace_and_parent_states() -> None:
-    async def outer_obs(_event: NodeEvent | MetadataAugmentationEvent) -> None:
+    async def outer_obs(_event: ObserverEvent) -> None:
         pass
 
-    async def sub_obs(_event: NodeEvent | MetadataAugmentationEvent) -> None:
+    async def sub_obs(_event: ObserverEvent) -> None:
         pass
 
-    async def invocation_obs(_event: NodeEvent | MetadataAugmentationEvent) -> None:
+    async def invocation_obs(_event: ObserverEvent) -> None:
         pass
 
     outer_subscribed = _wrap(outer_obs)
@@ -324,7 +330,7 @@ async def test_take_step_shares_counter_across_descended_contexts() -> None:
 
 
 def test_remove_handle_detaches_observer() -> None:
-    async def obs(_event: NodeEvent | MetadataAugmentationEvent) -> None:
+    async def obs(_event: ObserverEvent) -> None:
         pass
 
     subscribed = _wrap(obs)
@@ -337,7 +343,7 @@ def test_remove_handle_detaches_observer() -> None:
 
 
 def test_remove_handle_is_idempotent() -> None:
-    async def obs(_event: NodeEvent | MetadataAugmentationEvent) -> None:
+    async def obs(_event: ObserverEvent) -> None:
         pass
 
     subscribed = _wrap(obs)
@@ -361,10 +367,10 @@ async def test_metadata_augmentation_event_bypasses_phase_filter() -> None:
     augment_received: list[MetadataAugmentationEvent] = []
     node_received: list[NodeEvent] = []
 
-    async def observer(event: NodeEvent | MetadataAugmentationEvent) -> None:
+    async def observer(event: ObserverEvent) -> None:
         if isinstance(event, MetadataAugmentationEvent):
             augment_received.append(event)
-        else:
+        elif isinstance(event, NodeEvent):
             node_received.append(event)
 
     queue: asyncio.Queue[_QueuedItem | None] = asyncio.Queue()
@@ -392,10 +398,10 @@ async def test_metadata_augmentation_observer_exception_is_isolated() -> None:
     still run, the worker keeps draining."""
     sibling_received: list[MetadataAugmentationEvent] = []
 
-    async def boom(_event: NodeEvent | MetadataAugmentationEvent) -> None:
+    async def boom(_event: ObserverEvent) -> None:
         raise RuntimeError("boom")
 
-    async def good(event: NodeEvent | MetadataAugmentationEvent) -> None:
+    async def good(event: ObserverEvent) -> None:
         if isinstance(event, MetadataAugmentationEvent):
             sibling_received.append(event)
 
@@ -433,9 +439,9 @@ async def test_set_invocation_metadata_emits_augmentation_event_via_dispatch() -
         _set_namespace_prefix,
     )
 
-    captured: list[NodeEvent | MetadataAugmentationEvent] = []
+    captured: list[ObserverEvent] = []
 
-    def dispatch(event: NodeEvent | MetadataAugmentationEvent) -> None:
+    def dispatch(event: ObserverEvent) -> None:
         captured.append(event)
 
     dispatch_token = _set_active_dispatch(dispatch)
