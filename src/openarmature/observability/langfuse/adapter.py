@@ -226,38 +226,80 @@ class LangfuseSDKAdapter:
     ) -> None:
         # Merge into the trace_info cache so subsequent observations
         # (and the first one if not yet created) pick up the updated
-        # values. Since propagate_attributes runs on every observation
-        # using cached info, update_trace takes effect on the NEXT
-        # observation under this trace_id, not retroactively on prior
-        # observations.
+        # values. ``name`` / ``metadata`` are propagated via
+        # ``propagate_attributes`` around every observation under
+        # ``id``; ``input`` / ``output`` follow the SDK's
+        # ``set_trace_io`` path (per proposal 0043 + the
+        # empirically-validated v4.7.1 behaviour — see CHANGELOG).
         #
-        # Proposal 0043 ``input`` / ``output`` are cached but landing
-        # them on the live Langfuse Trace from outside an active
-        # span context is SDK-version-dependent (v4 exposes
-        # ``langfuse.update_current_trace(input=..., output=...)``
-        # only inside a context; cross-context REST updates need
-        # ``client.api.trace.update``). The InMemoryLangfuseClient
-        # surface used by tests applies them directly. The SDK
-        # adapter's apply path is a follow-up — caching here so the
-        # Protocol contract is satisfied without breaking SDK-adapter
-        # users.
+        # ``input`` is staged on the cache; applied to the FIRST real
+        # observation that opens under this trace_id (``_start_observation``
+        # below). Piggybacks on a real span so the trace tree gains no
+        # extra observation in the common case.
+        #
+        # ``output`` is applied immediately via a synthetic short-lived
+        # observation. By the time the LangfuseObserver dispatches the
+        # invocation-completed event all real spans have ended, so a
+        # synthetic span is the only path that has an active OTel span
+        # context for ``set_trace_io`` to find.
         entry = self._trace_info.get(id)
         if entry is None:
-            self._trace_info[id] = {
+            entry = {
                 "name": name,
                 "metadata": dict(metadata) if metadata is not None else {},
-                "input": input,
-                "output": output,
             }
-            return
-        if name is not None:
-            entry["name"] = name
-        if metadata is not None:
-            entry["metadata"].update(metadata)
+            self._trace_info[id] = entry
+        else:
+            if name is not None:
+                entry["name"] = name
+            if metadata is not None:
+                entry["metadata"].update(metadata)
         if input is not None:
-            entry["input"] = input
+            entry["pending_input"] = input
         if output is not None:
-            entry["output"] = output
+            self._emit_trace_output_synthetic(id, output)
+
+    def _emit_trace_output_synthetic(self, trace_id: str, output: Any) -> None:
+        # Open a synthetic short-lived observation, set
+        # ``trace.output`` on it via ``set_trace_io``, end immediately.
+        # The synthetic span shows in the trace as a small observation
+        # named ``openarmature.trace_io``; the value lands on the
+        # Langfuse Trace's ``output`` headline field through the
+        # ``langfuse.trace.output`` OTel attribute set inside.
+        #
+        # Edge case: if no real node observation ever opened for this
+        # trace (e.g., a resume-path validation failure aborted the
+        # invocation before any node fired), the cached ``pending_input``
+        # has no real span to piggyback on. Apply it here so the input
+        # still lands — the synthetic observation becomes the sole
+        # carrier for both fields. Pops the cache so we don't re-apply
+        # if ``update_trace`` is called more than once.
+        entry = self._trace_info.get(trace_id)
+        pending_input = entry.pop("pending_input", None) if entry is not None else None
+
+        trace_context: TraceContext = {"trace_id": _to_otel_trace_id(trace_id)}
+        with ExitStack() as stack:
+            if entry is not None:
+                stack.enter_context(
+                    propagate_attributes(
+                        trace_name=entry["name"],
+                        metadata=_stringify_metadata(entry["metadata"]),
+                    )
+                )
+            obs = cast(
+                "Any",
+                self._client.start_observation(
+                    name="openarmature.trace_io",
+                    as_type="span",
+                    trace_context=trace_context,
+                ),
+            )
+            try:
+                # Deprecation rationale on the equivalent call in
+                # ``_start_observation``.
+                obs.set_trace_io(input=pending_input, output=output)  # pyright: ignore[reportDeprecated]
+            finally:
+                obs.end()
 
     def span(
         self,
@@ -395,7 +437,25 @@ class LangfuseSDKAdapter:
                         metadata=_stringify_metadata(trace_entry["metadata"]),
                     )
                 )
-            return cast("Any", self._client.start_observation(**kwargs))
+            obs = cast("Any", self._client.start_observation(**kwargs))
+            # Proposal 0043 (PR 8.5a): apply any pending ``trace.input``
+            # cached by ``update_trace`` to the FIRST real observation
+            # under this trace. ``set_trace_io`` needs an active OTel
+            # span context — piggybacking on the just-created
+            # observation is the lowest-overhead path. ``pop`` so
+            # subsequent observations under the same trace_id don't
+            # re-apply (the value is one-shot per trace).
+            #
+            # The Langfuse SDK marks ``set_trace_io`` deprecated as of
+            # v4.6 ("removal in a future major version"); per the
+            # empirical verification in PR 8.5a it remains the only
+            # path that surfaces ``trace.input`` in the Langfuse UI's
+            # Traces list view. See CHANGELOG for the deprecation note.
+            if trace_entry is not None:
+                pending_input = trace_entry.pop("pending_input", None)
+                if pending_input is not None:
+                    obs.set_trace_io(input=pending_input)  # pyright: ignore[reportDeprecated]
+            return obs
 
 
 __all__ = ["LangfuseSDKAdapter"]
