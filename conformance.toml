@@ -32,7 +32,7 @@
 
 [manifest]
 implementation = "openarmature-python"
-spec_pin = "v0.34.0"
+spec_pin = "v0.35.0"
 
 # Status values:
 #   implemented   — shipped behavior matches the proposal's contract
@@ -203,5 +203,10 @@ status = "not-yet"
 status = "not-yet"
 
 [proposals."0042"]
+status = "implemented"
+since = "0.11.0"
+
+# Spec v0.35.0 (proposal 0043).
+[proposals."0043"]
 status = "implemented"
 since = "0.11.0"

@@ -91,6 +91,11 @@ class LangfuseTrace:
     id: str
     name: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict[str, Any])
+    # Proposal 0043 §8.2: Trace gains explicit ``input`` / ``output``
+    # payload fields. Populated by the Langfuse observer at the
+    # invocation-boundary events; absent when no observer wrote them.
+    input: Any | None = None
+    output: Any | None = None
     observations: list[LangfuseObservation] = field(default_factory=list[LangfuseObservation])
 
     def find_observation(self, observation_id: str) -> LangfuseObservation | None:
@@ -180,12 +185,16 @@ class LangfuseClient(Protocol):
         id: str,
         name: str | None = None,
         metadata: dict[str, Any] | None = None,
+        input: Any | None = None,
+        output: Any | None = None,
     ) -> None:
         """Update an existing Trace's mutable fields after creation.
 
         Used by the observer when the caller-supplied invocation
-        label (§8.6) lands later than the Trace's open call, or when
-        additional metadata becomes available mid-invocation.
+        label (§8.6) lands later than the Trace's open call, when
+        additional metadata becomes available mid-invocation, or
+        when the proposal 0043 invocation-boundary events populate
+        ``trace.input`` / ``trace.output``.
         """
         ...
 
@@ -358,6 +367,8 @@ class InMemoryLangfuseClient:
         id: str,
         name: str | None = None,
         metadata: dict[str, Any] | None = None,
+        input: Any | None = None,
+        output: Any | None = None,
     ) -> None:
         trace = self.traces.get(id)
         if trace is None:
@@ -365,11 +376,19 @@ class InMemoryLangfuseClient:
             # happen under the observer's emission order but stays
             # defensive against re-ordered events.
             self.trace(id=id, name=name, metadata=metadata)
-            return
+            trace = self.traces[id]
         if name is not None:
             trace.name = name
         if metadata is not None:
             trace.metadata.update(metadata)
+        # Proposal 0043: input/output land on the Trace's headline
+        # fields, distinct from the metadata bag. None means "not
+        # supplied on this update call" — the existing value (if any)
+        # is preserved; explicit replacement requires a non-None.
+        if input is not None:
+            trace.input = input
+        if output is not None:
+            trace.output = output
 
     def span(
         self,

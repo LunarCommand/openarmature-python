@@ -35,7 +35,12 @@ from .errors import (
     StateValidationError,
     UnreachableNode,
 )
-from .events import MetadataAugmentationEvent, NodeEvent
+from .events import (
+    InvocationCompletedEvent,
+    InvocationStartedEvent,
+    MetadataAugmentationEvent,
+    NodeEvent,
+)
 from .fan_out import FanOutConfig, FanOutNode
 from .middleware import (
     Middleware,
@@ -48,7 +53,7 @@ from .middleware import (
     exponential_jitter_backoff,
 )
 from .nodes import FunctionNode, Node
-from .observer import DrainSummary, Observer, RemoveHandle, SubscribedObserver
+from .observer import DrainSummary, Observer, ObserverEvent, RemoveHandle, SubscribedObserver
 from .parallel_branches import BranchSpec, ParallelBranchesNode
 from .projection import ExplicitMapping, FieldNameMatching, ProjectionStrategy
 from .reducers import Reducer, append, concat_flatten, last_write_wins, merge, merge_all
@@ -77,6 +82,8 @@ __all__ = [
     "FunctionNode",
     "GraphBuilder",
     "GraphError",
+    "InvocationCompletedEvent",
+    "InvocationStartedEvent",
     "MappingReferencesUndeclaredField",
     "MetadataAugmentationEvent",
     "Middleware",
@@ -87,6 +94,7 @@ __all__ = [
     "NodeException",
     "NoDeclaredEntry",
     "Observer",
+    "ObserverEvent",
     "ParallelBranchesBranchFailed",
     "ParallelBranchesNoBranches",
     "ParallelBranchesNode",

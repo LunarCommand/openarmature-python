@@ -221,6 +221,8 @@ class LangfuseSDKAdapter:
         id: str,
         name: str | None = None,
         metadata: dict[str, Any] | None = None,
+        input: Any | None = None,
+        output: Any | None = None,
     ) -> None:
         # Merge into the trace_info cache so subsequent observations
         # (and the first one if not yet created) pick up the updated
@@ -228,17 +230,34 @@ class LangfuseSDKAdapter:
         # using cached info, update_trace takes effect on the NEXT
         # observation under this trace_id, not retroactively on prior
         # observations.
+        #
+        # Proposal 0043 ``input`` / ``output`` are cached but landing
+        # them on the live Langfuse Trace from outside an active
+        # span context is SDK-version-dependent (v4 exposes
+        # ``langfuse.update_current_trace(input=..., output=...)``
+        # only inside a context; cross-context REST updates need
+        # ``client.api.trace.update``). The InMemoryLangfuseClient
+        # surface used by tests applies them directly. The SDK
+        # adapter's apply path is a follow-up — caching here so the
+        # Protocol contract is satisfied without breaking SDK-adapter
+        # users.
         entry = self._trace_info.get(id)
         if entry is None:
             self._trace_info[id] = {
                 "name": name,
                 "metadata": dict(metadata) if metadata is not None else {},
+                "input": input,
+                "output": output,
             }
             return
         if name is not None:
             entry["name"] = name
         if metadata is not None:
             entry["metadata"].update(metadata)
+        if input is not None:
+            entry["input"] = input
+        if output is not None:
+            entry["output"] = output
 
     def span(
         self,

@@ -54,9 +54,9 @@ from openarmature.graph import (
     CompiledGraph,
     ExplicitMapping,
     GraphBuilder,
-    MetadataAugmentationEvent,
     NodeEvent,
     Observer,
+    ObserverEvent,
     State,
     append,
 )
@@ -187,7 +187,7 @@ def build_review_subgraph() -> CompiledGraph[ReviewState]:
 # fire on every invocation of the compiled graph until removed.
 
 
-async def console_tracer(event: NodeEvent | MetadataAugmentationEvent) -> None:
+async def console_tracer(event: ObserverEvent) -> None:
     """Print one structured line per node boundary to stderr.
 
     Format: `[step=N] namespace.path → fields_changed_in_this_step`
@@ -197,7 +197,7 @@ async def console_tracer(event: NodeEvent | MetadataAugmentationEvent) -> None:
     reach observers as ``MetadataAugmentationEvent`` instances; this
     tracer ignores them.
     """
-    if isinstance(event, MetadataAugmentationEvent):
+    if not isinstance(event, NodeEvent):
         return
     namespace = ".".join(event.namespace)
     if event.error is not None:
@@ -239,8 +239,8 @@ class InvocationMetrics:
         self.errors: int = 0
         self.namespaces: set[tuple[str, ...]] = set()
 
-    async def __call__(self, event: NodeEvent | MetadataAugmentationEvent) -> None:
-        if isinstance(event, MetadataAugmentationEvent):
+    async def __call__(self, event: ObserverEvent) -> None:
+        if not isinstance(event, NodeEvent):
             return
         self.events += 1
         if event.error is not None:

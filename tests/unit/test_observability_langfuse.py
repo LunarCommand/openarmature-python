@@ -579,3 +579,188 @@ async def test_metadata_augmentation_no_op_when_no_entries() -> None:
     observer._handle_metadata_augmentation(event)  # noqa: SLF001
     # No Trace was opened (no invocation in scope) and no exception.
     assert client.traces == {}
+
+
+# ---------------------------------------------------------------------------
+# Trace input/output sourcing (proposal 0043 §8.4.1)
+# ---------------------------------------------------------------------------
+
+
+class _S0043(State):
+    msg: str = ""
+
+
+async def _emit_node(_s: _S0043) -> dict[str, Any]:
+    return {"msg": "ok"}
+
+
+def _build_0043_graph() -> Any:
+    return GraphBuilder(_S0043).add_node("a", _emit_node).add_edge("a", END).set_entry("a").compile()
+
+
+async def test_trace_input_output_default_emits_minimal_stub() -> None:
+    # Lever 3 (default). `disable_state_payload` defaults ON; no hooks
+    # supplied. trace.input = {entry_node, correlation_id};
+    # trace.output = {final_node, status}.
+    client = InMemoryLangfuseClient()
+    observer = LangfuseObserver(client=client)
+    graph = _build_0043_graph()
+    graph.attach_observer(observer)
+    await graph.invoke(_S0043(), correlation_id="corr-1")
+    await graph.drain()
+
+    trace = next(iter(client.traces.values()))
+    assert trace.input == {"entry_node": "a", "correlation_id": "corr-1"}
+    assert trace.output == {"final_node": "a", "status": "completed"}
+
+
+async def test_trace_input_output_disable_state_payload_off_emits_raw_state() -> None:
+    # Lever 2. `disable_state_payload=False`; no hooks. trace.input
+    # and trace.output carry the serialized state.
+    client = InMemoryLangfuseClient()
+    observer = LangfuseObserver(client=client, disable_state_payload=False)
+    graph = _build_0043_graph()
+    graph.attach_observer(observer)
+    await graph.invoke(_S0043())
+    await graph.drain()
+
+    trace = next(iter(client.traces.values()))
+    # ``input`` reflects initial_state, ``output`` reflects final state.
+    assert trace.input == {"msg": ""}
+    assert trace.output == {"msg": "ok"}
+
+
+async def test_trace_input_output_handles_non_json_native_state_fields() -> None:
+    # Regression for the PR #99 copilot finding: pydantic's
+    # ``model_dump()`` defaults to Python mode and leaves
+    # ``datetime`` / ``UUID`` / ``Decimal`` as Python objects. The
+    # downstream truncation path calls ``json.dumps`` without a
+    # ``default``, which raises ``TypeError`` on those types. The
+    # observer raise is swallowed by the engine's warnings-only
+    # observer-isolation contract, leaving trace.input / trace.output
+    # silently blank.
+    #
+    # ``_state_to_jsonable`` MUST call ``model_dump(mode="json")`` so
+    # these types serialize to their JSON-compatible string forms
+    # before the truncation step.
+    import uuid
+    from datetime import UTC, datetime
+    from decimal import Decimal
+
+    class _DateState(State):
+        when: datetime = datetime(2026, 5, 29, 12, 0, 0, tzinfo=UTC)
+        request_id: uuid.UUID = uuid.UUID("12345678-1234-5678-1234-567812345678")
+        amount: Decimal = Decimal("99.99")
+
+    async def _noop(_s: _DateState) -> dict[str, Any]:
+        return {}
+
+    client = InMemoryLangfuseClient()
+    observer = LangfuseObserver(client=client, disable_state_payload=False)
+    graph = GraphBuilder(_DateState).add_node("a", _noop).add_edge("a", END).set_entry("a").compile()
+    graph.attach_observer(observer)
+    await graph.invoke(_DateState())
+    await graph.drain()
+
+    trace = next(iter(client.traces.values()))
+    # The non-JSON-native types serialize to JSON-compatible strings.
+    # Both trace.input and trace.output land successfully (the bug
+    # would leave them as ``None``).
+    assert trace.input is not None, "trace.input should not be blank on State with datetime/UUID/Decimal"
+    assert trace.output is not None
+    trace_input = cast("dict[str, Any]", trace.input)
+    assert trace_input["when"] == "2026-05-29T12:00:00Z"
+    assert trace_input["request_id"] == "12345678-1234-5678-1234-567812345678"
+    # Decimal serializes to its string form under ``mode="json"``.
+    assert trace_input["amount"] == "99.99"
+
+
+async def test_trace_input_output_caller_hooks_replace_stub() -> None:
+    # Lever 1. Caller hooks supplied, returning non-None domain
+    # summaries. Hook return values appear on the trace fields verbatim;
+    # the stub does NOT appear; `disable_state_payload` is irrelevant.
+    client = InMemoryLangfuseClient()
+
+    def input_hook(state: _S0043) -> dict[str, Any]:
+        return {"summary": f"received msg={state.msg!r}"}
+
+    def output_hook(state: _S0043) -> dict[str, Any]:
+        return {"summary": f"final msg={state.msg!r}"}
+
+    observer = LangfuseObserver(
+        client=client,
+        trace_input_from_state=input_hook,
+        trace_output_from_state=output_hook,
+    )
+    graph = _build_0043_graph()
+    graph.attach_observer(observer)
+    await graph.invoke(_S0043())
+    await graph.drain()
+
+    trace = next(iter(client.traces.values()))
+    assert trace.input == {"summary": "received msg=''"}
+    assert trace.output == {"summary": "final msg='ok'"}
+
+
+async def test_trace_input_output_caller_hooks_return_none_falls_through() -> None:
+    # Lever-1 null-fallthrough. Hooks supplied but return None;
+    # observer falls through to the next applicable lever — lever 3
+    # (stub) when disable_state_payload defaults ON.
+    client = InMemoryLangfuseClient()
+
+    def input_hook(_state: _S0043) -> None:
+        return None
+
+    def output_hook(_state: _S0043) -> None:
+        return None
+
+    observer = LangfuseObserver(
+        client=client,
+        trace_input_from_state=input_hook,
+        trace_output_from_state=output_hook,
+    )
+    graph = _build_0043_graph()
+    graph.attach_observer(observer)
+    await graph.invoke(_S0043(), correlation_id="corr-2")
+    await graph.drain()
+
+    trace = next(iter(client.traces.values()))
+    # Stub applies as if no hook had been supplied.
+    assert trace.input == {"entry_node": "a", "correlation_id": "corr-2"}
+    assert trace.output == {"final_node": "a", "status": "completed"}
+
+
+class _FailState(State):
+    x: int = 0
+
+
+async def _raise_node(_s: _FailState) -> dict[str, Any]:
+    raise RuntimeError("boom")
+
+
+async def test_trace_output_status_failed_on_node_raise() -> None:
+    # Failure path: `status` enum closed on {completed, failed}. A
+    # raise inside the node body fires the InvocationCompletedEvent
+    # with status="failed" and final_node set to the raising node.
+    client = InMemoryLangfuseClient()
+    observer = LangfuseObserver(client=client)
+
+    graph = (
+        GraphBuilder(_FailState)
+        .add_node("raises", _raise_node)
+        .add_edge("raises", END)
+        .set_entry("raises")
+        .compile()
+    )
+    graph.attach_observer(observer)
+
+    # Spec §4: node-raised exceptions surface as NodeException
+    # (the runtime category that wraps node body raises).
+    from openarmature.graph.errors import NodeException
+
+    with pytest.raises(NodeException, match="raises"):
+        await graph.invoke(_FailState())
+    await graph.drain()
+
+    trace = next(iter(client.traces.values()))
+    assert trace.output == {"final_node": "raises", "status": "failed"}

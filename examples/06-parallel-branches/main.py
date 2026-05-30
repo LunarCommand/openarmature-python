@@ -70,8 +70,8 @@ from openarmature.graph import (
     BranchSpec,
     CompiledGraph,
     GraphBuilder,
-    MetadataAugmentationEvent,
     NodeEvent,
+    ObserverEvent,
     State,
     append,
 )
@@ -241,7 +241,7 @@ async def present(s: ArticleState) -> Mapping[str, Any]:
     return {"trace": ["present"]}
 
 
-async def branch_attribution_observer(event: NodeEvent | MetadataAugmentationEvent) -> None:
+async def branch_attribution_observer(event: ObserverEvent) -> None:
     """Print which branch each inner-node event came from.
 
     NodeEvent carries ``branch_name`` on events from nodes that

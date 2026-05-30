@@ -36,7 +36,12 @@ from contextvars import ContextVar, Token
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from openarmature.graph.events import MetadataAugmentationEvent, NodeEvent
+    from openarmature.graph.events import (
+        InvocationCompletedEvent,
+        InvocationStartedEvent,
+        MetadataAugmentationEvent,
+        NodeEvent,
+    )
     from openarmature.graph.observer import SubscribedObserver
 
 
@@ -208,12 +213,22 @@ def _reset_active_observers(token: Token[tuple[SubscribedObserver, ...]]) -> Non
 # ---------------------------------------------------------------------------
 
 
-_active_dispatch_var: ContextVar[Callable[[NodeEvent | MetadataAugmentationEvent], None] | None] = ContextVar(
-    "openarmature.active_dispatch", default=None
-)
+_active_dispatch_var: ContextVar[
+    Callable[
+        [NodeEvent | MetadataAugmentationEvent | InvocationStartedEvent | InvocationCompletedEvent],
+        None,
+    ]
+    | None
+] = ContextVar("openarmature.active_dispatch", default=None)
 
 
-def current_dispatch() -> Callable[[NodeEvent | MetadataAugmentationEvent], None] | None:
+def current_dispatch() -> (
+    Callable[
+        [NodeEvent | MetadataAugmentationEvent | InvocationStartedEvent | InvocationCompletedEvent],
+        None,
+    ]
+    | None
+):
     """Return the engine's dispatch callable for the current invocation,
     or ``None`` outside any invocation.
 
@@ -228,15 +243,30 @@ def current_dispatch() -> Callable[[NodeEvent | MetadataAugmentationEvent], None
 
 
 def _set_active_dispatch(
-    dispatch: Callable[[NodeEvent | MetadataAugmentationEvent], None],
-) -> Token[Callable[[NodeEvent | MetadataAugmentationEvent], None] | None]:
+    dispatch: Callable[
+        [NodeEvent | MetadataAugmentationEvent | InvocationStartedEvent | InvocationCompletedEvent],
+        None,
+    ],
+) -> Token[
+    Callable[
+        [NodeEvent | MetadataAugmentationEvent | InvocationStartedEvent | InvocationCompletedEvent],
+        None,
+    ]
+    | None
+]:
     """Set the engine's dispatch callable in scope. Internal —
     engine-only."""
     return _active_dispatch_var.set(dispatch)
 
 
 def _reset_active_dispatch(
-    token: Token[Callable[[NodeEvent | MetadataAugmentationEvent], None] | None],
+    token: Token[
+        Callable[
+            [NodeEvent | MetadataAugmentationEvent | InvocationStartedEvent | InvocationCompletedEvent],
+            None,
+        ]
+        | None
+    ],
 ) -> None:
     _active_dispatch_var.reset(token)
 

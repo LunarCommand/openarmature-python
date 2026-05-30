@@ -215,6 +215,13 @@ _DEFERRED_FIXTURES: dict[str, str] = {
     "observability/036-caller-invocation-id-non-uuid": (
         "Cross-capability parser doesn't model langfuse_trace; derivation pinned by unit tests"
     ),
+    # Proposal 0043 (trace.input/output) — fixture 037 uses langfuse_trace
+    # expected shape + hook-based directives the cross-capability parser
+    # doesn't model. Behavior pinned by unit tests at
+    # tests/unit/test_observability_langfuse.py::test_trace_input_output_*.
+    "observability/037-langfuse-trace-input-output": (
+        "Cross-capability parser doesn't model langfuse_trace; behavior pinned by unit tests"
+    ),
 }
 
 

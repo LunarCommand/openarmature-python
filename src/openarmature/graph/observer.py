@@ -34,8 +34,20 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import Any, Literal, Protocol
 
-from .events import MetadataAugmentationEvent, NodeEvent
+from .events import (
+    InvocationCompletedEvent,
+    InvocationStartedEvent,
+    MetadataAugmentationEvent,
+    NodeEvent,
+)
 from .state import State
+
+# Union of every event variant an Observer may receive. NodeEvent is
+# the original §6 started/completed/checkpoint shape; the other three
+# are side-channel events (proposal 0040 for augmentation; proposal
+# 0043 for invocation-boundary trace.input/output sourcing) that
+# bypass the phase filter and reach every subscribed observer.
+ObserverEvent = NodeEvent | MetadataAugmentationEvent | InvocationStartedEvent | InvocationCompletedEvent
 
 
 class Observer(Protocol):
@@ -64,9 +76,9 @@ class Observer(Protocol):
     conformance doesn't pin you to that name; any of `event`, `_event`,
     `e`, etc. matches.
 
-    Two event variants reach observers (graph-engine §6 + proposal
-    0040). The signature is the union; observers ``isinstance``-narrow
-    on the first line and choose which variants they handle.
+    Four event variants reach observers (graph-engine §6 + proposals
+    0040, 0043). The signature is the union; observers ``isinstance``-
+    narrow on the first line and choose which variants they handle.
 
     - :class:`NodeEvent` — the started/completed/checkpoint phase
       events. Subject to the ``phases`` filter on
@@ -84,6 +96,19 @@ class Observer(Protocol):
       subscribed observer sees it and isinstance-narrows to decide
       whether to act. Simple user observers typically early-return
       after ``isinstance(event, NodeEvent)`` checks.
+    - :class:`InvocationStartedEvent` — emitted once per invocation
+      before any node fires. Carries the engine-constructed
+      ``initial_state`` so Trace-level backends (Langfuse) can
+      populate ``trace.input`` via the proposal 0043 three-lever
+      decision tree. NOT subject to the ``phases`` filter; OTel-only
+      observers ignore it via the isinstance gate.
+    - :class:`InvocationCompletedEvent` — emitted once per invocation
+      after the last node fires (on both the success path and the
+      failure path). Carries ``final_state`` + a closed
+      ``status: {"completed", "failed"}`` enum so Trace-level
+      backends can populate ``trace.output``. NOT subject to the
+      ``phases`` filter; OTel-only observers ignore it via the
+      isinstance gate.
 
     Optional ``prepare_sync`` extension
     -----------------------------------
@@ -109,7 +134,7 @@ class Observer(Protocol):
     carries).
     """
 
-    async def __call__(self, event: NodeEvent | MetadataAugmentationEvent, /) -> None: ...
+    async def __call__(self, event: ObserverEvent, /) -> None: ...
 
 
 # Per spec v0.6.0 §6: the two valid phase strings. Used as the default
@@ -228,20 +253,23 @@ class _QueuedItem:
     without the worker needing to know the graph topology.
 
     ``event`` is the union of ``NodeEvent`` (started / completed /
-    checkpoint phases) and ``MetadataAugmentationEvent`` (proposal
-    0040, side-channel augmentation). The delivery worker branches by
-    type to apply the right delivery contract (phase-filter for
-    ``NodeEvent``, no filter for the augmentation event).
+    checkpoint phases), ``MetadataAugmentationEvent`` (proposal 0040,
+    side-channel augmentation), and the two invocation-boundary
+    events ``InvocationStartedEvent`` / ``InvocationCompletedEvent``
+    (proposal 0043, Trace-level input/output sourcing). The delivery
+    worker branches by type to apply the right delivery contract
+    (phase-filter for ``NodeEvent``, no filter for the other three).
     """
 
-    event: NodeEvent | MetadataAugmentationEvent
+    event: ObserverEvent
     observers: tuple[SubscribedObserver, ...]
 
 
 # A sentinel value the engine puts on the queue to signal the worker to
 # return after draining the events ahead of it. None is unambiguous —
-# the queue carries `NodeEvent` and `MetadataAugmentationEvent` instances
-# wrapped in `_QueuedItem`, never None.
+# the queue carries ``NodeEvent``, ``MetadataAugmentationEvent``, and
+# the two ``Invocation*Event`` variants wrapped in ``_QueuedItem``,
+# never None.
 _DRAIN_SENTINEL = None
 
 
@@ -459,6 +487,16 @@ class _InvocationContext:
     # ``Any`` rather than ``type[State]`` to avoid an import cycle
     # between graph and observer; callers narrow at the read site.
     state_cls: Any = None
+    # Per proposal 0043 (observability §8.4.1 trace.output sourcing):
+    # shared mutable single-element box tracking the most recently
+    # entered node's name. The outermost ``invoke()`` reads it on
+    # exit to populate ``InvocationCompletedEvent.final_node`` on
+    # both the success path (last node before END routing) and the
+    # failure path (the node whose execution raised). Shared by
+    # reference across subgraph / fan-out / parallel-branches
+    # descents so the inner-most node's name wins on failure (the
+    # real culprit, not the wrapper).
+    final_node_box: list[str] = field(default_factory=list[str])
 
     def full_observers(self) -> tuple[SubscribedObserver, ...]:
         """Return the ordered observer list to deliver for events from
@@ -506,6 +544,7 @@ class _InvocationContext:
             fan_out_progress_state=self.fan_out_progress_state,
             drain_counters=self.drain_counters,
             state_cls=self.state_cls,
+            final_node_box=self.final_node_box,
         )
 
     def descend_into_fan_out_instance(
@@ -556,6 +595,7 @@ class _InvocationContext:
             fan_out_progress_state=self.fan_out_progress_state,
             drain_counters=self.drain_counters,
             state_cls=self.state_cls,
+            final_node_box=self.final_node_box,
         )
 
     def descend_into_parallel_branch(
@@ -609,6 +649,7 @@ class _InvocationContext:
             fan_out_progress_state=self.fan_out_progress_state,
             drain_counters=self.drain_counters,
             state_cls=self.state_cls,
+            final_node_box=self.final_node_box,
         )
 
     def take_step(self) -> int:
@@ -622,11 +663,11 @@ class _InvocationContext:
 
 def _dispatch(
     context: _InvocationContext,
-    event: NodeEvent | MetadataAugmentationEvent,
+    event: ObserverEvent,
 ) -> None:
     """Enqueue an event for the delivery worker.
 
-    Handles two event variants:
+    Handles four event variants:
 
     - :class:`NodeEvent`: the started/completed/checkpoint pair model.
       For ``"started"``-phase events, also calls any subscribed
@@ -643,6 +684,13 @@ def _dispatch(
       anchored on ``"started"``, which only ``NodeEvent`` carries.
       Queued onto the same serial worker so observers see it in
       strict order with the surrounding node events.
+    - :class:`InvocationStartedEvent` /
+      :class:`InvocationCompletedEvent` (proposal 0043): invocation-
+      boundary events the engine enqueues at invocation entry / exit
+      so Trace-level backends can populate ``trace.input`` /
+      ``trace.output`` via the §8.4.1 three-lever decision tree.
+      Bypass ``prepare_sync`` (same rationale as
+      ``MetadataAugmentationEvent``: not a node-phase event).
 
     Phase-gated forwarding: ``prepare_sync`` only fires when ``"started"``
     is in the subscribed observer's ``phases`` set, mirroring how the
@@ -736,9 +784,11 @@ async def deliver_loop(
       the event's phase do NOT receive it. Phase filter applies at
       delivery, not dispatch; the engine still produces both events
       for every attempt.
-    - For :class:`MetadataAugmentationEvent` (proposal 0040), the
-      ``phases`` filter is bypassed entirely — the event isn't a
-      node-phase event, so every subscribed observer receives it
+    - For :class:`MetadataAugmentationEvent` (proposal 0040) and the
+      two invocation-boundary events :class:`InvocationStartedEvent`
+      / :class:`InvocationCompletedEvent` (proposal 0043), the
+      ``phases`` filter is bypassed entirely — none of those are
+      node-phase events, so every subscribed observer receives them
       regardless of ``phases``. Observers ``isinstance``-narrow on
       the first line and choose whether to act.
     - Observer exceptions don't propagate, don't break siblings,
@@ -775,6 +825,7 @@ __all__ = [
     "ALL_PHASES",
     "DrainSummary",
     "Observer",
+    "ObserverEvent",
     "RemoveHandle",
     "SubscribedObserver",
     # Engine-internal but listed so pyright sees them as exported (they're

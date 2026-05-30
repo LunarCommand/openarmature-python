@@ -29,7 +29,7 @@ import uuid
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from dataclasses import replace as dataclass_replace
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 if TYPE_CHECKING:
     # ``FanOutNode`` lives in ``.fan_out`` which has a TYPE_CHECKING
@@ -95,7 +95,12 @@ from .errors import (
     RuntimeGraphError,
     StateValidationError,
 )
-from .events import FanOutEventConfig, NodeEvent
+from .events import (
+    FanOutEventConfig,
+    InvocationCompletedEvent,
+    InvocationStartedEvent,
+    NodeEvent,
+)
 from .middleware import ChainCall, Middleware, compose_chain
 from .nodes import Node
 from .observer import (
@@ -1023,9 +1028,57 @@ class CompiledGraph[StateT: State]:
                     caller_invocation_metadata=current_invocation_metadata(),
                 ),
             )
+        # Proposal 0043: invocation-boundary event for trace.input
+        # sourcing. Carries the engine-constructed initial_state plus
+        # the §3 / §5.1 ids and the outermost-graph entry node name
+        # so Trace-level observers (Langfuse) can populate
+        # ``trace.input`` via the §8.4.1 three-lever decision tree.
+        # Dispatched AFTER the checkpoint-migrated event (when there
+        # is one) so the migration span is observable before the
+        # invocation-input event.
+        _dispatch(
+            context,
+            InvocationStartedEvent(
+                initial_state=starting_state,
+                invocation_id=invocation_id,
+                correlation_id=resolved_correlation_id,
+                entry_node=self.entry,
+            ),
+        )
+        final_state: StateT | None = None
+        status: Literal["completed", "failed"] = "failed"
         try:
-            return await self._invoke(starting_state, context)
+            final_state = await self._invoke(starting_state, context)
+            status = "completed"
+            return final_state
         finally:
+            # Proposal 0043: invocation-boundary event for trace.output
+            # sourcing. Fires on both the success path
+            # (status="completed") and the failure path
+            # (status="failed"). ``final_node`` comes from the shared
+            # box the engine populates as nodes enter; on the failure
+            # path that's the inner-most node that raised, on the
+            # success path that's the last node before the END-routing
+            # edge. ``final_state`` is the engine's returned state on
+            # success and ``starting_state`` on the failure path (the
+            # engine doesn't expose intermediate state across raises).
+            if context.final_node_box:
+                final_node = context.final_node_box[0]
+            else:
+                # Defensive: invocation raised before any node fired
+                # (e.g., resume-path validation). Fall back to the
+                # declared entry node.
+                final_node = self.entry
+            _dispatch(
+                context,
+                InvocationCompletedEvent(
+                    final_state=final_state if final_state is not None else starting_state,
+                    status=status,
+                    final_node=final_node,
+                    invocation_id=invocation_id,
+                    correlation_id=resolved_correlation_id,
+                ),
+            )
             _reset_invocation_metadata(metadata_token)
             _reset_invocation_id(invocation_token)
             _reset_correlation_id(correlation_token)
@@ -1098,6 +1151,17 @@ class CompiledGraph[StateT: State]:
             from .fan_out import FanOutNode  # noqa: PLC0415
             from .parallel_branches import ParallelBranchesNode  # noqa: PLC0415
 
+            # Proposal 0043: track the most recent node about to run
+            # so the outermost ``invoke()`` can populate
+            # ``InvocationCompletedEvent.final_node`` on both the
+            # END-reached success path (last node before the
+            # END-routing edge) and the failure path (the node that
+            # raised). Subgraph descents reuse the same shared box
+            # via ``descend_into_subgraph``, so a failure deep in a
+            # subgraph leaves the innermost node's name in the box —
+            # the actual culprit, not the wrapper.
+            context.final_node_box[:] = [current]
+
             if isinstance(node, FanOutNode):
                 # Fan-out nodes are recognized as a distinct node type
                 # per pipeline-utilities §9. Dispatched through
@@ -1137,6 +1201,20 @@ class CompiledGraph[StateT: State]:
             else:
                 step_result = await self._step_function_node(node, current, state, context)
             state = step_result.state
+
+            # Proposal 0043 (post-PR-99 review): restore the outer
+            # ``current`` to the shared box after a successful step.
+            # Descended `_step_*` calls (subgraph, fan-out, parallel-
+            # branches) write inner-node names into the box; without
+            # this restore, the wrapper's name leaks out of the box
+            # when the wrapper is the last node before the END-routing
+            # edge — and for parallel-branches the box would end with
+            # whichever branch's inner finished last (nondeterministic).
+            # On the failure path, the raise above bypasses this line,
+            # so the inner-most node that raised stays in the box as
+            # the failure-path ``final_node`` (matching spec §4
+            # attribution).
+            context.final_node_box[:] = [current]
 
             # Per spec graph-engine §3 step 3 (revised in proposal
             # 0012 / v0.9.0): the engine MUST dispatch the

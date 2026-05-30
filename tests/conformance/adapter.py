@@ -27,6 +27,8 @@ from openarmature.graph import (
     FanOutNode,
     FieldNameMatching,
     GraphBuilder,
+    NodeEvent,
+    ObserverEvent,
     ParallelBranchesNode,
     ProjectionStrategy,
     Reducer,
@@ -38,7 +40,6 @@ from openarmature.graph import (
     merge,
     merge_all,
 )
-from openarmature.graph.events import MetadataAugmentationEvent, NodeEvent
 from openarmature.graph.observer import Observer
 
 if TYPE_CHECKING:
@@ -855,8 +856,8 @@ def make_observer_fn(
     the event unrecorded and the counter shows it as undelivered.
     """
 
-    async def observer(event: NodeEvent | MetadataAugmentationEvent) -> None:
-        if isinstance(event, MetadataAugmentationEvent):
+    async def observer(event: ObserverEvent) -> None:
+        if not isinstance(event, NodeEvent):
             return
         sleep_ms = _resolve_sleep_ms(fixture)
         if sleep_ms > 0:
