@@ -4,6 +4,17 @@ All notable changes to `openarmature-python` are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). The package follows [Semantic Versioning](https://semver.org/); pre-1.0 minor bumps may carry behavioral changes per [spec governance](https://github.com/LunarCommand/openarmature-spec/blob/main/GOVERNANCE.md).
 
+## [Unreleased]
+
+### Changed
+
+- **Reserved-key extension** (proposal 0042, observability §3.4). Three additional bare key names — `branch_name`, `detached`, `detached_from_invocation_id` — are reserved against caller-supplied `invocation_metadata` and `set_invocation_metadata` collision; the framework rejects them at the `invoke()` boundary and at the mid-invocation augmentation helper with `ValueError`. The reserved-name set grows from 21 to 24. These three are top-level Langfuse metadata keys the observer mapping already writes; without reservation a caller key matching one would silently shadow the OA-emitted field.
+- **`observation.metadata.detached: true` moves to the parent-side dispatching observation** (proposal 0042, observability §8.4.2). The Langfuse mapping previously emitted `detached: true` on the dispatch observation inside the detached child trace; the §8.4.2 row added by 0042 places it on the **parent-side** dispatching observation that fires the detached child (the link observation in the main trace for detached subgraphs; the parent fan-out node observation for detached fan-outs). The detached-side observation no longer carries the flag.
+
+### Notes
+
+- **Pinned spec version bumped from v0.31.0 to v0.34.0.** Absorbs proposals 0042 (reserved-key extension; observation.metadata.detached + branch_name + trace.metadata.detached_from_invocation_id rows), 0038 (Google Gemini wire-format mapping — not yet implemented in python), and 0020 (sessions capability — not yet implemented in python).
+
 ## [0.10.0] — 2026-05-27
 
 Langfuse observability release. The pinned spec advances from v0.22.1 to v0.27.1, absorbing six accepted proposals (0031-0036). The headline is a native Langfuse backend mapping (a sibling to the OTel mapping) driven by a downstream production project integrating OpenArmature with Langfuse; this release also adds caller-supplied invocation metadata, two fan-out collection reducers, and a batch of provider / observability hardening surfaced by that same downstream integration.

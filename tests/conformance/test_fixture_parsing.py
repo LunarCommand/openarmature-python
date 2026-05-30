@@ -156,6 +156,41 @@ _DEFERRED_FIXTURES: dict[str, str] = {
     "llm-provider/042-anthropic-thinking-block-round-trip": (
         "Anthropic provider not implemented (0037 not-yet in conformance.toml)"
     ),
+    # Proposal 0038 (Google Gemini wire-format mapping) shipped in spec
+    # v0.32.0 but python marks it not-yet in conformance.toml — the
+    # Gemini provider isn't implemented in this release. Defer the
+    # cross-capability parse tests for the 044-053 fixtures; the
+    # `mapping: gemini` discriminator is harness-extension territory.
+    "llm-provider/044-gemini-basic-message-round-trip": (
+        "Gemini provider not implemented (0038 not-yet in conformance.toml)"
+    ),
+    "llm-provider/045-gemini-function-call-flow": (
+        "Gemini provider not implemented (0038 not-yet in conformance.toml)"
+    ),
+    "llm-provider/046-gemini-image-content-blocks": (
+        "Gemini provider not implemented (0038 not-yet in conformance.toml)"
+    ),
+    "llm-provider/047-gemini-tool-choice-modes": (
+        "Gemini provider not implemented (0038 not-yet in conformance.toml)"
+    ),
+    "llm-provider/048-gemini-runtime-config-mapping": (
+        "Gemini provider not implemented (0038 not-yet in conformance.toml)"
+    ),
+    "llm-provider/049-gemini-error-mapping": (
+        "Gemini provider not implemented (0038 not-yet in conformance.toml)"
+    ),
+    "llm-provider/050-gemini-structured-output-native": (
+        "Gemini provider not implemented (0038 not-yet in conformance.toml)"
+    ),
+    "llm-provider/051-gemini-structured-output-fallback": (
+        "Gemini provider not implemented (0038 not-yet in conformance.toml)"
+    ),
+    "llm-provider/052-gemini-thought-signature-round-trip": (
+        "Gemini provider not implemented (0038 not-yet in conformance.toml)"
+    ),
+    "llm-provider/053-cross-provider-signature-strip": (
+        "Gemini provider not implemented (0038 not-yet in conformance.toml)"
+    ),
     # Proposal 0040 (open-span metadata update) — task #22 implements
     # the §6 augmentation-event mechanism + un-defers 029/030 + 034.
     # Fixture 034 lands in the Langfuse-specific harness directly

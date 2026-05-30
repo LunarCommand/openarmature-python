@@ -66,10 +66,11 @@ _invocation_metadata_var: ContextVar[MappingProxyType[str, AttributeValue]] = Co
 # boundary so observers never see a colliding key.
 _RESERVED_PREFIXES: tuple[str, ...] = ("openarmature.", "gen_ai.")
 
-# Reserved exact key NAMES per §3.4 (proposal 0041): the top-level
-# metadata keys an OA-emitted §8 backend mapping writes alongside
-# caller keys (the §8.4 Langfuse set, plus invocation_id). A caller
-# key matching one exactly would silently overwrite an OA field in a
+# Reserved exact key NAMES per §3.4 (proposals 0041, 0042): the
+# top-level metadata keys an OA-emitted §8 backend mapping writes
+# alongside caller keys (the §8.4 Langfuse set, plus invocation_id,
+# branch_name, detached, detached_from_invocation_id). A caller key
+# matching one exactly would silently overwrite an OA field in a
 # backend's flat top-level metadata, so it is rejected at the boundary
 # the same way as the prefix reservation. Backend-set-independent:
 # rejected regardless of which observers are attached.
@@ -96,6 +97,9 @@ _RESERVED_KEY_NAMES: frozenset[str] = frozenset(
         "response_id",
         "prompt",
         "invocation_id",
+        "branch_name",
+        "detached",
+        "detached_from_invocation_id",
     }
 )
 

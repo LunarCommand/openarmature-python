@@ -726,6 +726,10 @@ class LangfuseObserver:
         # "string array, one entry per detached child" shape so
         # later detached siblings under the same parent can append.
         #
+        # `detached: True` per §8.4.2 (proposal 0042) — the
+        # parent-side dispatching observation marks itself when it
+        # fires a detached child.
+        #
         # Note: `subgraph_name` is intentionally NOT on this link
         # observation. Per §5.3 + §8.5, in detached mode the wrapper
         # role migrates to the detached trace's dispatch observation;
@@ -733,6 +737,7 @@ class LangfuseObserver:
         # (no wrapper role) and so does not carry `subgraph_name`.
         link_metadata: dict[str, Any] = {
             "detached_child_trace_ids": [detached_trace_id],
+            "detached": True,
         }
         if correlation_id is not None:
             link_metadata["correlation_id"] = correlation_id
@@ -783,9 +788,13 @@ class LangfuseObserver:
         # happens to be named ``X``.
         wrapper_obs_name = identity or prefix[-1]
         self.client.trace(id=detached_trace_id, name=wrapper_obs_name, metadata=detached_metadata)
+        # §8.4.2 (proposal 0042): `detached: true` lives on the
+        # PARENT-side dispatching observation (the link observation
+        # above), not on the dispatch observation IN the detached
+        # trace. The detached-side observation is the migrated
+        # SubgraphNode wrapper and carries `subgraph_name` only.
         dispatch_metadata: dict[str, Any] = {
             "subgraph_name": identity,
-            "detached": True,
         }
         if correlation_id is not None:
             dispatch_metadata["correlation_id"] = correlation_id
@@ -827,8 +836,14 @@ class LangfuseObserver:
         ids_list.append(detached_trace_id)
         fan_out_open = self._find_fan_out_node_observation(inv_state, prefix)
         if fan_out_open is not None:
+            # `detached: True` per §8.4.2 (proposal 0042) — the
+            # parent-side fan-out node observation marks itself when
+            # its instances are detached. Re-sent on every instance
+            # update; the Langfuse client merges metadata, so this is
+            # idempotent.
             link_metadata: dict[str, Any] = {
                 "detached_child_trace_ids": list(ids_list),
+                "detached": True,
             }
             if correlation_id is not None:
                 link_metadata["correlation_id"] = correlation_id
@@ -847,11 +862,15 @@ class LangfuseObserver:
             name=prefix[-1],
             metadata=detached_metadata,
         )
+        # §8.4.2 (proposal 0042): `detached: true` lives on the
+        # PARENT-side fan-out node observation (link_metadata above),
+        # not on the per-instance dispatch observation IN the detached
+        # trace. The detached-side per-instance observation carries
+        # only `fan_out_parent_node_name` + `fan_out_index`.
         parent_node_name = inv_state.fan_out_parent_node_name.get(prefix, prefix[-1])
         dispatch_metadata: dict[str, Any] = {
             "fan_out_parent_node_name": parent_node_name,
             "fan_out_index": event.fan_out_index,
-            "detached": True,
         }
         if correlation_id is not None:
             dispatch_metadata["correlation_id"] = correlation_id

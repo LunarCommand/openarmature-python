@@ -372,6 +372,59 @@ async def test_invoke_rejects_reserved_exact_key_at_boundary() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Reserved exact key names extension (proposal 0042)
+# ---------------------------------------------------------------------------
+
+
+def test_validate_rejects_reserved_branch_name() -> None:
+    with pytest.raises(ValueError, match="is reserved"):
+        validate_invocation_metadata({"branch_name": "fraud_check"})
+
+
+def test_validate_rejects_reserved_detached() -> None:
+    with pytest.raises(ValueError, match="is reserved"):
+        validate_invocation_metadata({"detached": True})
+
+
+def test_validate_rejects_reserved_detached_from_invocation_id() -> None:
+    with pytest.raises(ValueError, match="is reserved"):
+        validate_invocation_metadata({"detached_from_invocation_id": "parent-1"})
+
+
+def test_set_invocation_metadata_rejects_reserved_branch_name() -> None:
+    with pytest.raises(ValueError, match="is reserved"):
+        set_invocation_metadata(branch_name="policy_audit")
+
+
+def test_set_invocation_metadata_rejects_reserved_detached() -> None:
+    with pytest.raises(ValueError, match="is reserved"):
+        set_invocation_metadata(detached=True)
+
+
+def test_set_invocation_metadata_rejects_reserved_detached_from_invocation_id() -> None:
+    with pytest.raises(ValueError, match="is reserved"):
+        set_invocation_metadata(detached_from_invocation_id="parent-1")
+
+
+async def test_invoke_rejects_reserved_branch_name_at_boundary() -> None:
+    graph = _build_graph()
+    with pytest.raises(ValueError, match="is reserved"):
+        await graph.invoke(_SimpleState(), metadata={"branch_name": "x"})
+
+
+async def test_invoke_rejects_reserved_detached_at_boundary() -> None:
+    graph = _build_graph()
+    with pytest.raises(ValueError, match="is reserved"):
+        await graph.invoke(_SimpleState(), metadata={"detached": False})
+
+
+async def test_invoke_rejects_reserved_detached_from_invocation_id_at_boundary() -> None:
+    graph = _build_graph()
+    with pytest.raises(ValueError, match="is reserved"):
+        await graph.invoke(_SimpleState(), metadata={"detached_from_invocation_id": "p"})
+
+
+# ---------------------------------------------------------------------------
 # Caller-supplied invocation_id (proposal 0039)
 # ---------------------------------------------------------------------------
 

@@ -81,6 +81,19 @@ _DEFERRED_FIXTURES: dict[str, str] = {
     "041-anthropic-structured-output-fallback": "Anthropic provider not implemented (0037 not-yet)",
     "042-anthropic-thinking-block-round-trip": "Anthropic provider not implemented (0037 not-yet)",
     "043-openai-strips-thinking-blocks": "Anthropic provider not implemented (0037 not-yet)",
+    # Proposal 0038 (Google Gemini wire-format mapping) shipped in spec
+    # v0.32.0 but python marks it not-yet — the Gemini provider isn't
+    # implemented in this release.
+    "044-gemini-basic-message-round-trip": "Gemini provider not implemented (0038 not-yet)",
+    "045-gemini-function-call-flow": "Gemini provider not implemented (0038 not-yet)",
+    "046-gemini-image-content-blocks": "Gemini provider not implemented (0038 not-yet)",
+    "047-gemini-tool-choice-modes": "Gemini provider not implemented (0038 not-yet)",
+    "048-gemini-runtime-config-mapping": "Gemini provider not implemented (0038 not-yet)",
+    "049-gemini-error-mapping": "Gemini provider not implemented (0038 not-yet)",
+    "050-gemini-structured-output-native": "Gemini provider not implemented (0038 not-yet)",
+    "051-gemini-structured-output-fallback": "Gemini provider not implemented (0038 not-yet)",
+    "052-gemini-thought-signature-round-trip": "Gemini provider not implemented (0038 not-yet)",
+    "053-cross-provider-signature-strip": "Gemini provider not implemented (0038 not-yet)",
 }
 
 
