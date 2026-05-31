@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import copy
 import json
 from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, datetime
@@ -109,25 +110,16 @@ _LANGFUSE_FIXTURES = frozenset(
 # ``(fixture_stem, case_name)``.  The case-loop in the runner ``continue``s
 # past matching cases — NOT ``pytest.skip``, which would skip the whole
 # fixture's test invocation and hide the surrounding cases that DO run.
-# Used for proposal-0043 case 5 (resume re-fire) which needs harness
-# extensions tracked separately — checkpointer wiring + flaky-node test
-# seam + two-phase multi-trace assertion — landed in a follow-up PR.
-_DEFERRED_CASES: frozenset[tuple[str, str]] = frozenset(
-    {
-        (
-            "037-langfuse-trace-input-output",
-            "resume_hooks_refire_to_resumed_trace",
-        ),
-    }
-)
+# Currently empty; the harness covers every activated case.  Kept as a
+# named hook so future per-case deferrals don't need to re-introduce the
+# pattern.
+_DEFERRED_CASES: frozenset[tuple[str, str]] = frozenset()
 
 
 # Mocks the spec fixture 037 references for ``trace_input_from_state`` /
 # ``trace_output_from_state`` caller hooks.  Each YAML hook name maps to
 # a Python callable matching the spec fixture's documented mock
-# convention (see fixture 037's case 3 / case 4 inline comments).
-# ``returns_state_snapshot`` is intentionally absent — only case 5
-# references it, and case 5 is deferred per ``_DEFERRED_CASES``.
+# convention (see fixture 037's case 3 / case 4 / case 5 inline comments).
 def _returns_job_input_summary(_state: Any) -> dict[str, Any]:
     return {"summary": "job-input"}
 
@@ -140,10 +132,20 @@ def _returns_null(_state: Any) -> None:
     return None
 
 
+def _returns_state_snapshot(state: Any) -> dict[str, Any]:
+    # Fixture 037 case 5: the hook captures the state's full field set
+    # at hook-fire time.  ``model_dump()`` returns the JSON-able
+    # representation; the case asserts the trace's input/output exactly
+    # match the values present at first-invoke entry / first-invoke
+    # failure-exit / resumed-invoke entry / resumed-invoke exit.
+    return cast("dict[str, Any]", state.model_dump())
+
+
 _TRACE_IO_HOOK_REGISTRY: dict[str, Callable[[Any], Any]] = {
     "returns_job_input_summary": _returns_job_input_summary,
     "returns_job_output_summary": _returns_job_output_summary,
     "returns_null": _returns_null,
+    "returns_state_snapshot": _returns_state_snapshot,
 }
 
 
@@ -665,6 +667,20 @@ async def _run_case(case: Mapping[str, Any]) -> None:
             target = END if target_raw == "END" else target_raw
             builder.add_edge(edge["from"], target)
         builder.set_entry(entry)
+        # Optional checkpointer wiring — fixture 037 case 5 needs an
+        # in-memory checkpointer so the first invoke's pre-failure save
+        # carries over to the resumed invoke.  Only the literal value
+        # ``"in_memory"`` is recognized; other backends would need
+        # additional registration shimmed here.
+        checkpointer_spec = cast("str | None", case.get("checkpointer"))
+        if checkpointer_spec == "in_memory":
+            from openarmature.checkpoint import InMemoryCheckpointer  # noqa: PLC0415
+
+            builder.with_checkpointer(InMemoryCheckpointer())
+        elif checkpointer_spec is not None:
+            raise NotImplementedError(
+                f"langfuse harness only supports checkpointer: in_memory; got {checkpointer_spec!r}"
+            )
         graph = builder.compile()
         # ``initial_state`` overrides on the case populate caller-
         # supplied fields; remaining fields fall back to the State
@@ -713,6 +729,23 @@ async def _run_case(case: Mapping[str, Any]) -> None:
     caller_metadata = cast("dict[str, Any] | None", case.get("caller_metadata"))
     if caller_metadata is not None:
         invoke_kwargs["metadata"] = caller_metadata
+
+    # Resume cases run a two-phase flow (first invoke catches expected
+    # error → resume invoke completes), then assert against both traces
+    # separately.  Branch out here so the linear ``await graph.invoke``
+    # below stays focused on the common case.
+    if "resume" in case:
+        await _run_resume_case(
+            case=case,
+            graph=graph,
+            initial_state_factory=initial_state_factory,
+            client=client,
+            invoke_kwargs=invoke_kwargs,
+        )
+        if provider is not None:
+            await provider.aclose()
+        return
+
     await graph.invoke(initial_state_factory(), **invoke_kwargs)
     await graph.drain()
     if provider is not None:
@@ -731,6 +764,143 @@ async def _run_case(case: Mapping[str, Any]) -> None:
         assert len(client.traces) == 1, f"expected exactly one Trace, got {len(client.traces)}"
         trace = next(iter(client.traces.values()))
         _assert_trace(trace, expected_trace, expected_invariants=expected_invariants)
+
+
+async def _run_resume_case(
+    *,
+    case: Mapping[str, Any],
+    graph: Any,
+    initial_state_factory: Callable[[], Any],
+    client: InMemoryLangfuseClient,
+    invoke_kwargs: dict[str, Any],
+) -> None:
+    """Two-phase test flow for fixture 037 case 5.
+
+    Phase 1 — first invoke catches the expected NodeException at the
+    designated node; the captured Langfuse Trace's input/output match
+    ``first_run_expected.langfuse_trace``.  We snapshot the first trace's
+    headline fields immediately so the ``first_trace_unchanged`` invariant
+    can verify the resumed invoke leaves them untouched.
+
+    Phase 2 — resume invoke runs the same graph with
+    ``resume_invocation=first_invocation_id``, completes successfully, and
+    the resumed Trace's input/output match ``resume.expected.langfuse_trace``.
+
+    Phase 3 — invariants compare the two traces (distinct trace ids,
+    shared correlation_id, the snapshotted first trace's fields unchanged).
+    """
+    from openarmature.graph.errors import RuntimeGraphError  # noqa: PLC0415
+
+    # ---- Phase 1: first invoke catches expected error
+    first_run_expected_error = cast("dict[str, Any]", case.get("first_run_expected_error") or {})
+    expected_category = cast("str", first_run_expected_error.get("category", "node_exception"))
+    expected_raised_from = cast("str | None", first_run_expected_error.get("raised_from"))
+
+    # Catch the common ``RuntimeGraphError`` base so the harness handles
+    # any spec §4 category (node_exception / reducer_error /
+    # state_validation_error / edge_exception / routing_error).  The
+    # "raised from" node attribute differs per category — check
+    # ``node_name`` on NodeException, ``producing_node`` on
+    # ReducerError, ``source_node`` on EdgeException / RoutingError —
+    # via a small attribute walk so we don't hardcode per-category
+    # accessor knowledge here.
+    try:
+        await graph.invoke(initial_state_factory(), **invoke_kwargs)
+    except RuntimeGraphError as exc:
+        assert exc.category == expected_category, (
+            f"first run error category: expected {expected_category!r}, got {exc.category!r}"
+        )
+        if expected_raised_from is not None:
+            actual_raised_from = (
+                getattr(exc, "node_name", None)
+                or getattr(exc, "producing_node", None)
+                or getattr(exc, "source_node", None)
+            )
+            assert actual_raised_from == expected_raised_from, (
+                f"first run error raised_from: expected {expected_raised_from!r}, got {actual_raised_from!r}"
+            )
+    else:
+        raise AssertionError(
+            f"first run expected to raise RuntimeGraphError with category={expected_category!r}; "
+            f"completed without error"
+        )
+    await graph.drain()
+
+    assert len(client.traces) == 1, (
+        f"first run should produce exactly one Langfuse Trace; got {len(client.traces)}"
+    )
+    first_invocation_id, first_trace = next(iter(client.traces.items()))
+
+    # Snapshot the first trace's headline fields before the resume runs
+    # so the ``first_trace_unchanged`` invariant can compare against the
+    # state captured here.  ``client.traces`` holds the live recorder
+    # objects; ``copy.deepcopy`` protects against in-place writes.
+    first_trace_snapshot = {
+        "input": copy.deepcopy(first_trace.input),
+        "output": copy.deepcopy(first_trace.output),
+    }
+
+    first_run_expected = cast("dict[str, Any]", case["first_run_expected"])
+    first_expected_trace = cast("dict[str, Any]", first_run_expected["langfuse_trace"])
+    _assert_trace(first_trace, first_expected_trace, expected_invariants={})
+
+    # ---- Phase 2: resume invoke
+    resume_block = cast("dict[str, Any]", case["resume"])
+    # Drop ``correlation_id`` from invoke_kwargs on resume — the engine
+    # restores it from the saved record per §3.1.
+    resume_invoke_kwargs = {k: v for k, v in invoke_kwargs.items() if k != "correlation_id"}
+    await graph.invoke(
+        initial_state_factory(),
+        resume_invocation=first_invocation_id,
+        **resume_invoke_kwargs,
+    )
+    await graph.drain()
+
+    # Python dicts are insertion-ordered (PEP 468; guaranteed since
+    # 3.7).  Phase 1 added one trace; phase 2 added the resumed trace.
+    # Reading by position is more deterministic than scanning by
+    # not-equal — if a future engine change adds synthetic traces, the
+    # scan would silently pick the wrong key, but the position-based
+    # read fails the length assertion below explicitly.
+    trace_ids = list(client.traces.keys())
+    assert len(trace_ids) == 2, (
+        f"after resume there should be exactly two Langfuse Traces; got {len(trace_ids)}"
+    )
+    assert trace_ids[0] == first_invocation_id, (
+        f"first trace id changed during resume: was {first_invocation_id!r}, now {trace_ids[0]!r}"
+    )
+    resumed_invocation_id = trace_ids[1]
+    resumed_trace = client.traces[resumed_invocation_id]
+
+    resume_expected = cast("dict[str, Any]", resume_block["expected"])
+    resume_expected_trace = cast("dict[str, Any]", resume_expected["langfuse_trace"])
+    _assert_trace(resumed_trace, resume_expected_trace, expected_invariants={})
+
+    # ---- Phase 3: invariants
+    if resume_expected.get("first_trace_unchanged"):
+        assert first_trace.input == first_trace_snapshot["input"], (
+            f"first_trace_unchanged failed: input was {first_trace_snapshot['input']!r}, "
+            f"now {first_trace.input!r}"
+        )
+        assert first_trace.output == first_trace_snapshot["output"], (
+            f"first_trace_unchanged failed: output was {first_trace_snapshot['output']!r}, "
+            f"now {first_trace.output!r}"
+        )
+
+    invariants = cast("dict[str, Any]", case.get("invariants") or {})
+    if invariants.get("distinct_trace_ids"):
+        assert first_invocation_id != resumed_invocation_id, (
+            f"distinct_trace_ids failed: both traces have id {first_invocation_id!r}"
+        )
+    if invariants.get("correlation_id_consistent_across_traces"):
+        first_corr = first_trace.metadata.get("correlation_id")
+        resumed_corr = resumed_trace.metadata.get("correlation_id")
+        assert first_corr == resumed_corr, (
+            f"correlation_id_consistent_across_traces failed: first={first_corr!r}, resumed={resumed_corr!r}"
+        )
+    # ``hooks_refire_on_resumed_trace`` is implicit — verified by the
+    # ``_assert_trace`` call on the resumed trace above, which checks the
+    # hook-derived input/output match the resumed invocation's state.
 
 
 def _resolve_llm_model(case: Mapping[str, Any]) -> str:
@@ -800,6 +970,34 @@ def _build_node_body(
             return dict(update_pure_spec)
 
         return _node_pure
+
+    # ``flaky: {fail_first_invocation_only: true, on_success: {...}}`` —
+    # the compact resume-fixture flaky shape (paralleling the equivalent
+    # form in tests/conformance/adapter.py:_make_flaky_fn).  The node
+    # raises on its first call (a fresh ``RuntimeError`` the engine wraps
+    # as ``NodeException``) and returns ``on_success`` on subsequent
+    # calls.  Used by fixture 037 case 5: the first invoke aborts at
+    # this node; the resumed invoke calls the same node body — the
+    # closure-scoped ``has_failed`` survives the resume because the
+    # graph (and the closure) lives for the harness's full case run,
+    # so the second call returns success.
+    flaky_spec = cast("dict[str, Any] | None", node_spec.get("flaky"))
+    if flaky_spec is not None:
+        if not flaky_spec.get("fail_first_invocation_only"):
+            raise NotImplementedError(
+                f"langfuse harness only supports the fail_first_invocation_only flaky shape; got {flaky_spec}"
+            )
+        on_success = dict(cast("dict[str, Any]", flaky_spec.get("on_success") or {}))
+        has_failed = [False]
+
+        async def _node_flaky(_s: Any) -> dict[str, Any]:
+            _maybe_augment()
+            if not has_failed[0]:
+                has_failed[0] = True
+                raise RuntimeError(f"flaky({node_name}) first-invocation failure")
+            return dict(on_success)
+
+        return _node_flaky
 
     calls_llm_spec = cast("dict[str, Any] | None", node_spec.get("calls_llm"))
     renders_prompt_name = cast("str | None", node_spec.get("renders_prompt"))

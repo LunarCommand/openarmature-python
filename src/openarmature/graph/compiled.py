@@ -1059,9 +1059,12 @@ class CompiledGraph[StateT: State]:
             # box the engine populates as nodes enter; on the failure
             # path that's the inner-most node that raised, on the
             # success path that's the last node before the END-routing
-            # edge. ``final_state`` is the engine's returned state on
-            # success and ``starting_state`` on the failure path (the
-            # engine doesn't expose intermediate state across raises).
+            # edge. ``final_state`` precedence: the engine's returned
+            # state on success → the most recent successful step's
+            # post-merge state on a mid-graph raise (per §8.4.1
+            # *Resume semantics* "partial final state captured at the
+            # failure point") → ``starting_state`` only when no step
+            # ever completed.
             if context.final_node_box:
                 final_node = context.final_node_box[0]
             else:
@@ -1069,10 +1072,25 @@ class CompiledGraph[StateT: State]:
                 # (e.g., resume-path validation). Fall back to the
                 # declared entry node.
                 final_node = self.entry
+            # ``latest_state_box`` is typed ``list[Any]`` on
+            # _InvocationContext (the context isn't parameterized on
+            # StateT), but at the outermost level (where this code
+            # runs) it always holds an outer ``StateT`` from a
+            # successful step's post-merge state.  Cast for type
+            # narrowing; the per-context box-isolation pinned by
+            # ``test_failure_path_final_state_is_outer_type_*`` keeps
+            # this invariant honest.
+            event_final_state: StateT
+            if final_state is not None:
+                event_final_state = final_state
+            elif context.latest_state_box:
+                event_final_state = cast("StateT", context.latest_state_box[0])
+            else:
+                event_final_state = starting_state
             _dispatch(
                 context,
                 InvocationCompletedEvent(
-                    final_state=final_state if final_state is not None else starting_state,
+                    final_state=event_final_state,
                     status=status,
                     final_node=final_node,
                     invocation_id=invocation_id,
@@ -1201,6 +1219,15 @@ class CompiledGraph[StateT: State]:
             else:
                 step_result = await self._step_function_node(node, current, state, context)
             state = step_result.state
+            # Proposal 0043 (post-PR-99 review): surface the most
+            # recent successful step's post-merge state so the
+            # outermost ``invoke()`` can populate
+            # ``InvocationCompletedEvent.final_state`` on the failure
+            # path with the partial state, not the bare initial state.
+            # Updated AFTER ``state = step_result.state`` so an
+            # exception inside the step bypasses this assignment and
+            # the previous value (or the empty box) survives.
+            context.latest_state_box[:] = [state]
 
             # Proposal 0043 (post-PR-99 review): restore the outer
             # ``current`` to the shared box after a successful step.

@@ -764,3 +764,338 @@ async def test_trace_output_status_failed_on_node_raise() -> None:
 
     trace = next(iter(client.traces.values()))
     assert trace.output == {"final_node": "raises", "status": "failed"}
+
+
+class _PartialFailState(State):
+    a_ran: bool = False
+    b_ran: bool = False
+
+
+async def _node_a_succeeds(_s: _PartialFailState) -> dict[str, Any]:
+    return {"a_ran": True}
+
+
+async def _node_b_raises(_s: _PartialFailState) -> dict[str, Any]:
+    raise RuntimeError("node_b boom")
+
+
+async def test_failure_path_final_state_is_state_at_failure_point() -> None:
+    # Spec §8.4.1 *Resume semantics* + the proposal-0043 "partial final
+    # state captured at the failure point" clause:  a graph that
+    # completes node_a successfully then raises in node_b MUST surface
+    # the post-node-a state on the InvocationCompletedEvent so the
+    # ``trace_output_from_state`` hook (and the raw-state lever) see
+    # the partial state, not the bare initial state.  Pins the engine
+    # fix that surfaces ``latest_state_box`` on the failure path.
+
+    captured_output_state: list[_PartialFailState] = []
+
+    def output_hook(state: _PartialFailState) -> dict[str, Any]:
+        captured_output_state.append(state)
+        return {"a_ran": state.a_ran, "b_ran": state.b_ran}
+
+    client = InMemoryLangfuseClient()
+    observer = LangfuseObserver(client=client, trace_output_from_state=output_hook)
+    graph = (
+        GraphBuilder(_PartialFailState)
+        .add_node("node_a", _node_a_succeeds)
+        .add_node("node_b", _node_b_raises)
+        .add_edge("node_a", "node_b")
+        .add_edge("node_b", END)
+        .set_entry("node_a")
+        .compile()
+    )
+    graph.attach_observer(observer)
+
+    from openarmature.graph.errors import NodeException
+
+    with pytest.raises(NodeException, match="node_b"):
+        await graph.invoke(_PartialFailState())
+    await graph.drain()
+
+    # The output hook fired with the post-node-a state (a_ran=True),
+    # not the initial state (a_ran=False).
+    assert len(captured_output_state) == 1
+    assert captured_output_state[0].a_ran is True
+    assert captured_output_state[0].b_ran is False
+    trace = next(iter(client.traces.values()))
+    assert trace.output == {"a_ran": True, "b_ran": False}
+
+
+class _OuterFailState(State):
+    outer_a_done: bool = False
+    sub_done: bool = False
+
+
+class _InnerFailState(State):
+    inner_x_done: bool = False
+
+
+async def _outer_node_a(_s: _OuterFailState) -> dict[str, Any]:
+    return {"outer_a_done": True}
+
+
+async def _inner_node_x_succeeds(_s: _InnerFailState) -> dict[str, Any]:
+    return {"inner_x_done": True}
+
+
+async def _inner_node_y_raises(_s: _InnerFailState) -> dict[str, Any]:
+    raise RuntimeError("inner_node_y boom")
+
+
+async def test_failure_path_final_state_is_outer_type_when_subgraph_raises() -> None:
+    # Engine-bug regression: an inner-subgraph step's success previously
+    # overwrote the outermost ``latest_state_box`` (it was shared by
+    # reference across subgraph descents), so a subgraph-internal raise
+    # would leave the box holding an INNER state at outer ``invoke()``
+    # finally time.  The outer ``trace_output_from_state`` hook would
+    # then receive an inner-typed state when its signature expects the
+    # outer type — a real correctness bug.
+    #
+    # The box is now per-context: each subgraph descent gets its own
+    # fresh ``latest_state_box``, so the outermost level's box holds
+    # only outer-state-typed entries.  This test exercises a graph
+    # where outer node_a succeeds (outer state = a_done=true), the
+    # subgraph step raises inside, and the outer trace.output hook
+    # receives the outer state with ``outer_a_done=True``,
+    # ``sub_done=False``.
+    from openarmature.graph import ExplicitMapping
+
+    inner_graph = (
+        GraphBuilder(_InnerFailState)
+        .add_node("inner_x", _inner_node_x_succeeds)
+        .add_node("inner_y", _inner_node_y_raises)
+        .add_edge("inner_x", "inner_y")
+        .add_edge("inner_y", END)
+        .set_entry("inner_x")
+        .compile()
+    )
+
+    captured_output_state: list[Any] = []
+
+    def output_hook(state: Any) -> dict[str, Any]:
+        captured_output_state.append(state)
+        return {"outer_a_done": state.outer_a_done, "sub_done": state.sub_done}
+
+    client = InMemoryLangfuseClient()
+    observer = LangfuseObserver(client=client, trace_output_from_state=output_hook)
+    graph = (
+        GraphBuilder(_OuterFailState)
+        .add_node("outer_a", _outer_node_a)
+        .add_subgraph_node(
+            "sub",
+            inner_graph,
+            projection=ExplicitMapping(inputs=None, outputs={"sub_done": "inner_x_done"}),
+        )
+        .add_edge("outer_a", "sub")
+        .add_edge("sub", END)
+        .set_entry("outer_a")
+        .compile()
+    )
+    graph.attach_observer(observer)
+
+    from openarmature.graph.errors import NodeException
+
+    with pytest.raises(NodeException):
+        await graph.invoke(_OuterFailState())
+    await graph.drain()
+
+    # The hook receives the OUTER state (with outer_a_done=True,
+    # sub_done=False), not the inner state — confirming the box's
+    # per-level isolation worked.
+    assert len(captured_output_state) == 1
+    assert isinstance(captured_output_state[0], _OuterFailState)
+    assert not isinstance(captured_output_state[0], _InnerFailState)
+    assert captured_output_state[0].outer_a_done is True
+    assert captured_output_state[0].sub_done is False
+    trace = next(iter(client.traces.values()))
+    assert trace.output == {"outer_a_done": True, "sub_done": False}
+
+
+# ---------------------------------------------------------------------------
+# Per-context box isolation across fan-out + parallel-branches descents
+# ---------------------------------------------------------------------------
+
+
+class _FanOutOuterState(State):
+    outer_a_done: bool = False
+    items: list[int] = []
+    results: Annotated[list[int], append] = []
+
+
+class _FanOutInnerState(State):
+    item: int = 0
+    out: int = 0
+
+
+async def _fan_out_inner_raises(_s: _FanOutInnerState) -> dict[str, Any]:
+    raise RuntimeError("fan_out inner_node boom")
+
+
+async def test_failure_path_final_state_is_outer_type_when_fan_out_inner_raises() -> None:
+    # Sibling to the subgraph-raise test: pins the per-context
+    # ``latest_state_box`` isolation across a fan-out instance descent.
+    # Each fan-out instance gets its own ``_InvocationContext``
+    # (descend_into_fan_out_instance), so its inner step writes land on
+    # the instance's own box, not the outer box.  When the instance
+    # raises, the outermost ``invoke()``'s finally-block reads the
+    # OUTER box — which holds outer state from ``outer_a``'s successful
+    # completion, not the inner instance state.
+    inner_graph = (
+        GraphBuilder(_FanOutInnerState)
+        .add_node("inner_raise", _fan_out_inner_raises)
+        .add_edge("inner_raise", END)
+        .set_entry("inner_raise")
+        .compile()
+    )
+
+    async def _outer_a(_s: _FanOutOuterState) -> dict[str, Any]:
+        return {"outer_a_done": True}
+
+    captured_output_state: list[Any] = []
+
+    def output_hook(state: Any) -> dict[str, Any]:
+        captured_output_state.append(state)
+        return {"outer_a_done": state.outer_a_done, "results": list(state.results)}
+
+    client = InMemoryLangfuseClient()
+    observer = LangfuseObserver(client=client, trace_output_from_state=output_hook)
+    graph = (
+        GraphBuilder(_FanOutOuterState)
+        .add_node("outer_a", _outer_a)
+        .add_fan_out_node(
+            "fan",
+            subgraph=inner_graph,
+            collect_field="out",
+            target_field="results",
+            items_field="items",
+            item_field="item",
+        )
+        .add_edge("outer_a", "fan")
+        .add_edge("fan", END)
+        .set_entry("outer_a")
+        .compile()
+    )
+    graph.attach_observer(observer)
+
+    from openarmature.graph.errors import RuntimeGraphError
+
+    with pytest.raises(RuntimeGraphError):
+        # Three fan-out instances all fail; the engine raises after the
+        # fan-out node completes (fail_fast default).
+        await graph.invoke(_FanOutOuterState(items=[1, 2, 3]))
+    await graph.drain()
+
+    # The hook receives the OUTER state (FanOutOuterState), not an
+    # inner FanOutInnerState from the failed instance descent.
+    assert len(captured_output_state) == 1
+    assert isinstance(captured_output_state[0], _FanOutOuterState)
+    assert not isinstance(captured_output_state[0], _FanOutInnerState)
+    assert captured_output_state[0].outer_a_done is True
+    # No instance succeeded, so results stays empty.
+    assert list(captured_output_state[0].results) == []
+
+
+class _ParBrOuterState(State):
+    outer_a_done: bool = False
+    branch_x_done: bool = False
+    branch_y_done: bool = False
+
+
+class _ParBrBranchXState(State):
+    x_done: bool = False
+
+
+class _ParBrBranchYState(State):
+    y_done: bool = False
+
+
+async def _par_br_branch_x_succeeds(_s: _ParBrBranchXState) -> dict[str, Any]:
+    return {"x_done": True}
+
+
+async def _par_br_branch_y_raises(_s: _ParBrBranchYState) -> dict[str, Any]:
+    raise RuntimeError("parallel_branches branch_y boom")
+
+
+async def test_failure_path_final_state_is_outer_type_when_parallel_branch_raises() -> None:
+    # Sibling to the subgraph + fan-out tests: pins per-context
+    # ``latest_state_box`` isolation across a parallel-branches
+    # descent.  Each branch's inner _invoke runs in its own
+    # ``_InvocationContext`` (descend_into_parallel_branch), so inner
+    # writes don't leak to the outer box.  Even when branch_x writes
+    # its inner state successfully, the outermost finally-block reads
+    # the OUTER box on the branch_y-induced raise.
+    from openarmature.graph import BranchSpec
+
+    branch_x_subgraph = (
+        GraphBuilder(_ParBrBranchXState)
+        .add_node("succeeds", _par_br_branch_x_succeeds)
+        .add_edge("succeeds", END)
+        .set_entry("succeeds")
+        .compile()
+    )
+
+    branch_y_subgraph = (
+        GraphBuilder(_ParBrBranchYState)
+        .add_node("raises", _par_br_branch_y_raises)
+        .add_edge("raises", END)
+        .set_entry("raises")
+        .compile()
+    )
+
+    async def _outer_a(_s: _ParBrOuterState) -> dict[str, Any]:
+        return {"outer_a_done": True}
+
+    captured_output_state: list[Any] = []
+
+    def output_hook(state: Any) -> dict[str, Any]:
+        captured_output_state.append(state)
+        return {
+            "outer_a_done": state.outer_a_done,
+            "branch_x_done": state.branch_x_done,
+            "branch_y_done": state.branch_y_done,
+        }
+
+    client = InMemoryLangfuseClient()
+    observer = LangfuseObserver(client=client, trace_output_from_state=output_hook)
+    graph = (
+        GraphBuilder(_ParBrOuterState)
+        .add_node("outer_a", _outer_a)
+        .add_parallel_branches_node(
+            "dispatch",
+            branches={
+                "branch_x": BranchSpec(
+                    subgraph=branch_x_subgraph,
+                    outputs={"branch_x_done": "x_done"},
+                ),
+                "branch_y": BranchSpec(
+                    subgraph=branch_y_subgraph,
+                    outputs={"branch_y_done": "y_done"},
+                ),
+            },
+        )
+        .add_edge("outer_a", "dispatch")
+        .add_edge("dispatch", END)
+        .set_entry("outer_a")
+        .compile()
+    )
+    graph.attach_observer(observer)
+
+    from openarmature.graph.errors import RuntimeGraphError
+
+    with pytest.raises(RuntimeGraphError):
+        await graph.invoke(_ParBrOuterState())
+    await graph.drain()
+
+    # The hook receives the OUTER state (ParBrOuterState).  Whether
+    # branch_x's success projected back into the outer state by the
+    # time of the raise depends on the dispatch's join semantics;
+    # what MUST be true is that the captured state is the OUTER
+    # type, not branch_x's _ParBrBranchXState or branch_y's
+    # _ParBrBranchYState.
+    assert len(captured_output_state) == 1
+    assert isinstance(captured_output_state[0], _ParBrOuterState)
+    assert not isinstance(captured_output_state[0], _ParBrBranchXState)
+    assert not isinstance(captured_output_state[0], _ParBrBranchYState)
+    assert captured_output_state[0].outer_a_done is True

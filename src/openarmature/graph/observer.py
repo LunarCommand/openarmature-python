@@ -497,6 +497,23 @@ class _InvocationContext:
     # descents so the inner-most node's name wins on failure (the
     # real culprit, not the wrapper).
     final_node_box: list[str] = field(default_factory=list[str])
+    # Per proposal 0043 (observability §8.4.1 *Resume semantics* +
+    # "partial final state captured at the failure point" clause).
+    # Tracks the most recent successful step's post-merge state at THIS
+    # context level so the outermost ``invoke()`` can populate
+    # ``InvocationCompletedEvent.final_state`` on the failure path with
+    # the partial outer state, not the bare ``starting_state``. On the
+    # success path the box is unused — the engine's return value is the
+    # canonical ``final_state``. **Distinct from ``final_node_box``**:
+    # the latest-state box is per-level (each subgraph / fan-out
+    # instance / parallel-branches branch gets its own fresh box),
+    # because the OUTER Langfuse trace cares about the outer-graph's
+    # state type, and an inner state has a different type. The
+    # ``final_node_box`` shares by reference because the spec wants the
+    # innermost failing node's name (the real culprit); state has the
+    # opposite contract — the outermost level's state is what the
+    # outer trace.output hook receives.
+    latest_state_box: list[Any] = field(default_factory=list[Any])
 
     def full_observers(self) -> tuple[SubscribedObserver, ...]:
         """Return the ordered observer list to deliver for events from
@@ -545,6 +562,9 @@ class _InvocationContext:
             drain_counters=self.drain_counters,
             state_cls=self.state_cls,
             final_node_box=self.final_node_box,
+            # latest_state_box is INTENTIONALLY NOT propagated — each
+            # context level tracks its own outer-state-typed latest
+            # successful step. See the field docstring above.
         )
 
     def descend_into_fan_out_instance(
@@ -596,6 +616,9 @@ class _InvocationContext:
             drain_counters=self.drain_counters,
             state_cls=self.state_cls,
             final_node_box=self.final_node_box,
+            # latest_state_box is INTENTIONALLY NOT propagated — each
+            # context level tracks its own outer-state-typed latest
+            # successful step. See the field docstring above.
         )
 
     def descend_into_parallel_branch(
@@ -650,6 +673,9 @@ class _InvocationContext:
             drain_counters=self.drain_counters,
             state_cls=self.state_cls,
             final_node_box=self.final_node_box,
+            # latest_state_box is INTENTIONALLY NOT propagated — each
+            # context level tracks its own outer-state-typed latest
+            # successful step. See the field docstring above.
         )
 
     def take_step(self) -> int:
