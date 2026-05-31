@@ -2791,3 +2791,145 @@ async def test_metadata_augmentation_updates_per_branch_dispatch_span() -> None:
     assert "openarmature.user.audit_kind" not in dispatch_spans_by_branch["policy_audit"], (
         "sibling branch's dispatch span MUST NOT receive the augmenter's key"
     )
+
+
+async def test_nested_fan_out_augmentation_reaches_outer_instance_dispatch_span() -> None:
+    # Spec proposal 0045 §3.4 lineage-aware containment rule.
+    # Topology: outer fan-out wrapping a serial subgraph that
+    # contains a leaf.  The leaf augments a per-item key.  Augment
+    # targets per §3.4:
+    #
+    # - Outer instance #1's dispatch span MUST receive
+    #   ``group="item-200"`` (rule 2, strict ancestor on the path).
+    # - Outer instance #0's dispatch span MUST receive
+    #   ``group="item-100"`` (rule 2, its own subtree).
+    # - Outer instance #0 and #1's dispatch spans MUST NOT receive
+    #   each other's value (rule 3, siblings).
+    # - The outer fan-out NODE span MUST NOT receive any group key
+    #   (rule 3, shared parent).
+    # - The invocation span MUST NOT receive any group key (rule 3,
+    #   shared parent — augmenter is inside a fan-out instance).
+    #
+    # The chain at the augmenter is ``(K,)`` where K is the outer
+    # instance's index — the per-depth tracking that 0045 requires
+    # is exercised by the resolver picking the matching outer
+    # dispatch span (and skipping the sibling) on each leaf's
+    # augmentation.
+    import asyncio
+
+    from openarmature.observability.metadata import set_invocation_metadata
+
+    class _OuterS(State):
+        items: list[int] = []
+        results: Annotated[list[int], append] = []
+
+    class _MidS(State):
+        item: int = 0
+        out: int = 0
+
+    class _LeafS(State):
+        item: int = 0
+        out: int = 0
+
+    async def _leaf(s: _LeafS) -> dict[str, int]:
+        await asyncio.sleep(0)
+        # Augment with a per-item key so we can detect which dispatch
+        # span the augmentation lands on.
+        set_invocation_metadata(group=f"item-{s.item}")
+        return {"out": s.item}
+
+    leaf_subgraph = (
+        GraphBuilder(_LeafS).add_node("leaf", _leaf).add_edge("leaf", END).set_entry("leaf").compile()
+    )
+
+    # Mid-level: a serial subgraph wrapping the leaf.  Threads
+    # ``item`` straight through and exposes ``out``.
+    async def _mid_passthrough(_s: _MidS) -> dict[str, int]:
+        return {}
+
+    from openarmature.graph.projection import ExplicitMapping
+
+    mid_subgraph = (
+        GraphBuilder(_MidS)
+        .add_subgraph_node(
+            "leaf_wrap",
+            leaf_subgraph,
+            projection=ExplicitMapping[_MidS, _LeafS](inputs={"item": "item"}, outputs={"out": "out"}),
+        )
+        .add_node("noop", _mid_passthrough)
+        .add_edge("leaf_wrap", "noop")
+        .add_edge("noop", END)
+        .set_entry("leaf_wrap")
+        .compile()
+    )
+
+    exporter = InMemorySpanExporter()
+    observer = OTelObserver(span_processor=SimpleSpanProcessor(exporter))
+    g = (
+        GraphBuilder(_OuterS)
+        .add_fan_out_node(
+            "outer_fan",
+            subgraph=mid_subgraph,
+            collect_field="out",
+            target_field="results",
+            items_field="items",
+            item_field="item",
+        )
+        .add_edge("outer_fan", END)
+        .set_entry("outer_fan")
+        .compile()
+    )
+    g.attach_observer(observer)
+    try:
+        await g.invoke(_OuterS(items=[100, 200]))
+        await g.drain()
+    finally:
+        observer.shutdown()
+
+    spans = exporter.get_finished_spans()
+    # Outer per-instance dispatch spans (name = "outer_fan" with
+    # ``fan_out_index`` ∈ {0, 1} and ``fan_out.parent_node_name``).
+    outer_dispatches = {
+        dict(s.attributes or {}).get("openarmature.node.fan_out_index"): s
+        for s in spans
+        if s.name == "outer_fan"
+        and dict(s.attributes or {}).get("openarmature.node.fan_out_index") is not None
+        and "openarmature.fan_out.parent_node_name" in dict(s.attributes or {})
+    }
+    assert outer_dispatches.keys() == {0, 1}, (
+        f"expected two outer fan-out instance dispatch spans; got {outer_dispatches.keys()!r}"
+    )
+
+    # Each outer dispatch carries the leaf's per-item group value (its
+    # own subtree's augmentation propagated outward via the lineage-
+    # aware boundary rule).
+    outer0_group = dict(outer_dispatches[0].attributes or {}).get("openarmature.user.group")
+    outer1_group = dict(outer_dispatches[1].attributes or {}).get("openarmature.user.group")
+    assert outer0_group == "item-100", (
+        f"outer instance #0's dispatch span MUST carry its leaf's augmented value; got {outer0_group!r}"
+    )
+    assert outer1_group == "item-200", (
+        f"outer instance #1's dispatch span MUST carry its leaf's augmented value; got {outer1_group!r}"
+    )
+
+    # The outer fan-out NODE span (shared parent of both instances —
+    # the one without ``fan_out_index`` on its attributes) MUST NOT
+    # carry any augmented group key.
+    outer_node_spans = [
+        s
+        for s in spans
+        if s.name == "outer_fan" and dict(s.attributes or {}).get("openarmature.node.fan_out_index") is None
+    ]
+    assert len(outer_node_spans) >= 1
+    for outer_node in outer_node_spans:
+        assert "openarmature.user.group" not in dict(outer_node.attributes or {}), (
+            "outer fan-out NODE span (shared parent) MUST NOT receive any augmented group key"
+        )
+
+    # The invocation span MUST NOT carry it (augmenter is inside a
+    # fan-out → invocation is a shared parent).
+    inv_spans = [s for s in spans if s.name == "openarmature.invocation"]
+    assert len(inv_spans) == 1
+    assert "openarmature.user.group" not in dict(inv_spans[0].attributes or {}), (
+        "invocation span MUST NOT receive augmenter's key when inside a fan-out instance"
+    )

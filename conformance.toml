@@ -32,7 +32,7 @@
 
 [manifest]
 implementation = "openarmature-python"
-spec_pin = "v0.36.0"
+spec_pin = "v0.37.0"
 
 # Status values:
 #   implemented   — shipped behavior matches the proposal's contract
@@ -213,5 +213,17 @@ since = "0.11.0"
 
 # Spec v0.36.0 (proposal 0044).
 [proposals."0044"]
+status = "implemented"
+since = "0.11.0"
+
+# Spec v0.37.0 (proposal 0045).  Engine-side per-depth lineage chains
+# + observer-side three-step boundary decision tree implemented.
+# Single-level fixtures 029 / 030 / 034 stay unchanged per 0045's
+# backward-compat note.  Nested-case fixture 039 stays deferred in the
+# Langfuse harness — needs runtime-state item-list lookup for nested
+# fan-outs plus an ``augment_metadata_from_outer_item`` directive.
+# Behavioral contract verified at unit level via
+# ``test_nested_fan_out_augmentation_reaches_outer_instance_dispatch_span``.
+[proposals."0045"]
 status = "implemented"
 since = "0.11.0"

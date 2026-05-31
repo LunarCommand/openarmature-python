@@ -161,6 +161,7 @@ class ParallelBranchesNode[ParentT: State]:
                     parallel_branches_node_name=self.name,
                     parent_state=state,
                     sub_attached=tuple(spec.subgraph._attached_observers),  # noqa: SLF001
+                    branch_name=branch_name,
                 )
 
                 async def innermost(s: Any) -> Mapping[str, Any]:

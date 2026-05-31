@@ -34,7 +34,7 @@ from openarmature.graph.events import (
     MetadataAugmentationEvent,
     NodeEvent,
 )
-from openarmature.observability.lineage import is_prefix_or_equal, is_strict_prefix
+from openarmature.observability.lineage import is_strict_prefix
 from openarmature.observability.llm_event import LLM_NAMESPACE, LlmEventPayload
 
 from .client import (
@@ -77,9 +77,39 @@ _StackKey = tuple[tuple[str, ...], int, int | None, str | None]
 
 @dataclass
 class _OpenObservation:
-    """An in-flight Langfuse observation pinned in the observer's state."""
+    """An in-flight Langfuse observation pinned in the observer's state.
+
+    Per proposal 0045: carries the observation's own
+    ``fan_out_index_chain`` and ``branch_name_chain`` so the
+    augmentation walk can apply §3.4's lineage-aware boundary rule
+    (mirror of the OTel observer's ``_OpenSpan``)."""
 
     handle: LangfuseSpanHandle | LangfuseGenerationHandle
+    fan_out_index_chain: tuple[int | None, ...] = ()
+    branch_name_chain: tuple[str | None, ...] = ()
+
+
+def _observation_chain_on_path(
+    open_obs: _OpenObservation,
+    aug_fi_chain: tuple[int | None, ...],
+    aug_bn_chain: tuple[str | None, ...],
+) -> bool:
+    """Mirror of the OTel observer's ``_span_chain_on_path`` for
+    Langfuse observations.  Returns True iff the observation's chain
+    is a prefix-match of the augmenter's chain."""
+    obs_fi = open_obs.fan_out_index_chain
+    obs_bn = open_obs.branch_name_chain
+    if len(obs_fi) > len(aug_fi_chain):
+        return False
+    if len(obs_bn) > len(aug_bn_chain):
+        return False
+    for i in range(len(obs_fi)):
+        if obs_fi[i] != aug_fi_chain[i]:
+            return False
+    for i in range(len(obs_bn)):
+        if obs_bn[i] != aug_bn_chain[i]:
+            return False
+    return True
 
 
 def _empty_str_frozenset() -> frozenset[str]:
@@ -185,6 +215,14 @@ class _InvState:
     # per-instance dispatch observation can attach
     # metadata.fan_out_parent_node_name).
     fan_out_parent_node_name: dict[tuple[str, ...], str] = field(default_factory=dict[tuple[str, ...], str])
+    # Per proposal 0045: structural identification of parallel-
+    # branches NODE namespaces.  Populated on a pb NODE's started
+    # event (whichever events carry ``parallel_branches_config``);
+    # consulted by the augmentation walk to skip the pb NODE itself
+    # as a shared parent (§3.4's structural classification).
+    parallel_branches_parent_node_name: dict[tuple[str, ...], str] = field(
+        default_factory=dict[tuple[str, ...], str]
+    )
     # Side-cache: accumulator for `metadata.detached_child_trace_ids`
     # on dispatch observations that spawn detached children. Keyed by
     # the dispatch observation's prefix (the fan-out node's namespace,
@@ -336,6 +374,16 @@ class LangfuseObserver:
         if event.fan_out_config is not None and event.fan_out_index is None:
             inv_state.fan_out_parent_node_name[event.namespace] = event.fan_out_config.parent_node_name
 
+        # Per proposal 0045: mirror cache for parallel-branches NODE
+        # identification (used by the augmentation shared-parent
+        # check).  No additional ``branch_name is None`` filter — the
+        # ``*_config`` field is itself only populated on a NODE's own
+        # events.
+        if event.parallel_branches_config is not None:
+            inv_state.parallel_branches_parent_node_name[event.namespace] = (
+                event.parallel_branches_config.parent_node_name
+            )
+
         key = self._key_for(event)
         if key in inv_state.open_observations:
             # Idempotent: a second started for the same (namespace,
@@ -357,7 +405,11 @@ class LangfuseObserver:
             metadata=metadata,
             parent_observation_id=parent_observation_id,
         )
-        inv_state.open_observations[key] = _OpenObservation(handle=handle)
+        inv_state.open_observations[key] = _OpenObservation(
+            handle=handle,
+            fan_out_index_chain=event.fan_out_index_chain,
+            branch_name_chain=event.branch_name_chain,
+        )
 
     def _handle_completed(self, event: NodeEvent) -> None:
         from openarmature.observability.correlation import current_invocation_id
@@ -397,6 +449,10 @@ class LangfuseObserver:
             # rather than appending to the previous iteration's
             # accumulator and overwriting the prior link metadata.
             inv_state.detached_child_trace_ids.pop(event.namespace, None)
+        # Per proposal 0045: clean up the pb cache on a pb NODE's own
+        # completion.  Same shape as the fan-out cleanup above.
+        if event.parallel_branches_config is not None:
+            inv_state.parallel_branches_parent_node_name.pop(event.namespace, None)
 
         key = self._key_for(event)
         observation = inv_state.open_observations.pop(key, None)
@@ -446,53 +502,68 @@ class LangfuseObserver:
         if invocation_id is None or not event.entries:
             return
         inv_state = self._inv_states.get(invocation_id)
-        aug_fi = event.fan_out_index
-        aug_bn = event.branch_name
         aug_ns = event.namespace
+        aug_fi_chain = event.fan_out_index_chain
+        aug_bn_chain = event.branch_name_chain
         metadata_delta = dict(event.entries)
 
-        # Trace.metadata: only for outermost-serial. The Trace is
-        # shared across siblings, so a fan-out instance's per-item
-        # productId would leak across siblings if it updated the
-        # Trace — 029's fixture explicitly rules that out.
-        if aug_fi is None and aug_bn is None:
+        # Trace.metadata: only when the augmenter sits in OUTERMOST
+        # SERIAL context (no fan-out instance and no parallel-branches
+        # branch on its call-stack path).  Per §3.4 the Trace is a
+        # shared parent inside any dispatch boundary — siblings would
+        # leak — so only the no-dispatch-on-path case writes.
+        outermost_serial = all(fi is None for fi in aug_fi_chain) and all(bn is None for bn in aug_bn_chain)
+        if outermost_serial:
             self.client.update_trace(id=invocation_id, metadata=metadata_delta)
 
         if inv_state is None:
             return
 
-        # Subgraph wrapper observations on the ancestor path
-        # (outermost-serial only — inside a fan-out instance the
-        # subgraph wrapper above the fan-out node is sibling-shared).
-        if aug_fi is None and aug_bn is None:
-            for prefix, observation in inv_state.subgraph_observations.items():
-                if is_strict_prefix(prefix, aug_ns):
-                    observation.handle.update(metadata=metadata_delta)
+        # Per proposal 0045: parallel walk of the OTel observer's
+        # _collect_augmentation_targets — subgraph wrappers on the
+        # call-stack path (chain prefix-matches), fan-out instance
+        # dispatch observations whose dispatch position matches the
+        # augmenter's chain, and open NODE observations on the path
+        # (skipping fan-out / pb shared-parent NODEs).
 
-        # Fan-out instance dispatch observation(s) when the augmenter
-        # is inside a fan-out instance. Keys are anchor_ns +
-        # (str(fan_out_index),) per
-        # ``_open_fan_out_instance_dispatch_observation``.
-        if aug_fi is not None:
-            fi_str = str(aug_fi)
-            for key, observation in inv_state.fan_out_instance_observations.items():
-                if not key or key[-1] != fi_str:
-                    continue
-                anchor_ns = key[:-1]
-                if is_strict_prefix(anchor_ns, aug_ns) or anchor_ns == aug_ns:
-                    observation.handle.update(metadata=metadata_delta)
+        # Subgraph wrapper observations on the path.
+        for prefix, observation in inv_state.subgraph_observations.items():
+            if not is_strict_prefix(prefix, aug_ns):
+                continue
+            if _observation_chain_on_path(observation, aug_fi_chain, aug_bn_chain):
+                observation.handle.update(metadata=metadata_delta)
 
-        # Open node observations on the augmenter's call stack. Match
-        # on ``fan_out_index`` AND ``branch_name`` to skip sibling
-        # instances / branches; namespace must prefix (or equal) the
-        # augmenter's.
+        # Fan-out instance dispatch observations.
+        for key, observation in inv_state.fan_out_instance_observations.items():
+            if not key:
+                continue
+            anchor_ns = key[:-1]
+            fi_str = key[-1]
+            if not (is_strict_prefix(anchor_ns, aug_ns) or anchor_ns == aug_ns):
+                continue
+            chain_pos = len(anchor_ns) - 1
+            if chain_pos < 0 or chain_pos >= len(aug_fi_chain):
+                continue
+            aug_fi_at_pos = aug_fi_chain[chain_pos]
+            if aug_fi_at_pos is None or str(aug_fi_at_pos) != fi_str:
+                continue
+            observation.handle.update(metadata=metadata_delta)
+
+        # Open NODE observations.  Same as augmenter or strict
+        # ancestor on the path; skip shared-parent NODE observations
+        # (fan-out NODE / pb NODE) identified by presence in the
+        # parent_node_name caches.
         for key, observation in inv_state.open_observations.items():
-            ns, _ai, fi, bn = key
-            if fi != aug_fi:
+            ns, _ai, _fi, _bn = key
+            if ns == aug_ns:
+                if _observation_chain_on_path(observation, aug_fi_chain, aug_bn_chain):
+                    observation.handle.update(metadata=metadata_delta)
                 continue
-            if bn != aug_bn:
+            if not is_strict_prefix(ns, aug_ns):
                 continue
-            if is_prefix_or_equal(ns, aug_ns):
+            if ns in inv_state.fan_out_parent_node_name or ns in inv_state.parallel_branches_parent_node_name:
+                continue
+            if _observation_chain_on_path(observation, aug_fi_chain, aug_bn_chain):
                 observation.handle.update(metadata=metadata_delta)
 
     # ------------------------------------------------------------------
@@ -810,7 +881,13 @@ class LangfuseObserver:
             metadata=metadata,
             parent_observation_id=parent_observation_id,
         )
-        inv_state.subgraph_observations[prefix] = _OpenObservation(handle=handle)
+        # Per proposal 0045: chain sliced to wrapper depth.
+        chain_len = len(prefix)
+        inv_state.subgraph_observations[prefix] = _OpenObservation(
+            handle=handle,
+            fan_out_index_chain=event.fan_out_index_chain[:chain_len],
+            branch_name_chain=event.branch_name_chain[:chain_len],
+        )
 
     def _open_fan_out_instance_dispatch_observation(
         self,
@@ -845,7 +922,13 @@ class LangfuseObserver:
             parent_observation_id=parent_observation_id,
         )
         instance_key = prefix + (str(event.fan_out_index),)
-        inv_state.fan_out_instance_observations[instance_key] = _OpenObservation(handle=handle)
+        # Per proposal 0045: chain sliced to instance-dispatch depth.
+        chain_len = len(prefix)
+        inv_state.fan_out_instance_observations[instance_key] = _OpenObservation(
+            handle=handle,
+            fan_out_index_chain=event.fan_out_index_chain[:chain_len],
+            branch_name_chain=event.branch_name_chain[:chain_len],
+        )
 
     def _open_detached_subgraph_trace(
         self,
@@ -963,7 +1046,15 @@ class LangfuseObserver:
             metadata=dispatch_metadata,
             parent_observation_id=None,
         )
-        inv_state.subgraph_observations[prefix] = _OpenObservation(handle=handle)
+        # Per proposal 0045: detached subgraph wrapper sits in its own
+        # trace; chain still mirrors the parent-trace path so the
+        # augmentation lookup is consistent with non-detached.
+        chain_len = len(prefix)
+        inv_state.subgraph_observations[prefix] = _OpenObservation(
+            handle=handle,
+            fan_out_index_chain=event.fan_out_index_chain[:chain_len],
+            branch_name_chain=event.branch_name_chain[:chain_len],
+        )
         inv_state.detached_traces[prefix] = detached_trace_id
 
     def _open_detached_fan_out_instance_trace(
@@ -1040,7 +1131,12 @@ class LangfuseObserver:
             parent_observation_id=None,
         )
         instance_key = prefix + (str(event.fan_out_index),)
-        inv_state.fan_out_instance_observations[instance_key] = _OpenObservation(handle=handle)
+        chain_len = len(prefix)
+        inv_state.fan_out_instance_observations[instance_key] = _OpenObservation(
+            handle=handle,
+            fan_out_index_chain=event.fan_out_index_chain[:chain_len],
+            branch_name_chain=event.branch_name_chain[:chain_len],
+        )
         inv_state.detached_traces[instance_key] = detached_trace_id
         inv_state.fan_out_instance_root_prefixes.add(instance_key)
 
@@ -1213,7 +1309,11 @@ class LangfuseObserver:
                 parent_observation_id=parent_observation_id,
                 prompt=self._resolve_prompt_link(payload),
             )
-            inv_state.open_llm_observations[payload.call_id] = _OpenObservation(handle=handle)
+            inv_state.open_llm_observations[payload.call_id] = _OpenObservation(
+                handle=handle,
+                fan_out_index_chain=event.fan_out_index_chain,
+                branch_name_chain=event.branch_name_chain,
+            )
             return
 
         # completed: pop the started handle and finalize.

@@ -102,6 +102,31 @@ _LANGFUSE_FIXTURES = frozenset(
         # Both fixtures land once spec settles the dispatch-span
         # shape AND the adapter learns to infer fan-out aggregation
         # defaults from inner subgraphs.
+        # 039 (nested-lineage augmentation) — proposal 0045 v0.37.0.
+        # Stays deferred in PR 11. The three cases require harness
+        # extensions the existing primitives don't cover:
+        # - Case 1 + 3 (nested fan-out + fan-out-in-serial): the
+        #   ``augment_metadata_from_field`` middleware captures the
+        #   items list at fixture-build time from ``initial_state``;
+        #   nested fan-outs read items from the OUTER instance's
+        #   subgraph state (the ``inner_seed`` field threaded through
+        #   per_product), which the current item-capture path can't
+        #   resolve.  Needs a runtime-state item-list lookup.
+        # - Case 2 (pb-inside-fan-out): introduces a new directive
+        #   ``augment_metadata_from_outer_item: {key: field}`` — the
+        #   pb branch's middleware sources the augmentation value
+        #   from the SURROUNDING outer fan-out instance's item, not
+        #   from a static value or the branch's own state.  Needs a
+        #   new middleware factory + a way to capture the outer-item
+        #   reference at fixture-build time.
+        # 0045's behavioral contract IS exercised at unit level via the
+        # OTel observer's
+        # ``test_nested_fan_out_augmentation_reaches_outer_instance_dispatch_span``
+        # regression test, and the cross-impl coverage the spec relies
+        # on for nested cases is already in place.  Activating 039 against the
+        # Langfuse harness is a follow-up PR — the harness extensions
+        # above are non-trivial and orthogonal to the engine + observer
+        # changes 0045 actually mandates.
     }
 )
 

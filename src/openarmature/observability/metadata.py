@@ -168,8 +168,10 @@ def set_invocation_metadata(**entries: AttributeValue) -> None:
     from .correlation import (
         current_attempt_index,
         current_branch_name,
+        current_branch_name_chain,
         current_dispatch,
         current_fan_out_index,
+        current_fan_out_index_chain,
         current_namespace_prefix,
     )
 
@@ -182,6 +184,11 @@ def set_invocation_metadata(**entries: AttributeValue) -> None:
         attempt_index=current_attempt_index(),
         fan_out_index=current_fan_out_index(),
         branch_name=current_branch_name(),
+        # Per proposal 0045: the per-depth chains let observers walk
+        # the augmenter's call-stack ancestor path rather than only
+        # seeing the innermost dispatch.
+        fan_out_index_chain=current_fan_out_index_chain(),
+        branch_name_chain=current_branch_name_chain(),
     )
     dispatch(event)
 

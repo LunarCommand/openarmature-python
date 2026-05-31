@@ -416,6 +416,18 @@ class _InvocationContext:
     # instance, and absent (None) for nodes outside any fan-out.
     fan_out_index: int | None = None
 
+    # Per proposal 0045 (v0.37.0): per-depth lineage chains.  Mirror
+    # ``namespace_prefix`` depth — position ``i`` is the
+    # fan_out_index (resp. branch_name) for the dispatch boundary
+    # at namespace depth ``i+1``, or ``None`` if that boundary is a
+    # subgraph wrapper / serial node (not a fan-out, not a
+    # parallel-branches branch).  The chains are extended by one
+    # entry at every ``descend_into_*`` call; the engine then drives
+    # the chain ContextVars from these fields at every node-execution
+    # site so ``set_invocation_metadata`` sees the full chain.
+    fan_out_index_chain: tuple[int | None, ...] = ()
+    branch_name_chain: tuple[str | None, ...] = ()
+
     # ----------------------------------------------------------------
     # Checkpointing fields (spec pipeline-utilities §10)
     #
@@ -551,6 +563,11 @@ class _InvocationContext:
             parent_states_prefix=self.parent_states_prefix + (parent_state,),
             subgraph_identities=self.subgraph_identities + (subgraph_identity,),
             fan_out_index=self.fan_out_index,
+            # Per proposal 0045: subgraph wrappers don't add a
+            # fan-out or branch axis — extend both chains by
+            # ``None`` at this depth.
+            fan_out_index_chain=self.fan_out_index_chain + (None,),
+            branch_name_chain=self.branch_name_chain + (None,),
             invocation_id=self.invocation_id,
             correlation_id=self.correlation_id,
             checkpointer=self.checkpointer,
@@ -602,6 +619,11 @@ class _InvocationContext:
             parent_states_prefix=self.parent_states_prefix + (parent_state,),
             subgraph_identities=self.subgraph_identities + (subgraph_identity,),
             fan_out_index=fan_out_index,
+            # Per proposal 0045: fan-out instance descent extends the
+            # fan_out_index chain with the instance's index; the
+            # branch chain extends with ``None`` (no branch axis here).
+            fan_out_index_chain=self.fan_out_index_chain + (fan_out_index,),
+            branch_name_chain=self.branch_name_chain + (None,),
             invocation_id=self.invocation_id,
             correlation_id=self.correlation_id,
             checkpointer=self.checkpointer,
@@ -626,6 +648,8 @@ class _InvocationContext:
         parallel_branches_node_name: str,
         parent_state: State,
         sub_attached: tuple[SubscribedObserver, ...],
+        *,
+        branch_name: str,
     ) -> _InvocationContext:
         """Build the context for one parallel-branches branch's
         subgraph invocation.
@@ -637,11 +661,13 @@ class _InvocationContext:
         inner events nest under it (mirrors
         ``descend_into_fan_out_instance``'s namespace stamping).
 
-        Branch identity lives on the
-        ``observability.correlation._branch_name_var`` ContextVar
-        rather than on the descend context; set inside the
-        branch's task closure so ``copy_context`` inherits it
-        through the subgraph's execution.
+        Branch identity (the SCALAR innermost branch_name) lives on
+        the ``observability.correlation._branch_name_var`` ContextVar
+        — set inside the branch's task closure so ``copy_context``
+        inherits it through the subgraph's execution.  The PER-DEPTH
+        ``branch_name_chain`` (proposal 0045) is extended here on the
+        context so the engine can drive the chain ContextVar at
+        every inner-node execution site.
 
         Per §11.9 / §10.7 atomic-restart: drops the checkpointer
         and pending_resume_states (a crash mid-dispatch re-runs the
@@ -662,6 +688,12 @@ class _InvocationContext:
             # needed) is a future addition.
             subgraph_identities=self.subgraph_identities + (None,),
             fan_out_index=self.fan_out_index,
+            # Per proposal 0045: parallel-branches branch descent
+            # extends the branch chain with this branch's name; the
+            # fan_out_index chain extends with ``None`` (no fan-out
+            # axis here).
+            fan_out_index_chain=self.fan_out_index_chain + (None,),
+            branch_name_chain=self.branch_name_chain + (branch_name,),
             invocation_id=self.invocation_id,
             correlation_id=self.correlation_id,
             checkpointer=None,
