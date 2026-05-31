@@ -81,7 +81,7 @@ _LANGFUSE_FIXTURES = frozenset(
         # deferred to a follow-up PR — it needs the langfuse harness to
         # grow checkpointer wiring + flaky-node test seam + two-phase
         # multi-trace assertion. Listed individually in
-        # ``_DEFERRED_037_CASES`` rather than at the fixture level so the
+        # ``_DEFERRED_CASES`` rather than at the fixture level so the
         # four other cases run.
         "037-langfuse-trace-input-output",
         # 029 + 030 stay deferred in v0.11.0:
@@ -106,11 +106,12 @@ _LANGFUSE_FIXTURES = frozenset(
 
 
 # Per-case deferrals within an otherwise-activated fixture.  Each entry is
-# ``(fixture_stem, case_name)``.  The case-loop in the runner skips matching
-# cases with a clear pytest.skip reason.  Used for proposal-0043 case 5
-# (resume re-fire) which needs harness extensions tracked separately —
-# checkpointer wiring + flaky-node test seam + two-phase multi-trace
-# assertion — landed in a follow-up PR.
+# ``(fixture_stem, case_name)``.  The case-loop in the runner ``continue``s
+# past matching cases — NOT ``pytest.skip``, which would skip the whole
+# fixture's test invocation and hide the surrounding cases that DO run.
+# Used for proposal-0043 case 5 (resume re-fire) which needs harness
+# extensions tracked separately — checkpointer wiring + flaky-node test
+# seam + two-phase multi-trace assertion — landed in a follow-up PR.
 _DEFERRED_CASES: frozenset[tuple[str, str]] = frozenset(
     {
         (
