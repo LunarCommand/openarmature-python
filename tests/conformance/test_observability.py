@@ -1445,6 +1445,11 @@ async def _run_fixture_038_case(case: Mapping[str, Any]) -> None:
         inner_state_cls = build_state_cls(f"Inner_{sub_id}", inner_fields)
         ask_calls_llm = cast("dict[str, Any]", sub_spec["nodes"]["ask"]["calls_llm"])
         stores_in = cast("str", ask_calls_llm.get("stores_response_in", "msg"))
+        messages_in: tuple[Any, ...] = tuple(
+            UserMessage(content=m["content"])
+            for m in cast("list[dict[str, str]]", ask_calls_llm.get("messages", []))
+            if m.get("role") == "user"
+        ) or (UserMessage(content="answer the question"),)
 
         # Need to bind ``stores_in`` and the messages into the closure
         # for each subgraph independently — default-arg binding is the
@@ -1452,7 +1457,7 @@ async def _run_fixture_038_case(case: Mapping[str, Any]) -> None:
         async def _ask_body(
             _s: Any,
             stores: str = stores_in,
-            messages: tuple[Any, ...] = (UserMessage(content="answer the question"),),
+            messages: tuple[Any, ...] = messages_in,
         ) -> dict[str, str]:
             response = await provider.complete(list(messages))
             return {stores: response.message.content or ""}

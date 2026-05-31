@@ -2153,6 +2153,487 @@ async def test_parallel_branches_inside_fan_out_instance_inner_span_carries_both
         fan_out_indices.add(fi)
     assert fan_out_indices == {0, 1}, f"expected fan_out_index ∈ {{0, 1}}; got {fan_out_indices}"
 
+    # Parent-topology regression: each inner ``ask`` MUST parent under
+    # a per-branch dispatch span (the parallel-branches NODE's open
+    # span has fan_out_index set inside a fan-out instance; the scan
+    # in ``_open_parallel_branches_branch_dispatch_span`` must accept
+    # that).  And each dispatch span's parent MUST be the
+    # parallel-branches NODE span at the fan-out instance's namespace
+    # (NOT the invocation root).
+    spans_by_id = {cast("Any", s.context).span_id: s for s in spans}
+    dispatcher_node_spans = [
+        s
+        for s in spans
+        if s.name == "dispatcher"
+        and dict(s.attributes or {}).get("openarmature.parallel_branches.branch_count") is not None
+    ]
+    # One per fan-out instance.
+    assert len(dispatcher_node_spans) == 2, (
+        f"expected 2 dispatcher NODE spans (one per fan-out instance); got {len(dispatcher_node_spans)}"
+    )
+    dispatcher_node_ids = {cast("Any", s.context).span_id for s in dispatcher_node_spans}
+    for ask_span in ask_spans:
+        assert ask_span.parent is not None, "ask span MUST have a parent"
+        dispatch = spans_by_id.get(cast("Any", ask_span.parent).span_id)
+        dispatch_name = dispatch.name if dispatch is not None else "UNKNOWN"
+        assert dispatch is not None and dispatch.name == "primary", (
+            f"ask span MUST parent under per-branch dispatch span 'primary'; got {dispatch_name!r}"
+        )
+        assert dispatch.parent is not None, "dispatch span MUST have a parent"
+        assert cast("Any", dispatch.parent).span_id in dispatcher_node_ids, (
+            "per-branch dispatch span MUST parent under the parallel-branches NODE span "
+            "(at the fan-out instance's namespace), not the invocation root"
+        )
+
+
+async def test_parallel_branches_inside_subgraph_wrapper_parent_topology() -> None:
+    # Regression for the depth>1 nesting bug PR 9 caught during CoPilot
+    # review: pre-fix, when the parallel-branches node sits inside a
+    # subgraph wrapper (so the NODE's namespace is deeper than 1), the
+    # per-branch dispatch span was never synthesized (synthesis gated
+    # on ``depth == 1``) and inner-branch events couldn't find it
+    # (resolution hard-coded ``namespace[:1]``).  Post-fix, dispatch
+    # spans synthesize at the NODE's actual depth and inner spans
+    # parent under them.
+    from openarmature.graph import BranchSpec
+
+    class _OuterS(State):
+        result: str = ""
+
+    class _InnerWrapS(State):
+        result: str = ""
+
+    class _BranchS(State):
+        out: str = ""
+
+    async def _ask(_s: _BranchS) -> dict[str, str]:
+        return {"out": "done"}
+
+    branch_subgraph = (
+        GraphBuilder(_BranchS).add_node("ask", _ask).add_edge("ask", END).set_entry("ask").compile()
+    )
+
+    # Inner subgraph: contains a parallel-branches dispatcher.
+    inner_subgraph = (
+        GraphBuilder(_InnerWrapS)
+        .add_parallel_branches_node(
+            "dispatcher",
+            branches={
+                "fraud_check": BranchSpec(subgraph=branch_subgraph),
+                "policy_audit": BranchSpec(subgraph=branch_subgraph),
+            },
+        )
+        .add_edge("dispatcher", END)
+        .set_entry("dispatcher")
+        .compile()
+    )
+
+    # Outer graph: wraps the inner subgraph as a single node.  This
+    # puts the parallel-branches NODE at namespace depth 2 in the
+    # outer graph (``("wrapper", "dispatcher")``).
+    exporter = InMemorySpanExporter()
+    observer = OTelObserver(span_processor=SimpleSpanProcessor(exporter))
+    g = (
+        GraphBuilder(_OuterS)
+        .add_subgraph_node("wrapper", inner_subgraph)
+        .add_edge("wrapper", END)
+        .set_entry("wrapper")
+        .compile()
+    )
+    g.attach_observer(observer)
+    try:
+        await g.invoke(_OuterS())
+        await g.drain()
+    finally:
+        observer.shutdown()
+
+    spans = exporter.get_finished_spans()
+    spans_by_id = {cast("Any", s.context).span_id: s for s in spans}
+
+    # Per-branch dispatch spans MUST exist for both branches even
+    # though the parallel-branches NODE is at depth 2.
+    dispatch_spans_by_branch: dict[str, Any] = {}
+    for s in spans:
+        attrs = dict(s.attributes or {})
+        if attrs.get("openarmature.parallel_branches.parent_node_name") == "dispatcher":
+            bn = cast("str", attrs.get("openarmature.node.branch_name"))
+            dispatch_spans_by_branch[bn] = s
+    assert dispatch_spans_by_branch.keys() == {"fraud_check", "policy_audit"}, (
+        "per-branch dispatch spans MUST synthesize even when the parallel-branches "
+        f"NODE sits inside a subgraph wrapper; got dispatch spans for {dispatch_spans_by_branch.keys()!r}"
+    )
+
+    # Each ``ask`` span MUST parent under its matching dispatch span,
+    # not under the invocation root or the wrapper subgraph span.
+    ask_spans = [s for s in spans if s.name == "ask"]
+    assert len(ask_spans) == 2
+    for ask_span in ask_spans:
+        attrs = dict(ask_span.attributes or {})
+        bn = cast("str", attrs.get("openarmature.node.branch_name"))
+        assert ask_span.parent is not None, "ask span MUST have a parent"
+        parent_span_id = cast("Any", ask_span.parent).span_id
+        expected = dispatch_spans_by_branch[bn]
+        expected_id = expected.context.span_id
+        parent_name = spans_by_id[parent_span_id].name if parent_span_id in spans_by_id else "UNKNOWN"
+        assert parent_span_id == expected_id, (
+            f"ask span for branch {bn!r} parented under {parent_name!r}, "
+            f"expected per-branch dispatch span at depth-2 namespace"
+        )
+
+
+async def test_fan_out_inside_subgraph_wrapper_emits_per_instance_dispatch_span() -> None:
+    # Campsite-rule companion to
+    # ``test_parallel_branches_inside_subgraph_wrapper_parent_topology``:
+    # the per-instance dispatch span synthesis at observer.py:1277 had
+    # the same ``depth == 1`` gating that affected parallel-branches.
+    # Post-fix, a fan-out node nested inside a subgraph wrapper
+    # synthesizes its per-instance dispatch spans at the NODE's actual
+    # depth and inner spans parent under them.
+    class _OuterS(State):
+        items: list[int] = []
+        results: Annotated[list[int], append] = []
+
+    class _MidS(State):
+        items: list[int] = []
+        results: Annotated[list[int], append] = []
+
+    class _InnerS(State):
+        item: int = 0
+        out: int = 0
+
+    async def _double(s: _InnerS) -> dict[str, int]:
+        return {"out": s.item * 2}
+
+    inner_subgraph = (
+        GraphBuilder(_InnerS)
+        .add_node("double", _double)
+        .add_edge("double", END)
+        .set_entry("double")
+        .compile()
+    )
+
+    # Mid-level subgraph: contains a fan-out dispatcher.
+    mid_subgraph = (
+        GraphBuilder(_MidS)
+        .add_fan_out_node(
+            "fan",
+            subgraph=inner_subgraph,
+            collect_field="out",
+            target_field="results",
+            items_field="items",
+            item_field="item",
+        )
+        .add_edge("fan", END)
+        .set_entry("fan")
+        .compile()
+    )
+
+    # Outer graph wraps the mid subgraph as a single node, putting
+    # the fan-out NODE at namespace ``("wrapper", "fan")`` (depth 2).
+    # Explicit projection: the default FieldNameMatching ignores parent
+    # state on the way in, but we need ``items`` plumbed through so the
+    # inner fan-out has work to dispatch.
+    from openarmature.graph.projection import ExplicitMapping
+
+    exporter = InMemorySpanExporter()
+    observer = OTelObserver(span_processor=SimpleSpanProcessor(exporter))
+    g = (
+        GraphBuilder(_OuterS)
+        .add_subgraph_node(
+            "wrapper",
+            mid_subgraph,
+            projection=ExplicitMapping[_OuterS, _MidS](inputs={"items": "items"}),
+        )
+        .add_edge("wrapper", END)
+        .set_entry("wrapper")
+        .compile()
+    )
+    g.attach_observer(observer)
+    try:
+        await g.invoke(_OuterS(items=[1, 2]))
+        await g.drain()
+    finally:
+        observer.shutdown()
+
+    spans = exporter.get_finished_spans()
+    spans_by_id = {cast("Any", s.context).span_id: s for s in spans}
+
+    # Per-instance dispatch spans MUST synthesize even at depth 2.
+    # Per spec §5.4 / proposal 0013, they're named after the fan-out
+    # NODE ("fan") and carry ``openarmature.node.fan_out_index``.
+    instance_dispatch_by_idx: dict[Any, Any] = {}
+    for s in spans:
+        attrs = dict(s.attributes or {})
+        if (
+            s.name == "fan"
+            and attrs.get("openarmature.node.fan_out_index") is not None
+            and "openarmature.fan_out.parent_node_name" in attrs
+        ):
+            instance_dispatch_by_idx[attrs["openarmature.node.fan_out_index"]] = s
+    assert instance_dispatch_by_idx.keys() == {0, 1}, (
+        "per-instance dispatch spans MUST synthesize even when the fan-out NODE "
+        f"sits inside a subgraph wrapper; got dispatches for {instance_dispatch_by_idx.keys()!r}"
+    )
+
+    # Each ``double`` span MUST parent under its matching per-instance
+    # dispatch span (at depth 2), not under the wrapper subgraph span
+    # at depth 1.
+    double_spans = [s for s in spans if s.name == "double"]
+    assert len(double_spans) == 2
+    for double_span in double_spans:
+        attrs = dict(double_span.attributes or {})
+        fi = attrs.get("openarmature.node.fan_out_index")
+        assert double_span.parent is not None, "double span MUST have a parent"
+        parent_span_id = cast("Any", double_span.parent).span_id
+        expected_id = instance_dispatch_by_idx[fi].context.span_id
+        parent_name = spans_by_id[parent_span_id].name if parent_span_id in spans_by_id else "UNKNOWN"
+        assert parent_span_id == expected_id, (
+            f"double span for fan_out_index {fi!r} parented under {parent_name!r}, "
+            f"expected per-instance dispatch span at depth-2 namespace"
+        )
+
+
+async def test_detached_subgraph_at_depth_two_mints_fresh_trace() -> None:
+    # Campsite-rule extension: detached subgraph synthesis previously
+    # gated on ``depth == 1``, so a detached subgraph nested inside an
+    # outer wrapper would not mint a fresh trace and inner spans would
+    # bleed into the parent trace.  Post-fix, ``detached_subgraphs``
+    # matches the node-name segment at any depth.
+    class _OuterS(State):
+        result: str = ""
+
+    class _InnerS(State):
+        out: str = ""
+
+    async def _leaf(_s: _InnerS) -> dict[str, str]:
+        return {"out": "done"}
+
+    detached_subgraph = (
+        GraphBuilder(_InnerS).add_node("leaf", _leaf).add_edge("leaf", END).set_entry("leaf").compile()
+    )
+
+    # Mid-level subgraph wraps the detached one as a single node
+    # named "detached_inner".  Outer wraps mid as "wrapper".
+    # ``detached_subgraphs={"detached_inner"}`` should mint a fresh
+    # trace at depth 2 namespace ``("wrapper", "detached_inner")``.
+    mid_subgraph = (
+        GraphBuilder(_InnerS)
+        .add_subgraph_node("detached_inner", detached_subgraph)
+        .add_edge("detached_inner", END)
+        .set_entry("detached_inner")
+        .compile()
+    )
+
+    exporter = InMemorySpanExporter()
+    observer = OTelObserver(
+        span_processor=SimpleSpanProcessor(exporter),
+        detached_subgraphs=frozenset({"detached_inner"}),
+    )
+    g = (
+        GraphBuilder(_OuterS)
+        .add_subgraph_node("wrapper", mid_subgraph)
+        .add_edge("wrapper", END)
+        .set_entry("wrapper")
+        .compile()
+    )
+    g.attach_observer(observer)
+    try:
+        await g.invoke(_OuterS())
+        await g.drain()
+    finally:
+        observer.shutdown()
+
+    spans = exporter.get_finished_spans()
+
+    # Two traces: parent invocation and detached subgraph.
+    trace_ids = {cast("Any", s.context).trace_id for s in spans}
+    assert len(trace_ids) == 2, (
+        f"detached subgraph at depth 2 MUST mint a fresh trace; got {len(trace_ids)} trace(s) instead"
+    )
+
+    # The detached root MUST carry ``openarmature.subgraph.detached``
+    # and live at depth-2 namespace.
+    detached_roots = [
+        s
+        for s in spans
+        if s.name == "detached_inner"
+        and dict(s.attributes or {}).get("openarmature.subgraph.detached") is True
+    ]
+    assert len(detached_roots) == 1
+    # Its trace_id MUST differ from the leaf's parent invocation trace.
+    inv_spans = [s for s in spans if s.name == "openarmature.invocation"]
+    assert len(inv_spans) == 1
+    inv_trace_id = cast("Any", inv_spans[0].context).trace_id
+    detached_trace_id = cast("Any", detached_roots[0].context).trace_id
+    assert detached_trace_id != inv_trace_id, (
+        "detached subgraph root MUST live in a fresh trace, not the parent invocation trace"
+    )
+
+
+async def test_three_deep_mixed_pb_fan_out_pb_composition() -> None:
+    # Campsite-rule coverage for the three-deep mixed composition
+    # (pb1 → fan-out → pb2 → leaf) that the resolver restructure
+    # claimed to support but no earlier test exercised.  Each layer's
+    # dispatch span MUST synthesize at its own namespace, and the
+    # innermost leaf MUST parent under the innermost pb's per-branch
+    # dispatch span.
+    from openarmature.graph import BranchSpec
+
+    class _OuterS(State):
+        items: list[int] = []
+
+    class _MidBranchS(State):
+        items: list[int] = []
+        out: int = 0
+
+    class _FanInstanceS(State):
+        item: int = 0
+        out: int = 0
+
+    class _InnerBranchS(State):
+        out: int = 0
+
+    async def _leaf(_s: _InnerBranchS) -> dict[str, int]:
+        return {"out": 42}
+
+    inner_pb_branch = (
+        GraphBuilder(_InnerBranchS).add_node("leaf", _leaf).add_edge("leaf", END).set_entry("leaf").compile()
+    )
+
+    # pb2 sits inside the fan-out's per-instance subgraph.  One
+    # branch is enough — we want topology coverage, not branch
+    # combinatorics.
+    fan_instance_subgraph = (
+        GraphBuilder(_FanInstanceS)
+        .add_parallel_branches_node(
+            "pb2",
+            branches={"inner_a": BranchSpec(subgraph=inner_pb_branch, outputs={"out": "out"})},
+        )
+        .add_edge("pb2", END)
+        .set_entry("pb2")
+        .compile()
+    )
+
+    # Middle layer is the fan-out's wrapper — sits inside pb1's
+    # branch subgraph.  One fan-out instance is enough for topology.
+    mid_branch_subgraph = (
+        GraphBuilder(_MidBranchS)
+        .add_fan_out_node(
+            "fan",
+            subgraph=fan_instance_subgraph,
+            collect_field="out",
+            target_field="items",
+            items_field="items",
+            item_field="item",
+        )
+        .add_edge("fan", END)
+        .set_entry("fan")
+        .compile()
+    )
+
+    exporter = InMemorySpanExporter()
+    observer = OTelObserver(span_processor=SimpleSpanProcessor(exporter))
+    g = (
+        GraphBuilder(_OuterS)
+        .add_parallel_branches_node(
+            "pb1",
+            branches={
+                "outer_x": BranchSpec(
+                    subgraph=mid_branch_subgraph,
+                    inputs={"items": "items"},
+                ),
+            },
+        )
+        .add_edge("pb1", END)
+        .set_entry("pb1")
+        .compile()
+    )
+    g.attach_observer(observer)
+    try:
+        await g.invoke(_OuterS(items=[1]))
+        await g.drain()
+    finally:
+        observer.shutdown()
+
+    spans = exporter.get_finished_spans()
+    spans_by_id = {cast("Any", s.context).span_id: s for s in spans}
+
+    # The leaf span is at namespace depth 4 (pb1, fan, pb2, leaf)
+    # with the innermost branch_name "inner_a" and the fan-out's
+    # fan_out_index = 0.  It MUST parent under pb2's per-branch
+    # dispatch span at namespace ("pb1", "fan", "pb2", "inner_a").
+    leaf_spans = [s for s in spans if s.name == "leaf"]
+    assert len(leaf_spans) == 1
+    leaf_attrs = dict(leaf_spans[0].attributes or {})
+    assert leaf_attrs.get("openarmature.node.branch_name") == "inner_a"
+    assert leaf_attrs.get("openarmature.node.fan_out_index") == 0
+
+    # Find pb2's per-branch dispatch span (named "inner_a" with the
+    # ``parent_node_name`` attribute = "pb2") and pb1's per-branch
+    # dispatch span (named "outer_x" with parent_node_name = "pb1").
+    inner_branch_dispatch = next(
+        (
+            s
+            for s in spans
+            if s.name == "inner_a"
+            and dict(s.attributes or {}).get("openarmature.parallel_branches.parent_node_name") == "pb2"
+        ),
+        None,
+    )
+    outer_branch_dispatch = next(
+        (
+            s
+            for s in spans
+            if s.name == "outer_x"
+            and dict(s.attributes or {}).get("openarmature.parallel_branches.parent_node_name") == "pb1"
+        ),
+        None,
+    )
+    assert inner_branch_dispatch is not None, "pb2 per-branch dispatch MUST synthesize at depth 3"
+    assert outer_branch_dispatch is not None, "pb1 per-branch dispatch MUST synthesize at depth 1"
+
+    # Leaf parents under pb2's branch dispatch (innermost).
+    assert leaf_spans[0].parent is not None
+    leaf_parent_id = cast("Any", leaf_spans[0].parent).span_id
+    inner_dispatch_id = cast("Any", inner_branch_dispatch.context).span_id
+    assert leaf_parent_id == inner_dispatch_id, (
+        "leaf MUST parent under pb2's per-branch dispatch span (innermost), "
+        f"got {spans_by_id[leaf_parent_id].name if leaf_parent_id in spans_by_id else 'UNKNOWN'!r}"
+    )
+
+    # Find pb2's NODE span (named "pb2" with branch_count attribute).
+    # It MUST exist and parent under the fan-out instance dispatch.
+    pb2_node = next(
+        (
+            s
+            for s in spans
+            if s.name == "pb2"
+            and dict(s.attributes or {}).get("openarmature.parallel_branches.branch_count") is not None
+        ),
+        None,
+    )
+    assert pb2_node is not None
+    # Fan-out instance dispatch span (named "fan" with fan_out_index=0
+    # AND the parent_node_name attribute, which only the per-instance
+    # dispatch span carries).
+    fan_instance_dispatch = next(
+        (
+            s
+            for s in spans
+            if s.name == "fan"
+            and dict(s.attributes or {}).get("openarmature.node.fan_out_index") == 0
+            and "openarmature.fan_out.parent_node_name" in dict(s.attributes or {})
+        ),
+        None,
+    )
+    assert fan_instance_dispatch is not None, (
+        "fan-out per-instance dispatch span MUST synthesize at depth 2 (inside pb1 branch)"
+    )
+    assert pb2_node.parent is not None
+    pb2_parent_id = cast("Any", pb2_node.parent).span_id
+    fan_instance_id = cast("Any", fan_instance_dispatch.context).span_id
+    assert pb2_parent_id == fan_instance_id, "pb2 NODE MUST parent under fan-out per-instance dispatch span"
+
 
 async def test_metadata_augmentation_updates_per_branch_dispatch_span() -> None:
     # Spec §3.4 *Mid-invocation augmentation* (per the proposal-0040
