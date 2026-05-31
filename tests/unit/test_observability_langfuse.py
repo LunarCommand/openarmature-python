@@ -926,10 +926,21 @@ class _FanOutOuterState(State):
 class _FanOutInnerState(State):
     item: int = 0
     out: int = 0
+    inner_done: bool = False
+
+
+async def _fan_out_inner_succeeds(_s: _FanOutInnerState) -> dict[str, Any]:
+    # Successful inner step — writes ``inner_done=true`` to the
+    # instance's _invoke ``state`` local AND to the shared
+    # ``latest_state_box`` (per-context, so it lands on the instance's
+    # OWN box).  Under the original shared-box bug this write would
+    # leak into the outer box; under the per-context design it stays
+    # isolated to the instance.
+    return {"inner_done": True}
 
 
 async def _fan_out_inner_raises(_s: _FanOutInnerState) -> dict[str, Any]:
-    raise RuntimeError("fan_out inner_node boom")
+    raise RuntimeError("fan_out inner_raise boom")
 
 
 async def test_failure_path_final_state_is_outer_type_when_fan_out_inner_raises() -> None:
@@ -941,11 +952,22 @@ async def test_failure_path_final_state_is_outer_type_when_fan_out_inner_raises(
     # raises, the outermost ``invoke()``'s finally-block reads the
     # OUTER box — which holds outer state from ``outer_a``'s successful
     # completion, not the inner instance state.
+    #
+    # The inner subgraph has TWO inner nodes: ``inner_succeeds`` writes
+    # inner state to the instance's box, then ``inner_raises``
+    # propagates.  Under the original shared-box bug, the box would
+    # end with ``_FanOutInnerState(inner_done=true)`` and the outer
+    # hook would receive that inner-typed value.  The two-node shape
+    # is load-bearing — a single-node "always raise" subgraph would
+    # not exercise the leak because no successful inner step would
+    # write to the box.
     inner_graph = (
         GraphBuilder(_FanOutInnerState)
-        .add_node("inner_raise", _fan_out_inner_raises)
-        .add_edge("inner_raise", END)
-        .set_entry("inner_raise")
+        .add_node("inner_succeeds", _fan_out_inner_succeeds)
+        .add_node("inner_raises", _fan_out_inner_raises)
+        .add_edge("inner_succeeds", "inner_raises")
+        .add_edge("inner_raises", END)
+        .set_entry("inner_succeeds")
         .compile()
     )
 
