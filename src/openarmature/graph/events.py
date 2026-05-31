@@ -257,6 +257,17 @@ class NodeEvent:
     # simultaneously when a branch's subgraph contains a fan-out
     # (and vice versa).
     branch_name: str | None = None
+    # Per proposal 0045 (v0.37.0): per-depth lineage chains parallel
+    # to ``namespace``.  Position ``i`` is the fan_out_index (or
+    # branch_name) at the dispatch boundary leading to namespace
+    # depth ``i+1`` — or ``None`` when that boundary is a subgraph
+    # wrapper (not a fan-out, not a parallel-branches branch).
+    # ``fan_out_index`` and ``branch_name`` above carry the
+    # INNERMOST values; the chains carry the full lineage so
+    # observers can apply the §3.4 lineage-aware boundary rule
+    # without re-deriving it from successive events.
+    fan_out_index_chain: tuple[int | None, ...] = ()
+    branch_name_chain: tuple[str | None, ...] = ()
     # Per observability §5.3 + the coord-thread
     # ``clarify-subgraph-name-semantics`` resolution: chain of
     # compiled-subgraph identities parallel to the wrapper-depth
@@ -328,6 +339,16 @@ class MetadataAugmentationEvent:
     attempt_index: int = 0
     fan_out_index: int | None = None
     branch_name: str | None = None
+    # Per proposal 0045 (v0.37.0): the augmenter's per-depth lineage
+    # chain.  Two parallel tuples indexed by namespace position —
+    # position ``i`` is the fan_out_index (or branch_name) at
+    # namespace depth ``i+1``, or ``None`` if that depth's dispatch
+    # boundary is not a fan-out instance (not a parallel-branches
+    # branch).  Required by §3.4's lineage-aware boundary rule so
+    # observers can identify the augmenter's call-stack ancestor
+    # chain rather than only the innermost dispatch.
+    fan_out_index_chain: tuple[int | None, ...] = ()
+    branch_name_chain: tuple[str | None, ...] = ()
 
 
 # Spec: realizes observability §8.4.1 *Trace input/output sourcing*

@@ -102,7 +102,7 @@ from openarmature.graph.events import (
     MetadataAugmentationEvent,
     NodeEvent,
 )
-from openarmature.observability.lineage import is_prefix_or_equal, is_strict_prefix
+from openarmature.observability.lineage import is_strict_prefix
 from openarmature.observability.llm_event import LLM_NAMESPACE, LlmEventPayload
 
 # Span-stack key shape:
@@ -202,9 +202,47 @@ class _OpenSpan:
     """An in-flight span. No OTel context token: the new architecture
     resolves parents from the observer's internal maps within a
     single event handler's scope, so no token needs to live across
-    events."""
+    events.
+
+    Per proposal 0045: carries the span's own ``fan_out_index_chain``
+    and ``branch_name_chain`` so the augmentation walk can apply
+    §3.4's lineage-aware boundary rule without re-deriving the chain
+    from successive events."""
 
     span: Span
+    fan_out_index_chain: tuple[int | None, ...] = ()
+    branch_name_chain: tuple[str | None, ...] = ()
+
+
+def _span_chain_on_path(
+    open_span: _OpenSpan,
+    aug_fi_chain: tuple[int | None, ...],
+    aug_bn_chain: tuple[str | None, ...],
+) -> bool:
+    """Return True iff ``open_span``'s chain is a prefix-match of the
+    augmenter's chain — i.e., the span sits on the augmenter's
+    call-stack ancestor path.  Per proposal 0045 §3.4:
+
+    - A span shorter than the augmenter (chain prefix-matches) is an
+      ancestor on the path.
+    - A span at the same depth (chain exact-matches) is the augmenter
+      itself (or a descendant sharing the mutated mapping).
+    - A span deeper than the augmenter, OR with a position-mismatch
+      anywhere, is a sibling and MUST NOT be updated.
+    """
+    span_fi = open_span.fan_out_index_chain
+    span_bn = open_span.branch_name_chain
+    if len(span_fi) > len(aug_fi_chain):
+        return False
+    if len(span_bn) > len(aug_bn_chain):
+        return False
+    for i in range(len(span_fi)):
+        if span_fi[i] != aug_fi_chain[i]:
+            return False
+    for i in range(len(span_bn)):
+        if span_bn[i] != aug_bn_chain[i]:
+            return False
+    return True
 
 
 # Sorted object keys, no insignificant whitespace, UTF-8 output (per
@@ -645,7 +683,11 @@ class OTelObserver:
             kind=SpanKind.INTERNAL,
             attributes=self._node_attrs(event, correlation_id),
         )
-        inv_state.open_spans[self._key_for(event)] = _OpenSpan(span=span)
+        inv_state.open_spans[self._key_for(event)] = _OpenSpan(
+            span=span,
+            fan_out_index_chain=event.fan_out_index_chain,
+            branch_name_chain=event.branch_name_chain,
+        )
 
     def _handle_completed(self, event: NodeEvent) -> None:
         """Close the matching span, applying §4.2 status mapping."""
@@ -771,62 +813,118 @@ class OTelObserver:
     def _collect_augmentation_targets(
         self, invocation_id: str, event: MetadataAugmentationEvent
     ) -> list[Span]:
+        """Collect open spans on the augmenter's call-stack ancestor
+        chain per proposal 0045 §3.4.  Three-step boundary decision
+        tree per open span:
+
+        1. Same context as augmenter (or descendant sharing the
+           mutated mapping) — update.
+        2. Strict dispatch ancestor on the augmenter's call-stack path
+           (each outer fan-out instance dispatch, each outer parallel-
+           branches branch dispatch, each outer serial-subgraph wrapper
+           on the path) — update.
+        3. Sibling at any depth, OR shared parent at any depth (the
+           fan-out NODE itself, the parallel-branches NODE itself, the
+           invocation span when augmenter is non-root) — do not update.
+
+        Chain match: for an open span to be on the augmenter's path,
+        the span's own per-depth lineage chain MUST prefix-match the
+        augmenter's chain at every position the span occupies.  Where
+        positions disagree, the span is a sibling.
+        """
         targets: list[Span] = []
-        aug_fi = event.fan_out_index
-        aug_bn = event.branch_name
         aug_ns = event.namespace
+        aug_fi_chain = event.fan_out_index_chain
+        aug_bn_chain = event.branch_name_chain
         inv_state = self._inv_states.get(invocation_id)
-        if aug_fi is None and aug_bn is None:
-            # Outermost-serial context: the invocation span is in scope.
+
+        # Invocation span: included only when the augmenter is in
+        # OUTERMOST SERIAL context — no fan-out instance and no
+        # parallel-branches branch on its call-stack path.  Subgraph
+        # wrappers (chain entries with None at both axes) don't
+        # introduce the shared-parent semantics; only fan-out and
+        # parallel-branches do.  Mirrors fixture 034 and matches the
+        # 0045 §3.4 statement that "existing single-level fixtures
+        # remain unchanged."
+        outermost_serial = all(fi is None for fi in aug_fi_chain) and all(bn is None for bn in aug_bn_chain)
+        if outermost_serial:
             inv_open = self._invocation_span.get(invocation_id)
             if inv_open is not None:
                 targets.append(inv_open.span)
-            if inv_state is not None:
-                # Subgraph wrapper spans on the ancestor path.
-                for prefix, open_span in inv_state.subgraph_spans.items():
-                    if is_strict_prefix(prefix, aug_ns):
-                        targets.append(open_span.span)
+
         if inv_state is None:
             return targets
-        if aug_fi is not None:
-            # Fan-out instance dispatch span(s) on the ancestor path.
-            # Keys are anchor_ns + (str(fan_out_index),) per
-            # ``_open_fan_out_instance_dispatch_span``.
-            fi_str = str(aug_fi)
-            for key, open_span in inv_state.fan_out_instance_spans.items():
-                if not key or key[-1] != fi_str:
-                    continue
-                anchor_ns = key[:-1]
-                if is_strict_prefix(anchor_ns, aug_ns) or anchor_ns == aug_ns:
-                    targets.append(open_span.span)
-        if aug_bn is not None:
-            # Per-branch dispatch span(s) on the ancestor path (per
-            # spec §3.4's "outer parallel-branches branch" ancestor-
-            # chain rule, formalized in proposal 0045).  Keys are
-            # anchor_ns + (branch_name,) per
-            # ``_open_parallel_branches_branch_dispatch_span``.
-            # Same shape as the fan-out branch above.
-            for key, open_span in inv_state.parallel_branches_branch_spans.items():
-                if not key or key[-1] != aug_bn:
-                    continue
-                anchor_ns = key[:-1]
-                if is_strict_prefix(anchor_ns, aug_ns) or anchor_ns == aug_ns:
-                    targets.append(open_span.span)
-        # Open node spans on the augmenter's call stack. Match on
-        # ``fan_out_index`` AND ``branch_name`` to skip sibling
-        # instances / branches; namespace must prefix (or equal) the
-        # augmenter's. The BN discriminator is what keeps two
-        # concurrent same-named inner nodes across sibling
-        # parallel-branches branches from leaking augmentation to
-        # each other.
-        for key, open_span in inv_state.open_spans.items():
-            ns, _ai, fi, bn = key
-            if fi != aug_fi:
+
+        # Subgraph wrapper spans on the path: prefix-of-aug-namespace +
+        # chain prefix-matches aug's chain.
+        for prefix, open_span in inv_state.subgraph_spans.items():
+            if not is_strict_prefix(prefix, aug_ns):
                 continue
-            if bn != aug_bn:
-                continue
-            if is_prefix_or_equal(ns, aug_ns):
+            if _span_chain_on_path(open_span, aug_fi_chain, aug_bn_chain):
                 targets.append(open_span.span)
+
+        # Fan-out instance dispatch spans: keyed by anchor_ns +
+        # (str(fi),).  The dispatch represents the descent at namespace
+        # position len(anchor_ns)-1 — i.e., chain position
+        # ``len(anchor_ns)-1`` should match the dispatch's fi.
+        for key, open_span in inv_state.fan_out_instance_spans.items():
+            if not key:
+                continue
+            anchor_ns = key[:-1]
+            fi_str = key[-1]
+            if not (is_strict_prefix(anchor_ns, aug_ns) or anchor_ns == aug_ns):
+                continue
+            chain_pos = len(anchor_ns) - 1
+            if chain_pos < 0 or chain_pos >= len(aug_fi_chain):
+                continue
+            aug_fi_at_pos = aug_fi_chain[chain_pos]
+            if aug_fi_at_pos is None or str(aug_fi_at_pos) != fi_str:
+                continue
+            targets.append(open_span.span)
+
+        # Per-branch dispatch spans: keyed by anchor_ns + (branch_name,).
+        # Mirror logic to fan-out above, against the branch chain.
+        for key, open_span in inv_state.parallel_branches_branch_spans.items():
+            if not key:
+                continue
+            anchor_ns = key[:-1]
+            bn_str = key[-1]
+            if not (is_strict_prefix(anchor_ns, aug_ns) or anchor_ns == aug_ns):
+                continue
+            chain_pos = len(anchor_ns) - 1
+            if chain_pos < 0 or chain_pos >= len(aug_bn_chain):
+                continue
+            if aug_bn_chain[chain_pos] != bn_str:
+                continue
+            targets.append(open_span.span)
+
+        # Open NODE spans: same context (aug's own attempt span), or
+        # strict ancestor on the augmenter's path.  Skip:
+        # - sibling NODE spans (chain mismatch at some position)
+        # - shared-parent NODE spans (fan-out NODE / pb NODE
+        #   identified structurally by their presence in the
+        #   parent_node_name caches)
+        for key, open_span in inv_state.open_spans.items():
+            ns, _ai, _fi, _bn = key
+            if ns == aug_ns:
+                # Same context — must have matching chain to be the
+                # augmenter's own attempt rather than a sibling
+                # instance's same-named node.
+                if _span_chain_on_path(open_span, aug_fi_chain, aug_bn_chain):
+                    targets.append(open_span.span)
+                continue
+            if not is_strict_prefix(ns, aug_ns):
+                continue
+            # Shared-parent check: if this NODE is a fan-out node or
+            # a parallel-branches node (dispatcher), it's a shared
+            # parent and MUST NOT be updated regardless of cardinality
+            # (§3.4 — the structural classification governs, not the
+            # live sibling count).
+            if ns in inv_state.fan_out_parent_node_name or ns in inv_state.parallel_branches_parent_node_name:
+                continue
+            if _span_chain_on_path(open_span, aug_fi_chain, aug_bn_chain):
+                targets.append(open_span.span)
+
         return targets
 
     # ------------------------------------------------------------------
@@ -1032,7 +1130,11 @@ class OTelObserver:
                 kind=SpanKind.CLIENT,
                 attributes=attrs,
             )
-            inv_state.open_llm_spans[payload.call_id] = _OpenSpan(span=span)
+            inv_state.open_llm_spans[payload.call_id] = _OpenSpan(
+                span=span,
+                fan_out_index_chain=event.fan_out_index_chain,
+                branch_name_chain=event.branch_name_chain,
+            )
         elif event.phase == "completed":
             open_span = inv_state.open_llm_spans.pop(payload.call_id, None)
             if open_span is None:
@@ -1394,7 +1496,16 @@ class OTelObserver:
             kind=SpanKind.INTERNAL,
             attributes=attrs,
         )
-        inv_state.subgraph_spans[prefix] = _OpenSpan(span=span)
+        # Per proposal 0045: the subgraph wrapper sits at namespace
+        # depth ``len(prefix)``; its chain is the slice of the
+        # inner event's chain up to that position.  Both chain
+        # entries at the wrapper's position are ``None`` (subgraph
+        # wrappers don't introduce a fan-out or branch axis).
+        inv_state.subgraph_spans[prefix] = _OpenSpan(
+            span=span,
+            fan_out_index_chain=event.fan_out_index_chain[: len(prefix)],
+            branch_name_chain=event.branch_name_chain[: len(prefix)],
+        )
 
     def _close_subgraph_span(self, inv_state: _InvState, prefix: tuple[str, ...]) -> None:
         open_span = inv_state.subgraph_spans.pop(prefix, None)
@@ -1587,7 +1698,16 @@ class OTelObserver:
             attributes=attrs,
         )
         instance_key = prefix + (str(event.fan_out_index),)
-        inv_state.fan_out_instance_spans[instance_key] = _OpenSpan(span=instance_span)
+        # Per proposal 0045: this dispatch span sits AT the descent
+        # boundary into the fan-out instance.  Its chain is the slice
+        # of the inner event's chain up to and including the
+        # boundary's own position.
+        chain_len = len(prefix)
+        inv_state.fan_out_instance_spans[instance_key] = _OpenSpan(
+            span=instance_span,
+            fan_out_index_chain=event.fan_out_index_chain[:chain_len],
+            branch_name_chain=event.branch_name_chain[:chain_len],
+        )
 
     def _close_fan_out_instance_dispatch_span(self, inv_state: _InvState, key: tuple[str, ...]) -> None:
         open_span = inv_state.fan_out_instance_spans.pop(key, None)
@@ -1659,7 +1779,15 @@ class OTelObserver:
             attributes=attrs,
         )
         branch_key = prefix + (event.branch_name,)
-        inv_state.parallel_branches_branch_spans[branch_key] = _OpenSpan(span=branch_span)
+        # Per proposal 0045: this dispatch span sits at the descent
+        # boundary into this branch.  Its chain is the slice up to
+        # and including the boundary's own position.
+        chain_len = len(prefix)
+        inv_state.parallel_branches_branch_spans[branch_key] = _OpenSpan(
+            span=branch_span,
+            fan_out_index_chain=event.fan_out_index_chain[:chain_len],
+            branch_name_chain=event.branch_name_chain[:chain_len],
+        )
 
     def _close_parallel_branches_branch_dispatch_span(
         self, inv_state: _InvState, key: tuple[str, ...]

@@ -64,15 +64,19 @@ from openarmature.checkpoint.protocol import (
 from openarmature.observability.correlation import (
     _reset_active_dispatch,
     _reset_active_observers,
+    _reset_branch_name_chain,
     _reset_correlation_id,
     _reset_fan_out_index,
+    _reset_fan_out_index_chain,
     _reset_invocation_id,
     _reset_namespace_prefix,
     _set_active_dispatch,
     _set_active_observer_span,
     _set_active_observers,
+    _set_branch_name_chain,
     _set_correlation_id,
     _set_fan_out_index,
+    _set_fan_out_index_chain,
     _set_invocation_id,
     _set_namespace_prefix,
     current_active_observer_span,
@@ -1438,6 +1442,11 @@ class CompiledGraph[StateT: State]:
         dispatch_token = _set_active_dispatch(lambda event: _dispatch(context, event))
         namespace_token = _set_namespace_prefix(namespace)
         fan_out_token = _set_fan_out_index(context.fan_out_index)
+        # Per proposal 0045 (v0.37.0): drive the per-depth chain
+        # ContextVars from the context so ``set_invocation_metadata``
+        # sees the full lineage chain at augmentation time.
+        fan_out_chain_token = _set_fan_out_index_chain(context.fan_out_index_chain)
+        branch_chain_token = _set_branch_name_chain(context.branch_name_chain)
         try:
             try:
                 final_partial = await chain(state)
@@ -1459,6 +1468,8 @@ class CompiledGraph[StateT: State]:
                 # the chain unrecovered. Wrap as NodeException per §4.
                 raise NodeException(node_name=current, cause=e, recoverable_state=state) from e
         finally:
+            _reset_branch_name_chain(branch_chain_token)
+            _reset_fan_out_index_chain(fan_out_chain_token)
             _reset_fan_out_index(fan_out_token)
             _reset_namespace_prefix(namespace_token)
             _reset_active_dispatch(dispatch_token)
@@ -1579,6 +1590,9 @@ class CompiledGraph[StateT: State]:
         dispatch_token = _set_active_dispatch(lambda event: _dispatch(context, event))
         namespace_token = _set_namespace_prefix(namespace)
         fan_out_token = _set_fan_out_index(context.fan_out_index)
+        # Per proposal 0045: drive per-depth chain ContextVars.
+        fan_out_chain_token = _set_fan_out_index_chain(context.fan_out_index_chain)
+        branch_chain_token = _set_branch_name_chain(context.branch_name_chain)
 
         try:
             try:
@@ -1593,6 +1607,8 @@ class CompiledGraph[StateT: State]:
                 # preserved.
                 raise NodeException(node_name=current, cause=e, recoverable_state=state) from e
         finally:
+            _reset_branch_name_chain(branch_chain_token)
+            _reset_fan_out_index_chain(fan_out_chain_token)
             _reset_fan_out_index(fan_out_token)
             _reset_namespace_prefix(namespace_token)
             _reset_active_dispatch(dispatch_token)
@@ -1868,6 +1884,9 @@ class CompiledGraph[StateT: State]:
         dispatch_token = _set_active_dispatch(lambda event: _dispatch(context, event))
         namespace_token = _set_namespace_prefix(namespace)
         fan_out_token = _set_fan_out_index(context.fan_out_index)
+        # Per proposal 0045: drive per-depth chain ContextVars.
+        fan_out_chain_token = _set_fan_out_index_chain(context.fan_out_index_chain)
+        branch_chain_token = _set_branch_name_chain(context.branch_name_chain)
         # Per spec §10.11 the ``fan_out_progress`` entry is "in-flight
         # only"; the fan-out's own completion save below is the last
         # point where the entry is needed (proposal 0009: that save
@@ -1895,6 +1914,8 @@ class CompiledGraph[StateT: State]:
                 except Exception as e:
                     raise NodeException(node_name=current, cause=e, recoverable_state=state) from e
             finally:
+                _reset_branch_name_chain(branch_chain_token)
+                _reset_fan_out_index_chain(fan_out_chain_token)
                 _reset_fan_out_index(fan_out_token)
                 _reset_namespace_prefix(namespace_token)
                 _reset_active_dispatch(dispatch_token)
@@ -2084,6 +2105,9 @@ class CompiledGraph[StateT: State]:
         dispatch_token = _set_active_dispatch(lambda event: _dispatch(context, event))
         namespace_token = _set_namespace_prefix(namespace)
         fan_out_token = _set_fan_out_index(context.fan_out_index)
+        # Per proposal 0045: drive per-depth chain ContextVars.
+        fan_out_chain_token = _set_fan_out_index_chain(context.fan_out_index_chain)
+        branch_chain_token = _set_branch_name_chain(context.branch_name_chain)
         try:
             try:
                 final_partial = await chain(state)
@@ -2092,6 +2116,8 @@ class CompiledGraph[StateT: State]:
             except Exception as e:
                 raise NodeException(node_name=current, cause=e, recoverable_state=state) from e
         finally:
+            _reset_branch_name_chain(branch_chain_token)
+            _reset_fan_out_index_chain(fan_out_chain_token)
             _reset_fan_out_index(fan_out_token)
             _reset_namespace_prefix(namespace_token)
             _reset_active_dispatch(dispatch_token)
@@ -2173,6 +2199,11 @@ class CompiledGraph[StateT: State]:
                 fan_out_config=fan_out_config,
                 parallel_branches_config=parallel_branches_config,
                 branch_name=current_branch_name(),
+                # Per proposal 0045: per-depth lineage chains so
+                # observers can identify the augmenter's call-stack
+                # ancestor path under nested dispatch.
+                fan_out_index_chain=context.fan_out_index_chain,
+                branch_name_chain=context.branch_name_chain,
                 subgraph_identities=context.subgraph_identities,
                 caller_invocation_metadata=current_invocation_metadata(),
             ),
@@ -2210,6 +2241,9 @@ class CompiledGraph[StateT: State]:
                 fan_out_config=fan_out_config,
                 parallel_branches_config=parallel_branches_config,
                 branch_name=current_branch_name(),
+                # Per proposal 0045: per-depth lineage chains.
+                fan_out_index_chain=context.fan_out_index_chain,
+                branch_name_chain=context.branch_name_chain,
                 subgraph_identities=context.subgraph_identities,
                 caller_invocation_metadata=current_invocation_metadata(),
             ),

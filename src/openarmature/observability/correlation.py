@@ -363,6 +363,62 @@ def _reset_branch_name(token: Token[str | None]) -> None:
     _branch_name_var.reset(token)
 
 
+# Per proposal 0045 (v0.37.0): the per-depth lineage chain.  Mirrors
+# the namespace_prefix's depth: position N is the fan_out_index (or
+# branch_name) at namespace depth N+1, or None if that depth's
+# dispatch boundary is not a fan-out instance (not a parallel-
+# branches branch).  Required by the augmentation containment rule
+# (§3.4) so observers can identify the augmenter's call-stack
+# ancestor chain rather than only the innermost dispatch.  The
+# scalar ``_fan_out_index_var`` / ``_branch_name_var`` above are
+# kept (innermost values) so existing callers continue to work.
+_fan_out_index_chain_var: ContextVar[tuple[int | None, ...]] = ContextVar(
+    "openarmature.fan_out_index_chain", default=()
+)
+
+
+def current_fan_out_index_chain() -> tuple[int | None, ...]:
+    """Return the per-depth fan_out_index chain for the currently
+    executing node, or the empty tuple outside any node body.  Each
+    position corresponds to a depth in ``current_namespace_prefix()``;
+    a non-``None`` entry at position ``i`` means the dispatch boundary
+    at depth ``i+1`` is a fan-out instance with that index.
+    """
+    return _fan_out_index_chain_var.get()
+
+
+def _set_fan_out_index_chain(value: tuple[int | None, ...]) -> Token[tuple[int | None, ...]]:
+    """Set the chain.  Internal — engine-only."""
+    return _fan_out_index_chain_var.set(value)
+
+
+def _reset_fan_out_index_chain(token: Token[tuple[int | None, ...]]) -> None:
+    _fan_out_index_chain_var.reset(token)
+
+
+_branch_name_chain_var: ContextVar[tuple[str | None, ...]] = ContextVar(
+    "openarmature.branch_name_chain", default=()
+)
+
+
+def current_branch_name_chain() -> tuple[str | None, ...]:
+    """Return the per-depth branch_name chain.  Mirrors
+    ``current_fan_out_index_chain()`` — a non-``None`` entry at
+    position ``i`` means the dispatch boundary at depth ``i+1`` is a
+    parallel-branches branch with that name.
+    """
+    return _branch_name_chain_var.get()
+
+
+def _set_branch_name_chain(value: tuple[str | None, ...]) -> Token[tuple[str | None, ...]]:
+    """Set the chain.  Internal — engine-only."""
+    return _branch_name_chain_var.set(value)
+
+
+def _reset_branch_name_chain(token: Token[tuple[str | None, ...]]) -> None:
+    _branch_name_chain_var.reset(token)
+
+
 _attempt_index_var: ContextVar[int] = ContextVar("openarmature.attempt_index", default=0)
 
 
@@ -456,9 +512,11 @@ __all__ = [
     "current_active_observers",
     "current_attempt_index",
     "current_branch_name",
+    "current_branch_name_chain",
     "current_correlation_id",
     "current_dispatch",
     "current_fan_out_index",
+    "current_fan_out_index_chain",
     "current_invocation_id",
     "current_namespace_prefix",
     "validate_invocation_id",
@@ -471,8 +529,10 @@ __all__ = [
     "_reset_active_observers",
     "_reset_attempt_index",
     "_reset_branch_name",
+    "_reset_branch_name_chain",
     "_reset_correlation_id",
     "_reset_fan_out_index",
+    "_reset_fan_out_index_chain",
     "_reset_invocation_id",
     "_reset_namespace_prefix",
     "_set_active_dispatch",
@@ -480,8 +540,10 @@ __all__ = [
     "_set_active_observers",
     "_set_attempt_index",
     "_set_branch_name",
+    "_set_branch_name_chain",
     "_set_correlation_id",
     "_set_fan_out_index",
+    "_set_fan_out_index_chain",
     "_set_invocation_id",
     "_set_namespace_prefix",
 ]

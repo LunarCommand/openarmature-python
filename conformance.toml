@@ -32,7 +32,7 @@
 
 [manifest]
 implementation = "openarmature-python"
-spec_pin = "v0.36.0"
+spec_pin = "v0.37.0"
 
 # Status values:
 #   implemented   — shipped behavior matches the proposal's contract
