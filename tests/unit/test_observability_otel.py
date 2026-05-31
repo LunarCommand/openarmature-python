@@ -1806,11 +1806,12 @@ async def test_parallel_branches_dispatch_span_attributes() -> None:
     #   new attribute replaces the pre-0044 ``openarmature.branch_name``
     #   attribute python emitted before spec defined the namespace).
     #
-    # Activation of the dedicated conformance fixture
+    # Conformance fixture
     # ``observability/038-otel-parallel-branches-dispatch-span`` is
-    # deferred until the OTel conformance harness grows calls_llm +
-    # topology support — same disposition as fixture 030 on the
-    # Langfuse side.
+    # activated in ``tests/conformance/test_observability.py`` via
+    # ``_run_fixture_038`` + ``_assert_span_tree_matches`` (PR 9).
+    # This unit test covers the §5.7 attribute surface in isolation;
+    # the conformance fixture covers the full span-tree topology.
     from openarmature.graph import BranchSpec
 
     class _DispatchState(State):
@@ -2633,6 +2634,82 @@ async def test_three_deep_mixed_pb_fan_out_pb_composition() -> None:
     pb2_parent_id = cast("Any", pb2_node.parent).span_id
     fan_instance_id = cast("Any", fan_instance_dispatch.context).span_id
     assert pb2_parent_id == fan_instance_id, "pb2 NODE MUST parent under fan-out per-instance dispatch span"
+
+
+async def test_nested_pb_completion_closes_inner_dispatch_spans() -> None:
+    # Regression for the completion-side mirror of the cache-update
+    # filter bug: a parallel-branches node nested inside an outer pb's
+    # branch fires its own completed event with ``branch_name`` set
+    # (carrying the OUTER pb's branch_name).  The pb close handler
+    # previously gated on ``branch_name is None``, which meant inner
+    # pb's per-branch dispatch spans were never closed and the
+    # ``parallel_branches_branch_spans`` cache leaked.  Post-fix, the
+    # close handler relies on ``parallel_branches_config`` alone, so
+    # the inner pb's spans close before the outer pb's NODE span.
+    from openarmature.graph import BranchSpec
+
+    class _OuterS(State):
+        result: str = ""
+
+    class _OuterBranchS(State):
+        result: str = ""
+
+    class _InnerBranchS(State):
+        out: str = ""
+
+    async def _leaf(_s: _InnerBranchS) -> dict[str, str]:
+        return {"out": "done"}
+
+    inner_pb_branch = (
+        GraphBuilder(_InnerBranchS).add_node("leaf", _leaf).add_edge("leaf", END).set_entry("leaf").compile()
+    )
+    # Outer pb's branch subgraph contains the inner pb.
+    outer_branch_subgraph = (
+        GraphBuilder(_OuterBranchS)
+        .add_parallel_branches_node(
+            "pb2",
+            branches={"inner_a": BranchSpec(subgraph=inner_pb_branch)},
+        )
+        .add_edge("pb2", END)
+        .set_entry("pb2")
+        .compile()
+    )
+
+    exporter = InMemorySpanExporter()
+    observer = OTelObserver(span_processor=SimpleSpanProcessor(exporter))
+    g = (
+        GraphBuilder(_OuterS)
+        .add_parallel_branches_node(
+            "pb1",
+            branches={"outer_x": BranchSpec(subgraph=outer_branch_subgraph)},
+        )
+        .add_edge("pb1", END)
+        .set_entry("pb1")
+        .compile()
+    )
+    g.attach_observer(observer)
+    try:
+        await g.invoke(_OuterS())
+        await g.drain()
+    finally:
+        observer.shutdown()
+
+    spans = exporter.get_finished_spans()
+
+    # The inner pb's per-branch dispatch span ("inner_a" with
+    # parent_node_name "pb2") MUST be in the finished-spans list.
+    # Pre-fix, it would be missing because the inner pb's completion
+    # was skipped by the close handler and the span never ended.
+    inner_branch_dispatch_spans = [
+        s
+        for s in spans
+        if s.name == "inner_a"
+        and dict(s.attributes or {}).get("openarmature.parallel_branches.parent_node_name") == "pb2"
+    ]
+    assert len(inner_branch_dispatch_spans) == 1, (
+        f"inner pb's per-branch dispatch span MUST close on inner pb's completion; "
+        f"got {len(inner_branch_dispatch_spans)} closed dispatch span(s) for inner pb"
+    )
 
 
 async def test_metadata_augmentation_updates_per_branch_dispatch_span() -> None:

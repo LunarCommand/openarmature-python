@@ -671,7 +671,13 @@ class OTelObserver:
         # per-instance dispatch spans synthesized for this fan-out.
         # Children-before-parents close ordering: per-instance
         # dispatch spans before the fan-out node's own span.
-        if event.fan_out_index is None and event.fan_out_config is not None:
+        # ``fan_out_config`` is only populated on the NODE's OWN
+        # events, so the presence check is sufficient — we don't
+        # additionally filter on ``fan_out_index is None`` because
+        # when a fan-out is nested inside another fan-out's instance
+        # or a pb's branch, the NODE's own completion event carries
+        # the OUTER axis values.
+        if event.fan_out_config is not None:
             for key in list(inv_state.fan_out_instance_spans.keys()):
                 if len(key) > len(event.namespace) and key[: len(event.namespace)] == event.namespace:
                     self._close_fan_out_instance_dispatch_span(inv_state, key)
@@ -681,8 +687,12 @@ class OTelObserver:
         # node's own completion, close all per-branch dispatch spans
         # synthesized for it.  Children-before-parents close ordering
         # (per-branch dispatch spans before the parallel-branches node
-        # span itself).
-        if event.branch_name is None and event.parallel_branches_config is not None:
+        # span itself).  Same logic as the fan-out close above: rely
+        # on ``parallel_branches_config`` being populated only on the
+        # NODE's own events; don't additionally filter on
+        # ``branch_name is None`` (which would skip close for a pb
+        # nested inside another pb's branch).
+        if event.parallel_branches_config is not None:
             for key in list(inv_state.parallel_branches_branch_spans.keys()):
                 if len(key) > len(event.namespace) and key[: len(event.namespace)] == event.namespace:
                     self._close_parallel_branches_branch_dispatch_span(inv_state, key)

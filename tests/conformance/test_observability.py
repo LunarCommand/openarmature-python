@@ -1385,10 +1385,13 @@ async def _run_fixture_038_case(case: Mapping[str, Any]) -> None:
 
     # ---- Build a queue-backed mock LLM transport.  The fixture's
     # per-branch ``ask`` nodes share a single OpenAIProvider keyed off
-    # an httpx MockTransport; each branch's ``calls_llm`` block lists
-    # the expected response so the dispatched call order doesn't matter
-    # (the mock matches by the request payload's first user-message
-    # content).
+    # an httpx MockTransport.  Both branches dispatch concurrently and
+    # this fixture asserts span topology + §5.7 attributes only (not
+    # response-content routing), so a FIFO mock returning any queued
+    # response per call is correct.  Build the queue from the
+    # fixture-declared ``calls_llm.response`` values; the per-user-msg
+    # bookkeeping below is a side effect of parsing the fixture, not
+    # used by the handler.
     branches_spec = cast("dict[str, Any]", case["nodes"]["dispatcher"]["parallel_branches"]["branches"])
     branch_response_by_user_msg: dict[str, str] = {}
     for branch_name, branch_spec in branches_spec.items():
