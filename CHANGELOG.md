@@ -28,7 +28,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). The
 ### Notes
 
 - **Pinned spec version bumped from v0.31.0 to v0.35.0.** Absorbs proposals 0042 (reserved-key extension), 0043 (Langfuse trace.input/output sourcing), and the textual additions in v0.32.0 (Gemini wire-format mapping, 0038, not yet implemented) and v0.33.0 (sessions capability, 0020, not yet implemented).
-- The SDK adapter caches `input` / `output` in its `_trace_info` map; landing the values on the live Langfuse Trace from outside an active span context requires SDK-version-specific calls (v4's `langfuse.update_current_trace` works inside a context; cross-context REST updates need `client.api.trace.update`). The `InMemoryLangfuseClient` used by tests applies the fields directly. SDK-adapter end-to-end emit lands in a follow-up.
+- `LangfuseSDKAdapter` now applies `trace.input` / `trace.output` to the live Langfuse Trace. Input lands on the first real observation under the trace via `set_trace_io`; output uses a synthetic short-lived `openarmature.trace_io` observation as the carrier. The InMemoryLangfuseClient used by tests applies the fields directly.
+- The Langfuse v4 SDK marks `set_current_trace_io` / `Span.set_trace_io` deprecated ("removal in a future major version"). Empirical verification against Langfuse Cloud (v4.7.1, 2026-05-29) confirms it remains the **only** path that populates the Traces list view's headline `Input` / `Output` columns; `propagate_attributes(metadata=...)` does not substitute for it in the current UI. We will revisit when Langfuse publishes a concrete migration guide for v5.
 
 ## [0.10.0] — 2026-05-27
 
