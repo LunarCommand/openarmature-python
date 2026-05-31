@@ -16,7 +16,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
@@ -74,16 +74,16 @@ _LANGFUSE_FIXTURES = frozenset(
         # before the LLM call, exercising the §3.4 MUST that open
         # spans in the augmenting context's lineage update in place.
         "034-caller-metadata-open-span-update-serial",
-        # 037 stays deferred in v0.11.0: the conformance fixture
-        # exercises hook-based cases (caller-supplied callables) that
-        # the YAML-only fixture format can't express directly without
-        # a harness extension. The five-case decision tree
-        # (default stub / disable_state_payload=False / hooks
-        # non-null / hooks null-fallthrough / resume) is verified
-        # end-to-end by the unit tests in
-        # ``tests/unit/test_observability_langfuse.py::test_trace_input_output_*``.
-        # Wiring fixture 037 lands when the harness grows directive
-        # support for caller-supplied hook returns.
+        # 037 — proposal 0043 (trace.input/output sourcing). The four
+        # decision-tree cases (default stub / disable_state_payload=False
+        # / hooks non-null / hooks null-fallthrough) activate via the
+        # caller-hook registry below; case 5 (resume re-fire) stays
+        # deferred to a follow-up PR — it needs the langfuse harness to
+        # grow checkpointer wiring + flaky-node test seam + two-phase
+        # multi-trace assertion. Listed individually in
+        # ``_DEFERRED_CASES`` rather than at the fixture level so the
+        # four other cases run.
+        "037-langfuse-trace-input-output",
         # 029 + 030 stay deferred in v0.11.0:
         # - 029 (fan-out per-instance): fixture omits ``collect_field``
         #   and ``target_field`` on the fan_out cfg, plus the inner
@@ -103,6 +103,62 @@ _LANGFUSE_FIXTURES = frozenset(
         # defaults from inner subgraphs.
     }
 )
+
+
+# Per-case deferrals within an otherwise-activated fixture.  Each entry is
+# ``(fixture_stem, case_name)``.  The case-loop in the runner ``continue``s
+# past matching cases — NOT ``pytest.skip``, which would skip the whole
+# fixture's test invocation and hide the surrounding cases that DO run.
+# Used for proposal-0043 case 5 (resume re-fire) which needs harness
+# extensions tracked separately — checkpointer wiring + flaky-node test
+# seam + two-phase multi-trace assertion — landed in a follow-up PR.
+_DEFERRED_CASES: frozenset[tuple[str, str]] = frozenset(
+    {
+        (
+            "037-langfuse-trace-input-output",
+            "resume_hooks_refire_to_resumed_trace",
+        ),
+    }
+)
+
+
+# Mocks the spec fixture 037 references for ``trace_input_from_state`` /
+# ``trace_output_from_state`` caller hooks.  Each YAML hook name maps to
+# a Python callable matching the spec fixture's documented mock
+# convention (see fixture 037's case 3 / case 4 inline comments).
+# ``returns_state_snapshot`` is intentionally absent — only case 5
+# references it, and case 5 is deferred per ``_DEFERRED_CASES``.
+def _returns_job_input_summary(_state: Any) -> dict[str, Any]:
+    return {"summary": "job-input"}
+
+
+def _returns_job_output_summary(_state: Any) -> dict[str, Any]:
+    return {"summary": "job-output"}
+
+
+def _returns_null(_state: Any) -> None:
+    return None
+
+
+_TRACE_IO_HOOK_REGISTRY: dict[str, Callable[[Any], Any]] = {
+    "returns_job_input_summary": _returns_job_input_summary,
+    "returns_job_output_summary": _returns_job_output_summary,
+    "returns_null": _returns_null,
+}
+
+
+def _resolve_trace_io_hook(name: str) -> Callable[[Any], Any]:
+    """Look up a YAML-named trace_io hook in the registry.  Raises a
+    clear KeyError when the fixture references a name the harness
+    hasn't mocked yet — surfaces missing-mock issues at test setup
+    rather than as a downstream None/AttributeError.
+    """
+    try:
+        return _TRACE_IO_HOOK_REGISTRY[name]
+    except KeyError as exc:
+        raise KeyError(
+            f"trace_io hook {name!r} not registered; known: {sorted(_TRACE_IO_HOOK_REGISTRY)}"
+        ) from exc
 
 
 def _normalize_fan_out_subgraph_keys(spec: dict[str, Any]) -> None:
@@ -304,6 +360,7 @@ class _MockPromptBackend:
 @pytest.mark.parametrize("fixture_path", _fixture_paths(), ids=_fixture_id)
 async def test_langfuse_fixture(fixture_path: Path) -> None:
     spec = _load(fixture_path)
+    fixture_stem = fixture_path.stem
     if "cases" in spec:
         # Fold fixture-level ``subgraphs`` / ``inner_subgraphs`` into
         # each case so the per-case runner sees them locally. Fixture
@@ -313,6 +370,13 @@ async def test_langfuse_fixture(fixture_path: Path) -> None:
         fixture_subgraphs = cast("dict[str, Any] | None", spec.get("subgraphs"))
         fixture_inner_subgraphs = cast("dict[str, Any] | None", spec.get("inner_subgraphs"))
         for case in cast("list[dict[str, Any]]", spec["cases"]):
+            case_name = cast("str", case.get("name") or "<unnamed>")
+            if (fixture_stem, case_name) in _DEFERRED_CASES:
+                # Per-case deferral. Skipping inside the loop rather
+                # than emitting a separate pytest.skip lets us keep the
+                # surrounding cases running under the same parametrized
+                # test id.
+                continue
             if fixture_subgraphs is not None and "subgraphs" not in case:
                 case["subgraphs"] = fixture_subgraphs
             if fixture_inner_subgraphs is not None and "inner_subgraphs" not in case:
@@ -320,7 +384,7 @@ async def test_langfuse_fixture(fixture_path: Path) -> None:
             try:
                 await _run_case(case)
             except AssertionError as e:
-                raise AssertionError(f"case {case.get('name')!r}: {e}") from e
+                raise AssertionError(f"case {case_name!r}: {e}") from e
     else:
         await _run_case(spec)
 
@@ -602,7 +666,14 @@ async def _run_case(case: Mapping[str, Any]) -> None:
             builder.add_edge(edge["from"], target)
         builder.set_entry(entry)
         graph = builder.compile()
-        initial_state_factory = graph.state_cls
+        # ``initial_state`` overrides on the case populate caller-
+        # supplied fields; remaining fields fall back to the State
+        # class's declared defaults.  Proposal 0043's case 2 relies on
+        # this — it ships ``initial_state: {msg: "start"}`` to assert
+        # the raw-state ``trace.input`` carries the caller-supplied
+        # value rather than the default.
+        case_initial_state = cast("dict[str, Any]", case.get("initial_state") or {})
+        initial_state_factory = lambda: graph.state_cls(**case_initial_state)  # noqa: E731
 
     # ---- Observer
     observer_cfg = cast("dict[str, Any]", case.get("langfuse_observer") or {})
@@ -613,6 +684,17 @@ async def _run_case(case: Mapping[str, Any]) -> None:
         observer_kwargs["disable_llm_spans"] = bool(observer_cfg["disable_llm_spans"])
     if "payload_byte_cap" in observer_cfg:
         observer_kwargs["payload_byte_cap"] = int(observer_cfg["payload_byte_cap"])
+    # Proposal 0043 (§8.4.1 trace.input/output sourcing).
+    if "disable_state_payload" in observer_cfg:
+        observer_kwargs["disable_state_payload"] = bool(observer_cfg["disable_state_payload"])
+    if "trace_input_from_state" in observer_cfg:
+        observer_kwargs["trace_input_from_state"] = _resolve_trace_io_hook(
+            cast("str", observer_cfg["trace_input_from_state"])
+        )
+    if "trace_output_from_state" in observer_cfg:
+        observer_kwargs["trace_output_from_state"] = _resolve_trace_io_hook(
+            cast("str", observer_cfg["trace_output_from_state"])
+        )
     detached_subgraphs = _resolve_detached_wrapper_names(case)
     if detached_subgraphs:
         observer_kwargs["detached_subgraphs"] = detached_subgraphs
@@ -704,6 +786,20 @@ def _build_node_body(
             return dict(update_spec)
 
         return _node
+
+    # ``update_pure: {...}`` is the spec's literal-value update directive
+    # (paralleling ``update_pure`` in tests/conformance/adapter.py:727).
+    # Treated identically to ``update`` here — the langfuse harness only
+    # needs the literal-value form to drive proposal 0043's simple
+    # decision-tree cases.
+    update_pure_spec = cast("dict[str, Any] | None", node_spec.get("update_pure"))
+    if update_pure_spec is not None:
+
+        async def _node_pure(_s: Any) -> dict[str, Any]:
+            _maybe_augment()
+            return dict(update_pure_spec)
+
+        return _node_pure
 
     calls_llm_spec = cast("dict[str, Any] | None", node_spec.get("calls_llm"))
     renders_prompt_name = cast("str | None", node_spec.get("renders_prompt"))
@@ -920,9 +1016,27 @@ def _assert_trace(
         _assert_string_or_placeholder("trace.name", trace.name, expected.get("name"))
     expected_metadata = cast("dict[str, Any]", expected.get("metadata") or {})
     _assert_metadata_subset("trace.metadata", trace.metadata, expected_metadata)
-    expected_observations = cast("list[dict[str, Any]]", expected.get("observations") or [])
-    root_observations = trace.children_of(None)
-    _assert_observation_tree(trace, root_observations, expected_observations)
+    # Proposal 0043 (§8.4.1 trace.input/output sourcing).  Fixtures that
+    # opt in supply these as YAML maps; older fixtures leave them absent.
+    if "input" in expected:
+        expected_input = expected["input"]
+        assert trace.input == expected_input, (
+            f"trace.input mismatch: expected {expected_input!r}, got {trace.input!r}"
+        )
+    if "output" in expected:
+        expected_output = expected["output"]
+        assert trace.output == expected_output, (
+            f"trace.output mismatch: expected {expected_output!r}, got {trace.output!r}"
+        )
+    # ``observations:`` is asserted only when the fixture supplies it.
+    # Older fixtures that omit the block implicitly say "I'm asserting
+    # trace-level fields only; don't care about the observation tree"
+    # (proposal 0043's fixture 037 is the first to use this shape — it
+    # focuses purely on trace.input/output).
+    if "observations" in expected:
+        expected_observations = cast("list[dict[str, Any]]", expected["observations"])
+        root_observations = trace.children_of(None)
+        _assert_observation_tree(trace, root_observations, expected_observations)
 
     # Invariants: cross-cutting checks that hold across the full Trace.
     if expected_invariants.get("trace_id_equals_invocation_id"):
