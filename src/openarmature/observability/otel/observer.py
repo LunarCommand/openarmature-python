@@ -285,6 +285,37 @@ class _InvState:
     # ``openarmature.fan_out.parent_node_name`` even though the inner
     # event itself doesn't carry ``fan_out_config``.
     fan_out_parent_node_name: dict[tuple[str, ...], str] = field(default_factory=dict[tuple[str, ...], str])
+    # Per proposal 0044 (observability §5.7, v0.36.0): synthesize
+    # per-branch dispatch spans nested between the parallel-branches
+    # node span and the inner-branch spans (mirroring fan-out's
+    # per-instance synthesis above).  Keyed by
+    # ``prefix + (branch_name,)``.  Closed when the parallel-branches
+    # node's ``completed`` event fires.
+    parallel_branches_branch_spans: dict[tuple[str, ...], _OpenSpan] = field(
+        default_factory=dict[tuple[str, ...], _OpenSpan]
+    )
+    # ``parent_node_name`` cache for parallel-branches (mirrors the
+    # ``fan_out_parent_node_name`` cache above).  Surfaces from the
+    # parallel-branches NODE's ``started`` event via
+    # ``NodeEvent.parallel_branches_config.parent_node_name``; cached
+    # per-namespace-prefix so the per-branch dispatch synthesizer can
+    # attach ``openarmature.parallel_branches.parent_node_name``
+    # without re-reading the inner event (which only carries
+    # ``branch_name``).
+    parallel_branches_parent_node_name: dict[tuple[str, ...], str] = field(
+        default_factory=dict[tuple[str, ...], str]
+    )
+
+    # Per proposal 0044 (v0.36.0): cached branch-name set per
+    # parallel-branches NODE namespace.  Lets the per-branch dispatch
+    # synthesizer reject events whose ``branch_name`` belongs to a
+    # DIFFERENT parallel-branches node (nested case: an inner pb's
+    # branch event walks past outer pbs in the synthesis loop; outer
+    # pbs MUST NOT synthesize a phantom dispatch span for a branch
+    # name they don't actually own).
+    parallel_branches_branch_names: dict[tuple[str, ...], frozenset[str]] = field(
+        default_factory=dict[tuple[str, ...], frozenset[str]]
+    )
 
 
 @dataclass
@@ -580,8 +611,27 @@ class OTelObserver:
         # ``openarmature.fan_out.parent_node_name`` to per-instance
         # spans. Inner events from inside the fan-out's instances
         # don't carry ``fan_out_config`` themselves; the cache bridges.
-        if event.fan_out_config is not None and event.fan_out_index is None:
+        # ``fan_out_config`` is only populated on the NODE's OWN
+        # events, so the presence check is sufficient — we don't
+        # additionally filter on ``fan_out_index is None`` because
+        # when a fan-out is nested inside another fan-out or a pb
+        # branch, the NODE's own event carries the OUTER axis values.
+        if event.fan_out_config is not None:
             inv_state.fan_out_parent_node_name[event.namespace] = event.fan_out_config.parent_node_name
+
+        # Per proposal 0044 (v0.36.0): mirror cache for the parallel-
+        # branches NODE.  Same logic as the fan-out cache: rely on
+        # ``parallel_branches_config`` being populated only on the
+        # NODE's own events; don't additionally filter on
+        # ``branch_name is None`` (which would skip caching for a pb
+        # nested inside another pb's branch).
+        if event.parallel_branches_config is not None:
+            inv_state.parallel_branches_parent_node_name[event.namespace] = (
+                event.parallel_branches_config.parent_node_name
+            )
+            inv_state.parallel_branches_branch_names[event.namespace] = frozenset(
+                event.parallel_branches_config.branch_names
+            )
 
         # Synthesize subgraph dispatch spans for any ancestor namespace
         # prefix that doesn't have one yet (per observability §4.5).
@@ -621,11 +671,33 @@ class OTelObserver:
         # per-instance dispatch spans synthesized for this fan-out.
         # Children-before-parents close ordering: per-instance
         # dispatch spans before the fan-out node's own span.
-        if event.fan_out_index is None and event.fan_out_config is not None:
+        # ``fan_out_config`` is only populated on the NODE's OWN
+        # events, so the presence check is sufficient — we don't
+        # additionally filter on ``fan_out_index is None`` because
+        # when a fan-out is nested inside another fan-out's instance
+        # or a pb's branch, the NODE's own completion event carries
+        # the OUTER axis values.
+        if event.fan_out_config is not None:
             for key in list(inv_state.fan_out_instance_spans.keys()):
                 if len(key) > len(event.namespace) and key[: len(event.namespace)] == event.namespace:
                     self._close_fan_out_instance_dispatch_span(inv_state, key)
             inv_state.fan_out_parent_node_name.pop(event.namespace, None)
+
+        # Per proposal 0044 (v0.36.0): if this is the parallel-branches
+        # node's own completion, close all per-branch dispatch spans
+        # synthesized for it.  Children-before-parents close ordering
+        # (per-branch dispatch spans before the parallel-branches node
+        # span itself).  Same logic as the fan-out close above: rely
+        # on ``parallel_branches_config`` being populated only on the
+        # NODE's own events; don't additionally filter on
+        # ``branch_name is None`` (which would skip close for a pb
+        # nested inside another pb's branch).
+        if event.parallel_branches_config is not None:
+            for key in list(inv_state.parallel_branches_branch_spans.keys()):
+                if len(key) > len(event.namespace) and key[: len(event.namespace)] == event.namespace:
+                    self._close_parallel_branches_branch_dispatch_span(inv_state, key)
+            inv_state.parallel_branches_parent_node_name.pop(event.namespace, None)
+            inv_state.parallel_branches_branch_names.pop(event.namespace, None)
         key = self._key_for(event)
         open_span = inv_state.open_spans.pop(key, None)
         if open_span is None:
@@ -723,6 +795,19 @@ class OTelObserver:
             fi_str = str(aug_fi)
             for key, open_span in inv_state.fan_out_instance_spans.items():
                 if not key or key[-1] != fi_str:
+                    continue
+                anchor_ns = key[:-1]
+                if is_strict_prefix(anchor_ns, aug_ns) or anchor_ns == aug_ns:
+                    targets.append(open_span.span)
+        if aug_bn is not None:
+            # Per-branch dispatch span(s) on the ancestor path (per
+            # spec §3.4's "outer parallel-branches branch" ancestor-
+            # chain rule, formalized in proposal 0045).  Keys are
+            # anchor_ns + (branch_name,) per
+            # ``_open_parallel_branches_branch_dispatch_span``.
+            # Same shape as the fan-out branch above.
+            for key, open_span in inv_state.parallel_branches_branch_spans.items():
+                if not key or key[-1] != aug_bn:
                     continue
                 anchor_ns = key[:-1]
                 if is_strict_prefix(anchor_ns, aug_ns) or anchor_ns == aug_ns:
@@ -1079,25 +1164,36 @@ class OTelObserver:
         event's span. Walks namespace ancestors finding the
         innermost-open subgraph or detached root span; falls back to
         the invocation span."""
-        # 1a. Detached fan-out instance root — keyed by
-        #     ``namespace[:1] + (str(fan_out_index),)`` per
-        #     ``_open_detached_fan_out_instance_root``. Checked
-        #     explicitly before the generic prefix scan.
-        if event.fan_out_index is not None and event.namespace:
-            instance_key = event.namespace[:1] + (str(event.fan_out_index),)
-            root = inv_state.detached_roots.get(instance_key)
-            if root is not None:
-                return set_span_in_context(root.span)
-            # 1a'. Non-detached per-instance dispatch span (proposal
-            #      0013, v0.10.0). Same keying as the detached path
-            #      but lives in the parent trace under the fan-out
-            #      node's span. Inner-node events from inside a
-            #      non-detached fan-out instance parent under THIS
-            #      per-instance dispatch span (not the shared fan-out
-            #      node span at ``namespace[:1]``).
-            instance_dispatch = inv_state.fan_out_instance_spans.get(instance_key)
-            if instance_dispatch is not None:
-                return set_span_in_context(instance_dispatch.span)
+        # 1. Walk prefix lengths longest-to-shortest.  The INNERMOST
+        #    matching synthetic dispatch span wins.  Three keying
+        #    schemes live alongside each other at each prefix:
+        #      - per-branch dispatch (proposal 0044, v0.36.0): keyed by
+        #        ``prefix + (branch_name,)`` in
+        #        ``parallel_branches_branch_spans``
+        #      - detached fan-out instance root: keyed by
+        #        ``prefix + (str(fan_out_index),)`` in
+        #        ``detached_roots``
+        #      - non-detached fan-out instance dispatch (proposal 0013,
+        #        v0.10.0): keyed by ``prefix + (str(fan_out_index),)``
+        #        in ``fan_out_instance_spans``
+        #    Walking longest-to-shortest gives the right answer for
+        #    arbitrary composition (parallel-branches inside fan-out
+        #    instance and vice versa) — the dispatch span at the
+        #    deepest matching depth is the most-immediate parent.
+        for prefix_len in range(len(event.namespace), 0, -1):
+            prefix = event.namespace[:prefix_len]
+            if event.branch_name is not None:
+                branch_dispatch = inv_state.parallel_branches_branch_spans.get(prefix + (event.branch_name,))
+                if branch_dispatch is not None:
+                    return set_span_in_context(branch_dispatch.span)
+            if event.fan_out_index is not None:
+                instance_key = prefix + (str(event.fan_out_index),)
+                root = inv_state.detached_roots.get(instance_key)
+                if root is not None:
+                    return set_span_in_context(root.span)
+                instance_dispatch = inv_state.fan_out_instance_spans.get(instance_key)
+                if instance_dispatch is not None:
+                    return set_span_in_context(instance_dispatch.span)
         # 1b. Detached subgraph root at any matching prefix wins
         #     (highest precedence — events inside a detached subtree
         #     always parent under the detached root, never bleed up).
@@ -1176,39 +1272,84 @@ class OTelObserver:
             # fan-out node span at ``prefix`` is already open too
             # (synthesized as part of the fan-out node's started
             # event), so we don't open a new subgraph span at
-            # ``prefix``.
+            # ``prefix``.  This dedup runs at any depth — the fan-out
+            # node may sit inside a subgraph wrapper, another fan-out,
+            # or a parallel-branches branch.
             if (
-                depth == 1
-                and event.fan_out_index is not None
+                event.fan_out_index is not None
                 and (prefix + (str(event.fan_out_index),)) in inv_state.fan_out_instance_spans
             ):
                 continue
             # If this prefix's first segment is configured as a
             # detached subgraph, mint a fresh trace.
-            if depth == 1 and prefix[0] in self.detached_subgraphs:
+            # Detached subgraph wrapper at any depth: ``detached_subgraphs``
+            # holds bare node names, so we match on ``prefix[-1]`` (the
+            # node-name segment) at all depths — at depth 1 this
+            # coincides with ``prefix[0]`` so the depth-1 behavior is
+            # unchanged.
+            if prefix[-1] in self.detached_subgraphs:
                 self._open_detached_subgraph_root(inv_state, invocation_id, correlation_id, prefix, event)
                 continue
-            # If this is a fan-out instance namespace (event.fan_out_index
-            # populated, prefix == namespace[:1]), and the fan-out
-            # node is detached, open a per-instance detached root.
-            if depth == 1 and event.fan_out_index is not None and prefix[0] in self.detached_fan_outs:
+            # Per-instance detached root for a configured-detached
+            # fan-out (event.fan_out_index populated, fan-out NODE
+            # name at ``prefix[-1]`` in the configured set).
+            if event.fan_out_index is not None and prefix[-1] in self.detached_fan_outs:
                 self._open_detached_fan_out_instance_root(inv_state, correlation_id, prefix, event)
                 continue
             # Per spec §5.4 + proposal 0013: non-detached fan-out
             # instances get a synthetic per-instance dispatch span
             # under the fan-out node span. Triggered by an event
             # from inside a fan-out instance (event.fan_out_index
-            # populated) at depth 1 (the fan-out node's namespace
-            # prefix), where the parent_node_name cache has an
-            # entry — i.e., the fan-out node's started event has
-            # been seen.
+            # populated) at the depth where the parent_node_name
+            # cache has an entry — i.e., the fan-out node's started
+            # event has been seen.  The cache match self-gates to
+            # the fan-out node's actual namespace, so this works at
+            # any depth (including when the node sits inside a
+            # subgraph wrapper or a parallel-branches branch).  The
+            # detached check uses ``prefix[-1]`` (the fan-out node
+            # name) so it remains correct at depth > 1.
             if (
-                depth == 1
-                and event.fan_out_index is not None
-                and prefix[0] not in self.detached_fan_outs
+                event.fan_out_index is not None
+                and prefix[-1] not in self.detached_fan_outs
                 and prefix in inv_state.fan_out_parent_node_name
             ):
                 self._open_fan_out_instance_dispatch_span(inv_state, correlation_id, prefix, event)
+                continue
+            # Per proposal 0044 (v0.36.0): parallel-branches per-branch
+            # dispatch synthesis.  Triggered by an inner-branch event
+            # (event.branch_name populated) at the depth where the
+            # parent_node_name cache has an entry (i.e., the
+            # parallel-branches NODE's started event has been seen).
+            # The cache match self-gates to the parallel-branches
+            # node's actual namespace, so this works at any depth —
+            # including when the node sits inside a subgraph wrapper
+            # or a fan-out instance.  If a dispatch span for THIS
+            # branch is already open, skip — only one dispatch span
+            # per branch per parallel-branches NODE execution.
+            if (
+                event.branch_name is not None
+                and prefix in inv_state.parallel_branches_parent_node_name
+                and event.branch_name in inv_state.parallel_branches_branch_names.get(prefix, frozenset())
+            ):
+                branch_key = prefix + (event.branch_name,)
+                if branch_key not in inv_state.parallel_branches_branch_spans:
+                    self._open_parallel_branches_branch_dispatch_span(
+                        inv_state, correlation_id, prefix, event
+                    )
+                continue
+            # If ``prefix`` names a parallel-branches or fan-out NODE
+            # (detected by an entry in the respective parent_node_name
+            # cache), don't open a synthetic subgraph wrapper span —
+            # the NODE has its own span via ``_open_started_span``.
+            # This catches the case where the event walks past a pb /
+            # fan-out NODE depth without triggering per-branch /
+            # per-instance synthesis at THIS depth (e.g., an inner
+            # pb's branch event traversing an outer pb depth where
+            # the inner branch_name is not declared).
+            if (
+                prefix in inv_state.parallel_branches_parent_node_name
+                or prefix in inv_state.fan_out_parent_node_name
+            ):
                 continue
             self._open_subgraph_span(inv_state, invocation_id, correlation_id, prefix, event)
 
@@ -1288,13 +1429,25 @@ class OTelObserver:
             trace_flags=TraceFlags(TraceFlags.SAMPLED),
         )
 
-        # 2. Open the dispatch span in the parent trace. Parent of
-        #    the dispatch span is the invocation span (or whatever
-        #    was already in scope) per the per-invocation map.
+        # 2. Open the dispatch span in the parent trace. At depth 1
+        #    the parent is the invocation span; at depth > 1 it's the
+        #    nearest enclosing synthetic subgraph or detached root
+        #    span (mirroring ``_open_subgraph_span``'s walk).
         parent_ctx_for_dispatch: object = otel_context.Context()
-        inv = self._invocation_span.get(invocation_id)
-        if inv is not None:
-            parent_ctx_for_dispatch = set_span_in_context(inv.span)
+        for plen in range(len(prefix) - 1, 0, -1):
+            outer = prefix[:plen]
+            outer_sg = inv_state.subgraph_spans.get(outer)
+            if outer_sg is not None:
+                parent_ctx_for_dispatch = set_span_in_context(outer_sg.span)
+                break
+            outer_dr = inv_state.detached_roots.get(outer)
+            if outer_dr is not None:
+                parent_ctx_for_dispatch = set_span_in_context(outer_dr.span)
+                break
+        else:
+            inv = self._invocation_span.get(invocation_id)
+            if inv is not None:
+                parent_ctx_for_dispatch = set_span_in_context(inv.span)
         attrs_parent: dict[str, Any] = {
             "openarmature.node.name": prefix[-1],
             "openarmature.subgraph.name": _subgraph_identity_at(event, len(prefix)),
@@ -1444,6 +1597,80 @@ class OTelObserver:
         self._run_enrichers(open_span.span, None)
         open_span.span.end()
 
+    def _open_parallel_branches_branch_dispatch_span(
+        self,
+        inv_state: _InvState,
+        correlation_id: str | None,
+        prefix: tuple[str, ...],
+        event: NodeEvent,
+    ) -> None:
+        """Per-branch dispatch span for a parallel-branches NODE (per
+        observability §5.7 + proposal 0044, v0.36.0).  Mirror of
+        ``_open_fan_out_instance_dispatch_span``.
+
+        Parents under the parallel-branches node span at ``prefix``.
+        Span name is the branch's identifier (``event.branch_name``).
+        Attributes are ``openarmature.node.branch_name``,
+        ``openarmature.parallel_branches.parent_node_name`` (looked up
+        from the cache populated when the parallel-branches NODE's
+        ``started`` event landed), and the correlation_id if set.
+
+        Stored in ``inv_state.parallel_branches_branch_spans`` keyed by
+        ``prefix + (branch_name,)``.  Closed when the parallel-branches
+        NODE's own ``completed`` event fires (children-before-parents
+        ordering).
+        """
+        assert event.branch_name is not None, (
+            "parallel-branches branch dispatch synthesis requires event.branch_name"
+        )
+        # Find the parallel-branches NODE's open span (latest attempt
+        # under retry) to use as parent.  Scan ``open_spans`` by
+        # namespace only — the NODE may carry an outer
+        # ``fan_out_index`` (if the parallel-branches node sits inside
+        # a fan-out instance) or ``branch_name`` (if it sits inside
+        # another parallel-branches branch).  Only one entry per
+        # namespace is open at a time, so the scan is unambiguous.
+        node_open: _OpenSpan | None = None
+        for key, open_span in inv_state.open_spans.items():
+            ns, _attempt, _fan_idx, _bn = key
+            if ns == prefix:
+                node_open = open_span
+                break
+        parent_ctx: object
+        if node_open is not None:
+            parent_ctx = set_span_in_context(node_open.span)
+        else:
+            parent_ctx = otel_context.Context()
+
+        parent_node_name = inv_state.parallel_branches_parent_node_name.get(prefix, prefix[-1])
+        attrs: dict[str, Any] = {
+            "openarmature.node.name": event.branch_name,
+            "openarmature.node.branch_name": event.branch_name,
+            "openarmature.parallel_branches.parent_node_name": parent_node_name,
+            "openarmature.subgraph.name": _subgraph_identity_at(event, len(prefix)),
+        }
+        if correlation_id is not None:
+            attrs["openarmature.correlation_id"] = correlation_id
+        _apply_caller_metadata(attrs, event.caller_invocation_metadata)
+        branch_span = self._tracer.start_span(
+            name=event.branch_name,
+            context=cast("Any", parent_ctx),
+            kind=SpanKind.INTERNAL,
+            attributes=attrs,
+        )
+        branch_key = prefix + (event.branch_name,)
+        inv_state.parallel_branches_branch_spans[branch_key] = _OpenSpan(span=branch_span)
+
+    def _close_parallel_branches_branch_dispatch_span(
+        self, inv_state: _InvState, key: tuple[str, ...]
+    ) -> None:
+        open_span = inv_state.parallel_branches_branch_spans.pop(key, None)
+        if open_span is None:
+            return
+        open_span.span.set_status(Status(StatusCode.OK))
+        self._run_enrichers(open_span.span, None)
+        open_span.span.end()
+
     def _close_detached_root(self, inv_state: _InvState, prefix: tuple[str, ...]) -> None:
         inv_state.fan_out_instance_root_prefixes.discard(prefix)
         open_span = inv_state.detached_roots.pop(prefix, None)
@@ -1463,16 +1690,16 @@ class OTelObserver:
         open_span.span.end()
 
     def _find_fan_out_node_span(self, inv_state: _InvState, prefix: tuple[str, ...]) -> _OpenSpan | None:
-        """Find the currently-open fan-out node's parent dispatch
-        span at ``prefix`` regardless of ``attempt_index``. Under
-        retry middleware wrapping the fan-out, the in-flight
-        attempt's span lives at ``(prefix, attempt_index, None)``;
-        only one such entry is open at a time (retry opens and
-        closes within each attempt's lifecycle), so a scan finds it
-        unambiguously."""
+        """Find the currently-open fan-out NODE span at ``prefix``.
+        Scans by namespace only — the NODE may carry an outer
+        ``fan_out_index`` or ``branch_name`` if the fan-out is itself
+        nested inside another fan-out instance or a parallel-branches
+        branch.  Only one entry per namespace is open at a time
+        (retry middleware opens and closes attempts serially), so the
+        scan is unambiguous."""
         for key, open_span in inv_state.open_spans.items():
-            ns, _attempt, fan_idx, _bn = key
-            if ns == prefix and fan_idx is None:
+            ns, _attempt, _fan_idx, _bn = key
+            if ns == prefix:
                 return open_span
         return None
 
@@ -1486,14 +1713,18 @@ class OTelObserver:
         }
         if event.fan_out_index is not None:
             attrs["openarmature.node.fan_out_index"] = event.fan_out_index
-        # Per pipeline-utilities §11 / proposal 0011: surface
-        # branch_name on every inner-node span within a
-        # parallel-branches branch. Independent of fan_out_index —
+        # Per observability §5.7 + proposal 0044 (v0.36.0): the
+        # ``openarmature.node.branch_name`` attribute MUST appear on
+        # every inner-node span within a parallel-branches branch
+        # (parallels ``openarmature.node.fan_out_index`` on fan-out
+        # instance inner spans).  Independent of ``fan_out_index`` —
         # both MAY be present when a branch's subgraph contains a
-        # fan-out, and the spec §6 uniqueness invariant treats them
-        # as independent identification slots.
+        # fan-out, and §6 treats them as independent identification
+        # slots.  Pre-0044 the python observer emitted this as
+        # ``openarmature.branch_name``; renamed to match the spec
+        # attribute namespace.
         if event.branch_name is not None:
-            attrs["openarmature.branch_name"] = event.branch_name
+            attrs["openarmature.node.branch_name"] = event.branch_name
         if correlation_id is not None:
             attrs["openarmature.correlation_id"] = correlation_id
         # Per spec §5.4 + proposal 0013 (v0.10.0): fan-out node spans
@@ -1508,6 +1739,15 @@ class OTelObserver:
             attrs["openarmature.fan_out.item_count"] = cfg.item_count
             attrs["openarmature.fan_out.concurrency"] = 0 if cfg.concurrency is None else cfg.concurrency
             attrs["openarmature.fan_out.error_policy"] = cfg.error_policy
+        # Per spec §5.7 + proposal 0044 (v0.36.0): the parallel-
+        # branches NODE span carries branch_count + error_policy.
+        # Both come straight off ``parallel_branches_config`` which
+        # the engine attaches to the NODE's started/completed events
+        # only (analogous to fan_out_config).
+        if event.parallel_branches_config is not None:
+            pcfg = event.parallel_branches_config
+            attrs["openarmature.parallel_branches.branch_count"] = pcfg.branch_count
+            attrs["openarmature.parallel_branches.error_policy"] = pcfg.error_policy
         _apply_caller_metadata(attrs, event.caller_invocation_metadata)
         return attrs
 

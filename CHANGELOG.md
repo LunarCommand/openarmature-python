@@ -18,6 +18,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). The
 
   The `Observer.__call__` signature widens to `NodeEvent | MetadataAugmentationEvent | InvocationStartedEvent | InvocationCompletedEvent`. The new `ObserverEvent` type alias (re-exported from `openarmature.graph`) gives observer authors a one-name handle on the union; existing observers that ignore non-`NodeEvent` variants early-return after an `isinstance(event, NodeEvent)` check.
 - **`LangfuseTrace.input` / `LangfuseTrace.output` dataclass fields** on the in-memory recorder, populated by the new observer paths.
+- **Parallel-branches OTel dispatch span synthesis** (proposal 0044, observability §5.7). Mirroring the fan-out per-instance dispatch synthesis (proposal 0013), the OTel observer now synthesizes a per-branch dispatch span between the parallel-branches NODE span and each branch's inner-node spans. New `ParallelBranchesEventConfig` payload on `NodeEvent` (`branch_names`, `branch_count`, `error_policy`, `parent_node_name`); engine populates it on the parallel-branches NODE's `started` / `completed` events. New OTel span attributes:
+  - `openarmature.parallel_branches.branch_count` + `openarmature.parallel_branches.error_policy` on the parallel-branches NODE span.
+  - `openarmature.node.branch_name` + `openarmature.parallel_branches.parent_node_name` on each per-branch dispatch span.
+  - `openarmature.node.branch_name` on every inner-node span beneath a per-branch dispatch span.
+
+### Changed (breaking, pre-1.0)
+
+- **OTel span attribute `openarmature.branch_name` is renamed to `openarmature.node.branch_name`** to align with the spec §5.7 attribute namespace. Prior python releases emitted `openarmature.branch_name` as a workaround because the spec hadn't defined an OTel attribute carrying `branch_name` yet; proposal 0044 (v0.36.0) formalizes the namespace. **Downstream dashboards, queries, or alerts filtering on the old attribute name MUST update.** Pre-1.0 break; the prior name was python-implementation-only and was never spec-normative.
 
 ### Changed
 
@@ -32,7 +40,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). The
 
 ### Notes
 
-- **Pinned spec version bumped from v0.31.0 to v0.35.0.** Absorbs proposals 0042 (reserved-key extension), 0043 (Langfuse trace.input/output sourcing), and the textual additions in v0.32.0 (Gemini wire-format mapping, 0038, not yet implemented) and v0.33.0 (sessions capability, 0020, not yet implemented).
+- **Pinned spec version bumped from v0.31.0 to v0.36.0.** Absorbs proposals 0042 (reserved-key extension), 0043 (Langfuse trace.input/output sourcing), 0044 (parallel-branches OTel dispatch span), and the textual additions in v0.32.0 (Gemini wire-format mapping, 0038, not yet implemented) and v0.33.0 (sessions capability, 0020, not yet implemented).
 - `LangfuseSDKAdapter` now applies `trace.input` / `trace.output` to the live Langfuse Trace. Input lands on the first real observation under the trace via `set_trace_io`; output uses a synthetic short-lived `openarmature.trace_io` observation as the carrier. The InMemoryLangfuseClient used by tests applies the fields directly.
 - Conformance fixture `observability/conformance/037-langfuse-trace-input-output` activated for all five cases (default stub / `disable_state_payload=False` / hooks non-null / hooks null-fallthrough / resume re-fire). The langfuse harness grew per-case `checkpointer: in_memory` wiring, a compact `flaky:` test seam, and a two-phase resume-flow assertion path.
 - The Langfuse v4 SDK marks `set_current_trace_io` / `Span.set_trace_io` deprecated ("removal in a future major version"). Empirical verification against Langfuse Cloud (v4.7.1, 2026-05-29) confirms it remains the **only** path that populates the Traces list view's headline `Input` / `Output` columns; `propagate_attributes(metadata=...)` does not substitute for it in the current UI. We will revisit when Langfuse publishes a concrete migration guide for v5.

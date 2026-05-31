@@ -77,6 +77,52 @@ class FanOutEventConfig:
     parent_node_name: str
 
 
+# Spec: realizes observability §5.7 parallel-branches attributes via
+# the event-payload mechanism added by proposal 0044 (v0.36.0).
+# Backend observers cache ``parent_node_name`` off the parallel-
+# branches node's started event and apply it on every per-branch
+# dispatch span they synthesize (observability §5.7 mandates
+# ``openarmature.parallel_branches.parent_node_name`` on per-branch
+# dispatch spans). Mirrors :class:`FanOutEventConfig`'s shape.
+@dataclass(frozen=True)
+class ParallelBranchesEventConfig:
+    """Resolved parallel-branches configuration carried on a parallel-
+    branches node's own events.
+
+    Parallel-branches node events carry the resolved configuration so
+    backend observers can attribute the parallel-branches node span
+    (``branch_count`` / ``error_policy``) and synthesize per-branch
+    dispatch spans with the right ``branch_names`` + ``parent_node_name``.
+
+    Populated ONLY on ``started`` and ``completed`` events for a
+    parallel-branches node itself (partition by node type, not event
+    category; INCLUDES retried attempts of a parallel-branches node
+    when retry middleware wraps it). All other events leave
+    ``NodeEvent.parallel_branches_config`` null.
+
+    Field shapes:
+
+    - ``branch_names``: non-empty ordered tuple of strings. The branch
+      identifiers in declaration / dispatch order, as configured on
+      the parallel-branches node (pipeline-utilities §11.1).
+    - ``branch_count``: positive int. Equals ``len(branch_names)``.
+      Surfaced explicitly so observers don't have to derive it.
+    - ``error_policy``: one of ``"fail_fast"`` or ``"collect"`` (per
+      pipeline-utilities §11.5).
+    - ``parent_node_name``: the parallel-branches node's name in the
+      parent graph. Carried here for caching by backend observers
+      when attributing per-branch dispatch spans.
+
+    All four fields MUST be present when ``parallel_branches_config``
+    is populated.
+    """
+
+    branch_names: tuple[str, ...]
+    branch_count: int
+    error_policy: str
+    parent_node_name: str
+
+
 # Spec: realizes graph-engine §6 NodeEvent (started/completed pair
 # model from proposal 0005, v0.6.0). The ``checkpoint_saved`` phase
 # is the Python shape for §10.8 save events (§10.8 SHOULDs an event
@@ -190,6 +236,17 @@ class NodeEvent:
     attempt_index: int = 0
     fan_out_index: int | None = None
     fan_out_config: FanOutEventConfig | None = None
+    # Per observability §5.7 / proposal 0044 (v0.36.0): resolved
+    # parallel-branches configuration carried on the parallel-branches
+    # NODE's own events (mirroring ``fan_out_config`` on a fan-out
+    # NODE's events). Populated on both ``started`` and ``completed``
+    # events for a parallel-branches NODE (including retried
+    # attempts); absent on every other event. Carries the §5.7
+    # branch_count + error_policy + parent_node_name surface so
+    # backend observers can attribute the parallel-branches NODE span
+    # and synthesize per-branch dispatch spans without re-reading the
+    # graph's static config.
+    parallel_branches_config: ParallelBranchesEventConfig | None = None
     # Per pipeline-utilities §11 / graph-engine §6 (proposal 0011):
     # optional non-empty string populated only on events from nodes
     # that execute inside a parallel-branches branch. The
@@ -358,4 +415,5 @@ __all__ = [
     "InvocationStartedEvent",
     "MetadataAugmentationEvent",
     "NodeEvent",
+    "ParallelBranchesEventConfig",
 ]
