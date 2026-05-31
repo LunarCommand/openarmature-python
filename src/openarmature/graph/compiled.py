@@ -100,6 +100,7 @@ from .events import (
     InvocationCompletedEvent,
     InvocationStartedEvent,
     NodeEvent,
+    ParallelBranchesEventConfig,
 )
 from .middleware import ChainCall, Middleware, compose_chain
 from .nodes import Node
@@ -1985,6 +1986,29 @@ class CompiledGraph[StateT: State]:
         attempt_counter: list[int] = [0]
         deferred_info: list[tuple[int, StateT, StateT] | None] = [None]
 
+        # Per proposal 0044 (observability §5.7, v0.36.0): the
+        # resolved parallel-branches configuration is static at
+        # compile time (no count / concurrency resolvers like fan-out
+        # has), so build the event config once here and ship it on
+        # both started + completed events. ``branch_names`` mirrors
+        # the dispatch order ParallelBranchesNode uses internally
+        # (insertion order of the ``branches`` dict per pipeline-
+        # utilities §11.1).
+        #
+        # Python dicts preserve insertion order (PEP 468; guaranteed
+        # since 3.7), and YAML / direct-dict-literal ``branches``
+        # construction at the call site preserves the source order
+        # through into the dict's keys().  Spec §11.1 ties branch
+        # declaration order to dispatch order, so this tuple IS the
+        # declaration order observers should see.
+        branch_names: tuple[str, ...] = tuple(node.branches.keys())
+        parallel_branches_event_config = ParallelBranchesEventConfig(
+            branch_names=branch_names,
+            branch_count=len(branch_names),
+            error_policy=node.error_policy,
+            parent_node_name=current,
+        )
+
         async def innermost(s: Any) -> Mapping[str, Any]:
             attempt_counter[0] += 1
             # Read from ContextVar — see ``_step_function_node``'s
@@ -1998,6 +2022,7 @@ class CompiledGraph[StateT: State]:
                 step,
                 s,
                 attempt_index=attempt_index,
+                parallel_branches_config=parallel_branches_event_config,
             )
             otel_token = _attach_active_observer_span()
             try:
@@ -2012,6 +2037,7 @@ class CompiledGraph[StateT: State]:
                         s,
                         error=e,
                         attempt_index=attempt_index,
+                        parallel_branches_config=parallel_branches_event_config,
                     )
                     raise
                 except Exception as e:
@@ -2024,6 +2050,7 @@ class CompiledGraph[StateT: State]:
                         s,
                         error=wrapped,
                         attempt_index=attempt_index,
+                        parallel_branches_config=parallel_branches_event_config,
                     )
                     raise wrapped from e
             finally:
@@ -2041,6 +2068,7 @@ class CompiledGraph[StateT: State]:
                     s,
                     error=e,
                     attempt_index=attempt_index,
+                    parallel_branches_config=parallel_branches_event_config,
                 )
                 raise
 
@@ -2094,6 +2122,7 @@ class CompiledGraph[StateT: State]:
                     final_pre_state,
                     post_state=final_merged,
                     attempt_index=final_attempt_index,
+                    parallel_branches_config=parallel_branches_event_config,
                 )
             else:
                 self._dispatch_completed(
@@ -2104,6 +2133,7 @@ class CompiledGraph[StateT: State]:
                     final_pre_state,
                     error=edge_error,
                     attempt_index=final_attempt_index,
+                    parallel_branches_config=parallel_branches_event_config,
                 )
 
         return _StepResult(state=merged_outer, finalize_completed=finalize_completed)
@@ -2118,6 +2148,7 @@ class CompiledGraph[StateT: State]:
         *,
         attempt_index: int = 0,
         fan_out_config: FanOutEventConfig | None = None,
+        parallel_branches_config: ParallelBranchesEventConfig | None = None,
     ) -> None:
         # Per graph-engine §6 + pipeline-utilities §11: read the
         # active branch_name (set by ParallelBranchesNode inside
@@ -2140,6 +2171,7 @@ class CompiledGraph[StateT: State]:
                 attempt_index=attempt_index,
                 fan_out_index=context.fan_out_index,
                 fan_out_config=fan_out_config,
+                parallel_branches_config=parallel_branches_config,
                 branch_name=current_branch_name(),
                 subgraph_identities=context.subgraph_identities,
                 caller_invocation_metadata=current_invocation_metadata(),
@@ -2158,6 +2190,7 @@ class CompiledGraph[StateT: State]:
         error: RuntimeGraphError | None = None,
         attempt_index: int = 0,
         fan_out_config: FanOutEventConfig | None = None,
+        parallel_branches_config: ParallelBranchesEventConfig | None = None,
     ) -> None:
         from openarmature.observability.correlation import current_branch_name  # noqa: PLC0415
 
@@ -2175,6 +2208,7 @@ class CompiledGraph[StateT: State]:
                 attempt_index=attempt_index,
                 fan_out_index=context.fan_out_index,
                 fan_out_config=fan_out_config,
+                parallel_branches_config=parallel_branches_config,
                 branch_name=current_branch_name(),
                 subgraph_identities=context.subgraph_identities,
                 caller_invocation_metadata=current_invocation_metadata(),

@@ -30,7 +30,7 @@ from pydantic import Field
 # Skip the entire module if otel extras aren't installed.
 pytest.importorskip("opentelemetry.sdk.trace")
 
-from typing import Any, cast
+from typing import Annotated, Any, cast
 
 from opentelemetry import trace as otel_trace
 from opentelemetry.sdk.trace import ReadableSpan, TracerProvider
@@ -45,6 +45,7 @@ from openarmature.graph import (
     GraphBuilder,
     NodeException,
     State,
+    append,
 )
 from openarmature.observability.otel import OTelObserver, install_log_bridge
 
@@ -1758,7 +1759,7 @@ async def test_metadata_augmentation_in_parallel_branches_skips_sibling() -> Non
     by_branch: dict[str, dict[str, Any]] = {}
     for span in ask_spans:
         attrs = dict(span.attributes or {})
-        bn = attrs.get("openarmature.branch_name")
+        bn = attrs.get("openarmature.node.branch_name")
         assert isinstance(bn, str)
         by_branch[bn] = attrs
     # Each branch's ask carries its OWN branch_label augmentation.
@@ -1788,3 +1789,447 @@ async def test_metadata_augmentation_in_parallel_branches_skips_sibling() -> Non
         assert "openarmature.user.branch_label" not in attrs, (
             f"per-branch augmentation leaked onto {span.name} span"
         )
+
+
+async def test_parallel_branches_dispatch_span_attributes() -> None:
+    # Proposal 0044 (observability §5.7, v0.36.0): pins the §5.7
+    # attribute surface end-to-end.
+    #
+    # - The parallel-branches NODE span carries
+    #   ``openarmature.parallel_branches.branch_count`` +
+    #   ``openarmature.parallel_branches.error_policy``.
+    # - The synthesized per-branch dispatch span (one per branch)
+    #   carries ``openarmature.node.branch_name`` +
+    #   ``openarmature.parallel_branches.parent_node_name``.
+    # - Inner-branch ``ask`` spans carry
+    #   ``openarmature.node.branch_name`` matching their branch (the
+    #   new attribute replaces the pre-0044 ``openarmature.branch_name``
+    #   attribute python emitted before spec defined the namespace).
+    #
+    # Activation of the dedicated conformance fixture
+    # ``observability/038-otel-parallel-branches-dispatch-span`` is
+    # deferred until the OTel conformance harness grows calls_llm +
+    # topology support — same disposition as fixture 030 on the
+    # Langfuse side.
+    from openarmature.graph import BranchSpec
+
+    class _DispatchState(State):
+        fraud_result: str = ""
+        audit_result: str = ""
+
+    class _FraudState(State):
+        score: str = ""
+
+    class _AuditState(State):
+        summary: str = ""
+
+    async def _fraud_ask(_s: _FraudState) -> dict[str, str]:
+        return {"score": "low"}
+
+    async def _audit_ask(_s: _AuditState) -> dict[str, str]:
+        return {"summary": "compliant"}
+
+    fraud_subgraph = (
+        GraphBuilder(_FraudState).add_node("ask", _fraud_ask).add_edge("ask", END).set_entry("ask").compile()
+    )
+    audit_subgraph = (
+        GraphBuilder(_AuditState).add_node("ask", _audit_ask).add_edge("ask", END).set_entry("ask").compile()
+    )
+    exporter = InMemorySpanExporter()
+    observer = OTelObserver(span_processor=SimpleSpanProcessor(exporter))
+    g = (
+        GraphBuilder(_DispatchState)
+        .add_parallel_branches_node(
+            "dispatcher",
+            branches={
+                "fraud_check": BranchSpec(
+                    subgraph=fraud_subgraph,
+                    outputs={"fraud_result": "score"},
+                ),
+                "policy_audit": BranchSpec(
+                    subgraph=audit_subgraph,
+                    outputs={"audit_result": "summary"},
+                ),
+            },
+            error_policy="fail_fast",
+        )
+        .add_edge("dispatcher", END)
+        .set_entry("dispatcher")
+        .compile()
+    )
+    g.attach_observer(observer)
+    try:
+        await g.invoke(_DispatchState())
+        await g.drain()
+    finally:
+        observer.shutdown()
+
+    spans = exporter.get_finished_spans()
+    spans_by_name: dict[str, list[Any]] = {}
+    for span in spans:
+        spans_by_name.setdefault(span.name, []).append(span)
+
+    # ---- Parallel-branches NODE span carries branch_count + error_policy
+    dispatcher_node_spans = [
+        s
+        for s in spans_by_name.get("dispatcher", [])
+        if dict(s.attributes or {}).get("openarmature.parallel_branches.branch_count") is not None
+    ]
+    assert len(dispatcher_node_spans) == 1, (
+        f"expected exactly one parallel-branches NODE span carrying §5.7 attrs; "
+        f"got {len(dispatcher_node_spans)}"
+    )
+    node_attrs = dict(dispatcher_node_spans[0].attributes or {})
+    assert node_attrs["openarmature.parallel_branches.branch_count"] == 2
+    assert node_attrs["openarmature.parallel_branches.error_policy"] == "fail_fast"
+
+    # ---- Per-branch dispatch spans (one per branch) carry the §5.7
+    # branch-side attributes
+    dispatch_span_attrs_by_branch: dict[str, dict[str, Any]] = {}
+    for branch in ("fraud_check", "policy_audit"):
+        candidates = [
+            s
+            for s in spans_by_name.get(branch, [])
+            if dict(s.attributes or {}).get("openarmature.parallel_branches.parent_node_name") is not None
+        ]
+        assert len(candidates) == 1, (
+            f"expected exactly one per-branch dispatch span named {branch!r}; got {len(candidates)}"
+        )
+        dispatch_span_attrs_by_branch[branch] = dict(candidates[0].attributes or {})
+
+    for branch, attrs in dispatch_span_attrs_by_branch.items():
+        assert attrs["openarmature.node.branch_name"] == branch
+        assert attrs["openarmature.parallel_branches.parent_node_name"] == "dispatcher"
+
+    # ---- Inner-branch ``ask`` spans carry the per-spec branch_name
+    # attribute (renamed from the pre-0044 ``openarmature.branch_name``).
+    ask_spans = spans_by_name.get("ask", [])
+    assert len(ask_spans) == 2
+    ask_branch_names = {(dict(s.attributes or {})).get("openarmature.node.branch_name") for s in ask_spans}
+    assert ask_branch_names == {"fraud_check", "policy_audit"}
+
+
+async def test_parallel_branches_inner_spans_parent_under_dispatch_span() -> None:
+    # Regression for the parent-resolution bug PR 9 caught during
+    # conformance fixture 038 activation: pre-fix, inner-branch leaf
+    # spans parented directly under the invocation span instead of
+    # under their per-branch dispatch span (because
+    # ``_resolve_parent_context`` didn't know about
+    # ``parallel_branches_branch_spans``).  Post-fix, the dispatch
+    # span is the inner span's direct OTel parent.
+    from openarmature.graph import BranchSpec
+
+    class _S(State):
+        result: str = ""
+
+    class _InnerS(State):
+        x: int = 0
+
+    async def _ask(_s: _InnerS) -> dict[str, int]:
+        return {"x": 1}
+
+    inner = GraphBuilder(_InnerS).add_node("ask", _ask).add_edge("ask", END).set_entry("ask").compile()
+    exporter = InMemorySpanExporter()
+    observer = OTelObserver(span_processor=SimpleSpanProcessor(exporter))
+    g = (
+        GraphBuilder(_S)
+        .add_parallel_branches_node(
+            "dispatcher",
+            branches={
+                "fraud_check": BranchSpec(subgraph=inner),
+                "policy_audit": BranchSpec(subgraph=inner),
+            },
+        )
+        .add_edge("dispatcher", END)
+        .set_entry("dispatcher")
+        .compile()
+    )
+    g.attach_observer(observer)
+    try:
+        await g.invoke(_S())
+        await g.drain()
+    finally:
+        observer.shutdown()
+
+    spans = exporter.get_finished_spans()
+    spans_by_id = {cast("Any", s.context).span_id: s for s in spans}
+
+    # Per-branch dispatch spans are the spans named after a branch
+    # that carry the §5.7 ``parent_node_name`` attribute.
+    dispatch_span_ids: dict[str, int] = {}
+    for s in spans:
+        attrs = s.attributes or {}
+        if attrs.get("openarmature.parallel_branches.parent_node_name") == "dispatcher":
+            bn = cast("str", attrs.get("openarmature.node.branch_name"))
+            dispatch_span_ids[bn] = cast("Any", s.context).span_id
+
+    assert dispatch_span_ids.keys() == {"fraud_check", "policy_audit"}
+
+    # Each inner ``ask`` span MUST parent under the dispatch span
+    # matching its branch — NOT directly under the invocation span.
+    ask_spans = [s for s in spans if s.name == "ask"]
+    assert len(ask_spans) == 2
+    for ask_span in ask_spans:
+        attrs = ask_span.attributes or {}
+        bn = cast("str", attrs.get("openarmature.node.branch_name"))
+        assert ask_span.parent is not None, (
+            f"ask span for branch {bn!r} MUST have a parent (not the invocation root)"
+        )
+        parent_span_id = cast("Any", ask_span.parent).span_id
+        expected_parent_id = dispatch_span_ids[bn]
+        parent_name = spans_by_id[parent_span_id].name if parent_span_id in spans_by_id else "UNKNOWN"
+        assert parent_span_id == expected_parent_id, (
+            f"ask span for branch {bn!r} parented under {parent_name!r}, "
+            f"expected per-branch dispatch span {bn!r}"
+        )
+
+
+async def test_parallel_branches_node_under_retry_middleware_emits_per_attempt_dispatch_spans() -> None:
+    # Regression: under ``RetryMiddleware`` wrapping the parallel-
+    # branches node, the per-branch dispatch span synthesizer MUST
+    # locate the CURRENT attempt's NODE span (via the scan in
+    # ``_open_parallel_branches_branch_dispatch_span``).  A failing
+    # first attempt + a successful retry MUST produce:
+    #   - two NODE spans (one per attempt, distinct attempt_index)
+    #   - two per-branch dispatch spans per branch (one per attempt)
+    #   - each attempt's dispatch span parented under THAT attempt's
+    #     NODE span (not the wrong attempt's)
+    from openarmature.graph import BranchSpec, RetryMiddleware
+
+    class _S(State):
+        result: str = ""
+
+    class _InnerS(State):
+        x: int = 0
+
+    attempt_counter: list[int] = [0]
+
+    async def _flaky_branch(_s: _InnerS) -> dict[str, int]:
+        attempt_counter[0] += 1
+        if attempt_counter[0] == 1:
+            raise RuntimeError("first-attempt boom")
+        return {"x": 1}
+
+    inner = (
+        GraphBuilder(_InnerS).add_node("ask", _flaky_branch).add_edge("ask", END).set_entry("ask").compile()
+    )
+    # Use a catch-all classifier so the first-attempt failure
+    # (surfacing as ParallelBranchesBranchFailed wrapping a node
+    # exception) triggers a retry instead of being filtered as
+    # non-transient.
+    exporter = InMemorySpanExporter()
+    observer = OTelObserver(span_processor=SimpleSpanProcessor(exporter))
+    g = (
+        GraphBuilder(_S)
+        .add_parallel_branches_node(
+            "dispatcher",
+            branches={"only_branch": BranchSpec(subgraph=inner)},
+            middleware=[RetryMiddleware(max_attempts=2, classifier=lambda _exc, _state: True)],
+        )
+        .add_edge("dispatcher", END)
+        .set_entry("dispatcher")
+        .compile()
+    )
+    g.attach_observer(observer)
+    try:
+        await g.invoke(_S())
+        await g.drain()
+    finally:
+        observer.shutdown()
+
+    spans = exporter.get_finished_spans()
+
+    # Two NODE spans, distinct ``openarmature.node.attempt_index``.
+    node_spans = [
+        s
+        for s in spans
+        if s.name == "dispatcher"
+        and (s.attributes or {}).get("openarmature.parallel_branches.branch_count") is not None
+    ]
+    assert len(node_spans) == 2, f"expected 2 NODE spans (attempts 0 + 1); got {len(node_spans)}"
+    node_attempts: list[int] = sorted(
+        cast("int", dict(s.attributes or {}).get("openarmature.node.attempt_index", -1)) for s in node_spans
+    )
+    assert node_attempts == [0, 1]
+
+    # Two per-branch dispatch spans, one per attempt.
+    dispatch_spans = [
+        s
+        for s in spans
+        if s.name == "only_branch"
+        and (s.attributes or {}).get("openarmature.parallel_branches.parent_node_name") == "dispatcher"
+    ]
+    assert len(dispatch_spans) == 2, f"expected 2 dispatch spans (one per attempt); got {len(dispatch_spans)}"
+
+    # Each dispatch span's parent MUST be a NODE span (not the
+    # invocation span and not the wrong attempt's NODE span).
+    node_span_ids = {cast("Any", s.context).span_id for s in node_spans}
+    for d in dispatch_spans:
+        assert d.parent is not None
+        parent_id = cast("Any", d.parent).span_id
+        assert parent_id in node_span_ids, (
+            f"dispatch span MUST parent under a NODE span; "
+            f"got parent_id={parent_id} not in NODE span ids {node_span_ids}"
+        )
+
+
+async def test_parallel_branches_inside_fan_out_instance_inner_span_carries_both_axes() -> None:
+    # Regression: an inner-branch span deep inside a fan-out instance
+    # MUST carry BOTH ``openarmature.node.fan_out_index`` AND
+    # ``openarmature.node.branch_name``.  The 4-tuple ``_StackKey``
+    # disambiguation already supports this composition; this test
+    # locks the attribute surface that goes with it.
+    from openarmature.graph import BranchSpec
+
+    class _OuterS(State):
+        items: list[int] = []
+        results: Annotated[list[int], append] = []
+
+    class _MidS(State):
+        item: int = 0
+        out: int = 0
+
+    class _BranchS(State):
+        out: int = 0
+
+    async def _branch_ask(_s: _BranchS) -> dict[str, int]:
+        return {"out": 1}
+
+    branch_subgraph = (
+        GraphBuilder(_BranchS).add_node("ask", _branch_ask).add_edge("ask", END).set_entry("ask").compile()
+    )
+
+    # Mid-level subgraph: contains a parallel-branches dispatcher
+    # whose branches each end at ``ask``.
+    mid_builder = (
+        GraphBuilder(_MidS)
+        .add_parallel_branches_node(
+            "dispatcher",
+            branches={
+                "primary": BranchSpec(subgraph=branch_subgraph, outputs={"out": "out"}),
+            },
+        )
+        .add_edge("dispatcher", END)
+        .set_entry("dispatcher")
+    )
+    mid_subgraph = mid_builder.compile()
+
+    # Outer: fan-out → mid-level subgraph (which contains the
+    # parallel-branches node).
+    exporter = InMemorySpanExporter()
+    observer = OTelObserver(span_processor=SimpleSpanProcessor(exporter))
+    g = (
+        GraphBuilder(_OuterS)
+        .add_fan_out_node(
+            "fan",
+            subgraph=mid_subgraph,
+            collect_field="out",
+            target_field="results",
+            items_field="items",
+            item_field="item",
+        )
+        .add_edge("fan", END)
+        .set_entry("fan")
+        .compile()
+    )
+    g.attach_observer(observer)
+    try:
+        await g.invoke(_OuterS(items=[1, 2]))
+        await g.drain()
+    finally:
+        observer.shutdown()
+
+    spans = exporter.get_finished_spans()
+    # Inner ``ask`` spans (one per fan-out instance × one branch each
+    # = 2 spans) MUST carry both fan_out_index AND branch_name.
+    ask_spans = [s for s in spans if s.name == "ask"]
+    assert len(ask_spans) == 2, f"expected 2 ask spans (one per fan-out instance); got {len(ask_spans)}"
+    fan_out_indices: set[Any] = set()
+    for ask_span in ask_spans:
+        attrs = dict(ask_span.attributes or {})
+        assert attrs.get("openarmature.node.branch_name") == "primary"
+        fi = attrs.get("openarmature.node.fan_out_index")
+        assert fi is not None, f"ask span MUST carry fan_out_index inside a fan-out; attrs={attrs!r}"
+        fan_out_indices.add(fi)
+    assert fan_out_indices == {0, 1}, f"expected fan_out_index ∈ {{0, 1}}; got {fan_out_indices}"
+
+
+async def test_metadata_augmentation_updates_per_branch_dispatch_span() -> None:
+    # Spec §3.4 *Mid-invocation augmentation* (per the proposal-0040
+    # implementation + the proposal-0045 ancestor-chain clarification
+    # landing in PR 11): an augmentation fired from inside a branch
+    # MUST apply to every strict dispatch ancestor on the augmenter's
+    # call-stack path — including the per-branch dispatch span.
+    #
+    # Tests the OTel observer's
+    # ``_collect_augmentation_targets`` per-branch-dispatch lookup
+    # added in PR 9.  Sibling-skip is still enforced — the OTHER
+    # branch's dispatch span MUST NOT carry the augmenter's key.
+    import asyncio
+
+    from openarmature.graph import BranchSpec
+    from openarmature.observability.metadata import set_invocation_metadata
+
+    class _S(State):
+        result: str = ""
+
+    class _BranchS(State):
+        out: str = ""
+
+    async def _fraud_ask(_s: _BranchS) -> dict[str, str]:
+        await asyncio.sleep(0)
+        set_invocation_metadata(audit_kind="fraud")
+        return {"out": "fraud-done"}
+
+    async def _policy_ask(_s: _BranchS) -> dict[str, str]:
+        await asyncio.sleep(0)
+        return {"out": "policy-done"}
+
+    fraud_subgraph = (
+        GraphBuilder(_BranchS).add_node("ask", _fraud_ask).add_edge("ask", END).set_entry("ask").compile()
+    )
+    policy_subgraph = (
+        GraphBuilder(_BranchS).add_node("ask", _policy_ask).add_edge("ask", END).set_entry("ask").compile()
+    )
+
+    exporter = InMemorySpanExporter()
+    observer = OTelObserver(span_processor=SimpleSpanProcessor(exporter))
+    g = (
+        GraphBuilder(_S)
+        .add_parallel_branches_node(
+            "dispatcher",
+            branches={
+                "fraud_check": BranchSpec(subgraph=fraud_subgraph),
+                "policy_audit": BranchSpec(subgraph=policy_subgraph),
+            },
+        )
+        .add_edge("dispatcher", END)
+        .set_entry("dispatcher")
+        .compile()
+    )
+    g.attach_observer(observer)
+    try:
+        await g.invoke(_S())
+        await g.drain()
+    finally:
+        observer.shutdown()
+
+    spans = exporter.get_finished_spans()
+    # Per-branch dispatch spans.
+    dispatch_spans_by_branch: dict[str, dict[str, Any]] = {}
+    for s in spans:
+        attrs = dict(s.attributes or {})
+        if attrs.get("openarmature.parallel_branches.parent_node_name") == "dispatcher":
+            bn = cast("str", attrs.get("openarmature.node.branch_name"))
+            dispatch_spans_by_branch[bn] = attrs
+
+    assert dispatch_spans_by_branch.keys() == {"fraud_check", "policy_audit"}
+    # The fraud_check dispatch span MUST carry the augmentation key
+    # (it's the augmenter's strict dispatch ancestor).
+    assert dispatch_spans_by_branch["fraud_check"].get("openarmature.user.audit_kind") == "fraud", (
+        "per-branch dispatch span on augmenter's path MUST carry the augmentation key"
+    )
+    # The policy_audit dispatch span MUST NOT (sibling-skip).
+    assert "openarmature.user.audit_kind" not in dispatch_spans_by_branch["policy_audit"], (
+        "sibling branch's dispatch span MUST NOT receive the augmenter's key"
+    )

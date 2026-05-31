@@ -33,7 +33,7 @@ from __future__ import annotations
 
 import copy
 import re
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any, cast
 
@@ -81,6 +81,11 @@ CONFORMANCE_DIR = (
 
 _SUPPORTED_FIXTURES = frozenset(
     {
+        # v0.36.0 — proposal 0044 (parallel-branches OTel dispatch
+        # span). Asserts the per-branch dispatch span synthesis +
+        # §5.7 attribute surface end-to-end against a two-branch
+        # parallel-branches graph with calls_llm in each branch.
+        "038-otel-parallel-branches-dispatch-span",
         "001-otel-basic-trace",
         "002-otel-subgraph-hierarchy",
         "003-otel-error-status",
@@ -120,7 +125,11 @@ _SUPPORTED_FIXTURES = frozenset(
 )
 
 
-_DEFERRED_FIXTURES: dict[str, str] = {}
+_DEFERRED_FIXTURES: dict[str, str] = {
+    # Proposal 0045 (nested-lineage augmentation, v0.37.0) — engine
+    # + observer work lands in PR 11.
+    "039-nested-lineage-augmentation": ("Proposal 0045 not yet implemented (PR 11)"),
+}
 
 
 # UUIDv4 canonical form: xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx (where y in {8,9,a,b}).
@@ -181,6 +190,8 @@ async def test_observability_fixture(fixture_path: Path) -> None:
         await _run_fixture_011(spec)
     elif fixture_id == "028-caller-metadata-namespace-rejection":
         await _run_fixture_028(spec)
+    elif fixture_id == "038-otel-parallel-branches-dispatch-span":
+        await _run_fixture_038(spec)
     elif fixture_id in {
         "012-otel-llm-payload-default-off",
         "013-otel-llm-payload-enabled",
@@ -1268,7 +1279,6 @@ def _build_graph_with_mock_llm(case: Mapping[str, Any]) -> tuple[Any, list[Any]]
     against an ``httpx.MockTransport`` preloaded with the fixture's
     ``mock_llm`` responses."""
     import json
-    from collections.abc import Sequence
 
     import httpx
 
@@ -1335,6 +1345,273 @@ def _resolve_target_for_005(case: Mapping[str, Any]) -> Any:
         return END
     target = edges[0].get("to")
     return END if target == "END" else target
+
+
+async def _run_fixture_038(spec: Mapping[str, Any]) -> None:
+    """Single-case proposal-0044 fixture: a two-branch parallel-branches
+    graph where each branch's inner ``ask`` node makes an LLM call.
+
+    The OTel observer MUST synthesize a per-branch dispatch span between
+    the parallel-branches NODE span and each branch's inner-node spans;
+    the §5.7 attribute surface (``branch_count`` + ``error_policy`` on
+    the NODE span, ``branch_name`` + ``parent_node_name`` on each
+    dispatch span, ``branch_name`` on inner-branch leaf spans) MUST
+    appear; per-branch dispatch spans MUST close before the NODE span
+    in branch-declaration order.
+    """
+    cases = cast("list[dict[str, Any]]", spec["cases"])
+    assert len(cases) == 1, f"fixture 038 expects exactly one case; got {len(cases)}"
+    case = cases[0]
+    case_name = cast("str", case["name"])
+    try:
+        await _run_fixture_038_case(case)
+    except AssertionError as e:
+        raise AssertionError(f"case {case_name!r}: {e}") from e
+
+
+async def _run_fixture_038_case(case: Mapping[str, Any]) -> None:
+    import json
+
+    import httpx
+    from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import (
+        InMemorySpanExporter,
+    )
+
+    from openarmature.graph import END, BranchSpec, GraphBuilder
+    from openarmature.llm import OpenAIProvider, UserMessage
+
+    from .adapter import build_state_cls
+
+    # ---- Build a queue-backed mock LLM transport.  The fixture's
+    # per-branch ``ask`` nodes share a single OpenAIProvider keyed off
+    # an httpx MockTransport; each branch's ``calls_llm`` block lists
+    # the expected response so the dispatched call order doesn't matter
+    # (the mock matches by the request payload's first user-message
+    # content).
+    branches_spec = cast("dict[str, Any]", case["nodes"]["dispatcher"]["parallel_branches"]["branches"])
+    branch_response_by_user_msg: dict[str, str] = {}
+    for branch_name, branch_spec in branches_spec.items():
+        sub_id = cast("str", branch_spec["subgraph"])
+        sub = cast("dict[str, Any]", case["subgraphs"][sub_id])
+        ask_calls_llm = cast("dict[str, Any]", sub["nodes"]["ask"]["calls_llm"])
+        user_msg = "answer the question"
+        if "messages" in ask_calls_llm:
+            messages = cast("list[dict[str, str]]", ask_calls_llm["messages"])
+            user_msg = next((m["content"] for m in messages if m.get("role") == "user"), user_msg)
+        branch_response_by_user_msg[user_msg + f"::{branch_name}"] = cast(
+            "str", ask_calls_llm.get("response", f"{branch_name} response")
+        )
+
+    fallback_responses = list(branch_response_by_user_msg.values())
+
+    def _handler(_request: httpx.Request) -> httpx.Response:
+        # Both branches dispatch concurrently; response-to-branch
+        # mapping is non-deterministic by design.  The fixture asserts
+        # span topology + §5.7 attributes, NOT response-content
+        # routing — so a FIFO mock returning ANY of the queued
+        # responses is correct.  Don't add response-content assertions
+        # without first switching the mock to a content-routed shape.
+        if not fallback_responses:
+            raise AssertionError("mock_llm queue exhausted")
+        next_response = fallback_responses.pop(0)
+        body = {
+            "id": "test",
+            "object": "chat.completion",
+            "model": "test-model",
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {"role": "assistant", "content": next_response},
+                    "finish_reason": "stop",
+                }
+            ],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        }
+        return httpx.Response(
+            200, content=json.dumps(body).encode("utf-8"), headers={"Content-Type": "application/json"}
+        )
+
+    transport = httpx.MockTransport(_handler)
+    provider = OpenAIProvider(
+        base_url="http://mock-llm.test", model="test-model", api_key="test", transport=transport
+    )
+
+    # ---- Build the inner subgraphs (one per branch).  Each inner
+    # subgraph has a single ``ask`` node that calls the mock provider.
+    subgraphs: dict[str, Any] = {}
+    for sub_id, sub_spec in cast("dict[str, Any]", case["subgraphs"]).items():
+        inner_fields = cast("dict[str, dict[str, Any]]", sub_spec["state"]["fields"])
+        inner_state_cls = build_state_cls(f"Inner_{sub_id}", inner_fields)
+        ask_calls_llm = cast("dict[str, Any]", sub_spec["nodes"]["ask"]["calls_llm"])
+        stores_in = cast("str", ask_calls_llm.get("stores_response_in", "msg"))
+
+        # Need to bind ``stores_in`` and the messages into the closure
+        # for each subgraph independently — default-arg binding is the
+        # idiomatic late-binding sidestep for loop-scope closures.
+        async def _ask_body(
+            _s: Any,
+            stores: str = stores_in,
+            messages: tuple[Any, ...] = (UserMessage(content="answer the question"),),
+        ) -> dict[str, str]:
+            response = await provider.complete(list(messages))
+            return {stores: response.message.content or ""}
+
+        subgraphs[sub_id] = (
+            GraphBuilder(inner_state_cls)
+            .add_node("ask", _ask_body)
+            .add_edge("ask", END)
+            .set_entry("ask")
+            .compile()
+        )
+
+    # ---- Build the outer graph with the parallel-branches node.
+    outer_fields = cast("dict[str, dict[str, Any]]", case["state"]["fields"])
+    outer_state_cls = build_state_cls("Outer_038", outer_fields)
+    error_policy = cast(
+        "str", case["nodes"]["dispatcher"]["parallel_branches"].get("error_policy", "fail_fast")
+    )
+    branches = {
+        branch_name: BranchSpec(subgraph=subgraphs[cast("str", branch_spec["subgraph"])])
+        for branch_name, branch_spec in branches_spec.items()
+    }
+    builder = (
+        GraphBuilder(outer_state_cls)
+        .add_parallel_branches_node("dispatcher", branches=branches, error_policy=error_policy)  # type: ignore[arg-type]
+        .add_edge("dispatcher", END)
+        .set_entry("dispatcher")
+    )
+    graph = builder.compile()
+
+    exporter = InMemorySpanExporter()
+    observer = OTelObserver(span_processor=SimpleSpanProcessor(exporter))
+    graph.attach_observer(observer)
+    try:
+        await graph.invoke(outer_state_cls())
+        await graph.drain()
+    finally:
+        observer.shutdown()
+        await provider.aclose()
+
+    spans = exporter.get_finished_spans()
+
+    # ---- span_tree assertions
+    expected_tree = cast("list[dict[str, Any]]", case["expected"]["span_tree"])
+    # Find the invocation root.
+    inv_root = next(
+        (s for s in spans if s.name == "openarmature.invocation" and cast("Any", s.parent) is None), None
+    )
+    assert inv_root is not None, f"invocation root span missing; got {[s.name for s in spans]}"
+    _assert_span_tree_matches(spans, [inv_root], expected_tree)
+
+    # ---- Invariants
+    invariants = cast("dict[str, Any]", case["expected"].get("invariants") or {})
+    dispatch_spans = [
+        s
+        for s in spans
+        if (s.attributes or {}).get("openarmature.parallel_branches.parent_node_name") is not None
+    ]
+    node_span = next(
+        (
+            s
+            for s in spans
+            if s.name == "dispatcher"
+            and (s.attributes or {}).get("openarmature.parallel_branches.branch_count") is not None
+        ),
+        None,
+    )
+    if invariants.get("same_named_inner_spans_disambiguated_by_dispatch_parent"):
+        ask_spans = [s for s in spans if s.name == "ask"]
+        assert len(ask_spans) == 2, f"expected 2 inner ask spans; got {len(ask_spans)}"
+        dispatch_span_ids = {cast("Any", d.context).span_id for d in dispatch_spans}
+        ask_parents = {cast("Any", s.parent).span_id for s in ask_spans if s.parent is not None}
+        assert ask_parents.issubset(dispatch_span_ids), (
+            "same-named ask spans MUST parent under distinct per-branch dispatch spans"
+        )
+        assert len(ask_parents) == 2, "each ask span MUST parent under a DIFFERENT dispatch span"
+    if invariants.get("dispatch_spans_close_before_node_span"):
+        assert node_span is not None
+        node_end = node_span.end_time
+        for d in dispatch_spans:
+            assert d.end_time is not None and node_end is not None and d.end_time <= node_end, (
+                f"dispatch span {d.name!r} MUST close before parallel-branches NODE span"
+            )
+    declaration_order = cast("list[str] | None", invariants.get("dispatch_spans_close_in_declaration_order"))
+    if declaration_order is not None:
+        dispatch_by_name = {d.name: d for d in dispatch_spans}
+        ends = [
+            (name, dispatch_by_name[name].end_time) for name in declaration_order if name in dispatch_by_name
+        ]
+        found = [n for n, _ in ends]
+        assert len(ends) == len(declaration_order), (
+            f"declaration_order references {declaration_order!r} but only {found} dispatch spans found"
+        )
+        for (prev_name, prev_end), (name, end) in zip(ends, ends[1:], strict=False):
+            assert prev_end is not None and end is not None and prev_end <= end, (
+                f"dispatch span {prev_name!r} (end={prev_end}) MUST close before {name!r} (end={end})"
+            )
+
+
+def _assert_span_tree_matches(
+    all_spans: Sequence[Any], actual_roots: Sequence[Any], expected_nodes: Sequence[Mapping[str, Any]]
+) -> None:
+    """Recursive structural match: for every expected node, find a
+    matching actual span by name + attribute-subset; recurse on its
+    children.  Children are matched as a SET (order independent —
+    parallel-branches dispatch order isn't span-emission order)."""
+    actual_by_name: dict[str, list[Any]] = {}
+    for root in actual_roots:
+        actual_by_name.setdefault(root.name, []).append(root)
+
+    for expected in expected_nodes:
+        expected_name = cast("str", expected["name"])
+        candidates = actual_by_name.get(expected_name, [])
+        expected_attrs = cast("dict[str, Any]", expected.get("attributes") or {})
+
+        def _matches(span: Any, eattrs: dict[str, Any] = expected_attrs) -> bool:
+            attrs = dict(span.attributes or {})
+            return all(attrs.get(k) == v for k, v in eattrs.items())
+
+        matching = [c for c in candidates if _matches(c)]
+        assert len(matching) >= 1, (
+            f"no span found matching expected node name={expected_name!r} attrs={expected_attrs!r}; "
+            f"candidates: {[c.name for c in candidates]}"
+        )
+        # Ambiguous-match guard: when multiple candidates pass the
+        # name + attribute-subset filter, fail loudly rather than
+        # silently picking the first one.  Future fixtures with
+        # multiple same-named siblings at the same tree level MUST
+        # provide a disambiguator attribute in the expected node's
+        # ``attributes`` block.
+        assert len(matching) == 1, (
+            f"ambiguous match for expected node name={expected_name!r} "
+            f"attrs={expected_attrs!r}: {len(matching)} candidates pass "
+            f"the name + attribute-subset filter.  Add a disambiguating "
+            f"attribute to the expected node's ``attributes:`` block."
+        )
+        matched = matching[0]
+        actual_by_name[expected_name] = [c for c in candidates if c is not matched]
+        expected_status = cast("str | None", expected.get("status"))
+        if expected_status is not None:
+            actual_status_name = matched.status.status_code.name
+            # OTel's StatusCode default is UNSET — observers set OK
+            # explicitly on success ends, but the spec's expected
+            # ``status: OK`` semantic is "non-error", so accept
+            # UNSET as OK.  ERROR vs OK is the load-bearing
+            # distinction.
+            if expected_status == "OK" and actual_status_name in {"OK", "UNSET"}:
+                pass
+            else:
+                assert actual_status_name == expected_status, (
+                    f"{expected_name!r} status: expected {expected_status!r}, got {actual_status_name!r}"
+                )
+        expected_children = cast("list[dict[str, Any]] | None", expected.get("children"))
+        if expected_children is not None:
+            matched_span_id = matched.context.span_id
+            actual_children = [
+                s for s in all_spans if s.parent is not None and s.parent.span_id == matched_span_id
+            ]
+            _assert_span_tree_matches(all_spans, actual_children, expected_children)
 
 
 async def _run_fixture_008(spec: Mapping[str, Any]) -> None:
@@ -1980,7 +2257,6 @@ async def _run_llm_payload_case(case: Mapping[str, Any]) -> None:
     asserting via the LLM-attribute helpers (parse-shape, truncation,
     redaction-substring-absence)."""
     import json
-    from collections.abc import Sequence
 
     import httpx
     from opentelemetry.sdk.trace.export import SimpleSpanProcessor  # noqa: PLC0415
