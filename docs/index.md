@@ -46,15 +46,15 @@ buy-in from every node.
 
     `.compile()` rejects six categories of structural error before
     `invoke()` is reachable: dangling edges, unreachable nodes,
-    conflicting reducers, no entry, undeclared subgraph fields,
-    multiple outgoing edges.
+    conflicting reducers, no entry, mappings to undeclared state
+    fields, multiple outgoing edges.
 
 -   :material-arrow-split-vertical:{ .lg .middle } &nbsp; __Parallelism, formalized__
 
     ---
 
     Fan-out with bounded concurrency and per-instance error policy.
-    Parallel-branches runs N named sub-graphs. Both nest with
+    Parallel-branches runs N named subgraphs. Both nest with
     attribution-correct observability.
 
 -   :material-language-python:{ .lg .middle } &nbsp; __Async-first, LLM-agnostic__
