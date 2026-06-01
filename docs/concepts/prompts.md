@@ -120,9 +120,9 @@ strict default is actively wrong for your workflow.
 `Prompt` is a discriminated union over `TextPrompt` and `ChatPrompt`:
 
 - A `TextPrompt` carries a single `template: str` and renders to
-  exactly one `UserMessage`. The simpler variant and the default
-  for the filesystem backend; the right shape when the prompt is
-  a single user instruction and you don't need role tagging.
+  exactly one `UserMessage`. This is the simpler variant and the
+  default for the filesystem backend; reach for it when the prompt
+  is a single user instruction and you don't need role tagging.
 - A `ChatPrompt` carries `chat_template: list[ChatSegment]`. Each
   segment is either a `ContentSegment` (a role-tagged content
   block — `system`, `user`, or `assistant`, carrying a text
