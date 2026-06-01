@@ -17,8 +17,18 @@ from typing import Any, cast
 import pytest
 import yaml
 
+from openarmature.llm.messages import (
+    AssistantMessage,
+    Message,
+    SystemMessage,
+    ToolMessage,
+    UserMessage,
+)
 from openarmature.prompts import (
+    ChatPrompt,
+    ContentSegment,
     MappingLabelResolver,
+    PlaceholderSegment,
     Prompt,
     PromptError,
     PromptGroup,
@@ -27,6 +37,7 @@ from openarmature.prompts import (
     PromptResult,
     PromptStoreUnavailable,
     SamplingConfig,
+    TextPrompt,
 )
 
 from .harness.loader import CONFORMANCE_ROOT
@@ -47,6 +58,132 @@ def _fixture_paths() -> list[Path]:
 
 def _fixture_id(path: Path) -> str:
     return path.stem
+
+
+# ---------------------------------------------------------------------------
+# Fixture YAML mapping helpers (chat prompts — proposal 0046)
+# ---------------------------------------------------------------------------
+
+
+def _segment_from_fixture(entry: dict[str, Any]) -> Any:
+    """Map one ``chat_template`` entry from a fixture YAML to an OA
+    ChatSegment.  Uses ``model_construct`` to bypass construction-time
+    §11 validators — the harness exists to test render-time behavior,
+    including fixtures that intentionally build prompts violating
+    construction-time invariants (placeholder regex, role-block
+    compat).  Render-time enforcement (§11 spec-normative trigger)
+    still runs; only the construction-time ergonomic-only check is
+    bypassed.
+
+    Supported shapes:
+
+    - ``{role, content}`` where ``content`` is a string → ContentSegment
+      with a text-template content.
+    - ``{role, content}`` where ``content`` is a list of block dicts →
+      ContentSegment with a content-blocks-template.  Block dicts use
+      ``{type: text, text: ...}`` / ``{type: image, source: {...}}`` /
+      ``{type: image_url, url: ...}`` / ``{type: image_inline, ...}``.
+    - ``{placeholder: <name>}`` → PlaceholderSegment.
+    """
+    from openarmature.prompts import (
+        ImageInlineBlockTemplate,
+        ImageURLBlockTemplate,
+        TextBlockTemplate,
+    )
+
+    if "placeholder" in entry:
+        return PlaceholderSegment.model_construct(
+            type="placeholder",
+            placeholder=cast("str", entry["placeholder"]),
+        )
+    role = cast("str", entry["role"])
+    content = entry["content"]
+    if isinstance(content, str):
+        return ContentSegment.model_construct(
+            type="content",
+            role=cast("Any", role),
+            content=content,
+        )
+    # list of blocks
+    blocks: list[Any] = []
+    for block in cast("list[dict[str, Any]]", content):
+        block_type = block.get("type", "text")
+        if block_type == "text":
+            blocks.append(TextBlockTemplate(text=cast("str", block["text"])))
+        elif block_type == "image":
+            # Spec §3.1 / llm-provider §3.1.2 shape: ``{type: image,
+            # source: {type: url|inline, url?: ..., base64_data?: ...},
+            # media_type?: ..., detail?: ...}`` — ``source`` carries
+            # the discriminator + scheme-specific fields; ``media_type``
+            # and ``detail`` live at the block level (``media_type`` is
+            # required for inline sources, ignored for URL sources per
+            # llm-provider §3.1.2).
+            source = cast("dict[str, Any]", block["source"])
+            source_type = source.get("type")
+            if source_type == "url":
+                blocks.append(
+                    ImageURLBlockTemplate(
+                        url=cast("str", source["url"]),
+                        detail=block.get("detail"),
+                    )
+                )
+            elif source_type == "inline":
+                blocks.append(
+                    ImageInlineBlockTemplate(
+                        base64_data=cast("str", source["base64_data"]),
+                        media_type=cast("str", block.get("media_type", "")),
+                        detail=block.get("detail"),
+                    )
+                )
+            else:
+                raise AssertionError(f"unsupported image source type: {source_type!r}")
+        elif block_type == "image_url":
+            blocks.append(
+                ImageURLBlockTemplate(
+                    url=cast("str", block["url"]),
+                    detail=block.get("detail"),
+                )
+            )
+        elif block_type == "image_inline":
+            blocks.append(
+                ImageInlineBlockTemplate(
+                    base64_data=cast("str", block["base64_data"]),
+                    media_type=cast("str", block["media_type"]),
+                    detail=block.get("detail"),
+                )
+            )
+        else:
+            raise AssertionError(f"unsupported content-block type: {block_type!r}")
+    return ContentSegment.model_construct(
+        type="content",
+        role=cast("Any", role),
+        content=blocks,
+    )
+
+
+def _message_from_fixture(entry: dict[str, Any]) -> Message:
+    """Map one fixture placeholder-list entry to an OA ``Message``.
+
+    Placeholder injection carries caller-supplied ``Message`` lists
+    so all four llm-provider §3 roles are valid here (``system`` /
+    ``user`` / ``assistant`` / ``tool``).  Unknown or misspelled
+    roles raise rather than silently coerce to user — fail-closed
+    posture symmetric to the Langfuse backend's mapper.
+    """
+    role = cast("str", entry["role"])
+    content = entry["content"]
+    if role == "system":
+        return SystemMessage(content=cast("str", content))
+    if role == "assistant":
+        return AssistantMessage(content=cast("str", content))
+    if role == "user":
+        return UserMessage(content=content)
+    if role == "tool":
+        return ToolMessage(
+            content=cast("str", content),
+            tool_call_id=cast("str", entry["tool_call_id"]),
+        )
+    raise AssertionError(f"unsupported placeholder message role: {role!r}")
 
 
 # ---------------------------------------------------------------------------
@@ -86,18 +223,45 @@ class MockPromptBackend:
                     for k, v in cast(dict[str, Any], extras).items():
                         flat.setdefault(k, v)
                 sampling = SamplingConfig(**flat)
-            self._prompts[(ps.name, ps.label)] = Prompt(
-                name=ps.name,
-                version=ps.version,
-                label=ps.label,
-                template=ps.template,
-                template_hash=ps.template_hash,
-                fetched_at=now,
-                sampling=sampling,
-                observability_entities=(
-                    dict(ps.observability_entities) if ps.observability_entities is not None else None
-                ),
-            )
+            if ps.chat_template is not None:
+                # Proposal 0046: chat-prompt variant.  Map fixture
+                # YAML segment dicts to OA ChatSegment entries via
+                # ``model_construct`` to bypass construction-time §11
+                # validators — fixtures 028 / 030 intentionally build
+                # prompts that violate construction-time invariants
+                # (duplicate placeholder names, invalid placeholder
+                # regex) to verify the render-time error path.  The
+                # spec-normative render-time checks still run.
+                chat_segments = [_segment_from_fixture(entry) for entry in ps.chat_template]
+                self._prompts[(ps.name, ps.label)] = ChatPrompt.model_construct(
+                    kind="chat",
+                    name=ps.name,
+                    version=ps.version,
+                    label=ps.label,
+                    chat_template=chat_segments,
+                    template_hash=ps.template_hash,
+                    fetched_at=now,
+                    sampling=sampling,
+                    observability_entities=(
+                        dict(ps.observability_entities) if ps.observability_entities is not None else None
+                    ),
+                )
+            else:
+                assert ps.template is not None, (
+                    f"prompt {ps.name!r}/{ps.label!r} must declare either ``template`` or ``chat_template``"
+                )
+                self._prompts[(ps.name, ps.label)] = TextPrompt(
+                    name=ps.name,
+                    version=ps.version,
+                    label=ps.label,
+                    template=ps.template,
+                    template_hash=ps.template_hash,
+                    fetched_at=now,
+                    sampling=sampling,
+                    observability_entities=(
+                        dict(ps.observability_entities) if ps.observability_entities is not None else None
+                    ),
+                )
         self.call_count = 0
 
     async def fetch(self, name: str, label: str = "production") -> Prompt:
@@ -161,10 +325,35 @@ async def _run_call(
                     assert call.fetched_prompt is not None
                     fetched = await manager.fetch(call.fetched_prompt["name"], call.fetched_prompt["label"])
                     prompt = fetched
-                return manager.render(prompt, call.variables or {}), None
+                placeholders = (
+                    {k: [_message_from_fixture(m) for m in v] for k, v in call.placeholders.items()}
+                    if call.placeholders is not None
+                    else None
+                )
+                return (
+                    manager.render(
+                        prompt,
+                        call.variables or {},
+                        placeholders=placeholders,
+                    ),
+                    None,
+                )
             if operation == "get":
                 assert call.name is not None
-                return await manager.get(call.name, call.label, call.variables or {}), None
+                placeholders = (
+                    {k: [_message_from_fixture(m) for m in v] for k, v in call.placeholders.items()}
+                    if call.placeholders is not None
+                    else None
+                )
+                return (
+                    await manager.get(
+                        call.name,
+                        call.label,
+                        call.variables or {},
+                        placeholders=placeholders,
+                    ),
+                    None,
+                )
             raise AssertionError(f"unsupported manager operation: {operation!r}")
 
         # ``target: {backend: <name>}`` — direct backend op.
@@ -233,7 +422,7 @@ def _assert_per_call(
     assert raised is None, f"unexpected raise: {raised!r}"
 
     if call.expected.prompt is not None:
-        assert isinstance(result, Prompt), f"expected Prompt, got {type(result).__name__}"
+        assert isinstance(result, (TextPrompt, ChatPrompt)), f"expected Prompt, got {type(result).__name__}"
         expected = call.expected.prompt.model_dump(exclude_none=True)
         for key, value in expected.items():
             actual_attr = getattr(result, key)
@@ -343,9 +532,25 @@ def _assert_capture_attrs(capture_name: str, actual: Any, expected: dict[str, An
             )
             continue
         actual_value = getattr(actual, key)
+        # Proposal 0046: messages may be Message instances when the
+        # fixture expects dict-shapes.  Dump for structural compare.
+        if key == "messages" and isinstance(actual_value, list):
+            actual_value = [
+                _message_to_dict_for_compare(cast("Message", m)) for m in cast("list[Any]", actual_value)
+            ]
         assert actual_value == expected_value, (
             f"{capture_name}.{key}: expected {expected_value!r}, got {actual_value!r}"
         )
+
+
+def _message_to_dict_for_compare(message: Message) -> dict[str, Any]:
+    """Dump a Message to a plain dict for structural equality against
+    a fixture YAML expected value.  Mirrors the spec's documented
+    Message shape: ``{role, content}`` with optional extras."""
+    dumped = message.model_dump(exclude_none=True)
+    # Normalize content-blocks shape: drop pydantic internal
+    # discriminator literal where fixtures don't carry it.
+    return dumped
 
 
 @pytest.mark.parametrize("fixture_path", _fixture_paths(), ids=_fixture_id)

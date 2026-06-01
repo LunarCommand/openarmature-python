@@ -22,7 +22,20 @@ from .group import PromptGroup
 from .hashing import compute_rendered_hash, compute_template_hash
 from .label_resolver import SPEC_FALLBACK_LABEL, LabelResolver, MappingLabelResolver
 from .manager import PromptManager
-from .prompt import Prompt, PromptResult, SamplingConfig
+from .prompt import (
+    ChatPrompt,
+    ChatSegment,
+    ContentBlockTemplate,
+    ContentSegment,
+    ImageInlineBlockTemplate,
+    ImageURLBlockTemplate,
+    PlaceholderSegment,
+    Prompt,
+    PromptResult,
+    SamplingConfig,
+    TextBlockTemplate,
+    TextPrompt,
+)
 
 __all__ = [
     "PROMPT_NOT_FOUND",
@@ -30,9 +43,16 @@ __all__ = [
     "PROMPT_STORE_UNAVAILABLE",
     "PROMPT_TRANSIENT_CATEGORIES",
     "SPEC_FALLBACK_LABEL",
+    "ChatPrompt",
+    "ChatSegment",
+    "ContentBlockTemplate",
+    "ContentSegment",
     "FilesystemPromptBackend",
+    "ImageInlineBlockTemplate",
+    "ImageURLBlockTemplate",
     "LabelResolver",
     "MappingLabelResolver",
+    "PlaceholderSegment",
     "Prompt",
     "PromptBackend",
     "PromptError",
@@ -43,6 +63,8 @@ __all__ = [
     "PromptResult",
     "PromptStoreUnavailable",
     "SamplingConfig",
+    "TextBlockTemplate",
+    "TextPrompt",
     "compute_rendered_hash",
     "compute_template_hash",
     "current_prompt_group",

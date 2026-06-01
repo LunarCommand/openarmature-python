@@ -411,16 +411,16 @@ async def test_active_prompt_propagates_to_llm_span_attributes() -> None:
         _set_invocation_id,
     )
     from openarmature.prompts import (
-        Prompt,
         PromptGroup,
         PromptResult,
+        TextPrompt,
     )
 
     exporter = InMemorySpanExporter()
     observer = OTelObserver(span_processor=SimpleSpanProcessor(exporter))
 
     now = datetime.now(UTC)
-    prompt = Prompt(
+    prompt = TextPrompt(
         name="greeting",
         version="v1",
         label="production",
@@ -1381,8 +1381,8 @@ async def test_prompt_context_propagates_cross_task_via_provider_complete() -> N
     from openarmature.graph import END, GraphBuilder, State
     from openarmature.llm import OpenAIProvider, UserMessage
     from openarmature.prompts import (
-        Prompt,
         PromptResult,
+        TextPrompt,
         with_active_prompt,
     )
 
@@ -1414,7 +1414,7 @@ async def test_prompt_context_propagates_cross_task_via_provider_complete() -> N
     )
 
     now = datetime.now(UTC)
-    prompt = Prompt(
+    prompt = TextPrompt(
         name="greeting",
         version="v1",
         label="production",

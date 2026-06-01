@@ -1,11 +1,21 @@
-"""Prompt and PromptResult records."""
+"""Prompt and PromptResult records.
+
+Per proposal 0046 (prompt-management §3.1): two prompt variants land
+on this module — the existing single-string Text-prompt
+(:class:`TextPrompt`, formerly ``Prompt``) and the new role-tagged
+Chat-prompt (:class:`ChatPrompt`) carrying a list of
+:class:`ChatSegment` entries.  The user-facing union alias
+:data:`Prompt` covers both; callers ``isinstance``-narrow at the
+consumption point.
+"""
 
 from __future__ import annotations
 
+import re
 from datetime import datetime
-from typing import Any
+from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from openarmature.llm.messages import Message
 from openarmature.llm.response import RuntimeConfig
@@ -25,33 +35,156 @@ class SamplingConfig(RuntimeConfig):
     """Per-prompt sampling configuration. Shape-compatible with ``RuntimeConfig``."""
 
 
-class Prompt(BaseModel):
-    """An unrendered template plus identity metadata.
+# Spec §3.1 *Chat-prompt variant* — content-blocks-template shapes
+# mirroring llm-provider §3.1 ContentBlock shapes with variable-
+# substitutable text fields.  The v1 set covers user-message
+# authoring blocks (text + image); thinking / redacted-thinking
+# blocks are assistant-side round-trip content and don't sit on
+# the authored-template surface.
+class TextBlockTemplate(BaseModel):
+    """Text content block template.  Renders to an llm-provider
+    §3.1.1 text block carrying the variable-substituted text."""
 
-    A prompt carries enough information to be rendered, traced, and
-    content-addressed without a backend round-trip. ``template`` is
-    the raw template source string (Jinja2 syntax in Python);
-    compilation happens on render so ``Prompt`` stays serializable
-    and engine-agnostic.
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal["text"] = "text"
+    text: str
+
+
+class ImageURLBlockTemplate(BaseModel):
+    """URL image content block template.  Renders to an llm-provider
+    §3.1.2 URL image block; ``url`` is variable-substituted."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal["image_url"] = "image_url"
+    url: str
+    detail: Literal["auto", "low", "high"] | None = None
+
+
+class ImageInlineBlockTemplate(BaseModel):
+    """Inline base64 image content block template.  Renders to an
+    llm-provider §3.1.2 inline image block; ``base64_data`` and
+    ``media_type`` are variable-substituted."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal["image_inline"] = "image_inline"
+    base64_data: str
+    media_type: str
+    detail: Literal["auto", "low", "high"] | None = None
+
+
+ContentBlockTemplate = Annotated[
+    TextBlockTemplate | ImageURLBlockTemplate | ImageInlineBlockTemplate,
+    Field(discriminator="type"),
+]
+
+
+# Spec §3.1 placeholder regex: ASCII identifier shape to avoid
+# collision with backend placeholder syntax (e.g., Langfuse {{name}}).
+_PLACEHOLDER_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+class ContentSegment(BaseModel):
+    """One role-tagged content segment of a chat prompt.
+
+    Per spec §3.1, ``role`` is one of the three canonical authoring
+    roles from llm-provider §3 (Message shape); the fourth llm-provider
+    §3 role (``"tool"``) is intentionally excluded — tool-result
+    messages have a distinct per-message shape that doesn't map to a
+    template-author surface.  Tool-loop content flows through
+    placeholder segments instead.
+
+    ``content`` is either a single text template (the common case) or
+    an ordered non-empty list of :class:`ContentBlockTemplate` entries
+    for multimodal user messages (text + image).  Image blocks are
+    user-only per llm-provider §3.1.2 — a non-user role with an
+    image-block-containing list raises ``prompt_render_error`` at
+    render time.  Construction-time validation here surfaces the
+    same condition earlier for ergonomic feedback.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal["content"] = "content"
+    role: Literal["system", "user", "assistant"]
+    content: str | list[ContentBlockTemplate]
+
+    @model_validator(mode="after")
+    def _check_role_blocks(self) -> ContentSegment:
+        # Per spec §11 / msg 07: render-time is the spec-normative
+        # trigger; construction-time enforcement is permitted as an
+        # "ergonomic-only bonus" for hand-built prompts.  Both fire
+        # the same canonical errors.  Backends or harnesses that
+        # need to construct intentionally-invalid prompts (e.g., for
+        # round-trip render-time error tests) bypass these checks
+        # via ``ContentSegment.model_construct(...)``.
+        if isinstance(self.content, list):
+            if not self.content:
+                raise ValueError("content-blocks segment: block list MUST be non-empty")
+            if self.role != "user":
+                for block in self.content:
+                    if isinstance(block, (ImageURLBlockTemplate, ImageInlineBlockTemplate)):
+                        raise ValueError(f"image blocks are user-only; got role={self.role!r}")
+        return self
+
+
+class PlaceholderSegment(BaseModel):
+    """A placeholder slot in a chat prompt.  At render time the caller
+    supplies a ``list[Message]`` to inject in place of this segment;
+    an empty list injects zero messages (valid; the first-turn case),
+    while an absent mapping entry raises ``prompt_render_error``.
+
+    Per spec §3.1 the ``placeholder`` name MUST match
+    ``[A-Za-z_][A-Za-z0-9_]*`` — ASCII identifier shape — to avoid
+    collision with backend placeholder syntax.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal["placeholder"] = "placeholder"
+    placeholder: str
+
+    @model_validator(mode="after")
+    def _check_name(self) -> PlaceholderSegment:
+        # Per spec §11 / msg 07: render-time is the spec-normative
+        # trigger; construction-time enforcement is the optional
+        # "ergonomic bonus" for hand-built prompts.  Backends or
+        # harnesses constructing intentionally-invalid names
+        # (e.g., to verify the render-time error path) bypass this
+        # check via ``PlaceholderSegment.model_construct(...)``.
+        if not _PLACEHOLDER_NAME_RE.match(self.placeholder):
+            raise ValueError(f"placeholder name {self.placeholder!r} MUST match [A-Za-z_][A-Za-z0-9_]*")
+        return self
+
+
+ChatSegment = Annotated[
+    ContentSegment | PlaceholderSegment,
+    Field(discriminator="type"),
+]
+
+
+class _PromptBase(BaseModel):
+    """Shared identity / metadata for both prompt variants.
 
     Attributes:
         name: Stable identifier within the backend.
-        version: Backend-defined version string. Two distinct version
+        version: Backend-defined version string.  Two distinct version
             strings denote distinct prompt contents.
         label: The label under which this prompt was fetched
             (e.g., "production", "latest", "variant-a").
-        template: Raw template source.
-        template_hash: SHA-256 of the raw template source. Format
-            ``"sha256:<hex>"``.
+        template_hash: SHA-256 of the canonical serialization of the
+            prompt's template surface.  Format ``"sha256:<hex>"``.
         fetched_at: Time the prompt was fetched from its backend.
             When a caching backend serves a cached result,
             ``fetched_at`` MUST reflect the original fetch time, not
             the cache hit time.
-        sampling: Optional per-prompt sampling configuration. Splats
+        sampling: Optional per-prompt sampling configuration.  Splats
             into ``provider.complete(config=...)`` without translation.
         observability_entities: Optional backend-keyed references to
             first-class entities the prompt has been registered as in
-            observability backends. Spec-normative key:
+            observability backends.  Spec-normative key:
             ``langfuse_prompt`` (the Langfuse SDK Prompt-entity ref).
         metadata: Optional backend-supplied metadata.
     """
@@ -61,12 +194,70 @@ class Prompt(BaseModel):
     name: str
     version: str
     label: str
-    template: str
     template_hash: str
     fetched_at: datetime
     sampling: SamplingConfig | None = None
     observability_entities: dict[str, Any] | None = None
     metadata: dict[str, Any] | None = None
+
+
+class TextPrompt(_PromptBase):
+    """An unrendered single-string template plus identity metadata.
+
+    Renders to a single :class:`UserMessage` carrying the substituted
+    template text (spec §6.render Text-prompt clause).  Per the
+    proposal 0046 v0.38.0 narrowing, Text-prompts render to exactly
+    one Message with ``role: "user"``; multi-message and multimodal
+    prompts go through :class:`ChatPrompt`.
+
+    ``placeholders`` passed to ``PromptManager.render`` are ignored
+    for Text-prompt rendering per spec §6.
+    """
+
+    kind: Literal["text"] = "text"
+    template: str
+
+
+class ChatPrompt(_PromptBase):
+    """A role-tagged, multi-segment chat prompt (spec §3.1
+    *Chat-prompt variant*, proposal 0046 v0.38.0).
+
+    ``chat_template`` is an ordered list of :class:`ChatSegment`
+    entries — content segments carrying a role + content (text
+    template or content-blocks template) and placeholder segments
+    carrying a name that the caller fills at render time with a
+    ``list[Message]``.  The rendered :class:`PromptResult.messages`
+    is the in-order concatenation per segment.
+    """
+
+    kind: Literal["chat"] = "chat"
+    chat_template: list[ChatSegment]
+
+    @model_validator(mode="after")
+    def _check_chat_template(self) -> ChatPrompt:
+        # Per spec §11 / msg 07: render-time is the spec-normative
+        # trigger; construction-time enforcement is the optional
+        # "ergonomic bonus".  Backends or harnesses constructing
+        # intentionally-invalid chat templates (e.g., to verify the
+        # render-time error path) bypass via
+        # ``ChatPrompt.model_construct(...)``.
+        seen: set[str] = set()
+        for seg in self.chat_template:
+            if isinstance(seg, PlaceholderSegment):
+                if seg.placeholder in seen:
+                    raise ValueError(f"duplicate placeholder name {seg.placeholder!r} in chat_template")
+                seen.add(seg.placeholder)
+        return self
+
+
+# Public union alias.  Per spec §3.1 a Prompt is one-of Text/Chat;
+# discriminate via ``isinstance(prompt, ChatPrompt)`` at consumption
+# sites.  The ``kind`` literal on each variant is the explicit type
+# tag for Pydantic discriminator use (e.g., backend deserialization).
+Prompt = Annotated[
+    TextPrompt | ChatPrompt,
+    Field(discriminator="kind"),
+]
 
 
 class PromptResult(BaseModel):

@@ -33,6 +33,7 @@ from openarmature.prompts import (
     PromptRenderError,
     PromptResult,
     PromptStoreUnavailable,
+    TextPrompt,
     compute_rendered_hash,
     compute_template_hash,
     current_prompt_group,
@@ -123,8 +124,8 @@ def test_rendered_hash_differs_for_different_message_content() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _make_prompt(template: str = "Hello, {{ user }}!") -> Prompt:
-    return Prompt(
+def _make_prompt(template: str = "Hello, {{ user }}!") -> TextPrompt:
+    return TextPrompt(
         name="greeting",
         version="v1",
         label="production",
@@ -136,7 +137,7 @@ def _make_prompt(template: str = "Hello, {{ user }}!") -> Prompt:
 
 def test_prompt_extra_fields_forbidden() -> None:
     with pytest.raises(ValueError, match="extra"):
-        Prompt.model_validate(
+        TextPrompt.model_validate(
             {
                 "name": "greeting",
                 "version": "v1",
@@ -261,6 +262,7 @@ async def test_filesystem_backend_fetch_success(tmp_path: Path) -> None:
 
     backend = FilesystemPromptBackend(tmp_path)
     prompt = await backend.fetch("greeting", "production")
+    assert isinstance(prompt, TextPrompt)
     assert prompt.name == "greeting"
     assert prompt.label == "production"
     assert prompt.template == "Hello, {{ user }}!"
@@ -432,7 +434,7 @@ def test_manager_jinja_undefined_opt_out_renders_empty_for_missing_var() -> None
 
     from openarmature.prompts import PromptManager
 
-    prompt = Prompt(
+    prompt = TextPrompt(
         name="opt_out",
         version="v1",
         label="production",
@@ -462,6 +464,7 @@ async def test_filesystem_backend_flat_layout(tmp_path: Path) -> None:
     p_prod = await backend.fetch("greet", "production")
     p_stage = await backend.fetch("greet", "staging")
 
+    assert isinstance(p_prod, TextPrompt) and isinstance(p_stage, TextPrompt)
     assert p_prod.template == p_stage.template == "Hello, {{ user }}!"
     assert p_prod.label == "production"
     assert p_stage.label == "staging"
@@ -533,6 +536,189 @@ def test_mapping_label_resolver_spec_fallback_when_no_default() -> None:
 
     resolver = MappingLabelResolver({"experimental": "staging"})
     assert resolver.resolve("anything-not-listed") == "production"
+
+
+# ---------------------------------------------------------------------------
+# Proposal 0046: construction-time §11 enforcement (ergonomic bonus
+# atop the spec-normative render-time checks per spec msg-07 Q3).
+# ---------------------------------------------------------------------------
+
+
+def test_placeholder_segment_rejects_invalid_name_at_construction() -> None:
+    # Spec §3.1 placeholder name regex: ``[A-Za-z_][A-Za-z0-9_]*``.
+    # PlaceholderSegment enforces this at construction time as a
+    # faster-feedback ergonomic bonus.
+    from pydantic import ValidationError
+
+    from openarmature.prompts import PlaceholderSegment
+
+    with pytest.raises(ValidationError, match=r"placeholder name '1history' MUST match"):
+        PlaceholderSegment(placeholder="1history")
+
+
+def test_placeholder_segment_accepts_valid_name() -> None:
+    from openarmature.prompts import PlaceholderSegment
+
+    seg = PlaceholderSegment(placeholder="chat_history_v2")
+    assert seg.placeholder == "chat_history_v2"
+
+
+def test_chat_prompt_rejects_duplicate_placeholder_at_construction() -> None:
+    # Spec §3.1: placeholder names MUST be unique within a single
+    # chat_template.  Construction-time enforcement.
+    from datetime import UTC, datetime
+
+    from pydantic import ValidationError
+
+    from openarmature.prompts import (
+        ChatPrompt,
+        ContentSegment,
+        PlaceholderSegment,
+    )
+
+    with pytest.raises(ValidationError, match=r"duplicate placeholder name 'history'"):
+        ChatPrompt(
+            name="dup",
+            version="v1",
+            label="production",
+            template_hash="sha256:dup-v1",
+            fetched_at=datetime.now(UTC),
+            chat_template=[
+                ContentSegment(role="system", content="hi"),
+                PlaceholderSegment(placeholder="history"),
+                PlaceholderSegment(placeholder="history"),
+            ],
+        )
+
+
+def test_content_segment_rejects_image_in_non_user_role_at_construction() -> None:
+    # Spec §11 role-block compatibility: image blocks are user-only.
+    # Construction-time enforcement.
+    from pydantic import ValidationError
+
+    from openarmature.prompts import ContentSegment, ImageURLBlockTemplate, TextBlockTemplate
+
+    with pytest.raises(ValidationError, match=r"image blocks are user-only"):
+        ContentSegment(
+            role="system",
+            content=[
+                TextBlockTemplate(text="Context:"),
+                ImageURLBlockTemplate(url="https://example.invalid/diagram.png"),
+            ],
+        )
+
+
+def test_content_segment_rejects_empty_block_list_at_construction() -> None:
+    from pydantic import ValidationError
+
+    from openarmature.prompts import ContentSegment
+
+    with pytest.raises(ValidationError, match=r"block list MUST be non-empty"):
+        ContentSegment(role="user", content=[])
+
+
+async def test_chat_segment_template_cache_is_content_stable() -> None:
+    # Regression for cache-key stability: rendering the SAME segment
+    # text twice MUST hit the cached compiled jinja Template; the
+    # cache key derives from a SHA-256 of the segment source so it's
+    # stable across process restarts (not the salted built-in
+    # ``hash()``).
+    from datetime import UTC, datetime
+
+    from openarmature.prompts import (
+        ChatPrompt,
+        ContentSegment,
+        PromptManager,
+    )
+
+    backend = _DummyBackend()
+    manager = PromptManager(backend)
+    prompt = ChatPrompt(
+        name="cached",
+        version="v1",
+        label="production",
+        template_hash="sha256:cached-v1",
+        fetched_at=datetime.now(UTC),
+        chat_template=[
+            ContentSegment(role="system", content="hi {{ user }}"),
+            ContentSegment(role="user", content="ask {{ q }}"),
+        ],
+    )
+
+    # First render seeds the cache.
+    manager.render(prompt, {"user": "Alice", "q": "?"})
+    cached_keys_after_first = set(manager._template_cache.keys())  # noqa: SLF001
+
+    # Second render — same content text → MUST NOT add new entries.
+    manager.render(prompt, {"user": "Bob", "q": "?"})
+    cached_keys_after_second = set(manager._template_cache.keys())  # noqa: SLF001
+
+    assert cached_keys_after_first == cached_keys_after_second, (
+        f"chat-segment cache leaked entries on second render; "
+        f"new keys: {cached_keys_after_second - cached_keys_after_first!r}"
+    )
+
+    # All cache keys for chat segments are SHA-256 strings (start
+    # with the ``sha256:`` prefix that ``compute_template_hash``
+    # emits) — process-stable, NOT salted python ``hash()`` ints.
+    chat_segment_keys = cached_keys_after_first
+    assert chat_segment_keys, "expected chat-segment cache entries to be populated"
+    for key in chat_segment_keys:
+        assert isinstance(key, str), f"cache key {key!r} is not a string"
+        assert key.startswith("sha256:"), (
+            f"chat-segment cache key {key!r} is not SHA-256-derived; "
+            f"likely regressed to process-randomized hash()"
+        )
+
+
+class _DummyBackend:
+    async def fetch(self, name: str, label: str = "production") -> Any:
+        raise NotImplementedError
+
+
+async def test_inline_image_block_rejects_invalid_base64_at_render() -> None:
+    # Security hardening: a content-blocks template substitutes a
+    # variable into the base64_data field; if the resulting string
+    # isn't valid base64 (e.g., a stray comma from a CSV-like
+    # variable, padding mangled, non-base64-alphabet chars), the
+    # render-time check raises ``prompt_render_error`` rather than
+    # letting the malformed payload reach the LLM provider where it
+    # would surface as a provider-specific decode error.
+    from datetime import UTC, datetime
+
+    from openarmature.prompts import (
+        ChatPrompt,
+        ContentSegment,
+        ImageInlineBlockTemplate,
+        PromptManager,
+        PromptRenderError,
+        TextBlockTemplate,
+    )
+
+    backend = _DummyBackend()
+    manager = PromptManager(backend)
+    prompt = ChatPrompt(
+        name="bad_image",
+        version="v1",
+        label="production",
+        template_hash="sha256:bad-image-v1",
+        fetched_at=datetime.now(UTC),
+        chat_template=[
+            ContentSegment(
+                role="user",
+                content=[
+                    TextBlockTemplate(text="Describe:"),
+                    ImageInlineBlockTemplate(
+                        base64_data="{{ raw }}",
+                        media_type="image/png",
+                    ),
+                ],
+            ),
+        ],
+    )
+
+    with pytest.raises(PromptRenderError, match=r"base64"):
+        manager.render(prompt, {"raw": "not!valid base64!!"})
 
 
 class _StubBackend:

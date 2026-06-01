@@ -304,9 +304,13 @@ def _discriminate_fixture(
         # other purpose.
         if (
             "backends" in value
-            and "calls" in value
+            and ("calls" in value or "cases" in value)
             and not any(k in value for k in ("nodes", "edges", "state", "entry"))
         ):
+            # Per proposal 0046 (v0.38.0) the chat-prompt fixtures
+            # (017-031) carry ``backends:`` + top-level ``cases:``
+            # instead of ``backends:`` + ``calls:``.  Route both
+            # shapes to ``prompt_management``.
             return "prompt_management"
         if "cases" in value:
             return "cases"

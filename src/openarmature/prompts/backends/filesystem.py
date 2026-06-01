@@ -10,7 +10,7 @@ from typing import Any, Literal, cast
 
 from ..errors import PromptNotFound, PromptStoreUnavailable
 from ..hashing import compute_template_hash
-from ..prompt import Prompt, SamplingConfig
+from ..prompt import Prompt, SamplingConfig, TextPrompt
 
 
 class FilesystemPromptBackend:
@@ -171,7 +171,7 @@ class FilesystemPromptBackend:
         sampling = await asyncio.to_thread(self._resolve_sampling, name, label)
         template_hash = compute_template_hash(template_source)
         version = template_hash.removeprefix("sha256:")[:16]
-        return Prompt(
+        return TextPrompt(
             name=name,
             version=version,
             label=label,

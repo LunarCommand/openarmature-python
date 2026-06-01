@@ -30,7 +30,6 @@ _FIXTURES = list(discover_fixtures())
 # directive shapes (state_migration, parallel_branches, NodeEvent
 # branch_name) to succeed; those shapes ship with their respective PRs.
 # Keyed by the test ID format ``<capability>/<stem>``.
-_PROMPT_0046_REASON = "Proposal 0046 not yet implemented (PR 12)"
 _DEFERRED_FIXTURES: dict[str, str] = {
     # proposal 0011's parallel-branches fixtures (032-038 +
     # graph-engine/021) were removed from this list as part of
@@ -241,24 +240,9 @@ _DEFERRED_FIXTURES: dict[str, str] = {
     "observability/039-nested-lineage-augmentation": (
         "Cross-capability parser doesn't model nested-lineage directives; PR 11 lands the activation"
     ),
-    # Proposal 0046 (chat-prompt rendering, v0.38.0) — chat prompt
-    # fixtures 017-031 use new prompt-management YAML shapes the
-    # cross-cap parser hasn't modeled.  Activation lands in PR 12.
-    "prompt-management/017-chat-prompt-per-segment-render": _PROMPT_0046_REASON,
-    "prompt-management/018-chat-prompt-placeholder-injection": _PROMPT_0046_REASON,
-    "prompt-management/019-chat-prompt-placeholder-empty-list": _PROMPT_0046_REASON,
-    "prompt-management/020-chat-prompt-per-segment-strict-undefined": _PROMPT_0046_REASON,
-    "prompt-management/021-chat-prompt-empty-segment": _PROMPT_0046_REASON,
-    "prompt-management/022-chat-prompt-unfilled-placeholder": _PROMPT_0046_REASON,
-    "prompt-management/023-chat-prompt-content-blocks-text-image-url": _PROMPT_0046_REASON,
-    "prompt-management/024-chat-prompt-content-blocks-inline-image": _PROMPT_0046_REASON,
-    "prompt-management/025-chat-prompt-role-block-compatibility": _PROMPT_0046_REASON,
-    "prompt-management/026-chat-prompt-observability-entities": _PROMPT_0046_REASON,
-    "prompt-management/027-chat-prompt-empty-rendered-messages": _PROMPT_0046_REASON,
-    "prompt-management/028-chat-prompt-duplicate-placeholder-names": _PROMPT_0046_REASON,
-    "prompt-management/029-chat-prompt-content-blocks-empty-cases": _PROMPT_0046_REASON,
-    "prompt-management/030-chat-prompt-placeholder-name-validation": _PROMPT_0046_REASON,
-    "prompt-management/031-text-prompt-placeholders-ignored": _PROMPT_0046_REASON,
+    # Proposal 0046 (chat-prompt rendering, v0.38.0) — fixtures 017-031
+    # activate in PR 12 against the prompt-management harness's
+    # extended ``chat_template`` + ``placeholders`` directive shapes.
 }
 
 

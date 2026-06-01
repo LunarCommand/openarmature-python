@@ -61,7 +61,7 @@ from openarmature.observability.langfuse import (
     LangfuseObserver,
     LangfuseTrace,
 )
-from openarmature.prompts import Prompt, PromptManager, PromptResult
+from openarmature.prompts import Prompt, PromptManager, PromptResult, TextPrompt
 from openarmature.prompts.context import with_active_prompt
 
 _provider_instance: OpenAIProvider | None = None
@@ -103,7 +103,7 @@ class _MockLangfusePromptBackend:
 
     def __init__(self) -> None:
         now = datetime.now(UTC)
-        self._prompt = Prompt(
+        self._prompt = TextPrompt(
             name="mission-briefing",
             version="v7",
             label="production",
