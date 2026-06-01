@@ -21,6 +21,7 @@ from openarmature.llm.messages import (
     AssistantMessage,
     Message,
     SystemMessage,
+    ToolMessage,
     UserMessage,
 )
 from openarmature.prompts import (
@@ -111,9 +112,12 @@ def _segment_from_fixture(entry: dict[str, Any]) -> Any:
             blocks.append(TextBlockTemplate(text=cast("str", block["text"])))
         elif block_type == "image":
             # Spec §3.1 / llm-provider §3.1.2 shape: ``{type: image,
-            # source: {type: url|inline, url?: ..., base64_data?: ...,
-            # media_type?: ...}}`` — nested source carries the
-            # discriminator.
+            # source: {type: url|inline, url?: ..., base64_data?: ...},
+            # media_type?: ..., detail?: ...}`` — ``source`` carries
+            # the discriminator + scheme-specific fields; ``media_type``
+            # and ``detail`` live at the block level (``media_type`` is
+            # required for inline sources, ignored for URL sources per
+            # llm-provider §3.1.2).
             source = cast("dict[str, Any]", block["source"])
             source_type = source.get("type")
             if source_type == "url":
@@ -158,14 +162,28 @@ def _segment_from_fixture(entry: dict[str, Any]) -> Any:
 
 
 def _message_from_fixture(entry: dict[str, Any]) -> Message:
-    """Map one fixture placeholder-list entry to an OA ``Message``."""
+    """Map one fixture placeholder-list entry to an OA ``Message``.
+
+    Placeholder injection carries caller-supplied ``Message`` lists
+    so all four llm-provider §3 roles are valid here (``system`` /
+    ``user`` / ``assistant`` / ``tool``).  Unknown or misspelled
+    roles raise rather than silently coerce to user — fail-closed
+    posture symmetric to the Langfuse backend's mapper.
+    """
     role = cast("str", entry["role"])
     content = entry["content"]
     if role == "system":
         return SystemMessage(content=cast("str", content))
     if role == "assistant":
         return AssistantMessage(content=cast("str", content))
-    return UserMessage(content=content)
+    if role == "user":
+        return UserMessage(content=content)
+    if role == "tool":
+        return ToolMessage(
+            content=cast("str", content),
+            tool_call_id=cast("str", entry["tool_call_id"]),
+        )
+    raise AssertionError(f"unsupported placeholder message role: {role!r}")
 
 
 # ---------------------------------------------------------------------------

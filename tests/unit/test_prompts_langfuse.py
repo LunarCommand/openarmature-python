@@ -128,6 +128,56 @@ async def test_chat_prompt_maps_to_chat_prompt() -> None:
     assert segment.content == "hi {{ user }}"
 
 
+def _chat_client_with_raw_prompt(
+    raw_prompt: list[Any], *, name: str = "ext", version: int = 1
+) -> ChatPromptClient:
+    """Build a ChatPromptClient whose ``.prompt`` carries the raw
+    entries we want to test against — bypassing the SDK's own
+    ``__init__`` filter (which would otherwise drop everything our
+    backend doesn't recognize before our code sees it).  Simulates
+    a future SDK that emits shapes our current backend hasn't
+    learned to handle."""
+    client = _chat_client(name=name, version=version)
+    client.prompt = cast(Any, raw_prompt)
+    return client
+
+
+async def test_chat_prompt_with_unsupported_entry_fails_closed_at_fetch() -> None:
+    # Regression: an unknown entry shape in a Langfuse chat prompt
+    # MUST raise PromptNotFound at fetch time rather than silently
+    # drop, otherwise a Langfuse SDK extension would produce a
+    # degraded rendered prompt with no signal to the caller —
+    # exactly the kind of bug that changes model behavior invisibly.
+    chat_result = _chat_client_with_raw_prompt(
+        [
+            {"role": "system", "content": "ok"},
+            # Unknown shape — not a placeholder, role missing.
+            {"weird_extension": "future_sdk_thing"},
+        ],
+        name="unknown_shape",
+    )
+    backend = LangfusePromptBackend(_FakeClient(result=chat_result))
+
+    with pytest.raises(PromptNotFound, match=r"unsupported role/content shape"):
+        await backend.fetch("unknown_shape", "production")
+
+
+async def test_chat_prompt_with_placeholder_missing_name_fails_closed_at_fetch() -> None:
+    # Sibling regression: a placeholder marker missing the ``name``
+    # key MUST raise PromptNotFound at fetch time.
+    chat_result = _chat_client_with_raw_prompt(
+        [
+            {"role": "system", "content": "set up"},
+            {"type": "placeholder"},  # missing ``name``
+        ],
+        name="bad_placeholder_shape",
+    )
+    backend = LangfusePromptBackend(_FakeClient(result=chat_result))
+
+    with pytest.raises(PromptNotFound, match=r"placeholder entry missing"):
+        await backend.fetch("bad_placeholder_shape", "production")
+
+
 async def test_chat_prompt_with_malformed_placeholder_fetches_then_raises_at_render() -> None:
     # Regression for the spec §11 timing contract: a Langfuse-stored
     # chat prompt carrying a placeholder name that VIOLATES the §3.1
@@ -138,23 +188,13 @@ async def test_chat_prompt_with_malformed_placeholder_fetches_then_raises_at_ren
     # before surfacing.
     from openarmature.prompts import ChatPrompt, PlaceholderSegment, PromptManager, PromptRenderError
 
-    chat_result = ChatPromptClient(
-        Prompt_Chat(
-            type="chat",
-            name="bad_placeholder",
-            version=1,
-            prompt=cast(
-                Any,
-                [
-                    {"role": "system", "content": "set up"},
-                    {"type": "placeholder", "name": "1history"},  # leading digit — invalid per §3.1
-                    {"role": "user", "content": "go"},
-                ],
-            ),
-            config={},
-            labels=["production"],
-            tags=[],
-        )
+    chat_result = _chat_client_with_raw_prompt(
+        [
+            {"role": "system", "content": "set up"},
+            {"type": "placeholder", "name": "1history"},  # leading digit — invalid per §3.1
+            {"role": "user", "content": "go"},
+        ],
+        name="bad_placeholder",
     )
     backend = LangfusePromptBackend(_FakeClient(result=chat_result))
 

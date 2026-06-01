@@ -94,10 +94,9 @@ class LangfusePromptBackend:
         result = await asyncio.to_thread(self._get_prompt, name, label)
 
         if isinstance(result, ChatPromptClient):
-            chat_template = list(_chat_segments_from_langfuse(result.prompt))
-            template_hash = compute_template_hash(
-                json.dumps(_canonical_chat_for_hash(result.prompt), sort_keys=True)
-            )
+            normalized = _normalized_langfuse_entries(result.prompt, name=name, label=label)
+            chat_template = list(_chat_segments_from_normalized(normalized))
+            template_hash = compute_template_hash(json.dumps(normalized, sort_keys=True))
             # ``ChatPrompt.model_construct`` is required (not the
             # plain constructor): pydantic re-runs validators on
             # nested field values when validating the outer model,
@@ -166,43 +165,73 @@ def _sampling_from_config(config: dict[str, Any] | None) -> SamplingConfig | Non
     return SamplingConfig(**declared)
 
 
-def _normalized_langfuse_entries(raw: Iterable[Any]) -> list[dict[str, Any]]:
+def _normalized_langfuse_entries(raw: Iterable[Any], *, name: str, label: str) -> list[dict[str, Any]]:
     """Normalize a Langfuse ``ChatPromptClient.prompt`` list to OA
     canonical entry dicts.  Each output entry is either a content
     message ``{"role": ..., "content": ...}`` or a placeholder
-    marker ``{"type": "placeholder", "name": ...}``.  Unknown shapes
-    are dropped (defensive — backend extensions add new entry shapes
-    over time).  Shared between the segment-mapper and the canonical-
-    hash helper so the two stay in lockstep."""
+    marker ``{"type": "placeholder", "name": ...}``.
+
+    Fails closed on any entry whose shape this mapper doesn't
+    recognize.  Silent skipping is the wrong posture for a fetch-
+    side mapper: a Langfuse SDK extension (or a malformed entry)
+    would otherwise produce a degraded rendered prompt with zero
+    signal to the caller — exactly the kind of bug that changes
+    model behavior invisibly.  ``PromptNotFound`` is the canonical
+    "we got the prompt but couldn't fully deserialize it" signal,
+    matching how the backend handles other fetch-side failures.
+
+    ``name`` and ``label`` are threaded through purely for error
+    context on the ``PromptNotFound`` carriers.
+    """
     out: list[dict[str, Any]] = []
     for raw_entry in raw:
         if not isinstance(raw_entry, dict):
-            continue
+            raise PromptNotFound(
+                f"Langfuse chat-prompt entry has unsupported shape: "
+                f"expected dict, got {type(raw_entry).__name__}",
+                name=name,
+                label=label,
+                backend="langfuse",
+            )
         entry = cast("dict[str, Any]", raw_entry)
         entry_type = entry.get("type")
         if entry_type == "placeholder":
-            name = entry.get("name")
-            if isinstance(name, str):
-                out.append({"type": "placeholder", "name": name})
+            placeholder_name = entry.get("name")
+            if not isinstance(placeholder_name, str):
+                raise PromptNotFound(
+                    f"Langfuse placeholder entry missing or invalid 'name': {entry!r}",
+                    name=name,
+                    label=label,
+                    backend="langfuse",
+                )
+            out.append({"type": "placeholder", "name": placeholder_name})
             continue
         role = entry.get("role")
         content = entry.get("content")
         if role in {"system", "user", "assistant"} and isinstance(content, str):
             out.append({"role": role, "content": content})
+            continue
+        raise PromptNotFound(
+            f"Langfuse chat-prompt entry has unsupported role/content shape: {entry!r}",
+            name=name,
+            label=label,
+            backend="langfuse",
+        )
     return out
 
 
-def _chat_segments_from_langfuse(raw: Iterable[Any]) -> Iterable[ChatSegment]:
-    """Map a Langfuse ``ChatPromptClient.prompt`` to OA
-    :class:`ChatSegment` entries.  Placeholder segments bypass
-    construction-time validation via ``model_construct`` so a
-    Langfuse-stored prompt with a malformed placeholder name (e.g.,
-    leading-digit) reaches the render path before raising — the
-    spec-normative error trigger per §11.  Content segments go through
-    the normal pydantic constructor since their fields don't carry
-    spec-§11 constraints that hand-built callers would benefit from
-    catching earlier."""
-    for entry in _normalized_langfuse_entries(raw):
+def _chat_segments_from_normalized(
+    entries: Iterable[dict[str, Any]],
+) -> Iterable[ChatSegment]:
+    """Map a normalized canonical entry list to OA
+    :class:`ChatSegment` entries.  Placeholder segments use
+    ``model_construct`` so a Langfuse-stored prompt with a
+    malformed placeholder name (e.g., leading-digit) reaches the
+    render path before raising — the spec-normative §11 error
+    trigger.  Content segments go through the normal pydantic
+    constructor since their fields don't carry spec-§11 constraints
+    that hand-built callers would benefit from catching earlier."""
+    for entry in entries:
         if entry.get("type") == "placeholder":
             yield PlaceholderSegment.model_construct(
                 type="placeholder",
@@ -210,12 +239,6 @@ def _chat_segments_from_langfuse(raw: Iterable[Any]) -> Iterable[ChatSegment]:
             )
         else:
             yield ContentSegment(role=entry["role"], content=entry["content"])
-
-
-def _canonical_chat_for_hash(raw: Iterable[Any]) -> list[dict[str, Any]]:
-    """Canonical representation of a Langfuse chat-prompt list for
-    template-hashing purposes."""
-    return _normalized_langfuse_entries(raw)
 
 
 def _metadata_from(result: TextPromptClient | ChatPromptClient) -> dict[str, Any]:
