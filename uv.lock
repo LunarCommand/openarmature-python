@@ -946,6 +946,7 @@ otel = [
 
 [package.dev-dependencies]
 dev = [
+    { name = "opentelemetry-exporter-otlp-proto-http" },
     { name = "pre-commit" },
     { name = "pyright" },
     { name = "pytest" },
@@ -985,6 +986,7 @@ provides-extras = ["otel", "langfuse"]
 
 [package.metadata.requires-dev]
 dev = [
+    { name = "opentelemetry-exporter-otlp-proto-http", specifier = ">=1.27,<3" },
     { name = "pre-commit", specifier = ">=3.7" },
     { name = "pyright", specifier = ">=1.1.360" },
     { name = "pytest", specifier = ">=8.2" },

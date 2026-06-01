@@ -6,6 +6,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). The
 
 ## [Unreleased]
 
+### Added
+
+- **HyperDX OTel integration test path and "Production swap" docs in example 03.** `examples/03-observer-hooks/main.py`'s module docstring grows a "Production swap" section showing how to substitute the demo's `SimpleSpanProcessor` + `ConsoleSpanExporter` for `BatchSpanProcessor` + `OTLPSpanExporter` pointed at HyperDX (or any other OTLP-HTTP collector). A new opt-in integration test (`tests/integration/test_otel_hyperdx_export.py`, gated by `HYPERDX_API_KEY` + `HYPERDX_OTLP_ENDPOINT` env vars and `@pytest.mark.integration`) drives the same production export path end-to-end against a live endpoint. `opentelemetry-exporter-otlp-proto-http` lands as a dev-only dep; not promoted to a public extras group yet.
+
 ### Changed (breaking)
 
 - **`OpenAIProvider.ready()` default probe flipped to `chat_completions`.** A new constructor kwarg `readiness_probe: Literal["models", "chat_completions", "both"]` selects which wire path `ready()` exercises; the default is now the chat-completions path (`POST /v1/chat/completions` with `max_tokens=1`), which actually exercises the inference path. The previous catalog-only behavior is still available as `readiness_probe="models"`, and `readiness_probe="both"` runs catalog then chat for the strongest signal. Motivation: OpenAI-compatible proxies (Bifrost and similar) can return 200 on `GET /v1/models` while rejecting `POST /v1/chat/completions`, leaving the catalog probe green while every real call fails. The new default surfaces that class of failure at preflight rather than at first inference. Non-200 chat-probe responses route through `classify_http_error`, so the canonical error categories (`provider_authentication`, `provider_unavailable`, `provider_invalid_model`, etc.) surface consistently. Callers that depended on the catalog-only behavior (cost-sensitive cloud setups where every `ready()` would now bill prompt tokens) can opt back in by passing `readiness_probe="models"`.
