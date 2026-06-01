@@ -24,5 +24,5 @@ your environment can reach:
    sessions opening the project find the bundled docs automatically.
 """
 
-__version__ = "0.11.0rc2"
+__version__ = "0.11.0"
 __spec_version__ = "0.38.0"
