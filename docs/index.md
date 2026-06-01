@@ -9,6 +9,9 @@ A workflow framework for LLM pipelines and tool-calling agents. Typed
 state, structural graph checks, and observability that doesn't require
 buy-in from every node.
 
+[![PyPI](https://img.shields.io/pypi/v/openarmature.svg?color=blue)](https://pypi.org/project/openarmature/){target="_blank" rel="noopener"}
+[![spec](https://img.shields.io/badge/dynamic/toml?url=https://raw.githubusercontent.com/LunarCommand/openarmature-python/main/pyproject.toml&query=%24.tool.openarmature.spec_version&label=spec&color=9D4EDD)](https://github.com/LunarCommand/openarmature-spec){target="_blank" rel="noopener"}
+
 [Get started](getting-started/index.md){ .md-button .md-button--primary }
 [View on GitHub](https://github.com/LunarCommand/openarmature-python){ .md-button target="_blank" rel="noopener" }
 
