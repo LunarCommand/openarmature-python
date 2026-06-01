@@ -11,7 +11,7 @@ execution should begin. The graph stays a single graph; what
 differs across runs is which branch the conditional edge takes.
 
 Combine with [checkpointing](../concepts/checkpointing.md) if you
-want resume-style behavior — skip nodes whose work is already
+want resume-style behavior: skip nodes whose work is already
 captured in state.
 
 ## Snippet
@@ -78,7 +78,7 @@ fields the chosen branch needs) and the graph routes accordingly.
 
 - You have a few canonical entry points and the choice between
   them is data, not control flow.
-- You want to skip work already done in a prior run — combine with
+- You want to skip work already done in a prior run; combine with
   [checkpointing](../concepts/checkpointing.md) to pick up where
   you left off.
 - Your "different entry points" share state structure and most of
@@ -90,7 +90,7 @@ fields the chosen branch needs) and the graph routes accordingly.
   it's a different compiled graph. Don't bend one graph into two;
   two graphs are easier to test and reason about.
 - The number of entry points grows unboundedly. Then you're
-  reimplementing routing — consider a higher-level dispatch layer
+  reimplementing routing; consider a higher-level dispatch layer
   that picks which graph to invoke.
 
 ## Cross-references

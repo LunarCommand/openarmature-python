@@ -123,7 +123,7 @@ Lunar-mission image analysis (surface + equipment)
   `PromptGroup`. Inside the `with_active_prompt_group` scope, the
   attached OTel observer stamps `openarmature.prompt.group_name` on
   every LLM-call span. The console exporter prints those spans
-  alongside the human-readable output above — search the JSON blobs
+  alongside the human-readable output above; search the JSON blobs
   for `openarmature.prompt.group_name` to confirm.
 - **Per-call prompt scope**. The inner `with_active_prompt(rendered)`
   block adds the per-call identifiers (name, version, label,
@@ -134,7 +134,7 @@ Lunar-mission image analysis (surface + equipment)
 - **GenAI semantic conventions**. The same LLM spans also carry
   the cross-vendor `gen_ai.*` attributes (`gen_ai.system`,
   `gen_ai.request.model`, `gen_ai.response.model`,
-  `gen_ai.usage.{input,output}_tokens`, etc.) — Langfuse, Phoenix,
+  `gen_ai.usage.{input,output}_tokens`, etc.). Langfuse, Phoenix,
   or Honeycomb's LLM lens would render the generation correctly
   without any per-service attribute-mapping shim.
 - **Fallback path** isn't visible in a clean run because the

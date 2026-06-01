@@ -126,7 +126,7 @@ shapes: when a fan-out subgraph emits `list[X]` per instance, the
 parent's `target_field` receives `list[list[X]]` (which `append`
 would leave nested); when it emits `dict[str, X]`, the parent
 receives `list[dict]` (which `merge` can't consume). Both are
-strict like their single-level counterparts — they raise
+strict like their single-level counterparts: they raise
 `ReducerError` when an update element isn't the expected
 list/mapping shape. See the [fan-out](fan-out.md) page for the
 full pattern.

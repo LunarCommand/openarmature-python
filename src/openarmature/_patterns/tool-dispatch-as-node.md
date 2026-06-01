@@ -13,7 +13,7 @@ LLM node if the model wants more turns. The exit is the
 conditional edge routing to a `present` node (or `END`) when the
 assistant returns no `tool_calls`.
 
-No "agent framework" abstraction — the loop is just a graph cycle
+No "agent framework" abstraction; the loop is just a graph cycle
 on top of [`Tool`, `ToolCall`, `ToolMessage`](https://openarmature.ai/concepts/llms/).
 
 ## Snippet
@@ -99,7 +99,7 @@ for malformed `ToolCall.arguments`, and trace output.
 
 - The model needs to call local Python functions and react to
   their results.
-- The loop is bounded — either by `MAX_TURNS`, by the model
+- The loop is bounded, either by `MAX_TURNS`, by the model
   signaling it's done, or by both.
 - Tool results are textual or JSON-serializable and fit cleanly
   into `ToolMessage.content`.
@@ -120,11 +120,11 @@ for malformed `ToolCall.arguments`, and trace output.
 
 ## Cross-references
 
-- [LLMs concept page](https://openarmature.ai/concepts/llms/) — `Tool`, `ToolCall`,
+- [LLMs concept page](https://openarmature.ai/concepts/llms/): `Tool`, `ToolCall`,
   `ToolMessage` types and the `complete(messages, tools=...)`
   contract.
-- [State and reducers](https://openarmature.ai/concepts/state-and-reducers/) —
+- [State and reducers](https://openarmature.ai/concepts/state-and-reducers/):
   `append` reducer semantics.
-- [`examples/09-tool-use`](https://openarmature.ai/examples/09-tool-use/) — runnable
+- [`examples/09-tool-use`](https://openarmature.ai/examples/09-tool-use/): runnable
   reference implementation.
 - Spec: [llm-provider](https://openarmature.org/capabilities/llm-provider/)

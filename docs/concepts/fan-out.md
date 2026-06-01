@@ -111,7 +111,7 @@ into prior state:
   declare `append` on `Annotated[list[X], append]`. Each instance's
   value is already an `X`; `append` concatenates cleanly.
 - Each instance emits a `list[X]` (0..N records per instance) → the
-  engine lands `list[list[X]]`. Declare `concat_flatten` instead —
+  engine lands `list[list[X]]`. Declare `concat_flatten` instead;
   it flattens one level so the parent field stays `list[X]`. Plain
   `append` would leave the nesting and fail Pydantic validation.
 - Each instance emits a `dict[str, X]` → the engine lands
@@ -119,7 +119,7 @@ into prior state:
   the parent dict with last-write-wins per key. Plain `merge` can't
   consume a `list[dict]`.
 
-`concat_flatten` and `merge_all` are strict — they raise
+`concat_flatten` and `merge_all` are strict: they raise
 `ReducerError` if an update element isn't the expected list/mapping
 shape. See [state and reducers](state-and-reducers.md#five-built-in-reducers).
 

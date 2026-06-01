@@ -87,7 +87,7 @@ state and the session table holds the join keys.
 - Your application has long-lived sessions with multiple LLM turns
   and you want the prior state to be the starting point of the
   next turn.
-- You're already running a checkpointer for crash resume — this
+- You're already running a checkpointer for crash resume; this
   pattern is "use it more."
 - Cross-turn state has clean reducer semantics: `merge` for
   accumulating dicts, `append` for growing lists.
@@ -97,7 +97,7 @@ state and the session table holds the join keys.
 - A session's "state" is bigger than fits comfortably in a single
   graph state shape. Split into multiple graphs and share an
   external store keyed by session.
-- Turns are completely independent — there's no value in carrying
+- Turns are completely independent; there's no value in carrying
   state across them. Then just run each turn as a fresh invoke.
 - The application already has its own state-management layer that
   conflicts with OA's frozen-state model. Use OA per-turn without
@@ -105,10 +105,10 @@ state and the session table holds the join keys.
 
 ## Cross-references
 
-- [Checkpointing](https://openarmature.ai/concepts/checkpointing/) — backend wiring,
+- [Checkpointing](https://openarmature.ai/concepts/checkpointing/): backend wiring,
   `resume_invocation`, schema migration.
-- [State and reducers](https://openarmature.ai/concepts/state-and-reducers/) — `merge`
+- [State and reducers](https://openarmature.ai/concepts/state-and-reducers/): `merge`
   and `append` reducer strategies.
-- [`examples/08-checkpointing-and-migration`](https://openarmature.ai/examples/08-checkpointing-and-migration/) —
+- [`examples/08-checkpointing-and-migration`](https://openarmature.ai/examples/08-checkpointing-and-migration/):
   single-resume baseline.
 - Spec: [pipeline-utilities](https://openarmature.org/capabilities/pipeline-utilities/)

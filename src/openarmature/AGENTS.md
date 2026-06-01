@@ -4,7 +4,7 @@
 
 ## TL;DR
 
-OpenArmature is a workflow framework for LLM pipelines and tool-calling agents — typed state, compile-time topology checks, observability, and crash-safe checkpoints baked into a graph engine. The graph layer has no concept of LLMs or tools; the same primitives drive deterministic ETL pipelines and tool-calling agents alike. Nodes return partial updates; the engine merges into a frozen state snapshot. Behavior is defined by [openarmature-spec](https://openarmature.org/capabilities/) and verified by conformance fixtures; this package is the reference Python implementation.
+OpenArmature is a workflow framework for LLM pipelines and tool-calling agents: typed state, compile-time topology checks, observability, and crash-safe checkpoints baked into a graph engine. The graph layer has no concept of LLMs or tools; the same primitives drive deterministic ETL pipelines and tool-calling agents alike. Nodes return partial updates; the engine merges into a frozen state snapshot. Behavior is defined by [openarmature-spec](https://openarmature.org/capabilities/) and verified by conformance fixtures; this package is the reference Python implementation.
 
 **What OpenArmature is NOT:** not a chat framework (no built-in messages channel), not an LLM SDK (Provider is the abstraction layer; OpenAIProvider is the canonical impl), not a state-management library (state is per-invocation, not application-wide), not an evaluation framework (deferred to `openarmature-eval`).
 
@@ -486,7 +486,7 @@ per-fan-out-instance, depending on the scope of the bypass.
   addressable output, downloading a file).
 - The "does it exist" check is cheap (a filesystem `stat`, a
   Redis `EXISTS`, a database key lookup).
-- You're OK with the node being skipped silently — the partial
+- You're OK with the node being skipped silently; the partial
   update returned by the middleware is indistinguishable from a
   successful node run.
 
@@ -496,7 +496,7 @@ per-fan-out-instance, depending on the scope of the bypass.
   the node. The cost model inverts; the pattern is wrong.
 - You need to *force* re-execution on demand (cache invalidation).
   Add a `force_rerun: bool` field on state that the middleware
-  consults — but if you're doing that often, the bypass logic
+  consults. But if you're doing that often, the bypass logic
   belongs in the node itself, gated on a state field, not in
   middleware.
 - The cached output's freshness depends on inputs the middleware
@@ -506,13 +506,13 @@ per-fan-out-instance, depending on the scope of the bypass.
 
 #### Cross-references
 
-- [Middleware](https://openarmature.ai/concepts/middleware/) — middleware shape, the
+- [Middleware](https://openarmature.ai/concepts/middleware/): middleware shape, the
   four registration sites, composition.
 - Spec: [pipeline-utilities](https://openarmature.org/capabilities/pipeline-utilities/)
 
 This pattern is explicitly called out in proposal 0008's
 *Alternatives considered* section as a userland recipe rather than
-spec'd behavior — this page is its canonical home.
+spec'd behavior; this page is its canonical home.
 
 ### Caller-supplied trace identifiers
 
@@ -802,7 +802,7 @@ execution should begin. The graph stays a single graph; what
 differs across runs is which branch the conditional edge takes.
 
 Combine with [checkpointing](https://openarmature.ai/concepts/checkpointing/) if you
-want resume-style behavior — skip nodes whose work is already
+want resume-style behavior: skip nodes whose work is already
 captured in state.
 
 #### Snippet
@@ -869,7 +869,7 @@ fields the chosen branch needs) and the graph routes accordingly.
 
 - You have a few canonical entry points and the choice between
   them is data, not control flow.
-- You want to skip work already done in a prior run — combine with
+- You want to skip work already done in a prior run; combine with
   [checkpointing](https://openarmature.ai/concepts/checkpointing/) to pick up where
   you left off.
 - Your "different entry points" share state structure and most of
@@ -881,7 +881,7 @@ fields the chosen branch needs) and the graph routes accordingly.
   it's a different compiled graph. Don't bend one graph into two;
   two graphs are easier to test and reason about.
 - The number of entry points grows unboundedly. Then you're
-  reimplementing routing — consider a higher-level dispatch layer
+  reimplementing routing; consider a higher-level dispatch layer
   that picks which graph to invoke.
 
 #### Cross-references
@@ -979,7 +979,7 @@ state and the session table holds the join keys.
 - Your application has long-lived sessions with multiple LLM turns
   and you want the prior state to be the starting point of the
   next turn.
-- You're already running a checkpointer for crash resume — this
+- You're already running a checkpointer for crash resume; this
   pattern is "use it more."
 - Cross-turn state has clean reducer semantics: `merge` for
   accumulating dicts, `append` for growing lists.
@@ -989,7 +989,7 @@ state and the session table holds the join keys.
 - A session's "state" is bigger than fits comfortably in a single
   graph state shape. Split into multiple graphs and share an
   external store keyed by session.
-- Turns are completely independent — there's no value in carrying
+- Turns are completely independent; there's no value in carrying
   state across them. Then just run each turn as a fresh invoke.
 - The application already has its own state-management layer that
   conflicts with OA's frozen-state model. Use OA per-turn without
@@ -997,11 +997,11 @@ state and the session table holds the join keys.
 
 #### Cross-references
 
-- [Checkpointing](https://openarmature.ai/concepts/checkpointing/) — backend wiring,
+- [Checkpointing](https://openarmature.ai/concepts/checkpointing/): backend wiring,
   `resume_invocation`, schema migration.
-- [State and reducers](https://openarmature.ai/concepts/state-and-reducers/) — `merge`
+- [State and reducers](https://openarmature.ai/concepts/state-and-reducers/): `merge`
   and `append` reducer strategies.
-- [`examples/08-checkpointing-and-migration`](https://openarmature.ai/examples/08-checkpointing-and-migration/) —
+- [`examples/08-checkpointing-and-migration`](https://openarmature.ai/examples/08-checkpointing-and-migration/):
   single-resume baseline.
 - Spec: [pipeline-utilities](https://openarmature.org/capabilities/pipeline-utilities/)
 
@@ -1151,7 +1151,7 @@ LLM node if the model wants more turns. The exit is the
 conditional edge routing to a `present` node (or `END`) when the
 assistant returns no `tool_calls`.
 
-No "agent framework" abstraction — the loop is just a graph cycle
+No "agent framework" abstraction; the loop is just a graph cycle
 on top of [`Tool`, `ToolCall`, `ToolMessage`](https://openarmature.ai/concepts/llms/).
 
 #### Snippet
@@ -1237,7 +1237,7 @@ for malformed `ToolCall.arguments`, and trace output.
 
 - The model needs to call local Python functions and react to
   their results.
-- The loop is bounded — either by `MAX_TURNS`, by the model
+- The loop is bounded, either by `MAX_TURNS`, by the model
   signaling it's done, or by both.
 - Tool results are textual or JSON-serializable and fit cleanly
   into `ToolMessage.content`.
@@ -1258,12 +1258,12 @@ for malformed `ToolCall.arguments`, and trace output.
 
 #### Cross-references
 
-- [LLMs concept page](https://openarmature.ai/concepts/llms/) — `Tool`, `ToolCall`,
+- [LLMs concept page](https://openarmature.ai/concepts/llms/): `Tool`, `ToolCall`,
   `ToolMessage` types and the `complete(messages, tools=...)`
   contract.
-- [State and reducers](https://openarmature.ai/concepts/state-and-reducers/) —
+- [State and reducers](https://openarmature.ai/concepts/state-and-reducers/):
   `append` reducer semantics.
-- [`examples/09-tool-use`](https://openarmature.ai/examples/09-tool-use/) — runnable
+- [`examples/09-tool-use`](https://openarmature.ai/examples/09-tool-use/): runnable
   reference implementation.
 - Spec: [llm-provider](https://openarmature.org/capabilities/llm-provider/)
 
@@ -1273,7 +1273,7 @@ Recipes that aren't deducible from the API surface alone. The primitives docs te
 
 ### Declare a non-clobbering reducer on accumulator list fields
 
-State fields default to `last_write_wins` — each node's write replaces the prior value for that field. For scalar fields (`status: str`, `count: int`) that's usually what you want. For list fields that accumulate contributions across multiple nodes (`messages: list[Message]`, `events: list[Event]`, `results: list[Result]`), it's the wrong default — every node's contribution silently clobbers everything before it.
+State fields default to `last_write_wins`: each node's write replaces the prior value for that field. For scalar fields (`status: str`, `count: int`) that's usually what you want. For list fields that accumulate contributions across multiple nodes (`messages: list[Message]`, `events: list[Event]`, `results: list[Result]`), it's the wrong default; every node's contribution silently clobbers everything before it.
 
 Declare `append` (or another non-clobbering reducer) at the state class:
 
@@ -1288,15 +1288,15 @@ class WorkflowState(State):
     final_status: str = "pending"   # last_write_wins is fine here
 ```
 
-The failure mode without `append` is silent and easy to misdiagnose — the final state shows only the last node's contribution to the list, with no error. Common "why is my accumulator empty?" question. `merge` is the equivalent for `dict[str, V]` fields that accumulate keys across nodes.
+The failure mode without `append` is silent and easy to misdiagnose: the final state shows only the last node's contribution to the list, with no error. Common "why is my accumulator empty?" question. `merge` is the equivalent for `dict[str, V]` fields that accumulate keys across nodes.
 
 ### Branch on `Response.finish_reason` before reading `message.content`
 
 After `await provider.complete(messages, tools=[...])` returns, the shape of `Response` varies by `finish_reason`:
 
-- `finish_reason == "stop"` — assistant produced a content response. `message.content` carries the text; `message.tool_calls` is empty.
-- `finish_reason == "tool_calls"` — assistant emitted tool calls. `message.tool_calls` carries the list; `message.content` is typically empty (model didn't say anything beyond the tool calls).
-- `finish_reason == "length"` / `"content_filter"` / `"error"` — completion was cut off or refused; `message.content` may be partial or empty.
+- `finish_reason == "stop"`: assistant produced a content response. `message.content` carries the text; `message.tool_calls` is empty.
+- `finish_reason == "tool_calls"`: assistant emitted tool calls. `message.tool_calls` carries the list; `message.content` is typically empty (model didn't say anything beyond the tool calls).
+- `finish_reason == "length"` / `"content_filter"` / `"error"`: completion was cut off or refused; `message.content` may be partial or empty.
 
 Post-LLM logic that reads `message.content` without checking `finish_reason` misses the entire tool-calling path:
 
@@ -1317,11 +1317,11 @@ else:
 
 The discriminator is one branch; missing it gives you empty data on tool-call responses and silently wrong behavior on truncations.
 
-### `disable_llm_payload` defaults to `True` — flip it for LLM-aware observability backends
+### `disable_llm_payload` defaults to `True`: flip it for LLM-aware observability backends
 
 The `OTelObserver` (and any spec-conformant observer reading LLM events) defaults `disable_llm_payload: bool = True` per spec §5.5's "default-off by privacy" framing. Without flipping the flag, LLM spans carry GenAI semconv attributes (token counts, model name, finish reason) but NOT the message payload (input messages, response content, request extras).
 
-That's the right default for general OpenArmature use — payloads may contain PII the user hasn't audited, and storage cost grows with prompt size. But it's the WRONG default if you're wiring up an LLM-aware observability backend (Langfuse, Phoenix, Honeycomb's LLM lens) that renders the message stream as part of its generation view. Backends will show "empty" generations and you'll wonder why.
+That's the right default for general OpenArmature use: payloads may contain PII the user hasn't audited, and storage cost grows with prompt size. But it's the WRONG default if you're wiring up an LLM-aware observability backend (Langfuse, Phoenix, Honeycomb's LLM lens) that renders the message stream as part of its generation view. Backends will show "empty" generations and you'll wonder why.
 
 Flip the flag once at observer construction:
 
@@ -1332,36 +1332,36 @@ observer = OTelObserver(
     span_processor=your_exporter,
     disable_llm_payload=False,   # opt in to message-payload attributes
 )
-compiled.attach_observer(observer)
+graph.attach_observer(observer)
 ```
 
-The companion `disable_genai_semconv` flag defaults to `False` — GenAI semconv attributes emit by default since they're how LLM-aware backends render anything at all. Don't flip that one unless you're routing GenAI emission through a different layer.
+The companion `disable_genai_semconv` flag defaults to `False`: GenAI semconv attributes emit by default since they're how LLM-aware backends render anything at all. Don't flip that one unless you're routing GenAI emission through a different layer.
 
 ### Use the bundled `FilesystemCheckpointer` or `SQLiteCheckpointer`, not a hand-rolled serializer
 
-The temptation when persisting graph state is to `json.dumps(state.model_dump())` and write to a file. Don't. The shipped Checkpointer backends handle every contract `openarmature.checkpoint.Checkpointer` defines — round-trip integrity, `parent_states` for inner-save resume, fan-out progress tracking, schema-version migration, listing by `correlation_id`, `CheckpointRecordInvalid` on shape drift. A hand-rolled serializer that "works" on the happy path silently fails the moment a fan-out crash leaves an in-flight save record, and you'll be debugging it for hours before realizing the bundled backend exists.
+The temptation when persisting graph state is to `json.dumps(state.model_dump())` and write to a file. Don't. The shipped Checkpointer backends handle every contract `openarmature.checkpoint.Checkpointer` defines: round-trip integrity, `parent_states` for inner-save resume, fan-out progress tracking, schema-version migration, listing by `correlation_id`, `CheckpointRecordInvalid` on shape drift. A hand-rolled serializer that "works" on the happy path silently fails the moment a fan-out crash leaves an in-flight save record, and you'll be debugging it for hours before realizing the bundled backend exists.
 
-If your storage requirement isn't local disk (`FilesystemCheckpointer`) or local SQLite (`SQLiteCheckpointer` — also supports `:memory:` and arbitrary file paths), implement the `Checkpointer` Protocol against your backend rather than wrapping state serialization yourself. Custom backends inherit the spec's correctness contract for free.
+If your storage requirement isn't local disk (`FilesystemCheckpointer`) or local SQLite (`SQLiteCheckpointer`, which also supports `:memory:` and arbitrary file paths), implement the `Checkpointer` Protocol against your backend rather than wrapping state serialization yourself. Custom backends inherit the spec's correctness contract for free.
 
 ### Subgraphs > conditional-edge spaghetti when branches don't share state
 
 A common shape is "after this LLM call, route to either a JSON-extraction node or a tool-dispatch node depending on `finish_reason`." The naive solution is two conditional edges from the LLM node, one to each downstream. That works for two branches; it scales poorly past three.
 
-When the branches operate on different sub-shapes of state — e.g., one path is "extract JSON, then validate" while another is "dispatch tools, loop until done, then summarize" — encapsulate each as a `SubgraphNode` and route from the LLM node to the right subgraph. Each subgraph has its own state schema (projected from the parent), its own entry node, and its own internal topology. The parent graph becomes a switchboard with a few edges; the complexity lives one layer down where it composes cleanly.
+When the branches operate on different sub-shapes of state (e.g., one path is "extract JSON, then validate" while another is "dispatch tools, loop until done, then summarize"), encapsulate each as a `SubgraphNode` and route from the LLM node to the right subgraph. Each subgraph has its own state schema (projected from the parent), its own entry node, and its own internal topology. The parent graph becomes a switchboard with a few edges; the complexity lives one layer down where it composes cleanly.
 
 ### `OpenAIProvider.ready()` exercises `chat/completions` by default; opt back into the catalog-only probe for cost-sensitive callers
 
-`OpenAIProvider(..., readiness_probe=...)` accepts `"chat_completions"` (default), `"models"`, or `"both"`. The default issues `POST /v1/chat/completions` with a `max_tokens=1` body so a green `ready()` actually proves the inference wire path works, not just that the catalog endpoint answers. The motivating failure class: OpenAI-compatible proxies (Bifrost is the field-reported case) that return 200 on `GET /v1/models` while 405'ing the completions endpoint — the previous catalog-only default reported ready and every real call broke. The `"models"` opt-in is the old behavior, useful for cost-sensitive cloud callers where every `ready()` would otherwise bill one prompt's worth of tokens. `"both"` runs catalog then chat — strongest signal at double the cost. Non-200 responses on either probe route through `classify_http_error`, so the canonical error categories (`ProviderAuthentication`, `ProviderUnavailable`, `ProviderInvalidModel`, etc.) surface consistently regardless of which probe ran.
+`OpenAIProvider(..., readiness_probe=...)` accepts `"chat_completions"` (default), `"models"`, or `"both"`. The default issues `POST /v1/chat/completions` with a `max_tokens=1` body so a green `ready()` actually proves the inference wire path works, not just that the catalog endpoint answers. The motivating failure class: OpenAI-compatible proxies (Bifrost is the field-reported case) that return 200 on `GET /v1/models` while 405'ing the completions endpoint, so the previous catalog-only default reported ready and every real call broke. The `"models"` opt-in is the old behavior, useful for cost-sensitive cloud callers where every `ready()` would otherwise bill one prompt's worth of tokens. `"both"` runs catalog then chat, giving the strongest signal at double the cost. Non-200 responses on either probe route through `classify_http_error`, so the canonical error categories (`ProviderAuthentication`, `ProviderUnavailable`, `ProviderInvalidModel`, etc.) surface consistently regardless of which probe ran.
 
 ### Be explicit with `tool_choice`; don't trust the provider's default
 
-`Provider.complete(messages, tools, tool_choice=...)` accepts `"auto"`, `"required"`, `"none"`, or a `ForceTool(name=...)` record. When you omit `tool_choice`, the OpenAI provider's own default applies — usually `"auto"` when `tools` is non-empty, but documented per-provider. A pipeline that wants deterministic tool-calling (a routing node that MUST produce a tool call, a guarded LLM call that MUST NOT call tools) should pin `tool_choice` explicitly rather than relying on the provider default.
+`Provider.complete(messages, tools, tool_choice=...)` accepts `"auto"`, `"required"`, `"none"`, or a `ForceTool(name=...)` record. When you omit `tool_choice`, the OpenAI provider's own default applies (usually `"auto"` when `tools` is non-empty, but documented per-provider). A pipeline that wants deterministic tool-calling (a routing node that MUST produce a tool call, a guarded LLM call that MUST NOT call tools) should pin `tool_choice` explicitly rather than relying on the provider default.
 
-Pre-send validation catches the three §5 failure modes (`required` with empty tools, `ForceTool` with empty tools, `ForceTool.name` not in tools) and raises `ProviderInvalidRequest` before the HTTP call. Not all providers honor `tool_choice` — confirm with your provider's docs — but the OpenAI-compatible mapping is in `OpenAIProvider`.
+Pre-send validation catches the three §5 failure modes (`required` with empty tools, `ForceTool` with empty tools, `ForceTool.name` not in tools) and raises `ProviderInvalidRequest` before the HTTP call. Not all providers honor `tool_choice` (confirm with your provider's docs), but the OpenAI-compatible mapping is in `OpenAIProvider`.
 
 ### Always `await graph.drain()` in short-lived processes; supply a `timeout` if observers might hang
 
-`CompiledGraph.invoke()` returns when the graph reaches END or raises; observer events are dispatched onto a per-invocation queue and delivered by a background worker. The graph's execution loop never awaits observer processing. In a long-running service this is invisible — the worker drains naturally. In a CLI, script, or serverless function, the process exits before the worker finishes, and any late observer events (typically the last node's `completed` event plus any `checkpoint_saved` events) get dropped.
+`CompiledGraph.invoke()` returns when the graph reaches END or raises; observer events are dispatched onto a per-invocation queue and delivered by a background worker. The graph's execution loop never awaits observer processing. In a long-running service this is invisible: the worker drains naturally. In a CLI, script, or serverless function, the process exits before the worker finishes, and any late observer events (typically the last node's `completed` event plus any `checkpoint_saved` events) get dropped.
 
 Always call `await graph.drain()` before the short-lived process exits. If your observer set includes anything that might hang (a metrics observer with a flaky network endpoint, an OTel exporter behind a slow OTLP collector), supply a `timeout`:
 
@@ -1371,32 +1371,32 @@ if summary.timeout_reached:
     log.warning("drain truncated: %d events undelivered", summary.undelivered_count)
 ```
 
-The compiled graph stays usable for subsequent invocations after a timed-out drain — workers are cancelled cleanly, no partial state leaks.
+The compiled graph stays usable for subsequent invocations after a timed-out drain: workers are cancelled cleanly, no partial state leaks.
 
 ### `install_log_bridge` skips its own handler when the application already attached one to the same `LoggerProvider`
 
 Two distinct classes both named `LoggingHandler` exist in the OTel Python ecosystem and both bridge stdlib log records to the OTel Logs SDK:
 
-- `opentelemetry.sdk._logs.LoggingHandler` (the SDK class). Typically attached by an application's own logging setup — e.g., a FastAPI `setup_logging(...)` step that wires up an OTLP-backed `LoggerProvider` for log export.
+- `opentelemetry.sdk._logs.LoggingHandler` (the SDK class). Typically attached by an application's own logging setup, e.g., a FastAPI `setup_logging(...)` step that wires up an OTLP-backed `LoggerProvider` for log export.
 - `opentelemetry.instrumentation.logging.handler.LoggingHandler` (the instrumentation class). What `openarmature.observability.otel.install_log_bridge` attaches when it runs.
 
-Different classes, same OTel-Logs export path. If both are attached against the same `LoggerProvider`, every stdlib log record fires through both handlers, both call `provider.get_logger(...).emit(...)`, and `BatchLogRecordProcessor` ships the record TWICE to the OTLP endpoint. The duplication is OTLP-only — a console handler attached separately is unaffected, which makes "OTLP rows are doubled, console isn't" a head-scratcher to diagnose.
+Different classes, same OTel-Logs export path. If both are attached against the same `LoggerProvider`, every stdlib log record fires through both handlers, both call `provider.get_logger(...).emit(...)`, and `BatchLogRecordProcessor` ships the record TWICE to the OTLP endpoint. The duplication is OTLP-only; a console handler attached separately is unaffected, which makes "OTLP rows are doubled, console isn't" a head-scratcher to diagnose.
 
-`install_log_bridge` detects either handler class against the same provider and skips its own `addHandler` accordingly; the `openarmature.correlation_id` LogRecord factory still installs. The check is provider-scoped, so an application that intentionally attaches a handler against a DIFFERENT `LoggerProvider` (a separate logs pipeline) still gets the OA bridge against the OA provider — the helper only dedups when the SAME provider would receive duplicate emissions.
+`install_log_bridge` detects either handler class against the same provider and skips its own `addHandler` accordingly; the `openarmature.correlation_id` LogRecord factory still installs. The check is provider-scoped, so an application that intentionally attaches a handler against a DIFFERENT `LoggerProvider` (a separate logs pipeline) still gets the OA bridge against the OA provider; the helper only dedups when the SAME provider would receive duplicate emissions.
 
 ### Three exception hierarchies; know which one your code catches
 
 `openarmature` exceptions split across three sibling hierarchies:
 
-- `RuntimeGraphError` (in `openarmature.graph`) — node execution failures: `NodeException`, `RoutingError`, `EdgeException`, `ReducerError`, `StateValidationError`. Each has a `category` string matching the spec's canonical error categories.
-- `CheckpointError` (in `openarmature.checkpoint`) — persistence failures: `CheckpointNotFound`, `CheckpointSaveFailed`, `CheckpointRecordInvalid`, `CheckpointStateMigrationMissing`, `CheckpointStateMigrationFailed`, `CheckpointStateMigrationChainAmbiguous`.
-- `LlmProviderError` (in `openarmature.llm`) — provider call failures: `ProviderAuthentication`, `ProviderInvalidRequest`, `ProviderInvalidResponse`, `ProviderInvalidModel`, `ProviderModelNotLoaded`, `ProviderRateLimit`, `ProviderUnavailable`, `ProviderUnsupportedContentBlock`, `StructuredOutputInvalid`.
+- `RuntimeGraphError` (in `openarmature.graph`): node execution failures: `NodeException`, `RoutingError`, `EdgeException`, `ReducerError`, `StateValidationError`. Each has a `category` string matching the spec's canonical error categories.
+- `CheckpointError` (in `openarmature.checkpoint`): persistence failures: `CheckpointNotFound`, `CheckpointSaveFailed`, `CheckpointRecordInvalid`, `CheckpointStateMigrationMissing`, `CheckpointStateMigrationFailed`, `CheckpointStateMigrationChainAmbiguous`.
+- `LlmProviderError` (in `openarmature.llm`): provider call failures: `ProviderAuthentication`, `ProviderInvalidRequest`, `ProviderInvalidResponse`, `ProviderInvalidModel`, `ProviderModelNotLoaded`, `ProviderRateLimit`, `ProviderUnavailable`, `ProviderUnsupportedContentBlock`, `StructuredOutputInvalid`.
 
-Catching `Exception` works but is too broad; catching one hierarchy misses the other two. If you want to branch on category strings (e.g., for retry logic), catch the relevant base — `RuntimeGraphError` covers all five spec runtime categories, `LlmProviderError` covers all nine provider categories, `CheckpointError` covers all six checkpoint categories. The `TRANSIENT_CATEGORIES` frozenset in `openarmature.llm` enumerates which provider categories are retriable.
+Catching `Exception` works but is too broad; catching one hierarchy misses the other two. If you want to branch on category strings (e.g., for retry logic), catch the relevant base: `RuntimeGraphError` covers all five spec runtime categories, `LlmProviderError` covers all nine provider categories, `CheckpointError` covers all six checkpoint categories. The `TRANSIENT_CATEGORIES` frozenset in `openarmature.llm` enumerates which provider categories are retriable.
 
 ### Filter `openarmature.*`-namespaced events when your observer only cares about user nodes
 
-OA emits observer events under sentinel node-names for its own internal dispatch: `openarmature.llm.complete` for LLM provider calls (proposal 0024), `openarmature.checkpoint.migrate` for state-migration runs (proposal 0014), `openarmature.checkpoint.save` for checkpoint saves (proposal 0010). These events let the OTel / Langfuse observers emit LLM-provider spans, checkpoint-migrate spans, etc. — but a custom observer that only cares about user-defined node activity sees them as noise:
+OA emits observer events under sentinel node-names for its own internal dispatch: `openarmature.llm.complete` for LLM provider calls (proposal 0024), `openarmature.checkpoint.migrate` for state-migration runs (proposal 0014), `openarmature.checkpoint.save` for checkpoint saves (proposal 0010). These events let the OTel / Langfuse observers emit LLM-provider spans, checkpoint-migrate spans, etc., but a custom observer that only cares about user-defined node activity sees them as noise:
 
 ```python
 async def __call__(self, event: NodeEvent) -> None:
@@ -1406,11 +1406,11 @@ async def __call__(self, event: NodeEvent) -> None:
     # … user-node handling
 ```
 
-`event.namespace[0]` is the safest discriminator (the leaf `event.node_name` would also work for LLM events but won't match the checkpoint sentinels since those repurpose `node_name` differently). Don't try to filter on `current_invocation_id() is None` — OA-internal events are dispatched within the same invocation context as user-node events, so `invocation_id` is set for both; the namespace-prefix check is the stable contract.
+`event.namespace[0]` is the safest discriminator (the leaf `event.node_name` would also work for LLM events but won't match the checkpoint sentinels since those repurpose `node_name` differently). Don't try to filter on `current_invocation_id() is None`: OA-internal events are dispatched within the same invocation context as user-node events, so `invocation_id` is set for both; the namespace-prefix check is the stable contract.
 
 ### Fan-out subgraphs that emit `list[X]` per instance produce `list[list[X]]` at `target_field`
 
-When a fan-out's per-instance state collects a `list[X]` as its `collect_field` (e.g., each instance produces 0..N records), the engine's contribution step is `[s[cfg.collect_field] for s in successes]` — every instance's value becomes one element of the outer list. With `list[X]` per-instance, the parent receives `list[list[X]]`, and the default `append` reducer on the parent's `Annotated[list[X], append]` field preserves the nesting verbatim. Pydantic then fails to validate each `list[X]` element against `X`:
+When a fan-out's per-instance state collects a `list[X]` as its `collect_field` (e.g., each instance produces 0..N records), the engine's contribution step is `[s[cfg.collect_field] for s in successes]`; every instance's value becomes one element of the outer list. With `list[X]` per-instance, the parent receives `list[list[X]]`, and the default `append` reducer on the parent's `Annotated[list[X], append]` field preserves the nesting verbatim. Pydantic then fails to validate each `list[X]` element against `X`:
 
 ```
 attributed_candidates.0  Input should be a valid dictionary or
@@ -1418,7 +1418,7 @@ attributed_candidates.0  Input should be a valid dictionary or
   input_type=list]
 ```
 
-The fix is the `concat_flatten` built-in reducer (proposal 0036) — the list-of-lists analog of `append`. Declare it on the parent's collection field:
+The fix is the `concat_flatten` built-in reducer (proposal 0036), the list-of-lists analog of `append`. Declare it on the parent's collection field:
 
 ```python
 from typing import Annotated
@@ -1431,7 +1431,7 @@ class PipelineState(State):
     attributed_candidates: Annotated[list[ClaimCandidate], concat_flatten] = Field(default_factory=list)
 ```
 
-`concat_flatten` folds the per-instance lists into one flat list (`[*prior, *(item for sublist in update for item in sublist)]`), strict like `append` — it raises `ReducerError` if any element of the update isn't itself a list.
+`concat_flatten` folds the per-instance lists into one flat list (`[*prior, *(item for sublist in update for item in sublist)]`), strict like `append`: it raises `ReducerError` if any element of the update isn't itself a list.
 
 The dict-shaped analog is `merge_all` (also proposal 0036): when each fan-out instance contributes a `dict[str, X]`, the parent's `target_field` receives `list[dict]`, which plain `merge` can't consume. `merge_all` folds the sequence of mappings into the prior with shallow last-write-wins per key:
 
@@ -1446,9 +1446,9 @@ class PipelineState(State):
     keyed_results: Annotated[dict[str, Result], merge_all] = Field(default_factory=dict)
 ```
 
-Single-record-per-instance fan-outs (`collect_field: str`, parent field `Annotated[list[X], append]`) don't hit this — the engine still wraps each instance's value as one element, but `append` flattens it correctly since each element is already an `X`. The two non-flat shapes emerge only when the per-instance value is itself a container: a `list[X]` per instance lands `list[list[X]]` (use `concat_flatten`), and a `dict[str, X]` per instance lands `list[dict]` (use `merge_all`).
+Single-record-per-instance fan-outs (`collect_field: str`, parent field `Annotated[list[X], append]`) don't hit this; the engine still wraps each instance's value as one element, but `append` flattens it correctly since each element is already an `X`. The two non-flat shapes emerge only when the per-instance value is itself a container: a `list[X]` per instance lands `list[list[X]]` (use `concat_flatten`), and a `dict[str, X]` per instance lands `list[dict]` (use `merge_all`).
 
-If a parent field is populated by BOTH direct node writes AND fan-out collection, that's an architectural ambiguity worth fixing upstream — split into two fields, or pick one path.
+If a parent field is populated by BOTH direct node writes AND fan-out collection, that's an architectural ambiguity worth fixing upstream: split into two fields, or pick one path.
 
 ## Example index
 
