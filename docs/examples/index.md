@@ -43,6 +43,14 @@ in the repo.
 - [**09 - Tool use**](09-tool-use.md). Lunar-mission assistant that
   calls local Python tools to answer questions mixing fact recall and
   physics arithmetic.
+- [**10 - Langfuse observability**](10-langfuse-observability.md).
+  Send LLM-call observability natively to Langfuse with a prompt-
+  linkage demonstration on a mission-briefing Q&A pipeline.
+- [**11 - Chat with multimodal**](11-chat-with-multimodal.md). Four-
+  turn lunar-mission conversation with conversation memory threaded
+  through `ChatPrompt` + `PlaceholderSegment`. One turn attaches a
+  photograph; the agent processes it without changing the chat
+  shape.
 
 ## Configuration
 
