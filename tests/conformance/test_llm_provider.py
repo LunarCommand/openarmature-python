@@ -21,7 +21,7 @@ from __future__ import annotations
 import json
 from collections.abc import Awaitable, Callable, Iterator, Mapping
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 import httpx
 import pytest
@@ -156,8 +156,25 @@ def _build_provider(
 ) -> tuple[OpenAIProvider, list[httpx.Request]]:
     # Some fixtures (007 ready-check) use ``health_endpoint`` instead
     # of ``responses`` — that's the same shape, just one entry.
+    readiness_probe: Literal["models", "chat_completions", "both"] = "chat_completions"
     if "health_endpoint" in mock_provider_cfg:
-        responses: list[Mapping[str, Any]] = [cast("Mapping[str, Any]", mock_provider_cfg["health_endpoint"])]
+        health_endpoint = cast("Mapping[str, Any]", mock_provider_cfg["health_endpoint"])
+        responses: list[Mapping[str, Any]] = [health_endpoint]
+        # The spec fixture intentionally leaves the probe shape to the
+        # implementation (007 comment: "the implementation's chosen probe").
+        # Pick the OpenAIProvider readiness_probe mode that matches the
+        # fixture's mocked path so the mock is actually exercised. Fixtures
+        # 007's cases all mock ``/v1/models``, so the catalog probe is what
+        # they verify; a future fixture mocking ``/v1/chat/completions``
+        # would automatically route to the chat probe. A missing ``path``
+        # field leaves us at the OpenAIProvider default; all current
+        # fixtures populate ``path``, so this branch is unreachable in
+        # practice and the fallthrough is only defensive.
+        endpoint_path = health_endpoint.get("path")
+        if endpoint_path == "/v1/models":
+            readiness_probe = "models"
+        elif endpoint_path == "/v1/chat/completions":
+            readiness_probe = "chat_completions"
     else:
         responses = cast(
             "list[Mapping[str, Any]]",
@@ -176,6 +193,7 @@ def _build_provider(
         api_key="test-key",
         transport=transport,
         force_prompt_augmentation_fallback=force_fallback,
+        readiness_probe=readiness_probe,
     )
     return provider, captured
 
