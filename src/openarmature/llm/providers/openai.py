@@ -22,20 +22,30 @@ with the right ``base_url``.
 | HTTP 5xx (other)                                  | provider_unavailable         |
 | 200 OK that fails to parse into Response shape    | provider_invalid_response    |
 
-**``ready()`` probe.** Hits ``GET /v1/models`` and:
+**``ready()`` probe.** Three modes selected by the constructor kwarg
+``readiness_probe``:
 
-- 401/403 → ``provider_authentication``.
-- 5xx / connection error → ``provider_unavailable``.
-- 200 + bound model in returned list → success.
-- 200 + bound model NOT in list → ``provider_invalid_model``.
+- ``"chat_completions"`` (default) — issues ``POST /v1/chat/completions``
+  with a minimal ``max_tokens=1`` body. Actually exercises the inference
+  path, so OpenAI-compatible proxies (Bifrost, custom gateways) that
+  return 200 on ``GET /v1/models`` but reject ``POST /v1/chat/completions``
+  surface immediately rather than at first real call.
+- ``"models"`` — hits ``GET /v1/models`` and verifies the bound model
+  appears in the returned catalog. Cheaper (no completion tokens
+  billed) but doesn't catch the wire-mismatch case above.
+- ``"both"`` — runs the catalog probe first, then the chat probe.
+  Catalog check short-circuits with the cleaner "model not in catalog"
+  diagnostic before any billable call.
 
-The ``provider_model_not_loaded`` distinction needs a server-specific
-probe (LM Studio's loaded-vs-configured endpoint, vLLM's health
-endpoint, llama.cpp's runtime-status endpoint) that this base
-provider can't generically emit. Subclasses or purpose-built
-local-server provider variants close that gap; the base
-``OpenAIProvider`` documents the limitation here rather than silently
-treating "model in catalog" as "model loaded."
+All three modes map non-200 responses through ``classify_http_error``
+so the canonical error categories (``provider_authentication``,
+``provider_unavailable``, ``provider_invalid_model``,
+``provider_model_not_loaded``, ``provider_rate_limit``) surface
+consistently regardless of which probe ran.
+
+The previous default was ``"models"``; flipped to ``"chat_completions"``
+because the catalog probe missed a real failure class (proxy wire-
+format mismatch) in field use.
 """
 
 from __future__ import annotations
@@ -104,6 +114,13 @@ from ..provider import (
 )
 from ..response import FinishReason, ParsedValue, Response, RuntimeConfig, Usage
 
+# Runtime guard for ``OpenAIProvider(..., readiness_probe=...)``. The
+# Literal type narrows callers under static checkers but is not enforced
+# at runtime, so an unknown string would silently no-op both dispatch
+# branches in ``ready()`` and return None — a false-green readiness
+# signal. Validate in ``__init__`` against this set instead.
+_VALID_READINESS_PROBES = frozenset({"models", "chat_completions", "both"})
+
 
 class OpenAIProvider:
     """OpenAI Chat Completions wire-compatible provider.
@@ -139,6 +156,7 @@ class OpenAIProvider:
         timeout: float = 60.0,
         force_prompt_augmentation_fallback: bool = False,
         genai_system: str = "openai",
+        readiness_probe: Literal["models", "chat_completions", "both"] = "chat_completions",
     ) -> None:
         self.base_url = _validate_and_normalize_base_url(base_url)
         self.model = model
@@ -157,6 +175,20 @@ class OpenAIProvider:
         # those servers, and a wrong inference is worse than the explicit
         # opt-in.
         self._genai_system = genai_system
+        # ``readiness_probe`` selects which wire path ``ready()`` exercises.
+        # The default ``"chat_completions"`` actually tests inference; the
+        # opt-in ``"models"`` is the older catalog-only probe for
+        # cost-sensitive cloud callers (every chat probe bills prompt
+        # tokens). ``"both"`` runs catalog then chat for the strongest
+        # signal at double the round-trip cost. Same explicit-opt-in
+        # rationale as ``genai_system``: no base_url sniffing, since the
+        # right probe shape depends on what's on the other end and a
+        # wrong inference is worse than a wrong default.
+        if readiness_probe not in _VALID_READINESS_PROBES:
+            raise ValueError(
+                f"readiness_probe must be one of {sorted(_VALID_READINESS_PROBES)} (got {readiness_probe!r})"
+            )
+        self._readiness_probe = readiness_probe
         self._headers: dict[str, str] = {"Content-Type": "application/json"}
         if api_key is not None:
             self._headers["Authorization"] = f"Bearer {api_key}"
@@ -188,20 +220,36 @@ class OpenAIProvider:
     # ------------------------------------------------------------------
 
     async def ready(self) -> None:
-        """Verify the bound model is reachable and listed by the
-        provider. Hits ``GET /v1/models`` and matches ``self.model``
-        against the returned ``data[].id`` entries."""
+        """Verify the bound model is reachable. Dispatches on the
+        ``readiness_probe`` mode chosen at construction:
+
+        - ``"chat_completions"`` (default) issues a ``max_tokens=1``
+          chat call against ``POST /v1/chat/completions``.
+        - ``"models"`` issues ``GET /v1/models`` and matches
+          ``self.model`` against the returned ``data[].id`` entries.
+        - ``"both"`` runs the catalog probe first (cheaper, surfaces
+          model-not-in-catalog with the catalog diagnostic), then the
+          chat probe.
+        """
+        if self._readiness_probe in ("models", "both"):
+            await self._probe_models()
+        if self._readiness_probe in ("chat_completions", "both"):
+            await self._probe_chat_completions()
+
+    async def _probe_models(self) -> None:
+        """Catalog probe — ``GET /v1/models`` + bound-model presence
+        check. Cheaper than the chat probe (no completion tokens
+        billed) and surfaces the model-not-in-catalog case with the
+        cleaner ``seen_ids`` diagnostic; misses wire-format mismatches
+        on proxies that serve the catalog correctly but reject
+        completions."""
         try:
             resp = await self._client.get("/v1/models")
         except httpx.HTTPError as exc:
             raise ProviderUnavailable(str(exc)) from exc
 
-        if resp.status_code in (401, 403):
-            raise ProviderAuthentication(f"GET /v1/models returned {resp.status_code}")
-        if 500 <= resp.status_code < 600:
-            raise ProviderUnavailable(f"GET /v1/models returned {resp.status_code}")
         if resp.status_code != 200:
-            raise ProviderUnavailable(f"GET /v1/models returned unexpected {resp.status_code}")
+            raise classify_http_error(resp)
 
         try:
             body_raw = resp.json()
@@ -245,6 +293,37 @@ class OpenAIProvider:
                 raise ProviderModelNotLoaded(
                     f"model {self.model!r} is configured but not loaded (status={status_field!r})"
                 )
+
+    async def _probe_chat_completions(self) -> None:
+        """Inference probe — ``POST /v1/chat/completions`` with a
+        ``max_tokens=1`` body. Surfaces wire-format mismatches that
+        the catalog probe can't see (the motivating case: Bifrost-
+        style proxies that 200 on ``/v1/models`` but 405/404 on
+        ``/v1/chat/completions``). Bills one prompt's worth of tokens
+        on cloud endpoints, which is why this defaults on but is
+        opt-out via ``readiness_probe="models"``."""
+        body = {
+            "model": self.model,
+            "messages": [{"role": "user", "content": "."}],
+            "max_tokens": 1,
+        }
+        try:
+            resp = await self._client.post("/v1/chat/completions", json=body)
+        except httpx.HTTPError as exc:
+            raise ProviderUnavailable(str(exc)) from exc
+        if resp.status_code != 200:
+            raise classify_http_error(resp)
+        # Validate the response shape so a proxy answering 200 with an
+        # error payload or non-OpenAI-shape JSON doesn't pass the probe.
+        # Mirrors ``_do_complete``'s parse step. The returned Response
+        # is discarded — the validation itself is the point.
+        try:
+            payload_raw = resp.json()
+        except ValueError as exc:
+            raise ProviderInvalidResponse("POST /v1/chat/completions returned non-JSON body") from exc
+        if not isinstance(payload_raw, dict):
+            raise ProviderInvalidResponse("POST /v1/chat/completions returned a non-object body")
+        self._parse_response(cast("dict[str, Any]", payload_raw), None, None)
 
     # ------------------------------------------------------------------
     # complete() — single completion call

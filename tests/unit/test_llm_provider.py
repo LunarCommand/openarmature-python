@@ -573,3 +573,391 @@ def test_runtime_config_from_partial_empty() -> None:
     assert config.temperature is None
     assert config.frequency_penalty is None
     assert config.stop_sequences is None
+
+
+def test_readiness_probe_unknown_mode_rejected_at_construction() -> None:
+    # Literal type is a static hint, not a runtime guard. Unknown modes
+    # would otherwise silently no-op both dispatch branches in ready()
+    # and report ready, so reject at construction.
+    with pytest.raises(ValueError, match="readiness_probe must be one of"):
+        OpenAIProvider(
+            base_url="http://test",
+            model="m",
+            api_key="k",
+            readiness_probe="bogus",  # pyright: ignore[reportArgumentType]
+        )
+
+
+# ---------------------------------------------------------------------------
+# ready() readiness_probe modes
+# ---------------------------------------------------------------------------
+# Verifies the v0.12.0 default-flip: chat_completions is the strict probe
+# (actually exercises inference), models is the opt-in catalog-only probe,
+# both runs catalog then chat. Conformance fixture 007 owns the catalog-only
+# semantics — these tests cover the new wire paths and the dispatch.
+
+
+async def test_ready_chat_completions_200_passes() -> None:
+    def _ok(req: httpx.Request) -> httpx.Response:
+        assert req.url.path == "/v1/chat/completions"
+        return httpx.Response(
+            200,
+            json={
+                "id": "x",
+                "object": "chat.completion",
+                "created": 0,
+                "model": "m",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "."},
+                        "finish_reason": "length",
+                    }
+                ],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+            },
+        )
+
+    provider = OpenAIProvider(
+        base_url="http://test",
+        model="m",
+        api_key="k",
+        transport=httpx.MockTransport(_ok),
+    )
+    try:
+        await provider.ready()
+    finally:
+        await provider.aclose()
+
+
+async def test_ready_chat_completions_405_surfaces_unavailable() -> None:
+    # The Bifrost-style proxy case: the catalog endpoint may answer 200
+    # (which the older default probe accepted), but POST /v1/chat/completions
+    # returns 405 because the proxy doesn't actually serve completions.
+    # classify_http_error routes 405 through ProviderUnavailable.
+    def _405(req: httpx.Request) -> httpx.Response:
+        assert req.url.path == "/v1/chat/completions"
+        return httpx.Response(405, json={"error": {"message": "method not allowed"}})
+
+    provider = OpenAIProvider(
+        base_url="http://test",
+        model="m",
+        api_key="k",
+        transport=httpx.MockTransport(_405),
+    )
+    try:
+        with pytest.raises(ProviderUnavailable):
+            await provider.ready()
+    finally:
+        await provider.aclose()
+
+
+async def test_ready_chat_completions_401_surfaces_authentication() -> None:
+    def _401(_req: httpx.Request) -> httpx.Response:
+        return httpx.Response(401, json={"error": {"message": "Invalid API key"}})
+
+    provider = OpenAIProvider(
+        base_url="http://test",
+        model="m",
+        api_key="k",
+        transport=httpx.MockTransport(_401),
+    )
+    try:
+        with pytest.raises(ProviderAuthentication):
+            await provider.ready()
+    finally:
+        await provider.aclose()
+
+
+async def test_ready_chat_completions_404_model_not_found_surfaces_invalid_model() -> None:
+    def _404(_req: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            404,
+            json={"error": {"code": "model_not_found", "message": "no such model 'm'"}},
+        )
+
+    provider = OpenAIProvider(
+        base_url="http://test",
+        model="m",
+        api_key="k",
+        transport=httpx.MockTransport(_404),
+    )
+    try:
+        with pytest.raises(ProviderInvalidModel):
+            await provider.ready()
+    finally:
+        await provider.aclose()
+
+
+async def test_ready_both_runs_catalog_then_chat() -> None:
+    # The both-mode contract: catalog probe first (so catalog-only failures
+    # short-circuit before the billable chat call), then chat probe. This
+    # test verifies both endpoints get hit in order on the happy path.
+    seen: list[str] = []
+
+    def _handler(req: httpx.Request) -> httpx.Response:
+        seen.append(req.url.path)
+        if req.url.path == "/v1/models":
+            return httpx.Response(
+                200,
+                json={"object": "list", "data": [{"id": "m", "object": "model"}]},
+            )
+        return httpx.Response(
+            200,
+            json={
+                "id": "x",
+                "object": "chat.completion",
+                "created": 0,
+                "model": "m",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "."},
+                        "finish_reason": "length",
+                    }
+                ],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+            },
+        )
+
+    provider = OpenAIProvider(
+        base_url="http://test",
+        model="m",
+        api_key="k",
+        transport=httpx.MockTransport(_handler),
+        readiness_probe="both",
+    )
+    try:
+        await provider.ready()
+    finally:
+        await provider.aclose()
+    assert seen == ["/v1/models", "/v1/chat/completions"]
+
+
+async def test_ready_both_catalog_missing_model_short_circuits() -> None:
+    # When catalog returns 200 but the bound model isn't in the list, the
+    # catalog probe MUST raise ProviderInvalidModel before any chat call.
+    # The single ``seen``-tracking handler answers any path with the catalog
+    # JSON, so a leaked chat call would silently 200; the real proof of
+    # short-circuit is the seen == ["/v1/models"] assertion at the bottom.
+    seen: list[str] = []
+
+    def _handler(req: httpx.Request) -> httpx.Response:
+        seen.append(req.url.path)
+        return httpx.Response(
+            200,
+            json={
+                "object": "list",
+                "data": [{"id": "other-model", "object": "model"}],
+            },
+        )
+
+    provider = OpenAIProvider(
+        base_url="http://test",
+        model="m",
+        api_key="k",
+        transport=httpx.MockTransport(_handler),
+        readiness_probe="both",
+    )
+    try:
+        with pytest.raises(ProviderInvalidModel):
+            await provider.ready()
+    finally:
+        await provider.aclose()
+    assert seen == ["/v1/models"]
+
+
+async def test_ready_models_mode_still_hits_catalog() -> None:
+    # Explicit opt-in to the old default. Verifies the dispatch routes
+    # models-mode through the catalog endpoint and ignores the chat path.
+    seen: list[str] = []
+
+    def _handler(req: httpx.Request) -> httpx.Response:
+        seen.append(req.url.path)
+        return httpx.Response(
+            200,
+            json={"object": "list", "data": [{"id": "m", "object": "model"}]},
+        )
+
+    provider = OpenAIProvider(
+        base_url="http://test",
+        model="m",
+        api_key="k",
+        transport=httpx.MockTransport(_handler),
+        readiness_probe="models",
+    )
+    try:
+        await provider.ready()
+    finally:
+        await provider.aclose()
+    assert seen == ["/v1/models"]
+
+
+async def test_ready_models_429_surfaces_rate_limit() -> None:
+    # The catalog probe routes non-200 through classify_http_error, so
+    # 429 with a Retry-After lands as ProviderRateLimit carrying the
+    # parsed delay. Pre-refactor _probe_models would have flattened this
+    # to ProviderUnavailable.
+    def _429(_req: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            429,
+            headers={"Retry-After": "30"},
+            json={"error": {"message": "rate limited"}},
+        )
+
+    provider = OpenAIProvider(
+        base_url="http://test",
+        model="m",
+        api_key="k",
+        transport=httpx.MockTransport(_429),
+        readiness_probe="models",
+    )
+    try:
+        with pytest.raises(ProviderRateLimit) as excinfo:
+            await provider.ready()
+    finally:
+        await provider.aclose()
+    assert excinfo.value.retry_after == 30.0
+
+
+async def test_ready_models_503_model_not_loaded_surfaces_canonical_category() -> None:
+    # 503 with a model-not-loaded marker now lands as
+    # ProviderModelNotLoaded on the catalog probe too, not the previous
+    # generic ProviderUnavailable.
+    def _503(_req: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            503,
+            json={"error": {"type": "model_not_loaded", "message": "model is not loaded yet"}},
+        )
+
+    provider = OpenAIProvider(
+        base_url="http://test",
+        model="m",
+        api_key="k",
+        transport=httpx.MockTransport(_503),
+        readiness_probe="models",
+    )
+    try:
+        with pytest.raises(ProviderModelNotLoaded):
+            await provider.ready()
+    finally:
+        await provider.aclose()
+
+
+async def test_ready_both_catalog_200_chat_405_surfaces_unavailable() -> None:
+    # The actual Bifrost case via ``both`` mode: catalog probe sees 200 from
+    # ``/v1/models`` with the bound model present, then the chat probe gets
+    # 405. classify_http_error routes 405 to ProviderUnavailable. This is
+    # the failure shape ``both`` mode is meant to surface that the catalog-
+    # only probe missed.
+    seen: list[str] = []
+
+    def _handler(req: httpx.Request) -> httpx.Response:
+        seen.append(req.url.path)
+        if req.url.path == "/v1/models":
+            return httpx.Response(
+                200,
+                json={"object": "list", "data": [{"id": "m", "object": "model"}]},
+            )
+        return httpx.Response(405, json={"error": {"message": "method not allowed"}})
+
+    provider = OpenAIProvider(
+        base_url="http://test",
+        model="m",
+        api_key="k",
+        transport=httpx.MockTransport(_handler),
+        readiness_probe="both",
+    )
+    try:
+        with pytest.raises(ProviderUnavailable):
+            await provider.ready()
+    finally:
+        await provider.aclose()
+    assert seen == ["/v1/models", "/v1/chat/completions"]
+
+
+async def test_ready_chat_completions_network_error_surfaces_unavailable() -> None:
+    # httpx network-layer failures (ConnectError, ReadTimeout, etc.) on the
+    # chat probe wrap into ProviderUnavailable, same as on the catalog
+    # probe. Fixture 007's network_failure case covers the catalog side;
+    # this covers the chat-probe side that the catalog fixture can't reach
+    # under the new default.
+    def _raises(_req: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("connection refused")
+
+    provider = OpenAIProvider(
+        base_url="http://test",
+        model="m",
+        api_key="k",
+        transport=httpx.MockTransport(_raises),
+    )
+    try:
+        with pytest.raises(ProviderUnavailable, match="connection refused"):
+            await provider.ready()
+    finally:
+        await provider.aclose()
+
+
+async def test_ready_chat_completions_200_with_error_payload_surfaces_invalid_response() -> None:
+    # The residual false-green class: a proxy returning 200 with an
+    # error payload (no ``choices`` field) would pass a simple status
+    # check but indicates a deeply broken inference path. The chat probe
+    # now parses the response shape so this fails with
+    # ProviderInvalidResponse rather than reporting ready.
+    def _200_error(_req: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"error": "something is wrong"})
+
+    provider = OpenAIProvider(
+        base_url="http://test",
+        model="m",
+        api_key="k",
+        transport=httpx.MockTransport(_200_error),
+    )
+    try:
+        with pytest.raises(ProviderInvalidResponse):
+            await provider.ready()
+    finally:
+        await provider.aclose()
+
+
+async def test_ready_chat_completions_200_with_non_json_body_surfaces_invalid_response() -> None:
+    # Same false-green class, JSON-parse leg: a proxy returning 200 with
+    # a non-JSON body (HTML error page, plain text) must not pass.
+    def _200_html(_req: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=b"<html>error</html>", headers={"content-type": "text/html"})
+
+    provider = OpenAIProvider(
+        base_url="http://test",
+        model="m",
+        api_key="k",
+        transport=httpx.MockTransport(_200_html),
+    )
+    try:
+        with pytest.raises(ProviderInvalidResponse, match="non-JSON"):
+            await provider.ready()
+    finally:
+        await provider.aclose()
+
+
+async def test_ready_chat_completions_503_model_not_loaded() -> None:
+    # 503 with a model-not-loaded body routes through classify_http_error
+    # to ProviderModelNotLoaded. Covered indirectly by the classifier's
+    # own tests, but a single test here pins the dispatch from the chat
+    # probe specifically.
+    def _503(_req: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            503,
+            json={"error": {"type": "model_not_loaded", "message": "model is not loaded yet"}},
+        )
+
+    provider = OpenAIProvider(
+        base_url="http://test",
+        model="m",
+        api_key="k",
+        transport=httpx.MockTransport(_503),
+    )
+    try:
+        with pytest.raises(ProviderModelNotLoaded):
+            await provider.ready()
+    finally:
+        await provider.aclose()

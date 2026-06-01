@@ -85,6 +85,70 @@ stateless calls. Conversational memory (if you want it) is the
 caller's responsibility: thread it through state and pass the
 accumulated message list into each call.
 
+## Pre-flight readiness check
+
+`Provider.ready()` is the optional pre-flight call you make before
+your application starts taking real traffic. It raises one of the
+canonical [`LlmProviderError`](../reference/llm.md) categories on
+failure and returns `None` on success, so a typical startup hook
+looks like:
+
+```python
+async def startup() -> None:
+    provider = _get_provider()
+    try:
+        await provider.ready()
+    except ProviderAuthentication:
+        # Bad API key — fail fast at boot.
+        raise
+    except ProviderInvalidModel:
+        # Bound model isn't served by this endpoint — same.
+        raise
+    except ProviderUnavailable:
+        # Endpoint is down or unreachable — fail fast too.
+        raise
+```
+
+`OpenAIProvider` ships three probe shapes selected via the
+`readiness_probe` constructor kwarg:
+
+- **`"chat_completions"`** (default) — issues `POST /v1/chat/completions`
+  with a `max_tokens=1` body. Actually exercises the inference wire
+  path. Strongest signal at the cost of one prompt's worth of tokens
+  on cloud endpoints.
+- **`"models"`** — issues `GET /v1/models` and verifies the bound
+  model appears in the catalog. Cheaper (no completion billing) but
+  blind to proxy wire-mismatch cases: some OpenAI-compatible proxies
+  (Bifrost is the motivating example) serve `/v1/models` correctly
+  while 405'ing the completions endpoint, so a green catalog probe
+  doesn't prove `complete()` will work.
+- **`"both"`** — runs the catalog probe first (cheap fail-fast on
+  model-not-in-catalog with the cleaner `seen_ids` diagnostic), then
+  the chat probe. Strongest signal at double the round-trip cost.
+
+```python
+# Local server (LM Studio, vLLM, llama.cpp) — chat probe is free.
+provider = OpenAIProvider(
+    base_url="http://localhost:8000",
+    model="qwen2.5-coder",
+    readiness_probe="chat_completions",  # default
+)
+
+# Cloud endpoint, cost-sensitive — opt back into the catalog-only probe.
+provider = OpenAIProvider(
+    base_url="https://api.openai.com",
+    model="gpt-4o-mini",
+    api_key=os.environ["LLM_API_KEY"],
+    readiness_probe="models",
+)
+```
+
+The chat probe is the default because the catalog probe's
+false-green failure mode (Bifrost-style proxy mismatch) is silent at
+boot but fatal at first real call, and that's worse than the extra
+token spend for the small set of cost-sensitive callers who can opt
+out explicitly.
+
 ## Structured output
 
 Every LLM-using node that produces typed data ends up with the same

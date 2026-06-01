@@ -4,6 +4,12 @@ All notable changes to `openarmature-python` are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). The package follows [Semantic Versioning](https://semver.org/); pre-1.0 minor bumps may carry behavioral changes per [spec governance](https://github.com/LunarCommand/openarmature-spec/blob/main/GOVERNANCE.md).
 
+## [Unreleased]
+
+### Changed (breaking)
+
+- **`OpenAIProvider.ready()` default probe flipped to `chat_completions`.** A new constructor kwarg `readiness_probe: Literal["models", "chat_completions", "both"]` selects which wire path `ready()` exercises; the default is now the chat-completions path (`POST /v1/chat/completions` with `max_tokens=1`), which actually exercises the inference path. The previous catalog-only behavior is still available as `readiness_probe="models"`, and `readiness_probe="both"` runs catalog then chat for the strongest signal. Motivation: OpenAI-compatible proxies (Bifrost and similar) can return 200 on `GET /v1/models` while rejecting `POST /v1/chat/completions`, leaving the catalog probe green while every real call fails. The new default surfaces that class of failure at preflight rather than at first inference. Non-200 chat-probe responses route through `classify_http_error`, so the canonical error categories (`provider_authentication`, `provider_unavailable`, `provider_invalid_model`, etc.) surface consistently. Callers that depended on the catalog-only behavior (cost-sensitive cloud setups where every `ready()` would now bill prompt tokens) can opt back in by passing `readiness_probe="models"`.
+
 ## [0.11.0] — 2026-06-01
 
 Observability + prompt-management release. The pinned spec advances from v0.27.1 to v0.38.0, absorbing eight accepted proposals (0039-0046). Two headlines: (1) the Langfuse observer grows native `trace.input` / `trace.output` sourcing with caller hooks (0043) and the per-async-context augmentation boundary becomes lineage-aware for nested fan-out / parallel-branches topologies (0045); (2) prompt-management gains a Chat-prompt variant alongside the existing Text-prompt (0046) and `LangfusePromptBackend` lands for both Langfuse text and chat prompts. Caller-supplied `invocation_id` (0039), mid-invocation open-span metadata update (0040), three reserved-key surfaces (0041 + 0042), and the parallel-branches OTel dispatch span (0044) round out the cycle.
