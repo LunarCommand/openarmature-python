@@ -79,11 +79,14 @@ class _FakeClient:
 
 
 async def test_fetch_text_prompt_maps_to_prompt() -> None:
+    from openarmature.prompts import TextPrompt
+
     client = _text_client(prompt="Hello {{ user }}", version=7, tags=["greeting"])
     backend = LangfusePromptBackend(_FakeClient(result=client))
 
     prompt = await backend.fetch("greeting", "production")
 
+    assert isinstance(prompt, TextPrompt)
     assert prompt.name == "greeting"
     assert prompt.version == "7"
     assert prompt.label == "production"
@@ -105,14 +108,66 @@ async def test_fetch_passes_label_through() -> None:
     assert fake.calls == [("greeting", "staging")]
 
 
-async def test_chat_prompt_raises_not_found() -> None:
+async def test_chat_prompt_maps_to_chat_prompt() -> None:
+    # Per proposal 0046 (v0.38.0): Langfuse chat prompts now map to
+    # a ChatPrompt with one ContentSegment per Langfuse chat message
+    # (placeholder markers map to PlaceholderSegment).
+    from openarmature.prompts import ChatPrompt, ContentSegment
+
     backend = LangfusePromptBackend(_FakeClient(result=_chat_client()))
 
-    with pytest.raises(PromptNotFound) as excinfo:
-        await backend.fetch("chatty", "production")
+    prompt = await backend.fetch("chatty", "production")
 
-    assert excinfo.value.backend == "langfuse"
-    assert "chat prompt" in str(excinfo.value)
+    assert isinstance(prompt, ChatPrompt)
+    assert prompt.name == "chatty"
+    assert prompt.version == "1"
+    assert len(prompt.chat_template) == 1
+    segment = prompt.chat_template[0]
+    assert isinstance(segment, ContentSegment)
+    assert segment.role == "system"
+    assert segment.content == "hi {{ user }}"
+
+
+async def test_chat_prompt_with_malformed_placeholder_fetches_then_raises_at_render() -> None:
+    # Regression for the spec §11 timing contract: a Langfuse-stored
+    # chat prompt carrying a placeholder name that VIOLATES the §3.1
+    # regex (e.g., leading digit) MUST NOT raise at fetch time —
+    # render is the spec-normative error trigger.  The backend uses
+    # ``PlaceholderSegment.model_construct`` to bypass construction-
+    # time validators so the offending name reaches the render path
+    # before surfacing.
+    from openarmature.prompts import ChatPrompt, PlaceholderSegment, PromptManager, PromptRenderError
+
+    chat_result = ChatPromptClient(
+        Prompt_Chat(
+            type="chat",
+            name="bad_placeholder",
+            version=1,
+            prompt=cast(
+                Any,
+                [
+                    {"role": "system", "content": "set up"},
+                    {"type": "placeholder", "name": "1history"},  # leading digit — invalid per §3.1
+                    {"role": "user", "content": "go"},
+                ],
+            ),
+            config={},
+            labels=["production"],
+            tags=[],
+        )
+    )
+    backend = LangfusePromptBackend(_FakeClient(result=chat_result))
+
+    # Fetch MUST succeed — construction-time check is bypassed.
+    prompt = await backend.fetch("bad_placeholder", "production")
+    assert isinstance(prompt, ChatPrompt)
+    placeholder_seg = next(seg for seg in prompt.chat_template if isinstance(seg, PlaceholderSegment))
+    assert placeholder_seg.placeholder == "1history"
+
+    # Render MUST raise — the §11 spec-normative trigger.
+    manager = PromptManager(backend)
+    with pytest.raises(PromptRenderError, match=r"invalid placeholder name '1history'"):
+        manager.render(prompt)
 
 
 async def test_not_found_maps_to_prompt_not_found() -> None:

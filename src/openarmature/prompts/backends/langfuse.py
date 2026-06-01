@@ -1,21 +1,24 @@
-"""Langfuse-backed PromptBackend (text prompts).
+"""Langfuse-backed PromptBackend (text + chat prompts).
 
 Fetches prompts from Langfuse's prompt registry through OA's
 ``PromptManager``. Gated behind the ``[langfuse]`` extra; import this
 module only when ``langfuse`` is installed (``backends/__init__`` does
 not import it, so the base package stays langfuse-free).
 
-v1 supports Langfuse TEXT prompts. A Langfuse CHAT prompt raises
-``PromptNotFound`` because OA's render produces a single user message
-today; multi-message (chat) prompt support is tracked for a later
-release.
+Per proposal 0046 (v0.38.0): both Langfuse TEXT and CHAT prompts are
+supported.  Text prompts return a :class:`TextPrompt`; chat prompts
+return a :class:`ChatPrompt` with one :class:`ContentSegment` per
+Langfuse chat message.  Langfuse chat placeholders map to
+:class:`PlaceholderSegment` entries.
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
+from collections.abc import Iterable
 from datetime import UTC, datetime
-from typing import Any, Protocol
+from typing import Any, Protocol, cast
 
 import httpx
 from langfuse.api import NotFoundError, ServiceUnavailableError
@@ -23,7 +26,15 @@ from langfuse.model import ChatPromptClient, TextPromptClient
 
 from ..errors import PromptNotFound, PromptStoreUnavailable
 from ..hashing import compute_template_hash
-from ..prompt import Prompt, SamplingConfig
+from ..prompt import (
+    ChatPrompt,
+    ChatSegment,
+    ContentSegment,
+    PlaceholderSegment,
+    Prompt,
+    SamplingConfig,
+    TextPrompt,
+)
 
 
 class LangfusePromptClient(Protocol):
@@ -83,18 +94,35 @@ class LangfusePromptBackend:
         result = await asyncio.to_thread(self._get_prompt, name, label)
 
         if isinstance(result, ChatPromptClient):
-            raise PromptNotFound(
-                f"prompt ({name!r}, {label!r}) is a Langfuse chat prompt; "
-                "the Langfuse backend supports text prompts only in this "
-                "release (multi-message prompt support is planned)",
+            chat_template = list(_chat_segments_from_langfuse(result.prompt))
+            template_hash = compute_template_hash(
+                json.dumps(_canonical_chat_for_hash(result.prompt), sort_keys=True)
+            )
+            # ``ChatPrompt.model_construct`` is required (not the
+            # plain constructor): pydantic re-runs validators on
+            # nested field values when validating the outer model,
+            # so a placeholder name we bypassed at the
+            # ``PlaceholderSegment`` level would still trip the
+            # regex check during ChatPrompt construction.  Bypass
+            # the outer validators too so the malformed input
+            # reaches render-time (the spec-normative §11 error
+            # trigger).
+            return ChatPrompt.model_construct(
+                kind="chat",
                 name=name,
+                version=str(result.version),
                 label=label,
-                backend="langfuse",
+                chat_template=chat_template,
+                template_hash=template_hash,
+                fetched_at=datetime.now(UTC),
+                sampling=_sampling_from_config(result.config),
+                observability_entities={"langfuse_prompt": result},
+                metadata=_metadata_from(result),
             )
 
         template = result.prompt
         template_hash = compute_template_hash(template)
-        return Prompt(
+        return TextPrompt(
             name=name,
             version=str(result.version),
             label=label,
@@ -138,7 +166,59 @@ def _sampling_from_config(config: dict[str, Any] | None) -> SamplingConfig | Non
     return SamplingConfig(**declared)
 
 
-def _metadata_from(result: TextPromptClient) -> dict[str, Any]:
+def _normalized_langfuse_entries(raw: Iterable[Any]) -> list[dict[str, Any]]:
+    """Normalize a Langfuse ``ChatPromptClient.prompt`` list to OA
+    canonical entry dicts.  Each output entry is either a content
+    message ``{"role": ..., "content": ...}`` or a placeholder
+    marker ``{"type": "placeholder", "name": ...}``.  Unknown shapes
+    are dropped (defensive — backend extensions add new entry shapes
+    over time).  Shared between the segment-mapper and the canonical-
+    hash helper so the two stay in lockstep."""
+    out: list[dict[str, Any]] = []
+    for raw_entry in raw:
+        if not isinstance(raw_entry, dict):
+            continue
+        entry = cast("dict[str, Any]", raw_entry)
+        entry_type = entry.get("type")
+        if entry_type == "placeholder":
+            name = entry.get("name")
+            if isinstance(name, str):
+                out.append({"type": "placeholder", "name": name})
+            continue
+        role = entry.get("role")
+        content = entry.get("content")
+        if role in {"system", "user", "assistant"} and isinstance(content, str):
+            out.append({"role": role, "content": content})
+    return out
+
+
+def _chat_segments_from_langfuse(raw: Iterable[Any]) -> Iterable[ChatSegment]:
+    """Map a Langfuse ``ChatPromptClient.prompt`` to OA
+    :class:`ChatSegment` entries.  Placeholder segments bypass
+    construction-time validation via ``model_construct`` so a
+    Langfuse-stored prompt with a malformed placeholder name (e.g.,
+    leading-digit) reaches the render path before raising — the
+    spec-normative error trigger per §11.  Content segments go through
+    the normal pydantic constructor since their fields don't carry
+    spec-§11 constraints that hand-built callers would benefit from
+    catching earlier."""
+    for entry in _normalized_langfuse_entries(raw):
+        if entry.get("type") == "placeholder":
+            yield PlaceholderSegment.model_construct(
+                type="placeholder",
+                placeholder=entry["name"],
+            )
+        else:
+            yield ContentSegment(role=entry["role"], content=entry["content"])
+
+
+def _canonical_chat_for_hash(raw: Iterable[Any]) -> list[dict[str, Any]]:
+    """Canonical representation of a Langfuse chat-prompt list for
+    template-hashing purposes."""
+    return _normalized_langfuse_entries(raw)
+
+
+def _metadata_from(result: TextPromptClient | ChatPromptClient) -> dict[str, Any]:
     # Preserve Langfuse-side attribution. `config` is kept whole here
     # even though sampling fields are also lifted to `Prompt.sampling`,
     # so non-sampling config keys aren't dropped.

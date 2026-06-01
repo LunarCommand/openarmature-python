@@ -39,6 +39,7 @@ from openarmature.prompts import (
     Prompt,
     PromptManager,
     SamplingConfig,
+    TextPrompt,
 )
 from openarmature.prompts.context import with_active_prompt
 
@@ -365,7 +366,7 @@ class _MockPromptBackend:
             observability_entities: dict[str, Any] | None = None
             if with_langfuse_reference and "langfuse_prompt_reference" in spec:
                 observability_entities = {"langfuse_prompt": spec["langfuse_prompt_reference"]}
-            self._prompts[prompt_name] = Prompt(
+            self._prompts[prompt_name] = TextPrompt(
                 name=spec["name"],
                 version=spec["version"],
                 label=spec["label"],

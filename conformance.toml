@@ -32,7 +32,7 @@
 
 [manifest]
 implementation = "openarmature-python"
-spec_pin = "v0.37.0"
+spec_pin = "v0.38.0"
 
 # Status values:
 #   implemented   — shipped behavior matches the proposal's contract
@@ -225,5 +225,18 @@ since = "0.11.0"
 # Behavioral contract verified at unit level via
 # ``test_nested_fan_out_augmentation_reaches_outer_instance_dispatch_span``.
 [proposals."0045"]
+status = "implemented"
+since = "0.11.0"
+
+# Spec v0.38.0 (proposal 0046).  Multi-message chat-prompt rendering.
+# Adds ``ChatPrompt`` alongside the existing ``TextPrompt`` (renamed
+# from ``Prompt``); ``Prompt`` is now the discriminated-union alias.
+# Chat-prompt segments (content + placeholder) and content-block
+# templates (text + image-URL + image-inline) ship in
+# ``openarmature.prompts``.  ``PromptManager.render`` accepts a new
+# ``placeholders`` kwarg for variable-length message-list injection.
+# Conformance fixtures 017-031 activate against the existing
+# prompt-management harness with a chat-template parser extension.
+[proposals."0046"]
 status = "implemented"
 since = "0.11.0"

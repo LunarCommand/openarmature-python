@@ -44,7 +44,11 @@ class FixturePromptSpec(_StrictModel):
     name: str
     label: str
     version: str
-    template: str
+    # Text-prompt path uses ``template``; chat-prompt path uses
+    # ``chat_template`` (proposal 0046, v0.38.0).  Exactly one is
+    # set per fixture prompt.
+    template: str | None = None
+    chat_template: list[dict[str, Any]] | None = None
     template_hash: str
     # Proposal 0033: optional typed sub-record + observability-entities
     # mapping the mock backend attaches to the returned Prompt.
@@ -135,6 +139,9 @@ class FixtureCall(_StrictModel):
     # YAML elides; pydantic still maps both to ``None``.
     label: str | None = None
     variables: dict[str, Any] | None = None
+    # Proposal 0046: render-only ``placeholders`` kwarg — caller-
+    # supplied message-list injections keyed by placeholder name.
+    placeholders: dict[str, list[dict[str, Any]]] | None = None
     # Render-only inputs — either an inline ``fetched_prompt`` (which
     # the harness fetches first, then renders) or a ``fetched_prompt_ref``
     # pointing at an earlier ``capture_as``.
