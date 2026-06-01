@@ -2,9 +2,9 @@
 
 A lunar-mission Q&A assistant that maintains conversation context
 across four turns. One mid-conversation turn includes an attached
-photograph (Apollo 11 Lunar Module on the lunar surface): the user
-asks about it, the agent processes the multimodal turn naturally
-without changing the chat-history shape.
+photograph (Apollo 16 Lunar Module "Orion" on the lunar surface):
+the user asks about it, the agent processes the multimodal turn
+naturally without changing the chat-history shape.
 
 ## Overview
 
@@ -115,7 +115,7 @@ LLM, and updates state.
 
 ```
 === openarmature chat-with-multimodal demo ===
-Image URL: https://upload.wikimedia.org/...
+Image URL: https://images-assets.nasa.gov/image/as16-113-18334/...
 Scripted turns: 4
 
 --- Turn 0 ---

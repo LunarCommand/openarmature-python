@@ -24,7 +24,7 @@ which exercises a different LLM-side primitive entirely.
   which switches the user `ContentSegment.content` between a single
   text template (text-only turn) and a `[TextBlockTemplate,
   ImageURLBlockTemplate]` list (multimodal turn). The system segment
-  and the `PlaceholderSegment(name="history")` slot are identical
+  and the `PlaceholderSegment(placeholder="history")` slot are identical
   across both shapes; only the trailing user segment changes.
 - Chat history lives on state as `history: Annotated[list[Message],
   append]`. After each turn the node appends two messages (the new
