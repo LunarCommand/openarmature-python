@@ -69,9 +69,12 @@ collector and supplying its auth header. The HyperDX shape::
 Same observer call surface; only the processor + exporter change. The
 ``OTLPSpanExporter`` lives in the ``opentelemetry-exporter-otlp-proto-http``
 package (not in ``[otel]`` extras yet; install it directly while OA
-gauges demand). Remember to ``await otel_observer.force_flush()``
-before short-lived processes exit; ``BatchSpanProcessor`` ships in
-the background and would otherwise drop the tail.
+gauges demand). Before short-lived processes exit, call
+``await graph.drain()`` (drains the observer's per-invocation event
+queue so spans see their ``completed`` events) and then
+``otel_observer.force_flush()`` (synchronous; pushes
+``BatchSpanProcessor``'s tail through the exporter). The drain + flush
+pair ensures the tail lands before teardown.
 """
 
 from __future__ import annotations

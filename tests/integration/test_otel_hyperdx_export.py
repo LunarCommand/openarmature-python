@@ -87,6 +87,16 @@ async def test_otel_observer_pipeline_drains_with_hyperdx_exporter() -> None:
         final = await graph.invoke(_PingState())
         assert final.ping is True
 
+        # ``invoke()`` returns when the graph reaches END but observer
+        # events sit on a per-invocation queue until the background
+        # worker drains them. Without ``drain()``, a span that hasn't
+        # yet seen its ``completed`` event is still open when
+        # ``force_flush`` runs, and the exporter would ship only the
+        # ``started`` half (or nothing at all). The short-lived-process
+        # pattern in ``docs/agent/non-obvious-shapes.md`` makes this
+        # explicit.
+        await graph.drain()
+
         # Local-side assertion. ``BatchSpanProcessor.force_flush``
         # returns True when every registered processor finishes
         # flushing within the timeout, False when any one times out.
