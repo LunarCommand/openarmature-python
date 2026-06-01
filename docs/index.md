@@ -16,49 +16,54 @@ buy-in from every node.
 
 <div class="grid cards" markdown>
 
--   :material-shield-check:{ .lg .middle } &nbsp; __Typed, frozen state__
+-   :material-shield-check:{ .lg .middle } &nbsp; __Workflows to agents, one engine__
 
     ---
 
-    State schemas are Pydantic models with `frozen=True` and
-    `extra="forbid"`. Nodes can't mutate state; they return partial
-    updates and the engine merges via per-field reducers.
+    Built for LLM-infused pipelines first. Tool-calling agents (cycle
+    back to an LLM node) and pure deterministic ETL sit at the two ends
+    of the same spectrum.
 
--   :material-graph:{ .lg .middle } &nbsp; __Compile-time checks__
-
-    ---
-
-    Bad graph shapes (dangling edges, unreachable nodes, conflicting
-    reducers, missing entry) fail at `.compile()`, not at run time.
-
--   :material-eye:{ .lg .middle } &nbsp; __Observable, opt-in__
+-   :material-content-save:{ .lg .middle } &nbsp; __Crash-safe by contract__
 
     ---
 
-    Attach an `Observer` to see every node boundary. Drop in the
-    optional OTel mapping for spans + log correlation; logs carry
-    `trace_id` / `span_id` / `correlation_id` automatically.
+    Synchronous checkpoint save after every node. Process dies
+    mid-step, next `invoke(resume_invocation=...)` picks up from the
+    last save with `correlation_id` preserved.
 
--   :material-content-save:{ .lg .middle } &nbsp; __Checkpointable__
-
-    ---
-
-    In-memory and SQLite `Checkpointer` backends ship in core. Crash at
-    node N+1, resume from node N's saved state on the next invocation.
-
--   :material-arrow-split-vertical:{ .lg .middle } &nbsp; __First-class fan-out__
+-   :material-eye:{ .lg .middle } &nbsp; __Pluggable observability__
 
     ---
 
-    Per-instance fan-out with bounded concurrency, error-policy choice,
-    and observability events that attribute correctly per instance.
+    Native `OTelObserver` emits GenAI semantic conventions any OTLP
+    backend renders. Separate `LangfuseObserver` for the Langfuse
+    destination. No vendor lock-in to a paid SaaS.
+
+-   :material-graph:{ .lg .middle } &nbsp; __Bad graphs don't compile__
+
+    ---
+
+    `.compile()` rejects six categories of structural error before
+    `invoke()` is reachable: dangling edges, unreachable nodes,
+    conflicting reducers, no entry, undeclared subgraph fields,
+    multiple outgoing edges.
+
+-   :material-arrow-split-vertical:{ .lg .middle } &nbsp; __Parallelism, formalized__
+
+    ---
+
+    Fan-out with bounded concurrency and per-instance error policy.
+    Parallel-branches runs N named sub-graphs. Both nest with
+    attribution-correct observability.
 
 -   :material-language-python:{ .lg .middle } &nbsp; __Async-first, LLM-agnostic__
 
     ---
 
-    The engine has no concept of LLMs or tools; those live at the node
-    boundary. Use any provider, any model, any external system.
+    asyncio-native throughout: every node, observer, and checkpointer
+    is `async`. Use any LLM provider, any model, any external system.
+    Drops directly into FastAPI lifespan hooks.
 
 </div>
 
