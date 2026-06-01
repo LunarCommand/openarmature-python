@@ -1,10 +1,15 @@
+# hatchling 1.30.0 (released 2026-06-01) emits ``Metadata-Version: 2.5``
+# per PEP 770, but ``pypa/gh-action-pypi-publish@v1.14.0`` ships
+# ``twine==6.1.0`` which only recognises up to 2.4 and rejects the wheel
+# at preflight. Cap below 1.30 until the publish action picks up a
+# twine that knows about 2.5. Drop the cap when that lands.
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling<1.30"]
 build-backend = "hatchling.build"
 
 [project]
 name = "openarmature"
-version = "0.11.0rc1"
+version = "0.11.0rc2"
 description = "Workflow framework for LLM pipelines and tool-calling agents."
 readme = "README.md"
 requires-python = ">=3.12"
