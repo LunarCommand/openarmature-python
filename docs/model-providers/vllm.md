@@ -197,20 +197,149 @@ post-release task: harden OpenAIProvider readiness probe).
 
 vLLM supports OpenAI-style tool calling when launched with
 `--enable-auto-tool-choice` and a tool-parser flag matching the
-model family (e.g., `--tool-call-parser llama3_json` for Llama 3.1
-Instruct). The wire shape is identical to OpenAI's; from
+model family. The wire shape is identical to OpenAI's; from
 `OpenAIProvider`'s perspective, tool calls Just Work. The
 [fundamentals → tool calling](../concepts/llms.md#tool-calling) page
 covers the OA-side dispatch pattern; no vLLM-specific changes
 needed.
 
 ```bash
-# vLLM server — enable tool calling
-python -m vllm.entrypoints.openai.api_server \
-    --model meta-llama/Llama-3.1-8B-Instruct \
+# vLLM server with tool calling enabled
+vllm serve <model-id> \
     --enable-auto-tool-choice \
-    --tool-call-parser llama3_json
+    --tool-call-parser <parser-name>
 ```
+
+The `--tool-call-parser` flag MUST match the model family's training
+format; mismatches produce assistant messages that vLLM tries to
+parse as tool calls and silently returns as content (or vice versa).
+Common families:
+
+| Model family                  | `--tool-call-parser` value |
+|-------------------------------|----------------------------|
+| Llama 3.x Instruct            | `llama3_json`              |
+| Llama 4 (Maverick / Scout)    | `llama4_pythonic`          |
+| Mistral Instruct families     | `mistral`                  |
+| Hermes, Qwen 2.5 tool-use     | `hermes`                   |
+| Qwen3 / Qwen3-Coder           | `qwen3_xml`                |
+| DeepSeek V3                   | `deepseek_v3`              |
+| GPT-OSS (20B / 120B)          | `openai`                   |
+
+Anthropic Claude and Google Gemini models are proprietary cloud APIs,
+not open weights; vLLM doesn't serve them, so they don't appear in
+this table. Use their first-party endpoints (or an OpenAI-compatible
+proxy) and skip the `--tool-call-parser` story entirely.
+
+**Gemma (Google open weights).** Distinct from Gemini, but vLLM does
+not currently ship a tool-call parser for the mainstream Gemma 2,
+Gemma 3, or CodeGemma variants; tool calling is effectively
+unsupported under vLLM for those. The one exception is Google's
+specialized FunctionGemma (270M, edge-focused), which has its own
+`functiongemma` parser. For general-purpose tool-calling workloads,
+pick a model family from the table above rather than Gemma.
+
+**Qwen3-VL specifically.** vLLM's docs don't currently document a
+dedicated parser for the Qwen3-VL variants (`Qwen3-VL-30B-A3B`,
+`Qwen3-VL-72B`). Check vLLM's release notes for the version you're
+pinned to before assuming the Qwen3 row above carries over;
+multimodal-instruct variants sometimes ship parser support behind
+the text-instruct generation.
+
+See vLLM's
+[tool-calling docs](https://docs.vllm.ai/en/latest/features/tool_calling.html)
+for the current full list; the set grows release-over-release.
+
+## Production deployment
+
+The 30-second snippet at the top of this page is enough for a local
+dev box. Production deployments hit three additional gotchas worth
+calling out.
+
+### `VLLM_HTTP_TIMEOUT_KEEP_ALIVE` against `OpenAIProvider`
+
+`OpenAIProvider` keeps one `httpx.AsyncClient` per provider instance
+and reuses connections across concurrent `complete()` calls per the
+standard httpx pool idiom. vLLM's stock uvicorn keep-alive timeout
+is 5 seconds; an idle pooled connection on the OA side can outlive
+that window and the next request lands on a half-closed socket. The
+visible symptom is `httpcore.RemoteProtocolError: Server
+disconnected without sending a response` or
+`httpx.RemoteProtocolError`, surfaced through `OpenAIProvider` as
+`ProviderUnavailable`.
+
+The fix is to widen vLLM's keep-alive window via the
+`VLLM_HTTP_TIMEOUT_KEEP_ALIVE` env var (the value feeds uvicorn's
+`timeout_keep_alive`). 300 seconds covers most pool idle windows in
+practice:
+
+```bash
+VLLM_HTTP_TIMEOUT_KEEP_ALIVE=300 vllm serve <model-id> --host 0.0.0.0 --port 8001
+```
+
+Same applies behind a reverse proxy: the proxy's keep-alive window
+MUST be at least as wide as vLLM's. Otherwise the proxy closes
+connections vLLM still considers alive and the OA-side pool reuses a
+dead socket on the next call.
+
+### systemd unit shape
+
+For long-running vLLM workloads, a systemd unit is the canonical
+launcher. The structural skeleton:
+
+```ini
+# /etc/systemd/system/vllm-<model>.service
+[Unit]
+Description=vLLM serving <model-id>
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=vllm
+WorkingDirectory=/srv/vllm
+EnvironmentFile=/etc/vllm/<model>.env
+ExecStart=/srv/vllm/.venv/bin/vllm serve <model-id> \
+    --host 0.0.0.0 --port 8001 \
+    --enable-auto-tool-choice \
+    --tool-call-parser <parser-name>
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+```
+
+The `EnvironmentFile` pattern keeps `VLLM_HTTP_TIMEOUT_KEEP_ALIVE`,
+`CUDA_VISIBLE_DEVICES`, `HF_HOME`, and other deploy-specific vars
+out of the unit file itself, which makes the unit shippable across
+hosts without per-machine edits. `journalctl -u vllm-<model>` is
+then the canonical log surface for production triage.
+
+### Throughput knobs and OA concurrency
+
+Three vLLM flags interact directly with how many concurrent
+`complete()` calls an OA graph can land before vLLM starts 429-ing:
+
+- `--max-model-len`: per-request context ceiling. Lower values fit
+  more concurrent requests in the same KV-cache budget; higher
+  values let individual requests carry longer prompts at the cost
+  of concurrent capacity.
+- `--max-num-seqs`: hard cap on concurrent sequences vLLM will
+  schedule. Past this cap, the scheduler queues and (once queue
+  fills) returns 429 with `Retry-After`.
+- `--gpu-memory-utilization`: fraction of GPU VRAM vLLM may use.
+  Higher values widen the KV-cache budget, which lets vLLM schedule
+  closer to its `--max-num-seqs` cap before evicting in-flight
+  sequences; the cap itself doesn't move. Tune cautiously to avoid
+  OOM on the resident model weights.
+
+OA's `OpenAIProvider` shares one connection pool across the whole
+graph, so a fan-out with `concurrency=N` lands N simultaneous wire
+calls. When `N` exceeds `--max-num-seqs` minus vLLM's other
+in-flight traffic, expect `ProviderRateLimit` with
+`retry_after` populated; wrap the LLM-calling node in
+`RetryMiddleware` (or set `concurrency` explicitly on the fan-out)
+to avoid head-of-line stalls.
 
 ## Behaviour to be aware of
 
