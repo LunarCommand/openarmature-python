@@ -575,6 +575,19 @@ def test_runtime_config_from_partial_empty() -> None:
     assert config.stop_sequences is None
 
 
+def test_readiness_probe_unknown_mode_rejected_at_construction() -> None:
+    # Literal type is a static hint, not a runtime guard. Unknown modes
+    # would otherwise silently no-op both dispatch branches in ready()
+    # and report ready, so reject at construction.
+    with pytest.raises(ValueError, match="readiness_probe must be one of"):
+        OpenAIProvider(
+            base_url="http://test",
+            model="m",
+            api_key="k",
+            readiness_probe="bogus",  # pyright: ignore[reportArgumentType]
+        )
+
+
 # ---------------------------------------------------------------------------
 # ready() readiness_probe modes
 # ---------------------------------------------------------------------------
@@ -780,6 +793,57 @@ async def test_ready_models_mode_still_hits_catalog() -> None:
     assert seen == ["/v1/models"]
 
 
+async def test_ready_models_429_surfaces_rate_limit() -> None:
+    # The catalog probe routes non-200 through classify_http_error, so
+    # 429 with a Retry-After lands as ProviderRateLimit carrying the
+    # parsed delay. Pre-refactor _probe_models would have flattened this
+    # to ProviderUnavailable.
+    def _429(_req: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            429,
+            headers={"Retry-After": "30"},
+            json={"error": {"message": "rate limited"}},
+        )
+
+    provider = OpenAIProvider(
+        base_url="http://test",
+        model="m",
+        api_key="k",
+        transport=httpx.MockTransport(_429),
+        readiness_probe="models",
+    )
+    try:
+        with pytest.raises(ProviderRateLimit) as excinfo:
+            await provider.ready()
+    finally:
+        await provider.aclose()
+    assert excinfo.value.retry_after == 30.0
+
+
+async def test_ready_models_503_model_not_loaded_surfaces_canonical_category() -> None:
+    # 503 with a model-not-loaded marker now lands as
+    # ProviderModelNotLoaded on the catalog probe too, not the previous
+    # generic ProviderUnavailable.
+    def _503(_req: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            503,
+            json={"error": {"type": "model_not_loaded", "message": "model is not loaded yet"}},
+        )
+
+    provider = OpenAIProvider(
+        base_url="http://test",
+        model="m",
+        api_key="k",
+        transport=httpx.MockTransport(_503),
+        readiness_probe="models",
+    )
+    try:
+        with pytest.raises(ProviderModelNotLoaded):
+            await provider.ready()
+    finally:
+        await provider.aclose()
+
+
 async def test_ready_both_catalog_200_chat_405_surfaces_unavailable() -> None:
     # The actual Bifrost case via ``both`` mode: catalog probe sees 200 from
     # ``/v1/models`` with the bound model present, then the chat probe gets
@@ -829,6 +893,47 @@ async def test_ready_chat_completions_network_error_surfaces_unavailable() -> No
     )
     try:
         with pytest.raises(ProviderUnavailable, match="connection refused"):
+            await provider.ready()
+    finally:
+        await provider.aclose()
+
+
+async def test_ready_chat_completions_200_with_error_payload_surfaces_invalid_response() -> None:
+    # The residual false-green class: a proxy returning 200 with an
+    # error payload (no ``choices`` field) would pass a simple status
+    # check but indicates a deeply broken inference path. The chat probe
+    # now parses the response shape so this fails with
+    # ProviderInvalidResponse rather than reporting ready.
+    def _200_error(_req: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"error": "something is wrong"})
+
+    provider = OpenAIProvider(
+        base_url="http://test",
+        model="m",
+        api_key="k",
+        transport=httpx.MockTransport(_200_error),
+    )
+    try:
+        with pytest.raises(ProviderInvalidResponse):
+            await provider.ready()
+    finally:
+        await provider.aclose()
+
+
+async def test_ready_chat_completions_200_with_non_json_body_surfaces_invalid_response() -> None:
+    # Same false-green class, JSON-parse leg: a proxy returning 200 with
+    # a non-JSON body (HTML error page, plain text) must not pass.
+    def _200_html(_req: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=b"<html>error</html>", headers={"content-type": "text/html"})
+
+    provider = OpenAIProvider(
+        base_url="http://test",
+        model="m",
+        api_key="k",
+        transport=httpx.MockTransport(_200_html),
+    )
+    try:
+        with pytest.raises(ProviderInvalidResponse, match="non-JSON"):
             await provider.ready()
     finally:
         await provider.aclose()

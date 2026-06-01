@@ -114,6 +114,13 @@ from ..provider import (
 )
 from ..response import FinishReason, ParsedValue, Response, RuntimeConfig, Usage
 
+# Runtime guard for ``OpenAIProvider(..., readiness_probe=...)``. The
+# Literal type narrows callers under static checkers but is not enforced
+# at runtime, so an unknown string would silently no-op both dispatch
+# branches in ``ready()`` and return None — a false-green readiness
+# signal. Validate in ``__init__`` against this set instead.
+_VALID_READINESS_PROBES = frozenset({"models", "chat_completions", "both"})
+
 
 class OpenAIProvider:
     """OpenAI Chat Completions wire-compatible provider.
@@ -177,6 +184,10 @@ class OpenAIProvider:
         # rationale as ``genai_system``: no base_url sniffing, since the
         # right probe shape depends on what's on the other end and a
         # wrong inference is worse than a wrong default.
+        if readiness_probe not in _VALID_READINESS_PROBES:
+            raise ValueError(
+                f"readiness_probe must be one of {sorted(_VALID_READINESS_PROBES)} (got {readiness_probe!r})"
+            )
         self._readiness_probe = readiness_probe
         self._headers: dict[str, str] = {"Content-Type": "application/json"}
         if api_key is not None:
@@ -237,12 +248,8 @@ class OpenAIProvider:
         except httpx.HTTPError as exc:
             raise ProviderUnavailable(str(exc)) from exc
 
-        if resp.status_code in (401, 403):
-            raise ProviderAuthentication(f"GET /v1/models returned {resp.status_code}")
-        if 500 <= resp.status_code < 600:
-            raise ProviderUnavailable(f"GET /v1/models returned {resp.status_code}")
         if resp.status_code != 200:
-            raise ProviderUnavailable(f"GET /v1/models returned unexpected {resp.status_code}")
+            raise classify_http_error(resp)
 
         try:
             body_raw = resp.json()
@@ -306,6 +313,17 @@ class OpenAIProvider:
             raise ProviderUnavailable(str(exc)) from exc
         if resp.status_code != 200:
             raise classify_http_error(resp)
+        # Validate the response shape so a proxy answering 200 with an
+        # error payload or non-OpenAI-shape JSON doesn't pass the probe.
+        # Mirrors ``_do_complete``'s parse step. The returned Response
+        # is discarded — the validation itself is the point.
+        try:
+            payload_raw = resp.json()
+        except ValueError as exc:
+            raise ProviderInvalidResponse("POST /v1/chat/completions returned non-JSON body") from exc
+        if not isinstance(payload_raw, dict):
+            raise ProviderInvalidResponse("POST /v1/chat/completions returned a non-object body")
+        self._parse_response(cast("dict[str, Any]", payload_raw), None, None)
 
     # ------------------------------------------------------------------
     # complete() — single completion call
