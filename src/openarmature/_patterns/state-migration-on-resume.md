@@ -74,7 +74,7 @@ compiled = (
 
 # Later, on resume:
 # final = await compiled.invoke(
-#     starting_state=None,
+#     PipelineState(),  # overwritten by the loaded checkpoint
 #     resume_invocation=prior_invocation_id,
 # )
 ```

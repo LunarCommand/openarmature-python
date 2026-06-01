@@ -91,8 +91,11 @@ the same rules:
   namespaces per the spec).
 - Keys MUST NOT collide with the spec's reserved per-trace metadata
   keys (`correlation_id`, `entry_node`, `spec_version`, etc.). The
-  current set lives in `RESERVED_LANGFUSE_METADATA_KEYS` and expands
-  per proposals 0041 / 0042.
+  set is enforced at the `invoke()` and `set_invocation_metadata`
+  boundaries via the validator in
+  `openarmature.observability.metadata`; it grows per spec proposals
+  0041 / 0042, with the canonical list in the spec's observability
+  §3.4.
 - Values MUST be OTel-attribute-compatible scalars (`str` / `int` /
   `float` / `bool`) or homogeneous arrays of those.
 
