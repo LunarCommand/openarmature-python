@@ -16,13 +16,16 @@ import openarmature.patterns as patterns
 
 def test_list_returns_known_pattern_slugs() -> None:
     names = patterns.list()
-    # Exact set of seed patterns shipped from ``docs/patterns/``.
+    # Exact set of patterns shipped from ``docs/patterns/``.
     # If a new pattern lands, update this list deliberately —
     # silent additions mask scope expansion.
     assert names == [
         "bypass-if-output-exists",
+        "caller-supplied-trace-identifiers",
+        "observer-state-reconciliation",
         "parameterized-entry-point",
         "session-as-checkpoint-resume",
+        "state-migration-on-resume",
         "tool-dispatch-as-node",
     ]
 

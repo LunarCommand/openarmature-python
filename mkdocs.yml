@@ -147,6 +147,9 @@ nav:
     - Tool dispatch as node: patterns/tool-dispatch-as-node.md
     - Session as checkpoint resume: patterns/session-as-checkpoint-resume.md
     - Bypass if output exists: patterns/bypass-if-output-exists.md
+    - State migration on resume: patterns/state-migration-on-resume.md
+    - Caller-supplied trace identifiers: patterns/caller-supplied-trace-identifiers.md
+    - Custom observer reconciliation: patterns/observer-state-reconciliation.md
 
 extra:
   # Hide the "Made with Material for MkDocs" footer.
