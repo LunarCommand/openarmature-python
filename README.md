@@ -26,38 +26,22 @@ pip install 'openarmature[otel]'
 
 ## Why OpenArmature
 
-**State you can't accidentally mutate.**<br>
-State schemas are frozen Pydantic models. Nodes return partial updates; the engine merges. The snapshot a node holds can't change mid-execution, and assignment into state raises rather than silently writing.
+**One framework, from LLM-infused workflows to tool-calling agents.**<br>
+OpenArmature is built for LLM pipelines first: extract, classify, route, render, validate, persist, with the LLM dropped in wherever probability beats hand-written rules. Tool-calling agents (graphs that cycle back to an LLM node) and pure deterministic ETL (no LLM at all) sit at the two ends of the same spectrum. The graph engine has zero concept of LLMs, tools, or messages; those live at the node boundary behind a `Provider` Protocol. One platform for the whole gradient, instead of bending agent-shaped frameworks to fit workflow-shaped work.
 
-**Schema validation at every merge.**<br>
-Fields outside the declared schema fail at the merge boundary instead of silently dropping. A node returning `{"plann": "..."}` (typo) raises `StateValidationError` immediately, not three nodes downstream when the field is read and doesn't exist.
+**Crash-safe resume is first-class, by spec contract.**<br>
+Every completed node is followed by a synchronous checkpoint save before the engine advances. Any node fails, the process dies, OOM kill, preemption: the next `invoke(resume_invocation=...)` picks up from the last saved state with a fresh `invocation_id` (audit trail) and the original `correlation_id` preserved (cross-system join). Explicit state-schema migration registration handles old in-flight checkpoints when the schema evolves. Built for preemptible compute, queue workers, and any environment where the process can die mid-step, not just for human-in-the-loop interrupt resume.
 
-**Merge policy on the schema, not the call site.**<br>
-Each state field declares its reducer (`last_write_wins`, `append`, `merge`, or a user-defined callable) as part of the schema. Two nodes writing the same field compose via the field's policy: once, declaratively, instead of duplicated across call sites.
+**Destination-pluggable observability, not anchored to a paid SaaS.**<br>
+`OTelObserver` (in `openarmature[otel]`) emits the OpenTelemetry GenAI semantic conventions (`gen_ai.system`, `gen_ai.request.*`, `gen_ai.response.*`, `gen_ai.usage.*`) that Honeycomb, HyperDX, Phoenix, Datadog APM, Tempo, an open-source Jaeger, or your own OTLP collector all render natively without per-service shims. On top of that, a separate `LangfuseObserver` (in `openarmature[langfuse]`) provides a native mapping for teams who've chosen Langfuse: MIT-licensed, self-hostable, decoupled through a `LangfuseClient` Protocol so swapping it out is a single-file change. No coupling to a closed-source product owned by the framework vendor.
 
-**Subgraphs compose with explicit data seams.**<br>
-Subgraphs run against their own state schema with `inputs` (additive, opt in to share parent fields) and `outputs` (replacement, name exactly what comes back) mappings. Parent fields don't leak in by accident; subgraph fields don't slip out unless declared.
+**The graph either compiles or it never runs.**<br>
+`.compile()` rejects six categories of structural error before `invoke()` is reachable: unreachable nodes, dangling edges, conflicting reducers, no declared entry, mappings to undeclared state fields, multiple outgoing edges from one node. State schemas are frozen Pydantic models validated at every merge boundary. For a 30-node pipeline with conditional routing, the difference between "tests pass" and "tests pass on today's code path" is structural.
 
-**Bad graphs don't compile.**<br>
-Dangling edges, unreachable nodes, conflicting reducers, no declared entry, mappings to undeclared fields, multiple outgoing edges from one node. Six categories of structural error all fail at `.compile()`, not at runtime mid-execution. The graph either constructs cleanly or it doesn't reach `invoke()`.
+**There's a spec, not just code.**<br>
+OpenArmature is defined by a public, language-agnostic [specification](https://github.com/LunarCommand/openarmature-spec) with conformance fixtures every reference implementation must pass. Behavior is bounded by the spec; implementations conform to it. Minor-version surprises around state merge, fan-out collection, or resume semantics live in proposals tracked openly, not in silent code changes between releases.
 
-**The graph engine has no concept of LLMs or tools.**<br>
-Validation, retry, recovery, structured output: those are node-internal or middleware concerns. The same engine runs deterministic ETL pipelines and tool-calling agents; the topology layer doesn't pick a side.
-
-**Determinism is a contract.**<br>
-Same input, same node implementations, same edge functions, same final state, and same observed node-execution order. The spec mandates it; conformance fixtures verify it across every implementation. Replay an audit run and get byte-identical state.
-
-**Checkpoint saves are synchronous-by-contract.**<br>
-The engine awaits each save before advancing. A crash immediately after a `completed` event cannot have lost the corresponding write. Resume mints a fresh `invocation_id` (audit trail) while preserving `correlation_id` (cross-system join key), so a recovered run is traceable as a new attempt without losing the thread to the original request.
-
-**Observability that doesn't double-export.**<br>
-The OpenTelemetry mapping mandates a private `TracerProvider`. That prevents the trap where global-provider auto-instrumentation libraries (OpenInference, Langfuse v3, etc.) emit duplicate spans alongside the framework's. Your spans flow exactly where you point them; no surprise fan-out to vendor backends you didn't configure.
-
-**LLM spans LLM-aware backends can actually read.**<br>
-Each `provider.complete()` call emits a dedicated `openarmature.llm.complete` span carrying both the framework's `openarmature.llm.*` attributes and the cross-vendor OpenTelemetry GenAI semantic conventions (`gen_ai.system`, `gen_ai.request.*`, `gen_ai.response.*`, `gen_ai.usage.*`). Langfuse, Phoenix, Honeycomb's LLM lens — they render generations correctly out of the box, no per-service attribute-mapping shim required. Input/output payload emission is opt-in (`disable_llm_payload=False`), default-off because the payload may contain PII; image bytes are unconditionally redacted at the provider so they never enter the observability stream.
-
-**Native Langfuse mapping, not just OTLP.**<br>
-Alongside the OpenTelemetry mapping, `LangfuseObserver` (in `openarmature[langfuse]`) maps invocations to Langfuse Traces and Observations directly — subgraph hierarchy, per-instance fan-out, and detached-trace mode included. Both observers can run on one graph. Caller-supplied invocation metadata (`invoke(metadata={"tenantId": ...})`) propagates to every backend at once: `openarmature.user.*` span attributes on the OTel side, top-level `trace.metadata` / `observation.metadata` keys on the Langfuse side.
+For the full feature catalog see [openarmature.ai/concepts](https://openarmature.ai/concepts/).
 
 ## Hello World
 
