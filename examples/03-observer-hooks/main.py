@@ -35,6 +35,46 @@ Run with:
     LLM_API_KEY=sk-... uv run python main.py "explain why NASA is returning to the moon with Artemis"
 
 (``--all-extras`` pulls in ``opentelemetry-sdk`` for the OTel observer.)
+
+**Production swap: real OTLP exporter (e.g. HyperDX).**
+
+The example wires ``OTelObserver`` to a ``SimpleSpanProcessor`` +
+``ConsoleSpanExporter`` so every span prints to stdout. That is fine
+for a short-lived demo and wrong for production: synchronous export
+blocks each node boundary, and printing is not ingestion. For a real
+backend (HyperDX, Honeycomb, Tempo, any OTLP-HTTP collector), swap to
+``BatchSpanProcessor`` + ``OTLPSpanExporter`` pointing at your
+collector and supplying its auth header. The HyperDX shape::
+
+    from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
+    from opentelemetry.sdk.trace.export import BatchSpanProcessor
+
+    otel_observer = OTelObserver(
+        span_processor=BatchSpanProcessor(
+            OTLPSpanExporter(
+                endpoint="https://in-otel.hyperdx.io/v1/traces",
+                # HyperDX accepts the API key as a bare ``authorization``
+                # value. Other collectors expect ``Bearer <token>``;
+                # check your destination's docs. The bracket-form
+                # ``os.environ[...]`` is intentional: unlike ``LLM_API_KEY``
+                # (which permits None for unauthenticated local servers),
+                # a missing HyperDX key would silently send unauthenticated
+                # requests, so fail-loud at boot is the right shape.
+                headers={"authorization": os.environ["HYPERDX_API_KEY"]},
+            )
+        ),
+        resource=Resource.create({"service.name": "openarmature-demo-answers"}),
+    )
+
+Same observer call surface; only the processor + exporter change. The
+``OTLPSpanExporter`` lives in the ``opentelemetry-exporter-otlp-proto-http``
+package (not in ``[otel]`` extras yet; install it directly while OA
+gauges demand). Before short-lived processes exit, call
+``await graph.drain()`` (drains the observer's per-invocation event
+queue so spans see their ``completed`` events) and then
+``otel_observer.force_flush()`` (synchronous; pushes
+``BatchSpanProcessor``'s tail through the exporter). The drain + flush
+pair ensures the tail lands before teardown.
 """
 
 from __future__ import annotations
