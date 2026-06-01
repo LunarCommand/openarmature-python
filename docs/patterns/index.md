@@ -33,3 +33,12 @@ docs composing existing primitives.
 - [Bypass if output exists](bypass-if-output-exists.md) —
   short-circuit a node whose external output already exists, via
   middleware.
+- [State migration on resume](state-migration-on-resume.md) — let
+  older in-flight checkpoints resume against an evolved state
+  schema without each node body having to handle multiple shapes.
+- [Caller-supplied trace identifiers](caller-supplied-trace-identifiers.md)
+  — propagate tenant ID / request ID / feature flags into every
+  observability span via `invoke(metadata=...)`.
+- [Custom observer: reconciling started → completed pairs](observer-state-reconciliation.md)
+  — thread per-call state between paired events using a per-
+  invocation dict keyed on the spec's uniqueness tuple.
