@@ -5,6 +5,16 @@ env vars. Skipped in CI and local runs that don't have credentials in
 scope; runs end-to-end against HyperDX Cloud (or any other OTLP-HTTP
 collector) when invoked from a shell with both env vars sourced.
 
+``HYPERDX_OTLP_ENDPOINT`` MUST be the full traces-collector URL
+including the ``/v1/traces`` path suffix, e.g.::
+
+    HYPERDX_OTLP_ENDPOINT=https://in-otel.hyperdx.io/v1/traces
+
+``OTLPSpanExporter`` uses the ``endpoint`` kwarg verbatim and does
+not append the path itself (that auto-append only happens for the
+``OTEL_EXPORTER_OTLP_ENDPOINT`` host-only convention this test does
+not use). A host-only URL POSTs to ``/`` and HyperDX 404s.
+
 The test verifies the production export path the documentation
 recommends (``BatchSpanProcessor`` + ``OTLPSpanExporter``) drains
 cleanly from the local pipeline. The assertion is local-side: the
@@ -27,7 +37,10 @@ import pytest
 # fallback also can't find a target.
 pytestmark = pytest.mark.skipif(
     not (os.environ.get("HYPERDX_API_KEY") and os.environ.get("HYPERDX_OTLP_ENDPOINT")),
-    reason="Requires HYPERDX_API_KEY + HYPERDX_OTLP_ENDPOINT (live HyperDX endpoint)",
+    reason=(
+        "Requires HYPERDX_API_KEY + HYPERDX_OTLP_ENDPOINT (live HyperDX endpoint); "
+        "endpoint MUST include the /v1/traces path suffix"
+    ),
 )
 
 
