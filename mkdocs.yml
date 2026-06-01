@@ -141,6 +141,7 @@ nav:
     - Checkpointing and migration: examples/08-checkpointing-and-migration.md
     - Tool use: examples/09-tool-use.md
     - Langfuse observability: examples/10-langfuse-observability.md
+    - Chat with multimodal: examples/11-chat-with-multimodal.md
   - Patterns:
     - patterns/index.md
     - Parameterized entry point: patterns/parameterized-entry-point.md
