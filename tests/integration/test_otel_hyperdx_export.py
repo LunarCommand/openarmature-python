@@ -60,12 +60,24 @@ async def test_otel_observer_pipeline_drains_with_hyperdx_exporter() -> None:
     from openarmature.graph import END, GraphBuilder, State
     from openarmature.observability.otel import OTelObserver
 
+    # Enforce the documented endpoint shape at runtime. The
+    # ``OTLPSpanExporter`` uses the URL verbatim and does not append
+    # ``/v1/traces`` itself, so a host-only URL POSTs to ``/`` and
+    # HyperDX 404s; the SDK swallows that response and ``force_flush``
+    # still returns True, which would mask a misconfigured env var
+    # behind a passing test.
+    endpoint = os.environ["HYPERDX_OTLP_ENDPOINT"]
+    assert endpoint.endswith("/v1/traces"), (
+        f"HYPERDX_OTLP_ENDPOINT must end with /v1/traces (got {endpoint!r}); "
+        "OTLPSpanExporter uses the URL verbatim and does not append paths."
+    )
+
     # HyperDX accepts the API key as a bare ``authorization`` header
     # value (no ``Bearer`` prefix). Other OTLP collectors that expect
     # ``Bearer <token>`` will need the caller to format the header
     # themselves; this is the documented HyperDX shape.
     exporter = OTLPSpanExporter(
-        endpoint=os.environ["HYPERDX_OTLP_ENDPOINT"],
+        endpoint=endpoint,
         headers={"authorization": os.environ["HYPERDX_API_KEY"]},
     )
 
