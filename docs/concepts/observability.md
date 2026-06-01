@@ -153,8 +153,8 @@ A walk-through:
   instance contains a parallel-branches node). The combination
   `(namespace, branch_name, fan_out_index, attempt_index, phase)`
   uniquely identifies each event source. On the OTel mapping
-  side, an `openarmature.branch_name` span attribute is added in
-  parallel to the existing `openarmature.node.fan_out_index`.
+  side, an `openarmature.node.branch_name` span attribute is added
+  in parallel to the existing `openarmature.node.fan_out_index`.
 
 ## Routing errors and the completed event
 

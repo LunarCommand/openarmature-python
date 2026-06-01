@@ -115,6 +115,35 @@ manager = PromptManager(backend, jinja_undefined=jinja2.Undefined)
 templates that walk nested attributes. Reach for these only when the
 strict default is actively wrong for your workflow.
 
+## Two variants: text and chat
+
+`Prompt` is a discriminated union over `TextPrompt` and `ChatPrompt`:
+
+- A `TextPrompt` carries a single `template: str` and renders to
+  exactly one `UserMessage`. This is the simpler variant and the
+  default for the filesystem backend; reach for it when the prompt
+  is a single user instruction and you don't need role tagging.
+- A `ChatPrompt` carries `chat_template: list[ChatSegment]`. Each
+  segment is either a `ContentSegment` (a role-tagged content
+  block — `system`, `user`, or `assistant`, carrying a text
+  template OR a list of content-block templates for multimodal
+  user messages) or a `PlaceholderSegment` (a slot the caller fills
+  at render time with a `list[Message]`, useful for chat history
+  injection).
+
+`PromptManager.render(prompt, variables, placeholders=...)`
+dispatches on the variant. For `TextPrompt` the `placeholders`
+kwarg is ignored. For `ChatPrompt` each content segment renders
+with the strict-undefined rule applied independently; placeholder
+segments inject their caller-supplied message lists in order.
+
+Backends can return either variant — the `LangfusePromptBackend`
+maps Langfuse text prompts to `TextPrompt` and Langfuse chat
+prompts to `ChatPrompt` with one `ContentSegment` per Langfuse
+chat message. Discriminate at the call site with
+`isinstance(prompt, ChatPrompt)` when you need variant-specific
+behavior; most callers just pass the prompt back into `render()`.
+
 ## Per-prompt sampling parameters
 
 A `Prompt` carries an optional `sampling` field — a `SamplingConfig`
