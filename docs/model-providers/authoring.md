@@ -277,7 +277,7 @@ of:
 
   Inline image bytes MUST be redacted in the provider's
   serialization step before reaching the payload (see
-  [Observability — Inline image
+  [Observability: Inline image
   redaction](../concepts/observability.md#inline-image-redaction-always-on))
   so custom observers consuming `LlmEventPayload` cannot leak raw
   bytes.

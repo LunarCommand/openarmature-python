@@ -1,6 +1,6 @@
 # 10 - Langfuse observability
 
-Send LLM call observability to Langfuse natively — Trace at the top,
+Send LLM call observability to Langfuse natively: Trace at the top,
 Span observations for graph nodes, Generation observations with input,
 output, token usage, model parameters, and a native link back to the
 prompt entity the call rendered from.
@@ -16,7 +16,7 @@ shape as the graph runs.
 The demo's prompt backend stubs a Langfuse-source by attaching a
 sentinel `langfuse_prompt` reference to the rendered prompt. The
 Generation observation reads that reference and links back to the
-prompt entity — exactly what you'd see in a production Langfuse
+prompt entity, exactly what you'd see in a production Langfuse
 dashboard threading "this generation came from prompt v7" without any
 manual wiring at the call site.
 
@@ -28,7 +28,7 @@ manual wiring at the call site.
 - The `LangfuseClient` Protocol decouples the observer from the SDK.
   The bundled `InMemoryLangfuseClient` recorder is the test/demo
   shape; production passes a real `langfuse.Langfuse()` instance (or
-  a thin adapter — see [Reading the output](#reading-the-output)
+  a thin adapter; see [Reading the output](#reading-the-output)
   below).
 - Prompt linkage through
   [`Prompt.observability_entities`](../concepts/prompts.md#backend-keyed-observability-entity-references):
@@ -40,7 +40,7 @@ manual wiring at the call site.
   output content on Generation observations. Default-off is the
   privacy posture; the demo deliberately flips it.
 - `correlation_id` cross-cutting metadata on the Trace and every
-  Observation — the join key if you're also running an OTel observer
+  Observation: the join key if you're also running an OTel observer
   alongside.
 
 ## How to run
@@ -67,7 +67,7 @@ flowchart TD
 
 A single-node graph: fetch the prompt, render with the question, call
 the LLM under `with_active_prompt(...)`, store the response. The
-single node is deliberate — the value is in the captured Trace shape,
+single node is deliberate; the value is in the captured Trace shape,
 not the graph topology.
 
 ## Reading the output
@@ -83,7 +83,7 @@ prompt:   mission-briefing v7
 ─── captured Langfuse trace ─────────────────────────────────
 Trace id=01234567-89ab-...
       name='answer_briefing'
-      metadata={correlation_id='...', entry_node='answer_briefing', spec_version='0.26.0'}
+      metadata={correlation_id='...', entry_node='answer_briefing', spec_version='0.38.0'}
   [span] 'answer_briefing' level=DEFAULT
     metadata={attempt_index=0, correlation_id='...', namespace=['answer_briefing'], step=0}
     [generation] 'openarmature.llm.complete' level=DEFAULT
@@ -106,7 +106,7 @@ Trace id=01234567-89ab-...
   `output`, and the prompt-identity metadata. In a production Langfuse
   dashboard this is what the "Generation" detail view renders.
 - **`prompt_entity_link`** is the value `Prompt.observability_entities['langfuse_prompt']`
-  carried — a sentinel string in this demo, a real Langfuse SDK Prompt
+  carried: a sentinel string in this demo, a real Langfuse SDK Prompt
   object in production. When the backend doesn't surface the reference
   (e.g., a filesystem backend), the link is absent but the
   `metadata.prompt` map (name, version, label, hashes) still appears
@@ -151,7 +151,7 @@ display logic from clobbering the trace's display name when later
 observations land without the attribute set.
 
 Validated against `langfuse>=4.6,<5`. v2.x and v3.x are NOT
-supported — supply your own adapter against the same four-method
+supported; supply your own adapter against the same four-method
 Protocol if you need to stay on an older version.
 
 For prompt linkage: in production, the
@@ -173,6 +173,6 @@ graph.attach_observer(LangfuseObserver(client=langfuse_client))
 
 Their `disable_llm_spans` / `disable_llm_payload` flags are
 independent. The `correlation_id` cross-cutting attribute is the join
-key — find a slow Generation in Langfuse, search for the
+key: find a slow Generation in Langfuse, search for the
 `correlation_id` in OTel logs to see the surrounding infrastructure
 activity.

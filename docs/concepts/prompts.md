@@ -125,7 +125,7 @@ strict default is actively wrong for your workflow.
   is a single user instruction and you don't need role tagging.
 - A `ChatPrompt` carries `chat_template: list[ChatSegment]`. Each
   segment is either a `ContentSegment` (a role-tagged content
-  block — `system`, `user`, or `assistant`, carrying a text
+  block: `system`, `user`, or `assistant`, carrying a text
   template OR a list of content-block templates for multimodal
   user messages) or a `PlaceholderSegment` (a slot the caller fills
   at render time with a `list[Message]`, useful for chat history
@@ -137,7 +137,7 @@ kwarg is ignored. For `ChatPrompt` each content segment renders
 with the strict-undefined rule applied independently; placeholder
 segments inject their caller-supplied message lists in order.
 
-Backends can return either variant — the `LangfusePromptBackend`
+Backends can return either variant: the `LangfusePromptBackend`
 maps Langfuse text prompts to `TextPrompt` and Langfuse chat
 prompts to `ChatPrompt` with one `ContentSegment` per Langfuse
 chat message. Discriminate at the call site with
@@ -146,7 +146,7 @@ behavior; most callers just pass the prompt back into `render()`.
 
 ## Per-prompt sampling parameters
 
-A `Prompt` carries an optional `sampling` field — a `SamplingConfig`
+A `Prompt` carries an optional `sampling` field: a `SamplingConfig`
 sub-record mirroring `RuntimeConfig`'s seven declared fields
 (`temperature`, `max_tokens`, `top_p`, `seed`, `frequency_penalty`,
 `presence_penalty`, `stop_sequences`) plus the extras pass-through
@@ -177,7 +177,7 @@ once at construction, keyed by prompt name).
 
 `PromptManager.fetch(name)` without an explicit `label` consults a
 configured `LabelResolver` and falls back to `"production"`. This
-lets one prompt be A/B-tested or canaried without code changes —
+lets one prompt be A/B-tested or canaried without code changes:
 edit the resolver's data, not the call sites.
 
 ```python
@@ -190,9 +190,9 @@ resolver = MappingLabelResolver({
 })
 manager = PromptManager(backend, label_resolver=resolver)
 
-# Resolver returns "staging" — staging template fetched.
+# Resolver returns "staging", staging template fetched.
 classify = await manager.fetch("experimental_classifier")
-# Resolver returns "production" (the default) — production fetched.
+# Resolver returns "production" (the default), production fetched.
 greet = await manager.fetch("greet")
 # Explicit label bypasses the resolver entirely.
 audit = await manager.fetch("greet", "audit")

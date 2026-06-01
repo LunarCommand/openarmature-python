@@ -105,7 +105,7 @@ wrap that branch's whole subgraph invocation as a unit. Retry
 middleware on a branch retries the **whole branch**: a fresh
 subgraph invocation each time, fresh inner-node execution. The
 wrapping retry's attempt counter propagates to events emitted from
-inner nodes (per graph-engine §6 v0.16.1), so observer events
+inner nodes (per graph-engine §6), so observer events
 inside the branch correctly show `attempt_index` ticking across
 retries.
 

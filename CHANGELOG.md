@@ -6,6 +6,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). The
 
 ## [Unreleased]
 
+### Changed
+
+- **Docs sweep: stale references and em-dash normalization.** Fixed three definite stale references (`spec_version='0.26.0'` in the Langfuse example output now reads `'0.38.0'`; the dangling `v0.16.1` qualifier dropped from the parallel-branches concept page; `compiled.attach_observer` corrected to `graph.attach_observer` in `non-obvious-shapes.md` for variable-name consistency with the rest of the docs). Swept em dashes out of the user-facing docs (130 instances across 17 files) per the convention set during the patterns expansion. mkdocs strict build clean; no broken intra-docs links.
+
 ### Added
 
 - **vLLM production deployment notes.** `docs/model-providers/vllm.md` grows a "Production deployment" section covering the `VLLM_HTTP_TIMEOUT_KEEP_ALIVE` gotcha (vLLM's stock 5s uvicorn keep-alive lapses pooled OA-side httpx connections and surfaces as `ProviderUnavailable`; widen to roughly 300s), a systemd unit skeleton, and the three throughput knobs that interact with OA's shared connection pool (`--max-model-len`, `--max-num-seqs`, `--gpu-memory-utilization`). The existing "Tool calling" section grows a `--tool-call-parser` family table verified against vLLM's docs (Llama 3.x / Llama 4 / Mistral / Hermes / Qwen3 / DeepSeek V3 / GPT-OSS), plus explicit "not supported here" callouts for Anthropic / Gemini (proprietary cloud) and mainstream Gemma (no vLLM parser).

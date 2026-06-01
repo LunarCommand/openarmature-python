@@ -117,7 +117,7 @@ Field framing worth getting right:
   per-instance entry carries an explicit `result_is_error` boolean
   that discriminates success contributions (roll forward into
   `target_field`) from `collect`-mode error contributions (roll
-  forward into `errors_field`) — the engine reads the explicit field
+  forward into `errors_field`). The engine reads the explicit field
   on resume rather than inferring routing from the shape of `result`.
   Empty tuple when no fan-outs are in flight. See
   [Resume semantics](fan-out.md#resume-semantics) on the fan-out
@@ -222,7 +222,7 @@ deserializes the result into your current state class.
 
 **Canonical source for `schema_version`.** The framework reads
 `schema_version` from the state class declared at graph construction
-time — the class passed to `GraphBuilder(...)`. If you pass a State
+time: the class passed to `GraphBuilder(...)`. If you pass a State
 subclass instance at runtime whose `schema_version` shadows the
 declared class's value, the saved record still carries the declared
 class's value. This rule keeps every save site within an invocation

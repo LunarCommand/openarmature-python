@@ -81,7 +81,7 @@ per-fan-out-instance, depending on the scope of the bypass.
   addressable output, downloading a file).
 - The "does it exist" check is cheap (a filesystem `stat`, a
   Redis `EXISTS`, a database key lookup).
-- You're OK with the node being skipped silently — the partial
+- You're OK with the node being skipped silently; the partial
   update returned by the middleware is indistinguishable from a
   successful node run.
 
@@ -91,7 +91,7 @@ per-fan-out-instance, depending on the scope of the bypass.
   the node. The cost model inverts; the pattern is wrong.
 - You need to *force* re-execution on demand (cache invalidation).
   Add a `force_rerun: bool` field on state that the middleware
-  consults — but if you're doing that often, the bypass logic
+  consults. But if you're doing that often, the bypass logic
   belongs in the node itself, gated on a state field, not in
   middleware.
 - The cached output's freshness depends on inputs the middleware
@@ -101,10 +101,10 @@ per-fan-out-instance, depending on the scope of the bypass.
 
 ## Cross-references
 
-- [Middleware](https://openarmature.ai/concepts/middleware/) — middleware shape, the
+- [Middleware](https://openarmature.ai/concepts/middleware/): middleware shape, the
   four registration sites, composition.
 - Spec: [pipeline-utilities](https://openarmature.org/capabilities/pipeline-utilities/)
 
 This pattern is explicitly called out in proposal 0008's
 *Alternatives considered* section as a userland recipe rather than
-spec'd behavior — this page is its canonical home.
+spec'd behavior; this page is its canonical home.

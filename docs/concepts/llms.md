@@ -99,42 +99,42 @@ async def startup() -> None:
     try:
         await provider.ready()
     except ProviderAuthentication:
-        # Bad API key — fail fast at boot.
+        # Bad API key: fail fast at boot.
         raise
     except ProviderInvalidModel:
-        # Bound model isn't served by this endpoint — same.
+        # Bound model isn't served by this endpoint: same.
         raise
     except ProviderUnavailable:
-        # Endpoint is down or unreachable — fail fast too.
+        # Endpoint is down or unreachable: fail fast too.
         raise
 ```
 
 `OpenAIProvider` ships three probe shapes selected via the
 `readiness_probe` constructor kwarg:
 
-- **`"chat_completions"`** (default) — issues `POST /v1/chat/completions`
+- **`"chat_completions"`** (default): issues `POST /v1/chat/completions`
   with a `max_tokens=1` body. Actually exercises the inference wire
   path. Strongest signal at the cost of one prompt's worth of tokens
   on cloud endpoints.
-- **`"models"`** — issues `GET /v1/models` and verifies the bound
+- **`"models"`**: issues `GET /v1/models` and verifies the bound
   model appears in the catalog. Cheaper (no completion billing) but
   blind to proxy wire-mismatch cases: some OpenAI-compatible proxies
   (Bifrost is the motivating example) serve `/v1/models` correctly
   while 405'ing the completions endpoint, so a green catalog probe
   doesn't prove `complete()` will work.
-- **`"both"`** — runs the catalog probe first (cheap fail-fast on
+- **`"both"`**: runs the catalog probe first (cheap fail-fast on
   model-not-in-catalog with the cleaner `seen_ids` diagnostic), then
   the chat probe. Strongest signal at double the round-trip cost.
 
 ```python
-# Local server (LM Studio, vLLM, llama.cpp) — chat probe is free.
+# Local server (LM Studio, vLLM, llama.cpp): chat probe is free.
 provider = OpenAIProvider(
     base_url="http://localhost:8000",
     model="qwen2.5-coder",
     readiness_probe="chat_completions",  # default
 )
 
-# Cloud endpoint, cost-sensitive — opt back into the catalog-only probe.
+# Cloud endpoint, cost-sensitive: opt back into the catalog-only probe.
 provider = OpenAIProvider(
     base_url="https://api.openai.com",
     model="gpt-4o-mini",
@@ -342,14 +342,14 @@ shape.
 By default the model decides whether and which tools to call.
 `tool_choice` constrains that decision per call. Four modes:
 
-- `"auto"` — the model decides. Equivalent to omitting the parameter
+- `"auto"`: the model decides. Equivalent to omitting the parameter
   when `tools` is non-empty.
-- `"required"` — the model MUST call at least one tool. Useful for
+- `"required"`: the model MUST call at least one tool. Useful for
   routing nodes that branch on tool selection.
-- `"none"` — the model MUST NOT call tools, even if `tools` is
+- `"none"`: the model MUST NOT call tools, even if `tools` is
   supplied. Useful for guarded LLM calls or for explicitly disabling
   tool-calling without rebuilding a tools-less request.
-- `ForceTool(name=...)` — the model MUST call the named tool exactly.
+- `ForceTool(name=...)`: the model MUST call the named tool exactly.
 
 Pre-send validation catches the three failure modes (`required` with
 empty tools, `ForceTool` with empty tools, `ForceTool.name` not in
@@ -371,7 +371,7 @@ response = await provider.complete(
 )
 ```
 
-Not all providers honor `tool_choice` — confirm with your provider's
+Not all providers honor `tool_choice`; confirm with your provider's
 documentation. The `OpenAIProvider` maps the spec shape onto OpenAI's
 wire shape per the §8.1.1 mapping table. Whether the model actually
 honored the constraint is observable from the returned

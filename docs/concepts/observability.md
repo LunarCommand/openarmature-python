@@ -244,16 +244,16 @@ or missing log entries.
 ### Bounded drain (optional timeout)
 
 `drain()` accepts an optional `timeout` parameter (non-negative
-seconds) — `await compiled.drain(timeout=5.0)` bounds the wait at five
+seconds): `await compiled.drain(timeout=5.0)` bounds the wait at five
 seconds. When the deadline fires, in-flight workers are cancelled
-cleanly so the compiled graph stays usable for subsequent invocations
-— partial delivery state from one drain does NOT leak into the next.
+cleanly so the compiled graph stays usable for subsequent invocations;
+partial delivery state from one drain does NOT leak into the next.
 
 The returned `DrainSummary` carries:
 
-- `timeout_reached: bool` — `True` only when the timeout actually
+- `timeout_reached: bool`: `True` only when the timeout actually
   fired. A drain that finishes before the deadline reports `False`.
-- `undelivered_count: int` — events dispatched but not fully delivered
+- `undelivered_count: int`: events dispatched but not fully delivered
   to every subscribed observer before the deadline. Always `0` when
   `timeout_reached is False`.
 
@@ -305,8 +305,8 @@ the IDs explicitly.
 ## Caller-supplied invocation metadata
 
 `correlation_id` is one string; if you also need to attach
-business-domain identifiers — tenant IDs, request IDs, feature
-flags, A/B cohort labels — pass them as a structured mapping at
+business-domain identifiers (tenant IDs, request IDs, feature
+flags, A/B cohort labels), pass them as a structured mapping at
 `invoke()` time:
 
 ```python
@@ -324,7 +324,7 @@ await compiled.invoke(
 Every observability backend picks the entries up:
 
 - **OTel** emits each entry as an `openarmature.user.<key>`
-  cross-cutting span attribute on every span — invocation, node,
+  cross-cutting span attribute on every span: invocation, node,
   subgraph wrapper, fan-out instance, LLM provider, retry attempt.
   Backends that consume OTel attributes (Phoenix / Arize, Honeycomb,
   Datadog APM, HyperDX, Grafana Tempo, custom collectors) see them
@@ -345,7 +345,7 @@ Two rules:
   `int`, `float`, `bool`) or homogeneous arrays of those types.
   `None`, nested objects, and mixed-type arrays are rejected.
 
-Violations raise `ValueError` synchronously — no spans emitted, no
+Violations raise `ValueError` synchronously: no spans emitted, no
 work runs.
 
 ### Adding entries mid-invocation
@@ -371,7 +371,7 @@ node's `started`, any LLM call inside) pick up the new entries.
 **Per-async-context scoping.** The metadata mapping lives in a
 `ContextVar`, which Python copies on async-task creation. Fan-out
 instances and parallel-branches each receive their own copy at
-dispatch time — an instance that calls `set_invocation_metadata`
+dispatch time; an instance that calls `set_invocation_metadata`
 does NOT leak its augmentation to sibling instances. This is the
 canonical pattern for per-instance identifiers:
 
@@ -472,7 +472,7 @@ Cross-vendor attribute names every LLM-aware backend reads
 (Langfuse, Phoenix, Honeycomb's LLM lens, OpenInference-aware
 tools). Emitted alongside the OA namespace:
 
-- `gen_ai.system` — `"openai"` by default; override per provider
+- `gen_ai.system`: `"openai"` by default; override per provider
   instance to `"vllm"` / `"lm_studio"` / `"llama_cpp"` / etc. when
   the OpenAI Chat Completions wire format is hitting a non-OpenAI
   endpoint:
@@ -485,16 +485,16 @@ tools). Emitted alongside the OA namespace:
   )
   ```
 
-- `gen_ai.request.model` / `gen_ai.response.model` — the bound
+- `gen_ai.request.model` / `gen_ai.response.model`: the bound
   model and (when the provider returns one) the more-specific
   identifier in the response body.
 - `gen_ai.request.temperature` / `max_tokens` / `top_p` / `seed` /
-  `frequency_penalty` / `presence_penalty` / `stop_sequences` —
+  `frequency_penalty` / `presence_penalty` / `stop_sequences`:
   only emitted for fields the caller actually set; absence on
   the span means "not supplied," distinct from a zero value.
-- `gen_ai.usage.input_tokens` / `output_tokens` — token counts.
-- `gen_ai.response.finish_reasons` — single-element string array.
-- `gen_ai.response.id` — when the provider returns one.
+- `gen_ai.usage.input_tokens` / `output_tokens`: token counts.
+- `gen_ai.response.finish_reasons`: single-element string array.
+- `gen_ai.response.id`: when the provider returns one.
 
 Disable the GenAI semconv set with `OTelObserver(disable_genai_semconv=True)`
 when an external auto-instrumentation library (OpenInference,
@@ -515,12 +515,12 @@ observer = OTelObserver(
 
 This surfaces three attributes:
 
-- `openarmature.llm.input.messages` — JSON-encoded message array
+- `openarmature.llm.input.messages`: JSON-encoded message array
   (the spec §3 message shape: `{role, content, tool_calls?, …}`).
-- `openarmature.llm.output.content` — the assistant's response
+- `openarmature.llm.output.content`: the assistant's response
   content string verbatim. Omitted for tool-call-only responses
   with empty content.
-- `openarmature.llm.request.extras` — JSON-encoded `RuntimeConfig`
+- `openarmature.llm.request.extras`: JSON-encoded `RuntimeConfig`
   extras bag (provider-specific pass-through fields like
   `repetition_penalty` for vLLM, or `top_k` for HuggingFace
   endpoints). Omitted when empty.
@@ -543,7 +543,7 @@ that fits within `cap - len(marker)` bytes followed by the marker:
 ```
 
 where M is the pre-truncation byte length. The marker is appended
-outside any JSON encoding — a truncated attribute is *not* parseable
+outside any JSON encoding, so a truncated attribute is *not* parseable
 JSON, which is the clean signal backend code can use to detect
 truncation without a separate flag.
 
@@ -563,7 +563,7 @@ provider, *before* the payload reaches the observer:
 
 The `media_type` and `detail` fields are preserved at the image-block
 level (per llm-provider §3.1.2); only `source` is replaced. URL-form
-images pass through unchanged — the URL is a short string and is
+images pass through unchanged: the URL is a short string and is
 informative for trace readers.
 
 Redaction is **not** gated by `disable_llm_payload` and is **not**
@@ -626,7 +626,7 @@ observer = OTelObserver(
 ```
 
 Each enricher receives the live `Span` plus the `NodeEvent` that
-triggered the close (or `None` on synthetic close sites — subgraph
+triggered the close (or `None` on synthetic close sites: subgraph
 dispatch, detached root, fan-out instance, invocation span,
 shutdown drain). Setting attributes inside this hook works
 correctly; doing it from a `SpanProcessor.on_end` callback does
@@ -668,9 +668,9 @@ full pattern.
 
 `OTelObserver.shutdown()` calls `provider.shutdown()` on the private
 `TracerProvider`, which per OTel SDK contract flushes every
-registered span processor. Under unusual teardown orderings — for
+registered span processor. Under unusual teardown orderings (for
 example, FastAPI's `TestClient` teardown that closes the event loop
-before a `BatchSpanProcessor`'s export thread finishes — spans can
+before a `BatchSpanProcessor`'s export thread finishes), spans can
 appear dropped. Two workarounds:
 
 - Call `observer._provider.force_flush(timeout_millis=...)`
@@ -682,7 +682,7 @@ appear dropped. Two workarounds:
 ## Langfuse mapping (opt-in)
 
 A second sibling observer maps the same `NodeEvent` stream onto
-Langfuse's native Trace + Observation data model — Traces at the
+Langfuse's native Trace + Observation data model: Traces at the
 top, Span observations for graph nodes, Generation observations for
 LLM calls. Use it instead of (or alongside) the OTel observer when
 your trace UI is Langfuse and you want first-class Generation
@@ -699,7 +699,7 @@ observer = LangfuseObserver(client=client)
 graph.attach_observer(observer)
 ```
 
-The `client` is anything matching the `LangfuseClient` Protocol —
+The `client` is anything matching the `LangfuseClient` Protocol:
 the bundled `InMemoryLangfuseClient` (used by the conformance
 harness, useful for unit tests), or a real `langfuse.Langfuse()`
 instance wrapped in `LangfuseSDKAdapter` for production. Install
@@ -749,7 +749,7 @@ for a runnable demo.
     matching the `LangfuseClient` Protocol's four methods.
 
     A runtime `isinstance(adapter, LangfuseClient)` check ships in
-    the unit suite — if a future v4 patch breaks the Protocol's
+    the unit suite, so if a future v4 patch breaks the Protocol's
     surface, the test fails loudly.
 
 ### What Langfuse sees
@@ -772,7 +772,7 @@ for a runnable demo.
 
 ### Payload + truncation
 
-`disable_llm_payload` mirrors the OTel observer's flag — defaults
+`disable_llm_payload` mirrors the OTel observer's flag and defaults
 to `True` for the same privacy reason. Flip to `False` to populate
 `generation.input` / `output` / `metadata.request_extras` from the
 LLM event payload.
@@ -804,7 +804,7 @@ the Generation observation links to that entity natively (spec
 
 The two observers are independent §6 event consumers and can be
 attached together. They share the `correlation_id` as the
-cross-backend join key — find a slow Generation in Langfuse, search
+cross-backend join key: find a slow Generation in Langfuse, search
 for its `correlation_id` in OTel logs, see the surrounding
 infrastructure activity.
 

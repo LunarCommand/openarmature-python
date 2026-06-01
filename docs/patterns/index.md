@@ -4,9 +4,9 @@ Recipes for things people keep asking the framework to do but
 that compose cleanly from existing primitives.
 
 The split between [Concepts](../concepts/index.md) and Patterns is
-intentional: Concepts explain *what OpenArmature is* — typed state,
-nodes, edges, middleware, checkpointing, observers. Patterns
-explain *ways to use it* — opinionated shapes for common
+intentional: Concepts explain *what OpenArmature is* (typed state,
+nodes, edges, middleware, checkpointing, observers). Patterns
+explain *ways to use it*: opinionated shapes for common
 downstream questions like "how do I run an agent loop?" or "how do
 I skip work that's already been done?".
 
@@ -18,27 +18,27 @@ I skip work that's already been done?".
   them?" → look here.
 
 Patterns are user-level recipes, not framework contracts. New
-patterns can be added without spec coordination — they're how-to
+patterns can be added without spec coordination; they're how-to
 docs composing existing primitives.
 
 ## The catalog
 
-- [Parameterized entry point](parameterized-entry-point.md) —
+- [Parameterized entry point](parameterized-entry-point.md):
   start the graph at an arbitrary node via state-driven routing.
-- [Tool dispatch as node](tool-dispatch-as-node.md) — model an
+- [Tool dispatch as node](tool-dispatch-as-node.md): model an
   agent tool-call loop as a graph cycle.
-- [Session as checkpoint resume](session-as-checkpoint-resume.md) —
+- [Session as checkpoint resume](session-as-checkpoint-resume.md):
   carry multi-turn agent state across turns using the existing
   checkpointer.
-- [Bypass if output exists](bypass-if-output-exists.md) —
+- [Bypass if output exists](bypass-if-output-exists.md):
   short-circuit a node whose external output already exists, via
   middleware.
-- [State migration on resume](state-migration-on-resume.md) — let
+- [State migration on resume](state-migration-on-resume.md): let
   older in-flight checkpoints resume against an evolved state
   schema without each node body having to handle multiple shapes.
-- [Caller-supplied trace identifiers](caller-supplied-trace-identifiers.md)
-  — propagate tenant ID / request ID / feature flags into every
+- [Caller-supplied trace identifiers](caller-supplied-trace-identifiers.md):
+  propagate tenant ID / request ID / feature flags into every
   observability span via `invoke(metadata=...)`.
-- [Custom observer: reconciling started → completed pairs](observer-state-reconciliation.md)
-  — thread per-call state between paired events using a per-
+- [Custom observer: reconciling started → completed pairs](observer-state-reconciliation.md):
+  thread per-call state between paired events using a per-
   invocation dict keyed on the spec's uniqueness tuple.
