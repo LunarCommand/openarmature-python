@@ -132,7 +132,7 @@ spec-reserved key in flat Langfuse `trace.metadata`.
 
 - [Observability concept page](../concepts/observability.md): how
   OTel attributes and Langfuse metadata propagate.
-- [`examples/10-langfuse-observability`](../examples/10-langfuse-observability.md):
+- [`examples/langfuse-observability`](../examples/langfuse-observability.md):
   runnable example exercising the metadata propagation path.
 - Spec: [observability](https://openarmature.org/capabilities/observability/),
   the propagation contract for caller-supplied metadata.

@@ -334,7 +334,7 @@ Wiring the loop as a graph cycle: a `call_llm` node, a
 to `call_llm` when `tool_calls` are present and forward to a
 termination node when they aren't. A turn cap on the routing function
 prevents runaway loops on a model that stays in tool-calling forever.
-See [`09 - Tool use`](../examples/09-tool-use.md) for the runnable
+See [`09 - Tool use`](../examples/tool-use.md) for the runnable
 shape.
 
 ### Controlling tool-call behavior with `tool_choice`
@@ -591,10 +591,10 @@ classifier won't do this for them.
 - [API reference: `openarmature.llm`](../reference/llm.md) for the
   full surface: message types, `Response`, `RuntimeConfig`, every
   error class, validation helpers.
-- [Examples: 00 - Hello, world](../examples/00-hello-world.md) for a
+- [Examples: 00 - Hello, world](../examples/hello-world.md) for a
   runnable graph exercising both `response_schema` forms in one
   pipeline.
-- [Examples: 09 - Tool use](../examples/09-tool-use.md) for the
+- [Examples: 09 - Tool use](../examples/tool-use.md) for the
   agent-loop pattern with two local tools.
-- [Examples: 07 - Multimodal prompt](../examples/07-multimodal-prompt.md)
+- [Examples: 07 - Multimodal prompt](../examples/multimodal-prompt.md)
   for content blocks alongside versioned prompts.

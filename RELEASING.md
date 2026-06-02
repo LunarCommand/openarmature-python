@@ -112,7 +112,7 @@ Minimum smoke set:
 
 - [ ] Version string matches the rc tag.
 - [ ] At least one example runs to completion against a real LLM
-      endpoint (`examples/00-hello-world/main.py` is the quickest).
+      endpoint (`examples/hello-world/main.py` is the quickest).
 - [ ] The optional `[otel]` extra installs cleanly and
       `import openarmature.observability.otel` succeeds.
 - [ ] If any docs changed in this release, the live docs site

@@ -648,7 +648,7 @@ spec-reserved key in flat Langfuse `trace.metadata`.
 
 - [Observability concept page](https://openarmature.ai/concepts/observability/): how
   OTel attributes and Langfuse metadata propagate.
-- [`examples/10-langfuse-observability`](https://openarmature.ai/examples/10-langfuse-observability/):
+- [`examples/langfuse-observability`](https://openarmature.ai/examples/langfuse-observability/):
   runnable example exercising the metadata propagation path.
 - Spec: [observability](https://openarmature.org/capabilities/observability/),
   the propagation contract for caller-supplied metadata.
@@ -1001,7 +1001,7 @@ state and the session table holds the join keys.
   `resume_invocation`, schema migration.
 - [State and reducers](https://openarmature.ai/concepts/state-and-reducers/): `merge`
   and `append` reducer strategies.
-- [`examples/08-checkpointing-and-migration`](https://openarmature.ai/examples/08-checkpointing-and-migration/):
+- [`examples/checkpointing-and-migration`](https://openarmature.ai/examples/checkpointing-and-migration/):
   single-resume baseline.
 - Spec: [pipeline-utilities](https://openarmature.org/capabilities/pipeline-utilities/)
 
@@ -1229,7 +1229,7 @@ The `MAX_TURNS` cap prevents runaway loops; the conditional edge
 short-circuits to `present` when the cap is hit or when the model
 returns no `tool_calls`.
 
-See [`examples/09-tool-use`](https://openarmature.ai/examples/09-tool-use/) for a
+See [`examples/tool-use`](https://openarmature.ai/examples/tool-use/) for a
 runnable version with full tool definitions, defensive handling
 for malformed `ToolCall.arguments`, and trace output.
 
@@ -1263,7 +1263,7 @@ for malformed `ToolCall.arguments`, and trace output.
   contract.
 - [State and reducers](https://openarmature.ai/concepts/state-and-reducers/):
   `append` reducer semantics.
-- [`examples/09-tool-use`](https://openarmature.ai/examples/09-tool-use/): runnable
+- [`examples/tool-use`](https://openarmature.ai/examples/tool-use/): runnable
   reference implementation.
 - Spec: [llm-provider](https://openarmature.org/capabilities/llm-provider/)
 
@@ -1454,19 +1454,19 @@ If a parent field is populated by BOTH direct node writes AND fan-out collection
 
 _Runnable example programs shipped in the source tree at `examples/`. The full code is not bundled here (each example is 300+ lines); read the file at the listed path to see the canonical shape for that use case._
 
-- **`examples/00-hello-world/main.py`** — Hello-world demo: a 3-node graph where each node makes an LLM call with structured output. Classify a query, then either plan research or write a one-sentence summary.
-- **`examples/01-routing-and-subgraphs/main.py`** — openarmature demo: conditional routing + subgraph with a custom projection.
-- **`examples/02-explicit-subgraph-mapping/main.py`** — openarmature demo: same compiled subgraph reused at two sites in one parent graph, each site with its own ExplicitMapping.
-- **`examples/03-observer-hooks/main.py`** — openarmature demo: observer hooks for structured logging, per-call metrics, and OTel spans.
-- **`examples/04-nested-subgraphs/main.py`** — openarmature demo: question answering against a tiny document corpus, with two levels of subgraph nesting.
-- **`examples/05-fan-out-with-retry/main.py`** — openarmature demo: summarize a batch of lunar-mission headlines in parallel, with per-headline retries and timing.
-- **`examples/06-parallel-branches/main.py`** — openarmature demo: enrich a lunar-mission news article with three independent analyses running concurrently.
-- **`examples/07-multimodal-prompt/main.py`** — openarmature demo: two independent analyses of a lunar-mission photograph using versioned prompt templates, a fallback prompt backend, and a multimodal user message.
-- **`examples/08-checkpointing-and-migration/main.py`** — openarmature demo: a lunar-mission planning pipeline that survives a mid-pipeline crash and later resumes under an upgraded state schema.
-- **`examples/09-tool-use/main.py`** — openarmature demo: a lunar-mission assistant that calls local Python functions as tools to answer fact and physics questions about Apollo / Artemis missions.
-- **`examples/10-langfuse-observability/main.py`** — openarmature demo: Langfuse observer + prompt linkage on a lunar mission Q&A pipeline.
-- **`examples/11-chat-with-multimodal/main.py`** — openarmature demo: multi-turn chat with conversation memory and a multimodal turn, using ChatPrompt + PlaceholderSegment.
-- **`examples/12-production-observability/main.py`** — openarmature demo: production observability with dual OTel + Langfuse observers, caller hooks for trace.input/output, and the canonical TimingMiddleware.
+- **`examples/chat-with-multimodal/main.py`** — openarmature demo: multi-turn chat with conversation memory and a multimodal turn, using ChatPrompt + PlaceholderSegment.
+- **`examples/checkpointing-and-migration/main.py`** — openarmature demo: a lunar-mission planning pipeline that survives a mid-pipeline crash and later resumes under an upgraded state schema.
+- **`examples/explicit-subgraph-mapping/main.py`** — openarmature demo: same compiled subgraph reused at two sites in one parent graph, each site with its own ExplicitMapping.
+- **`examples/fan-out-with-retry/main.py`** — openarmature demo: summarize a batch of lunar-mission headlines in parallel, with per-headline retries and timing.
+- **`examples/hello-world/main.py`** — Hello-world demo: a 3-node graph where each node makes an LLM call with structured output. Classify a query, then either plan research or write a one-sentence summary.
+- **`examples/langfuse-observability/main.py`** — openarmature demo: Langfuse observer + prompt linkage on a lunar mission Q&A pipeline.
+- **`examples/multimodal-prompt/main.py`** — openarmature demo: two independent analyses of a lunar-mission photograph using versioned prompt templates, a fallback prompt backend, and a multimodal user message.
+- **`examples/nested-subgraphs/main.py`** — openarmature demo: question answering against a tiny document corpus, with two levels of subgraph nesting.
+- **`examples/observer-hooks/main.py`** — openarmature demo: observer hooks for structured logging, per-call metrics, and OTel spans.
+- **`examples/parallel-branches/main.py`** — openarmature demo: enrich a lunar-mission news article with three independent analyses running concurrently.
+- **`examples/production-observability/main.py`** — openarmature demo: production observability with dual OTel + Langfuse observers, caller hooks for trace.input/output, and the canonical TimingMiddleware.
+- **`examples/routing-and-subgraphs/main.py`** — openarmature demo: conditional routing + subgraph with a custom projection.
+- **`examples/tool-use/main.py`** — openarmature demo: a lunar-mission assistant that calls local Python functions as tools to answer fact and physics questions about Apollo / Artemis missions.
 
 ## Discovery cross-references
 
