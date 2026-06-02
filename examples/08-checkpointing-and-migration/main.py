@@ -358,13 +358,20 @@ async def main() -> None:
             print(f"    completed nodes:        {completed_node_names}")
             print()
 
-            # Second attempt: resume the same invocation. The engine
-            # reads the saved record, skips define_objective (its
+            # Second attempt: resume from the pre-crash record. The
+            # engine reads the saved record, skips define_objective (its
             # position is in completed_positions), retries size_crew
             # (now succeeds because _size_crew_attempt_count is past 1),
             # then runs draft_timeline to END. The user-supplied state
             # argument is a placeholder; the engine ignores it on resume
             # and starts from the saved record's state instead.
+            #
+            # Important: each invoke() mints its OWN invocation_id, even
+            # on resume. The pre-crash record stays under the original
+            # id; the resumed attempt's new checkpoints (size_crew +
+            # draft_timeline completions) save under a fresh id. After
+            # the resume we re-query to capture that new id, which is
+            # the one phase 2 needs as its resume target.
             print("  second attempt (resume from saved invocation):")
             final_v1 = await graph_v1.invoke(
                 MissionPlanStateV1(destination=destination),
@@ -372,10 +379,14 @@ async def main() -> None:
             )
             await graph_v1.drain()
 
-            print(f"    objective:        {final_v1.objective}")
-            print(f"    crew_size:        {final_v1.crew_size}")
-            print(f"    timeline:         {final_v1.timeline}")
-            print(f"    trace:            {final_v1.trace}")
+            resume_summaries = list(await checkpointer.list(CheckpointFilter(correlation_id=run_id)))
+            resumed_invocation_id = resume_summaries[-1].invocation_id
+
+            print(f"    objective:              {final_v1.objective}")
+            print(f"    crew_size:              {final_v1.crew_size}")
+            print(f"    timeline:               {final_v1.timeline}")
+            print(f"    trace:                  {final_v1.trace}")
+            print(f"    resumed invocation_id:  {resumed_invocation_id}")
             print()
             print(
                 "  Each node name appears exactly once across two invoke() "
@@ -396,15 +407,20 @@ async def main() -> None:
             print()
 
             graph_v2 = build_graph(checkpointer)
-            # Resume from the (crash-survived, then completed) v1
-            # invocation. The engine reads the saved record, applies
-            # migrate_v1_to_v2, re-deserializes against
-            # MissionPlanStateV2, and continues at the first uncompleted
-            # node (assess_risks - the v1 pipeline's three nodes are all
-            # in completed_positions, the new v2 node is not).
+            # Resume from the post-crash, post-resume completed record
+            # (resumed_invocation_id), NOT the pre-crash partial record
+            # (invocation_id). The pre-crash record only has
+            # define_objective in completed_positions; resuming from it
+            # would re-run size_crew + draft_timeline, defeating the
+            # "completed v1 then migrate" narrative. The engine reads
+            # the resumed-id record, applies migrate_v1_to_v2,
+            # re-deserializes against MissionPlanStateV2, and continues
+            # at the first uncompleted node (assess_risks - the v1
+            # pipeline's three nodes are all in completed_positions on
+            # this record, the new v2 node is not).
             final_v2 = await graph_v2.invoke(
                 MissionPlanStateV2(destination=destination),
-                resume_invocation=invocation_id,
+                resume_invocation=resumed_invocation_id,
             )
             await graph_v2.drain()
 

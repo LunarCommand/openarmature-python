@@ -64,6 +64,14 @@ migration runs once on load, and execution continues at
   node. The retried node runs from a clean slate against the
   loaded state - whatever transient condition caused the previous
   failure can resolve cleanly.
+- **Each `invoke()` mints its own `invocation_id`, even on resume.**
+  The pre-crash record stays under the original id; the resumed
+  attempt's new checkpoints save under a fresh id. Phase 2's resume
+  target is the *resumed attempt's* id (the post-resume completed
+  record), not the original id (the pre-crash partial record).
+  The example re-queries `CheckpointFilter(correlation_id=run_id)`
+  after the phase 1 resume completes to capture the new id; the
+  shared `correlation_id` is the cross-attempt join key.
 - **[`State.schema_version`](../concepts/checkpointing.md)** as a
   `ClassVar[str]` declaration. Empty string opts the class out of
   migration support; any non-empty value opts it in.
@@ -140,10 +148,11 @@ Phase 1 - invoke v1 graph; size_crew crashes; resume picks up
     completed nodes:        ['define_objective']
 
   second attempt (resume from saved invocation):
-    objective:        <objective sentence>
-    crew_size:        4
-    timeline:         <timeline sentence>
-    trace:            ['define_objective', 'size_crew', 'draft_timeline']
+    objective:              <objective sentence>
+    crew_size:              4
+    timeline:               <timeline sentence>
+    trace:                  ['define_objective', 'size_crew', 'draft_timeline']
+    resumed invocation_id:  <uuid-B, different from the pre-crash uuid above>
 
   Each node name appears exactly once across two invoke() calls.
   define_objective is in trace from the first attempt (its append
@@ -184,6 +193,19 @@ Phase 2 - invoke v2 graph with resume; v1->v2 migration runs
   `record.completed_positions` (a tuple of `NodePosition` entries
   carrying namespace, node_name, step, attempt_index) down to
   just the node names for display.
+- **`saved invocation_id` and `resumed invocation_id` are
+  different.** Each `invoke()` mints a fresh `invocation_id`,
+  including the resumed call. The pre-crash record (one completed
+  node) stays under the original id; the resumed attempt's
+  checkpoints (size_crew + draft_timeline completions) save under
+  the new id. The cross-attempt join key that ties them together
+  is `correlation_id` (here: `demo-mission-plan-1`), supplied by
+  the caller on the first invoke and preserved across the resume.
+  Phase 2's `resume_invocation=` target is the resumed attempt's
+  id, NOT the original; resuming from the original would reload
+  the pre-crash partial record and re-run `size_crew` +
+  `draft_timeline`, defeating the "completed v1 then migrate"
+  story.
 - **`trace: ['define_objective', 'size_crew', 'draft_timeline']`**
   after the resume is the cross-attempt continuity proof. The
   resumed invoke starts from the saved state (so `trace` already
