@@ -1,5 +1,8 @@
 # Nested subgraphs
 
+!!! info "Source"
+    [https://github.com/LunarCommand/openarmature-python/blob/main/examples/nested-subgraphs/main.py](https://github.com/LunarCommand/openarmature-python/blob/main/examples/nested-subgraphs/main.py){target="_blank" rel="noopener"}
+
 Question answering against a tiny baked-in document corpus, with
 two levels of subgraph nesting: outer coordinator, middle doc-QA,
 inner section-extract.

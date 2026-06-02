@@ -1,5 +1,8 @@
 # Tool use
 
+!!! info "Source"
+    [https://github.com/LunarCommand/openarmature-python/blob/main/examples/tool-use/main.py](https://github.com/LunarCommand/openarmature-python/blob/main/examples/tool-use/main.py){target="_blank" rel="noopener"}
+
 A lunar-mission assistant that calls local Python tools to answer
 questions mixing fact recall and physics arithmetic about Apollo
 and Artemis missions.

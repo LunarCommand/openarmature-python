@@ -1,5 +1,8 @@
 # Explicit subgraph mapping
 
+!!! info "Source"
+    [https://github.com/LunarCommand/openarmature-python/blob/main/examples/explicit-subgraph-mapping/main.py](https://github.com/LunarCommand/openarmature-python/blob/main/examples/explicit-subgraph-mapping/main.py){target="_blank" rel="noopener"}
+
 Compare two topics by running the *same* compiled analysis subgraph
 on each, with each call site writing into disjoint parent fields.
 This is the canonical use of `ExplicitMapping`.

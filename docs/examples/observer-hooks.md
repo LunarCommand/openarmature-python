@@ -1,5 +1,8 @@
 # Observer hooks
 
+!!! info "Source"
+    [https://github.com/LunarCommand/openarmature-python/blob/main/examples/observer-hooks/main.py](https://github.com/LunarCommand/openarmature-python/blob/main/examples/observer-hooks/main.py){target="_blank" rel="noopener"}
+
 Add observability to a `draft → review → finalize` pipeline without
 touching any node code. Three observer flavors run side-by-side: a
 console tracer, a per-invocation metrics collector, and the

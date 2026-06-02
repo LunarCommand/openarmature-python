@@ -1,5 +1,8 @@
 # Multimodal prompt
 
+!!! info "Source"
+    [https://github.com/LunarCommand/openarmature-python/blob/main/examples/multimodal-prompt/main.py](https://github.com/LunarCommand/openarmature-python/blob/main/examples/multimodal-prompt/main.py){target="_blank" rel="noopener"}
+
 Two independent analyses of a lunar-mission photograph using
 versioned prompt templates, a fallback prompt backend, and a
 multimodal user message that carries both text and image.

@@ -1,5 +1,8 @@
 # Checkpointing and migration
 
+!!! info "Source"
+    [https://github.com/LunarCommand/openarmature-python/blob/main/examples/checkpointing-and-migration/main.py](https://github.com/LunarCommand/openarmature-python/blob/main/examples/checkpointing-and-migration/main.py){target="_blank" rel="noopener"}
+
 A lunar-mission planning pipeline that writes a SQLite checkpoint
 after every step, survives a simulated mid-pipeline crash, and then
 resumes the saved invocation under an upgraded state schema with a

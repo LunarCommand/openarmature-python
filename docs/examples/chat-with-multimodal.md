@@ -1,5 +1,8 @@
 # Chat with multi-turn memory and a multimodal turn
 
+!!! info "Source"
+    [https://github.com/LunarCommand/openarmature-python/blob/main/examples/chat-with-multimodal/main.py](https://github.com/LunarCommand/openarmature-python/blob/main/examples/chat-with-multimodal/main.py){target="_blank" rel="noopener"}
+
 A lunar-mission Q&A assistant that maintains conversation context
 across four turns. One mid-conversation turn includes an attached
 photograph (Apollo 16 Lunar Module "Orion" on the lunar surface):

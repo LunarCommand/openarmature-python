@@ -1,5 +1,8 @@
 # Routing and subgraphs
 
+!!! info "Source"
+    [https://github.com/LunarCommand/openarmature-python/blob/main/examples/routing-and-subgraphs/main.py](https://github.com/LunarCommand/openarmature-python/blob/main/examples/routing-and-subgraphs/main.py){target="_blank" rel="noopener"}
+
 A question-answering assistant. Classify the question, then either
 give a one-shot quick answer or run a multi-step research
 sub-pipeline, then lightly copy-edit the result.
