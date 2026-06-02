@@ -285,6 +285,43 @@
   padding-left: 0.75rem;
 }
 
+/* Source-box callout color (the ``!!! info "Source"`` admonition
+ * inserted between the H1 and lead paragraph on every example
+ * walk-through doc). Material's default ``info`` admonition uses
+ * a blue accent; this override paints it in the project lavender
+ * to match the ``#9d4edd`` brand purple and inline-code color
+ * (``#e4c1f9`` ≈ rgb(228, 193, 249)) used elsewhere in the slate
+ * theme. Scoped to ``.admonition.info``; currently the only
+ * ``!!! info`` usage in the docs is the Source callout, so this
+ * effectively styles "the Source box". If a future doc adds a
+ * non-Source info admonition that should stay blue, switch the
+ * walk-through callouts to a custom ``!!! source`` type and
+ * re-scope this rule to ``.admonition.source``. */
+.md-typeset .admonition.info,
+.md-typeset details.info {
+  border-color: rgb(228, 193, 249);
+}
+
+.md-typeset .admonition.info > .admonition-title,
+.md-typeset details.info > summary {
+  background-color: rgba(228, 193, 249, 0.1);
+}
+
+.md-typeset .admonition.info > .admonition-title::before,
+.md-typeset details.info > summary::before {
+  background-color: rgb(228, 193, 249);
+}
+
+/* Source-box link color (slate theme). The default slate link
+ * color (``#9d4edd`` purple) clashes with the lavender source-box
+ * accent; switch the link inside the source admonition to the
+ * dark-theme body-text tone so the URL reads as content rather
+ * than as a highlighted action. Selector specificity beats the
+ * general ``[data-md-color-scheme="slate"] .md-typeset a`` rule. */
+[data-md-color-scheme="slate"] .md-typeset .admonition.info a {
+  color: rgba(226, 228, 233, 0.82);
+}
+
 /* The vertical guide line, rendered as a ::before pseudo-element
  * (so it can stop 5px short of the nav's bottom edge via
  * ``top: 0; bottom: 5px``). Scoped to any sub-section whose nested

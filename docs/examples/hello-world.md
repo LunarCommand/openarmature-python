@@ -1,5 +1,8 @@
 # Hello, world
 
+!!! info "Source"
+    [https://github.com/LunarCommand/openarmature-python/blob/main/examples/hello-world/main.py](https://github.com/LunarCommand/openarmature-python/blob/main/examples/hello-world/main.py){target="_blank" rel="noopener"}
+
 The smallest possible LLM-routed pipeline: classify a query, then
 either plan research on it or summarize it in one sentence. Sets the
 shape every other example builds on.

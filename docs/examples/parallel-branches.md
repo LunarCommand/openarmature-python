@@ -1,5 +1,8 @@
 # Parallel branches
 
+!!! info "Source"
+    [https://github.com/LunarCommand/openarmature-python/blob/main/examples/parallel-branches/main.py](https://github.com/LunarCommand/openarmature-python/blob/main/examples/parallel-branches/main.py){target="_blank" rel="noopener"}
+
 Enrich a lunar-mission news article with three independent
 analyses (one-sentence summary, sentiment label, topic tags)
 running concurrently as separate subgraphs.

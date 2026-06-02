@@ -1,5 +1,8 @@
 # Fan-out with retry
 
+!!! info "Source"
+    [https://github.com/LunarCommand/openarmature-python/blob/main/examples/fan-out-with-retry/main.py](https://github.com/LunarCommand/openarmature-python/blob/main/examples/fan-out-with-retry/main.py){target="_blank" rel="noopener"}
+
 Summarize a batch of lunar-mission headlines in parallel, with
 per-headline retry and timing middleware wrapping each instance's
 subgraph run.

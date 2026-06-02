@@ -1,5 +1,8 @@
 # Production observability with dual observers and timing middleware
 
+!!! info "Source"
+    [https://github.com/LunarCommand/openarmature-python/blob/main/examples/production-observability/main.py](https://github.com/LunarCommand/openarmature-python/blob/main/examples/production-observability/main.py){target="_blank" rel="noopener"}
+
 A single-turn lunar-mission Q&A endpoint instrumented the way you'd
 ship it: BOTH OTel and Langfuse observers attached to the same
 graph, caller hooks deriving domain-shaped `trace.input` /

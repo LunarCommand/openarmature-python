@@ -1,5 +1,8 @@
 # Langfuse observability
 
+!!! info "Source"
+    [https://github.com/LunarCommand/openarmature-python/blob/main/examples/langfuse-observability/main.py](https://github.com/LunarCommand/openarmature-python/blob/main/examples/langfuse-observability/main.py){target="_blank" rel="noopener"}
+
 Send LLM call observability to Langfuse natively: Trace at the top,
 Span observations for graph nodes, Generation observations with input,
 output, token usage, model parameters, and a native link back to the
