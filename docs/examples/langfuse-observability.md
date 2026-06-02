@@ -98,7 +98,7 @@ Trace id=01234567-89ab-...
 
 - **Trace name = entry node name** by default. The caller-supplied
   invocation-label path (a per-`invoke()` argument that overrides the
-  default) ships with proposal 0034's caller-metadata work.
+  default) is part of the caller-metadata API.
 - **Span observation per node.** `answer_briefing` is the only node
   here; a multi-node graph would produce a tree of nested Span
   observations under the Trace.

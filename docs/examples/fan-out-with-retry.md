@@ -59,10 +59,9 @@ normally. The `append` reducer's no-double-merge guarantee holds
 across resume because `completed` is a one-shot accumulator state.
 
 Composition with `instance_middleware` (retry): on resume, an
-instance's `attempt_index` resets to 0 (a fresh retry budget) per
-spec graph-engine §6's resume semantics. So a retry-exhausted
-instance whose `in_flight` state was saved gets a fresh budget on
-the resumed run.
+instance's `attempt_index` resets to 0 (a fresh retry budget). So
+a retry-exhausted instance whose `in_flight` state was saved gets
+a fresh budget on the resumed run.
 
 See [Resume semantics in fan-out](../concepts/fan-out.md#resume-semantics)
 and the [Checkpointing concept page](../concepts/checkpointing.md)

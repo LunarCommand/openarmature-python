@@ -34,9 +34,9 @@ turn's `render()` injects the grown history into the placeholder.
 
 - [`ChatPrompt`](../concepts/prompts.md) with
   [`ContentSegment`](../concepts/prompts.md) and
-  [`PlaceholderSegment`](../concepts/prompts.md) (proposal 0046,
-  spec v0.38.0). The placeholder is how multi-turn chat history
-  shapes get injected at render time.
+  [`PlaceholderSegment`](../concepts/prompts.md). The placeholder
+  is how multi-turn chat history shapes get injected at render
+  time.
 - The same chat template can carry an
   [`ImageURLBlockTemplate`](../concepts/prompts.md) when the
   current user turn includes an image. The `content` field on the
