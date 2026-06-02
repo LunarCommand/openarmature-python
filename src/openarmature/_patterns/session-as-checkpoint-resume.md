@@ -109,6 +109,6 @@ state and the session table holds the join keys.
   `resume_invocation`, schema migration.
 - [State and reducers](https://openarmature.ai/concepts/state-and-reducers/): `merge`
   and `append` reducer strategies.
-- [`examples/08-checkpointing-and-migration`](https://openarmature.ai/examples/08-checkpointing-and-migration/):
+- [`examples/checkpointing-and-migration`](https://openarmature.ai/examples/checkpointing-and-migration/):
   single-resume baseline.
 - Spec: [pipeline-utilities](https://openarmature.org/capabilities/pipeline-utilities/)

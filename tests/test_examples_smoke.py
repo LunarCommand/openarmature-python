@@ -30,19 +30,19 @@ import pytest
 EXAMPLES_DIR = Path(__file__).parent.parent / "examples"
 
 DEMOS = [
-    "00-hello-world",
-    "01-routing-and-subgraphs",
-    "02-explicit-subgraph-mapping",
-    "03-observer-hooks",
-    "04-nested-subgraphs",
-    "05-fan-out-with-retry",
-    "06-parallel-branches",
-    "07-multimodal-prompt",
-    "08-checkpointing-and-migration",
-    "09-tool-use",
-    "10-langfuse-observability",
-    "11-chat-with-multimodal",
-    "12-production-observability",
+    "hello-world",
+    "routing-and-subgraphs",
+    "explicit-subgraph-mapping",
+    "nested-subgraphs",
+    "fan-out-with-retry",
+    "parallel-branches",
+    "multimodal-prompt",
+    "chat-with-multimodal",
+    "tool-use",
+    "checkpointing-and-migration",
+    "observer-hooks",
+    "langfuse-observability",
+    "production-observability",
 ]
 
 

@@ -164,7 +164,7 @@ async def main() -> None:
 asyncio.run(main())
 ```
 
-Set `LLM_API_KEY=sk-...` and run. To swap providers, point `LLM_BASE_URL` and `LLM_MODEL` at OpenRouter, vLLM, LM Studio, llama.cpp, or anything else that speaks the OpenAI Chat Completions wire format. The example also lives at [`examples/00-hello-world/main.py`](./examples/00-hello-world/main.py); see [`examples/`](./examples/) for more runnable demos.
+Set `LLM_API_KEY=sk-...` and run. To swap providers, point `LLM_BASE_URL` and `LLM_MODEL` at OpenRouter, vLLM, LM Studio, llama.cpp, or anything else that speaks the OpenAI Chat Completions wire format. The example also lives at [`examples/hello-world/main.py`](./examples/hello-world/main.py); see [`examples/`](./examples/) for more runnable demos.
 
 A few things to notice:
 

@@ -91,7 +91,7 @@ The `MAX_TURNS` cap prevents runaway loops; the conditional edge
 short-circuits to `present` when the cap is hit or when the model
 returns no `tool_calls`.
 
-See [`examples/09-tool-use`](https://openarmature.ai/examples/09-tool-use/) for a
+See [`examples/tool-use`](https://openarmature.ai/examples/tool-use/) for a
 runnable version with full tool definitions, defensive handling
 for malformed `ToolCall.arguments`, and trace output.
 
@@ -125,6 +125,6 @@ for malformed `ToolCall.arguments`, and trace output.
   contract.
 - [State and reducers](https://openarmature.ai/concepts/state-and-reducers/):
   `append` reducer semantics.
-- [`examples/09-tool-use`](https://openarmature.ai/examples/09-tool-use/): runnable
+- [`examples/tool-use`](https://openarmature.ai/examples/tool-use/): runnable
   reference implementation.
 - Spec: [llm-provider](https://openarmature.org/capabilities/llm-provider/)

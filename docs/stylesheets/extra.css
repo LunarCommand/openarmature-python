@@ -200,12 +200,108 @@
 /* Indent nested nav items so section hierarchy reads at a glance.
  * Material's ``navigation.sections`` layout renders section labels
  * and their children flush-left at the same horizontal position;
- * fine for short sections but hard to scan when one runs long (the
- * Examples section has 11 entries). A small left-pad on the nested
- * links shows the hierarchy without altering typography. Scoped to
- * the primary nav so the right-hand TOC sidebar is untouched. */
+ * a small left-pad on the nested links shows the hierarchy without
+ * altering typography. Scoped to the primary nav so the right-hand
+ * TOC sidebar is untouched. */
 .md-nav--primary .md-nav .md-nav__link {
   padding-left: 0.375rem;
+}
+
+/* Hide the active tab's title inside the sidebar. The top tabs
+ * (Documentation / Examples / Patterns) are shown above the
+ * content via ``navigation.tabs``; Material also renders the
+ * active tab's label as a ``.md-nav__title`` at the top of the
+ * sidebar, which is redundant. The level-1 nav is the tab's
+ * content; hiding its ``.md-nav__title`` drops the repeated
+ * label cleanly. */
+.md-nav--primary .md-nav[data-md-level="1"] > .md-nav__title {
+  display: none;
+}
+
+/* Vertical guide line + extra indent next to the *children* of an
+ * expandable sub-section group (Concepts / Model Providers /
+ * Reference under Documentation; Foundations / Composition /
+ * etc. under Examples). Material renders the section's toggle in
+ * two different shapes:
+ *
+ *   - ``<label class="md-nav__link">Composition</label>`` when the
+ *     section has no ``index.md`` of its own (Examples' topical
+ *     groups are like this).
+ *   - ``<div class="md-nav__link md-nav__container">`` when the
+ *     section has its own ``index.md`` (Documentation's Concepts /
+ *     Model Providers / Reference are like this, because
+ *     ``navigation.indexes`` wires the section's index page in via
+ *     a container that wraps both the index link and the toggle).
+ *
+ * Keying off either shape directly would also catch Getting Started
+ * (which renders the container shape too, since ``navigation.indexes``
+ * rolled its single ``index.md`` child up into the parent and left
+ * the level-2 nav empty). Keying instead off "has at least one
+ * direct child in the nested level-2 nav" cleanly skips Getting
+ * Started (empty nested nav) while matching every real
+ * multi-child sub-section in both tabs. Patterns' top-level pages
+ * have no sub-section nesting at all, so no line is drawn there. */
+/* Position the children's nav and shift the children's UL 10px
+ * LEFT, applied to ALL sub-sections under the level-1 nav so child
+ * links align horizontally regardless of whether the parent
+ * sub-section has the vertical guide line (which is itself scoped
+ * separately to multi-child sub-sections only). */
+.md-nav--primary .md-nav[data-md-level="1"] > .md-nav__list > .md-nav__item > .md-nav {
+  position: relative;
+  margin-left: 0.25rem;
+}
+
+.md-nav--primary .md-nav[data-md-level="1"] > .md-nav__list > .md-nav__item > .md-nav > .md-nav__list {
+  margin-left: -0.625rem;
+}
+
+/* Shift the sub-section label (the ``<label>`` or
+ * ``<div class="md-nav__container">`` wrapper) 10px LEFT to
+ * tighten the layout, while leaving the children's nav (with its
+ * vertical guide line) in place. */
+.md-nav--primary .md-nav[data-md-level="1"] > .md-nav__list > .md-nav__item > .md-nav__link {
+  margin-left: -0.625rem;
+}
+
+/* Align label-form labels (Examples: Foundations, Composition,
+ * etc.) and direct-link-form items (Patterns: Parameterized entry
+ * point, Tool dispatch as node, etc.) with container-form labels
+ * (Documentation: Concepts, Model Providers, Reference). The base
+ * padding rule (.md-nav--primary .md-nav .md-nav__link
+ * { padding-left: 0.375rem }) applies to ANY element with
+ * .md-nav__link class. In Documentation, the section toggle is
+ * rendered as <div class="md-nav__container"> wrapping
+ * <a class="md-nav__link">, and the base rule applies to BOTH the
+ * outer div AND the inner a, giving the text 0.75rem of layered
+ * left offset. In Examples (<label class="md-nav__link">) and
+ * Patterns (<a class="md-nav__link"> directly), the rule applies
+ * once and the text only gets 0.375rem of offset; result is text
+ * 7.5px left of the Documentation equivalent. This rule overrides
+ * the single-application forms' padding to 0.75rem so all
+ * sub-section / top-level page text lands at the same X column.
+ * ``:not(.md-nav__container)`` excludes Documentation's div wrapper
+ * so its layered offset stays intact. */
+.md-nav--primary .md-nav[data-md-level="1"] > .md-nav__list > .md-nav__item > .md-nav__link:not(.md-nav__container) {
+  padding-left: 0.75rem;
+}
+
+/* The vertical guide line, rendered as a ::before pseudo-element
+ * (so it can stop 5px short of the nav's bottom edge via
+ * ``top: 0; bottom: 5px``). Scoped to any sub-section whose nested
+ * nav has at least one child (the ``:has(> .md-nav > .md-nav__list
+ * > .md-nav__item)`` predicate); Getting Started's nested nav is
+ * empty (single ``index.md`` child got rolled up into the parent
+ * link via ``navigation.indexes``) so it doesn't match. A plain
+ * border would always cover the full element height; the
+ * pseudo-element gives us precise control over both ends. */
+.md-nav--primary .md-nav[data-md-level="1"] > .md-nav__list > .md-nav__item:has(> .md-nav > .md-nav__list > .md-nav__item) > .md-nav::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 5px;
+  width: 1px;
+  background: var(--md-default-fg-color--lightest);
 }
 
 [data-md-color-scheme="slate"] .md-header,

@@ -732,7 +732,7 @@ observer = LangfuseObserver(
 The adapter bridges `langfuse>=4.6`'s unified `start_observation`
 API onto our `LangfuseClient` Protocol; the observer code is the
 same in tests and production. See
-[`examples/10-langfuse-observability`](../examples/10-langfuse-observability.md)
+[`examples/langfuse-observability`](../examples/langfuse-observability.md)
 for a runnable demo.
 
 !!! note "Langfuse SDK version compatibility"

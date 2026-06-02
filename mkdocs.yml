@@ -130,19 +130,26 @@ nav:
       - openarmature.observability: reference/observability.md
   - Examples:
     - examples/index.md
-    - Hello, world: examples/00-hello-world.md
-    - Routing and subgraphs: examples/01-routing-and-subgraphs.md
-    - Explicit subgraph mapping: examples/02-explicit-subgraph-mapping.md
-    - Observer hooks: examples/03-observer-hooks.md
-    - Nested subgraphs: examples/04-nested-subgraphs.md
-    - Fan-out with retry: examples/05-fan-out-with-retry.md
-    - Parallel branches: examples/06-parallel-branches.md
-    - Multimodal prompt: examples/07-multimodal-prompt.md
-    - Checkpointing and migration: examples/08-checkpointing-and-migration.md
-    - Tool use: examples/09-tool-use.md
-    - Langfuse observability: examples/10-langfuse-observability.md
-    - Chat with multimodal: examples/11-chat-with-multimodal.md
-    - Production observability: examples/12-production-observability.md
+    - Foundations:
+      - Hello, world: examples/hello-world.md
+    - Composition:
+      - Routing and subgraphs: examples/routing-and-subgraphs.md
+      - Explicit subgraph mapping: examples/explicit-subgraph-mapping.md
+      - Nested subgraphs: examples/nested-subgraphs.md
+    - Concurrency:
+      - Fan-out with retry: examples/fan-out-with-retry.md
+      - Parallel branches: examples/parallel-branches.md
+    - Prompts:
+      - Multimodal prompt: examples/multimodal-prompt.md
+      - Chat with multimodal: examples/chat-with-multimodal.md
+    - Tool use:
+      - Tool use: examples/tool-use.md
+    - Reliability:
+      - Checkpointing and migration: examples/checkpointing-and-migration.md
+    - Observability:
+      - Observer hooks: examples/observer-hooks.md
+      - Langfuse observability: examples/langfuse-observability.md
+      - Production observability: examples/production-observability.md
   - Patterns:
     - patterns/index.md
     - Parameterized entry point: patterns/parameterized-entry-point.md
