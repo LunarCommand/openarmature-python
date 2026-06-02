@@ -222,9 +222,10 @@ def build_review_subgraph() -> CompiledGraph[ReviewState]:
 # ----------------------------------------------------------------------------
 # Observer 1: console tracer (graph-attached)
 # ----------------------------------------------------------------------------
-# A bare async function. Conforms to the `Observer` Protocol structurally
-# any `async def(event: NodeEvent) -> None` works. Graph-attached observers
-# fire on every invocation of the compiled graph until removed.
+# A bare async function. Conforms to the `Observer` Protocol
+# structurally: any `async def(event: NodeEvent) -> None` works.
+# Graph-attached observers fire on every invocation of the compiled
+# graph until removed.
 
 
 async def console_tracer(event: ObserverEvent) -> None:
@@ -388,7 +389,7 @@ async def main() -> None:
     finally:
         # Required for short-lived processes: invoke() returns when the
         # graph reaches END regardless of whether the observer queue has
-        # finished. The try/finally also matters on the failure path
+        # finished. The try/finally also matters on the failure path:
         # the engine dispatches a failure event with `error` populated
         # BEFORE propagating, and that event is exactly what a debugging
         # user would want to see. Without `finally`, an invoke that

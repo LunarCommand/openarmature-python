@@ -33,7 +33,7 @@ different topologies per branch; one dispatch.
   contribute to the same parent field, the parent's reducer applies
   them in the order the branches were declared in the ``branches``
   mapping (not in completion order). The three branches here write
-  disjoint parent fields, so the order doesn't affect the result
+  disjoint parent fields, so the order doesn't affect the result,
   but the property holds and would matter if they overlapped.
 - A ``branch_attribution_observer`` reads ``NodeEvent.branch_name``
   on inner-node events. ``branch_name`` is populated only for

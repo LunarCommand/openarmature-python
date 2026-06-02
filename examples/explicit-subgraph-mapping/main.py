@@ -74,8 +74,9 @@ def _get_provider() -> OpenAIProvider:
 # summary and a score for EACH topic. So the parent schema declares paired
 # fields: a_summary/a_score and b_summary/b_score.
 #
-# The subgraph speaks in a single set of names; `topic`, `summary`, `score`
-# because it has no idea which side of the comparison it's running for. The
+# The subgraph speaks in a single set of names (`topic`, `summary`,
+# `score`) because it has no idea which side of the comparison it's
+# running for. The
 # mapping at each call site is what wires the subgraph's neutral names to the
 # parent's per-side fields.
 #

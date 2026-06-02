@@ -264,7 +264,7 @@ async def main() -> None:
 
     # disable_llm_payload=False opts in to capturing the input messages
     # and output content on Generation observations. Default is True
-    # for the same privacy reason the OTel observer's flag exists
+    # for the same privacy reason the OTel observer's flag exists:
     # payloads may contain PII the operator hasn't audited. Flip it
     # deliberately here because the demo's whole point is showing what
     # the model saw and returned.

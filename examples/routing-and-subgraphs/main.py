@@ -152,7 +152,7 @@ async def _chat(system: str, user: str) -> str:
 #   (b) Every node contributes to `tallies` via the `merge` reducer. Each
 #       return dict carries a small `{"tallies": {...}}` fragment; the
 #       reducer accumulates them into one dict on the final state. This is
-#       the same pattern used for metrics/counts across a pipeline
+#       the same pattern used for metrics/counts across a pipeline:
 #       compose by emitting fragments, not by read-modify-write.
 #
 #   (c) No node calls a subsequent node. `classify` doesn't know whether
@@ -409,10 +409,10 @@ _: ProjectionStrategy[AssistantState, ResearchState] = QuestionProjection()
 # ----------------------------------------------------------------------------
 # Four things to notice below:
 #
-#   1. `.add_subgraph_node("research", ..., projection=QuestionProjection())`
-#      this is the only new method on `GraphBuilder` vs 01-linear-pipeline. It
-#      registers a compiled graph as a node, under the given name, with the
-#      given projection.
+#   1. `.add_subgraph_node("research", ..., projection=QuestionProjection())`:
+#      this is the only new method on `GraphBuilder` vs the hello-world
+#      example. It registers a compiled graph as a node, under the given
+#      name, with the given projection.
 #
 #   2. `.add_conditional_edge("classify", route_from_classification)`; the
 #      conditional edge. Exactly one outgoing edge per node still applies;
