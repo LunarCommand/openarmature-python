@@ -142,6 +142,7 @@ nav:
     - Tool use: examples/09-tool-use.md
     - Langfuse observability: examples/10-langfuse-observability.md
     - Chat with multimodal: examples/11-chat-with-multimodal.md
+    - Production observability: examples/12-production-observability.md
   - Patterns:
     - patterns/index.md
     - Parameterized entry point: patterns/parameterized-entry-point.md
