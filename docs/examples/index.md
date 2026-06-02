@@ -51,6 +51,12 @@ in the repo.
   through `ChatPrompt` + `PlaceholderSegment`. One turn attaches a
   photograph; the agent processes it without changing the chat
   shape.
+- [**12 - Production observability**](12-production-observability.md).
+  Dual OTel + Langfuse observers attached to one graph, caller
+  hooks deriving domain-shaped `trace.input` / `trace.output` from
+  State, built-in `TimingMiddleware` recording per-node duration,
+  multi-tenant caller-supplied metadata propagating to both
+  observers in one `invoke()` call.
 
 ## Configuration
 

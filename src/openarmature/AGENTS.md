@@ -1466,6 +1466,7 @@ _Runnable example programs shipped in the source tree at `examples/`. The full c
 - **`examples/09-tool-use/main.py`** — openarmature demo: a lunar-mission assistant that calls local Python functions as tools to answer fact and physics questions about Apollo / Artemis missions.
 - **`examples/10-langfuse-observability/main.py`** — openarmature demo: Langfuse observer + prompt linkage on a lunar mission Q&A pipeline.
 - **`examples/11-chat-with-multimodal/main.py`** — openarmature demo: multi-turn chat with conversation memory and a multimodal turn, using ChatPrompt + PlaceholderSegment.
+- **`examples/12-production-observability/main.py`** — openarmature demo: production observability with dual OTel + Langfuse observers, caller hooks for trace.input/output, and the canonical TimingMiddleware.
 
 ## Discovery cross-references
 
