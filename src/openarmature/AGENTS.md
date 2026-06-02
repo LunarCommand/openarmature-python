@@ -1462,7 +1462,7 @@ _Runnable example programs shipped in the source tree at `examples/`. The full c
 - **`examples/05-fan-out-with-retry/main.py`** — openarmature demo: summarize a batch of lunar-mission headlines in parallel, with per-headline retries and timing.
 - **`examples/06-parallel-branches/main.py`** — openarmature demo: enrich a lunar-mission news article with three independent analyses running concurrently.
 - **`examples/07-multimodal-prompt/main.py`** — openarmature demo: two independent analyses of a lunar-mission photograph using versioned prompt templates, a fallback prompt backend, and a multimodal user message.
-- **`examples/08-checkpointing-and-migration/main.py`** — openarmature demo: a lunar-mission planning pipeline that checkpoints its progress, then resumes under an upgraded state schema.
+- **`examples/08-checkpointing-and-migration/main.py`** — openarmature demo: a lunar-mission planning pipeline that survives a mid-pipeline crash and later resumes under an upgraded state schema.
 - **`examples/09-tool-use/main.py`** — openarmature demo: a lunar-mission assistant that calls local Python functions as tools to answer fact and physics questions about Apollo / Artemis missions.
 - **`examples/10-langfuse-observability/main.py`** — openarmature demo: Langfuse observer + prompt linkage on a lunar mission Q&A pipeline.
 - **`examples/11-chat-with-multimodal/main.py`** — openarmature demo: multi-turn chat with conversation memory and a multimodal turn, using ChatPrompt + PlaceholderSegment.
