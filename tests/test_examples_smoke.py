@@ -41,6 +41,8 @@ DEMOS = [
     "08-checkpointing-and-migration",
     "09-tool-use",
     "10-langfuse-observability",
+    "11-chat-with-multimodal",
+    "12-production-observability",
 ]
 
 
