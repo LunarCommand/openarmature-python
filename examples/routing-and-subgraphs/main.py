@@ -10,7 +10,7 @@ copy-edit the result.
 custom `ProjectionStrategy` for the parent ↔ subgraph boundary, and the
 `merge` reducer for dict accumulation.
 
-Three graph features that `00-hello-world` only touched lightly:
+Three graph features that `hello-world` only touched lightly:
 
   1. **Conditional edges.** The entry node classifies the question and the
      graph routes to one of two branches based on that classification.
@@ -22,7 +22,7 @@ Three graph features that `00-hello-world` only touched lightly:
      shape what comes back out), we write a `ProjectionStrategy` by hand.
 
 LLM calls go through ``openarmature.llm.OpenAIProvider`` (same pattern as
-``00-hello-world``) so the example reads as the recommended path rather
+``hello-world``) so the example reads as the recommended path rather
 than as "openai with some openarmature on top."
 
 **Configuration** (env vars; OpenAI defaults shown):

@@ -223,7 +223,7 @@ async def pick_doc(s: DocQAState) -> Mapping[str, Any]:
     # return only part of the title. Accept either direction of containment
     # over the lowercased strings; strict equality is too brittle for
     # free-form output. A production app would constrain the model with
-    # response_schema (see 00-hello-world) so the reply is guaranteed to be
+    # response_schema (see hello-world) so the reply is guaranteed to be
     # a valid title.
     match = next(
         (d for d in CORPUS if d["title"].lower() in reply or reply in d["title"].lower()),

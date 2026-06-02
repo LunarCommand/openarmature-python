@@ -207,7 +207,7 @@ async def synthesize(s: ComparisonState) -> Mapping[str, Any]:
 #     with no way to express "this site reads A, that site reads B." Both
 #     sites would write `parent.summary` and clobber each other.
 #
-#   - A custom `ProjectionStrategy` (the 01-routing-and-subgraphs approach)
+#   - A custom `ProjectionStrategy` (the routing-and-subgraphs approach)
 #     would have to differ per call site; you'd write two distinct projection
 #     classes that do the same thing in mirror image. That's exactly the
 #     boilerplate `ExplicitMapping` removes.
