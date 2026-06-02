@@ -22,10 +22,10 @@ answer. The interesting part is the observability wiring:
 - Both observers consume the same `NodeEvent` stream
   independently; node code never knows there are two backends.
 - `LangfuseObserver` carries `trace_input_from_state` and
-  `trace_output_from_state` caller hooks (proposal 0043 §8.4.1)
-  that derive domain dicts like `{"question": ...}` /
-  `{"answer": ..., "model": ...}` from State, instead of letting
-  the observer dump the raw State object.
+  `trace_output_from_state` caller hooks that derive domain dicts
+  like `{"question": ...}` / `{"answer": ..., "model": ...}` from
+  State, instead of letting the observer dump the raw State
+  object.
 - `TimingMiddleware` (canonical, from
   `openarmature.graph.middleware`) wraps the respond node. An
   `on_complete` async callback receives a `TimingRecord` and
@@ -42,14 +42,14 @@ sees the same logical events represented two ways.
 ## What it teaches
 
 - **Two observers on one graph**
-  ([proposal 0031 + the no-double-export claim](../concepts/observability.md)).
+  ([no double-export between them](../concepts/observability.md)).
   Each consumes the `NodeEvent` stream independently; the engine
   fans events out to all attached observers. Production deployments
   often run both: OTel for infrastructure-side correlation
   (logs, distributed tracing across services), Langfuse for
   LLM-aware generation rendering.
 - **Caller hooks for `trace.input` / `trace.output`**
-  ([proposal 0043, observability §8.4.1](../concepts/observability.md)).
+  ([deriving domain dicts from State](../concepts/observability.md)).
   Without the hooks the Langfuse observer either omits the field
   (`disable_state_payload=True` default) or dumps the raw State
   (when `disable_state_payload=False`). The hooks let you return a
@@ -63,7 +63,7 @@ sees the same logical events represented two ways.
   callback fires inline before the chain's result reaches the
   engine; keep it fast (queue work, defer I/O).
 - **`invoke(metadata={...})` propagation across observers**
-  ([proposal 0034 + 0041 reserved keys](../concepts/observability.md)).
+  ([caller metadata and reserved keys](../concepts/observability.md)).
   One call site, both backends pick it up: OTel attaches each entry
   as `openarmature.user.<key>` cross-cutting span attribute,
   Langfuse merges as top-level `trace.metadata` keys plus
