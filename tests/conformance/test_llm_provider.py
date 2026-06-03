@@ -47,6 +47,7 @@ from openarmature.llm import (
     UserMessage,
 )
 
+from ._deferral import skip_if_deferred
 from .harness import (
     assert_error_carries,
     assert_response_format_absent,
@@ -94,6 +95,20 @@ _DEFERRED_FIXTURES: dict[str, str] = {
     "051-gemini-structured-output-fallback": "Gemini provider not implemented (0038 not-yet)",
     "052-gemini-thought-signature-round-trip": "Gemini provider not implemented (0038 not-yet)",
     "053-cross-provider-signature-strip": "Gemini provider not implemented (0038 not-yet)",
+    # ----- v0.12.0 cycle spec-pin bump (v0.38.0 -> v0.45.0) -------------
+    # Proposal 0047 (implicit prefix-cache wire-byte stability, v0.39.0)
+    # — wire-byte hashing across providers. Queued for v0.13.0 LLM
+    # provider hardening batch.
+    "054-openai-wire-byte-stability": ("Proposal 0047 wire-byte stability; queued for v0.13.0"),
+    "055-anthropic-wire-byte-stability": (
+        "Proposal 0047 wire-byte stability; queued for v0.13.0 (also Anthropic-pending)"
+    ),
+    # Proposal 0050 (call-level retry, v0.42.0) — three fixtures
+    # exercise the new ``retry`` kwarg on ``complete()``. Queued for
+    # v0.14.0 retry & reliability primitives batch.
+    "056-call-level-retry-transient": ("Proposal 0050 call-level retry; queued for v0.14.0"),
+    "057-call-level-retry-exhaustion": ("Proposal 0050 call-level retry; queued for v0.14.0"),
+    "058-call-level-retry-non-transient-no-retry": ("Proposal 0050 call-level retry; queued for v0.14.0"),
 }
 
 
@@ -458,8 +473,7 @@ def _assert_raises_matches(
 @pytest.mark.parametrize("fixture_path", _fixture_paths(), ids=_fixture_id)
 async def test_llm_provider_fixture(fixture_path: Path) -> None:
     fixture_id = fixture_path.stem
-    if fixture_id in _DEFERRED_FIXTURES:
-        pytest.skip(f"{fixture_id}: {_DEFERRED_FIXTURES[fixture_id]}")
+    skip_if_deferred(fixture_id, _DEFERRED_FIXTURES)
     spec = _load(fixture_path)
 
     if "cases" in spec:

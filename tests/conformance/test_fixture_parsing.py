@@ -14,6 +14,7 @@ from pathlib import Path
 
 import pytest
 
+from ._deferral import skip_if_deferred
 from .harness import discover_fixtures, load_fixture
 
 
@@ -243,6 +244,109 @@ _DEFERRED_FIXTURES: dict[str, str] = {
     # Proposal 0046 (chat-prompt rendering, v0.38.0) — fixtures 017-031
     # activate in PR 12 against the prompt-management harness's
     # extended ``chat_template`` + ``placeholders`` directive shapes.
+    # ----- v0.12.0 cycle spec-pin bump (v0.38.0 -> v0.45.0) ----------------
+    # Proposal 0047 (implicit prefix-cache wire-byte stability, v0.39.0)
+    # — fixtures 054-055 require the wire-byte hashing directive shape.
+    # Queued for v0.13.0 LLM provider hardening batch.
+    "llm-provider/054-openai-wire-byte-stability": ("Proposal 0047 wire-byte stability; queued for v0.13.0"),
+    "llm-provider/055-anthropic-wire-byte-stability": (
+        "Proposal 0047 wire-byte stability; queued for v0.13.0"
+    ),
+    # Proposal 0047 also adds cache attribute emission fixtures
+    # (observability/040-042). Same v0.13.0 batch.
+    "observability/040-llm-cache-attribute-emission": (
+        "Proposal 0047 cache attribute emission; queued for v0.13.0"
+    ),
+    "observability/041-llm-cache-attribute-absence": (
+        "Proposal 0047 cache attribute emission; queued for v0.13.0"
+    ),
+    "observability/042-llm-cache-attribute-reported-zero": (
+        "Proposal 0047 cache attribute emission; queued for v0.13.0"
+    ),
+    # Proposal 0048 (read-symmetric metadata + queryable observer, v0.40.0)
+    # — fixtures 043-049 require the ``capture_invocation_metadata_into`` /
+    # ``augment_metadata`` / queryable-observer directive shapes. Lands
+    # in PR 2 of the v0.12.0 cycle along with the implementation; this
+    # PR-1 deferral keeps the parse tests green in the meantime.
+    "observability/043-get-invocation-metadata-roundtrip": (
+        "Proposal 0048 read-symmetric metadata; lands in PR 2 of v0.12.0"
+    ),
+    "observability/044-get-invocation-metadata-fan-out-scoping": (
+        "Proposal 0048 read-symmetric metadata; lands in PR 2 of v0.12.0"
+    ),
+    "observability/045-get-invocation-metadata-retry-scoping": (
+        "Proposal 0048 read-symmetric metadata; lands in PR 2 of v0.12.0"
+    ),
+    "observability/046-get-invocation-metadata-outside-invocation": (
+        "Proposal 0048 read-symmetric metadata; lands in PR 2 of v0.12.0"
+    ),
+    "observability/047-queryable-observer-pattern": (
+        "Proposal 0048 queryable observer pattern; lands in PR 2 of v0.12.0"
+    ),
+    "observability/048-queryable-observer-async-safety": (
+        "Proposal 0048 queryable observer pattern; lands in PR 2 of v0.12.0"
+    ),
+    "observability/049-queryable-observer-lifecycle-drop": (
+        "Proposal 0048 queryable observer pattern; lands in PR 2 of v0.12.0"
+    ),
+    # Proposal 0049 (typed LLM completion event, v0.41.0) — fixtures
+    # 050-056 require the ``LlmCompletionEvent`` typed-event directive
+    # shape. Queued for v0.13.0 LLM provider hardening batch.
+    "observability/050-llm-completion-event-dispatch": (
+        "Proposal 0049 typed LLM completion event; queued for v0.13.0"
+    ),
+    "observability/051-llm-completion-event-type-discrimination": (
+        "Proposal 0049 typed LLM completion event; queued for v0.13.0"
+    ),
+    "observability/052-llm-completion-event-caller-metadata-opt-in": (
+        "Proposal 0049 typed LLM completion event; queued for v0.13.0"
+    ),
+    "observability/053-llm-completion-event-no-event-on-failure": (
+        "Proposal 0049 typed LLM completion event; queued for v0.13.0"
+    ),
+    "observability/054-llm-completion-event-fan-out-index-population": (
+        "Proposal 0049 typed LLM completion event; queued for v0.13.0"
+    ),
+    "observability/055-llm-completion-event-branch-name-population": (
+        "Proposal 0049 typed LLM completion event; queued for v0.13.0"
+    ),
+    "observability/056-llm-completion-event-strict-serial-ordering": (
+        "Proposal 0049 typed LLM completion event; queued for v0.13.0"
+    ),
+    # Proposal 0050 (failure-isolation middleware + call-level retry,
+    # v0.42.0) — llm-provider fixtures 056-058 (call-level retry) and
+    # pipeline-utilities fixtures 058-063 (failure-isolation
+    # middleware) require new directive shapes. Queued for v0.14.0
+    # retry & reliability primitives batch.
+    "llm-provider/056-call-level-retry-transient": ("Proposal 0050 call-level retry; queued for v0.14.0"),
+    "llm-provider/057-call-level-retry-exhaustion": ("Proposal 0050 call-level retry; queued for v0.14.0"),
+    "llm-provider/058-call-level-retry-non-transient-no-retry": (
+        "Proposal 0050 call-level retry; queued for v0.14.0"
+    ),
+    "pipeline-utilities/058-failure-isolation-static-degraded": (
+        "Proposal 0050 failure-isolation middleware; queued for v0.14.0"
+    ),
+    "pipeline-utilities/059-failure-isolation-callable-degraded": (
+        "Proposal 0050 failure-isolation middleware; queued for v0.14.0"
+    ),
+    "pipeline-utilities/060-failure-isolation-predicate-filtering": (
+        "Proposal 0050 failure-isolation middleware; queued for v0.14.0"
+    ),
+    "pipeline-utilities/061-failure-isolation-retry-three-piece-composition": (
+        "Proposal 0050 failure-isolation middleware; queued for v0.14.0"
+    ),
+    "pipeline-utilities/062-failure-isolation-on-caught-callback": (
+        "Proposal 0050 failure-isolation middleware; queued for v0.14.0"
+    ),
+    "pipeline-utilities/063-failure-isolation-default-predicate-bare-exception": (
+        "Proposal 0050 failure-isolation middleware; queued for v0.14.0"
+    ),
+    # Proposal 0052 (implementation attribution attributes, v0.44.0)
+    # — observability/059 is the Langfuse-side mapping fixture. Lands
+    # in PR 3 of the v0.12.0 cycle along with the implementation.
+    "observability/059-implementation-attribution-langfuse": (
+        "Proposal 0052 implementation attribution; lands in PR 3 of v0.12.0"
+    ),
 }
 
 
@@ -260,8 +364,7 @@ def test_fixture_parses(case: tuple[str, Path]) -> None:
     ``GraphFixture`` based on top-level keys; ``extra="forbid"`` rejects
     any unknown top-level field."""
     case_id = _id(case)
-    if case_id in _DEFERRED_FIXTURES:
-        pytest.skip(f"{case_id}: {_DEFERRED_FIXTURES[case_id]}")
+    skip_if_deferred(case_id, _DEFERRED_FIXTURES)
     _, path = case
     load_fixture(path)
 
@@ -272,8 +375,7 @@ def test_fixture_round_trips(case: tuple[str, Path]) -> None:
     Phase 0 per the implementation plan: catches dropped fields the user
     intended to use later."""
     case_id = _id(case)
-    if case_id in _DEFERRED_FIXTURES:
-        pytest.skip(f"{case_id}: {_DEFERRED_FIXTURES[case_id]}")
+    skip_if_deferred(case_id, _DEFERRED_FIXTURES)
     _, path = case
     parsed = load_fixture(path)
     dumped = parsed.model_dump(exclude_none=True)

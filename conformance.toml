@@ -32,7 +32,7 @@
 
 [manifest]
 implementation = "openarmature-python"
-spec_pin = "v0.38.0"
+spec_pin = "v0.45.0"
 
 # Status values:
 #   implemented   — shipped behavior matches the proposal's contract
@@ -240,3 +240,59 @@ since = "0.11.0"
 [proposals."0046"]
 status = "implemented"
 since = "0.11.0"
+
+# Spec v0.39.0 (proposal 0047).  Implicit prefix-cache wire-byte
+# stability.  Cross-provider invariant requiring intra-impl byte
+# equality across calls with equivalent inputs.  Queued for v0.13.0
+# alongside 0049 (LLM provider hardening + typed event batch).
+[proposals."0047"]
+status = "not-yet"
+
+# Spec v0.40.0 (proposal 0048).  Read-symmetric invocation metadata
+# (``get_invocation_metadata()`` symmetric to ``set_invocation_metadata()``)
+# + queryable observer pattern blessing.  Queued for v0.12.0 (this
+# cycle); will flip to ``implemented`` in the implementation PR.
+[proposals."0048"]
+status = "not-yet"
+
+# Spec v0.41.0 (proposal 0049).  Typed LLM Completion Event — first
+# typed event variant on the observer event union.  Queued for
+# v0.13.0 alongside 0047.
+[proposals."0049"]
+status = "not-yet"
+
+# Spec v0.42.0 (proposal 0050).  Retry & degradation primitives —
+# failure-isolation middleware + call-level retry.  Queued for
+# v0.14.0 (largest single piece in the roadmap).
+[proposals."0050"]
+status = "not-yet"
+
+# Spec v0.43.0 (proposal 0051).  Langfuse trace.input/trace.output
+# implementation-surface caveat.  Purely textual: documents that the
+# Langfuse SDK's ``LangfuseClient`` API requires a trace object
+# round-trip to project caller-side ``trace.input`` / ``trace.output``
+# updates onto the wire.  No module-level change required; the python
+# implementation's existing v0.11.0 (proposal 0043) shape already
+# matches the documented behavior.
+[proposals."0051"]
+status = "textual-only"
+since = "0.12.0"
+
+# Spec v0.44.0 (proposal 0052).  Implementation attribution attributes
+# (``openarmature.implementation.name`` + ``openarmature.implementation.version``
+# on every invocation span).  Queued for v0.12.0 (this cycle); will
+# flip to ``implemented`` in the implementation PR.
+[proposals."0052"]
+status = "not-yet"
+
+# Spec v0.45.0 (proposal 0053).  §3.4 shared-parent boundary
+# clarification.  Purely textual: tightens the structural-shared-parent
+# classification to predicate the invocation span on whether at least
+# one fan-out or parallel-branches dispatch is on the augmenter's
+# call-stack path.  Implementation-side: behavior already matches the
+# clarified contract via fixtures 034 (outermost-serial augmentation
+# reaches the invocation span) and 039 (nested cases do not).  No
+# module-level change required.
+[proposals."0053"]
+status = "textual-only"
+since = "0.12.0"
