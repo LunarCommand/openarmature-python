@@ -40,6 +40,7 @@ from openarmature.prompts import (
     TextPrompt,
 )
 
+from ._deferral import skip_if_deferred
 from .harness.loader import CONFORMANCE_ROOT
 from .harness.prompt_management import (
     FixtureBackendSpec,
@@ -553,8 +554,25 @@ def _message_to_dict_for_compare(message: Message) -> dict[str, Any]:
     return dumped
 
 
+# Fixtures whose implementation lands in a later PR. Skip-marked so a
+# green test run at this commit means "everything we claim to implement
+# passes." Each subsequent PR drops its own rows as it lands the
+# underlying support.
+_DEFERRED_FIXTURES: dict[str, str] = {
+    # Proposal 0047 (implicit prefix-cache wire-byte stability, spec
+    # v0.39.0) adds an ``expected_shared_prefix`` directive — multi-
+    # render byte-equality check on the shared template prefix.
+    # Queued for v0.13.0 LLM provider hardening batch.
+    "032-cross-variable-substring-stability": (
+        "Proposal 0047 wire-byte stability (expected_shared_prefix directive); queued for v0.13.0"
+    ),
+}
+
+
 @pytest.mark.parametrize("fixture_path", _fixture_paths(), ids=_fixture_id)
 async def test_prompt_management_fixture(fixture_path: Path) -> None:
+    fixture_id = _fixture_id(fixture_path)
+    skip_if_deferred(fixture_id, _DEFERRED_FIXTURES)
     raw: Any = yaml.safe_load(fixture_path.read_text())
     fixture = PromptManagementFixture.model_validate(raw)
 
