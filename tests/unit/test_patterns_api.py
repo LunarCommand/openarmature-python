@@ -72,12 +72,12 @@ def test_get_unknown_pattern_raises_key_error_with_known_names() -> None:
 
 
 def test_get_returns_distinct_content_per_pattern() -> None:
-    """Sanity check: the four patterns aren't accidentally aliasing
-    to the same payload (e.g., a generator bug that wrote one file's
-    content under all four slugs).
+    """Sanity check: the patterns aren't accidentally aliasing to
+    the same payload (e.g., a generator bug that wrote one file's
+    content under multiple slugs).
     """
     contents = {name: patterns.get(name) for name in patterns.list()}
-    # All four contents are unique.
+    # All contents are unique.
     assert len(set(contents.values())) == len(contents)
 
 
