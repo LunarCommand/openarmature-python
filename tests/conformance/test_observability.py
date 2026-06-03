@@ -895,20 +895,19 @@ async def _run_fixture_028(spec: Mapping[str, Any]) -> None:
     # Case-level deferrals for fixture 028. The spec extends the
     # fixture with new negative-control cases as new reserved keys
     # land in §3.4; impl-side coverage for those cases lands in the
-    # PR that implements the corresponding key reservation.
-    _deferred_cases: dict[str, str] = {
+    # PR that implements the corresponding key reservation. Stored as
+    # a set since the skip is a ``continue`` (no ``pytest.skip``
+    # reason surface); rationale lives in the per-block comment above
+    # each name.
+    _deferred_cases: set[str] = {
         # Proposal 0052 (implementation attribution, spec v0.44.0)
         # extends the reserved-set 24 → 26 names with
         # ``implementation_name`` / ``implementation_version``.
         # Coverage lands in PR 3 of the v0.12.0 cycle alongside the
         # ``openarmature.implementation.*`` invocation-span attribute
         # emission.
-        "rejects_reserved_oa_name_implementation_name": (
-            "Proposal 0052 implementation attribution; lands in PR 3 of v0.12.0"
-        ),
-        "rejects_reserved_oa_name_implementation_version": (
-            "Proposal 0052 implementation attribution; lands in PR 3 of v0.12.0"
-        ),
+        "rejects_reserved_oa_name_implementation_name",
+        "rejects_reserved_oa_name_implementation_version",
     }
     cases = cast("list[dict[str, Any]]", spec["cases"])
     for case in cases:

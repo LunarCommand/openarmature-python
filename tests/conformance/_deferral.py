@@ -12,8 +12,8 @@ future tweaks to the message shape land in one place.
 
 The case-level skip inside ``_run_fixture_028`` in
 ``test_observability.py`` deliberately doesn't use this helper — it
-``continue``\\s inside an async loop iterating sub-cases of a single
-fixture rather than skipping the outer pytest test.
+executes ``continue`` inside an async loop iterating sub-cases of a
+single fixture rather than skipping the outer pytest test.
 """
 
 from __future__ import annotations
