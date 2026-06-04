@@ -388,11 +388,209 @@ that context, per normal `ContextVar` semantics.
 
 ### Reading the in-scope metadata
 
-`openarmature.observability.current_invocation_metadata()` returns
-the live mapping (or an empty `MappingProxyType` outside an
-invocation). Observers and capability code read this to surface
-the entries on backend-specific records; user code typically uses
-`set_invocation_metadata` to write and lets the framework propagate.
+`openarmature.observability.get_invocation_metadata()` returns an
+immutable `MappingProxyType` snapshot of the entries visible in the
+current async context's view, or an empty mapping outside any active
+invocation. The read is per-attempt scoped under retry middleware:
+values written in a prior failed attempt are not visible. Reads do
+NOT emit a metadata-augmentation event; the augmentation event
+signals mutations to backends, not consumer reads.
+
+The existing `current_invocation_metadata()` is a stable alias
+pointing at the same function; both names live in `__all__`. Pick
+whichever reads naturally at the call site — `get_/set_` for
+symmetry, `current_` for "the current value of the contextvar".
+
+Three call-site categories:
+
+- **Observers and capability code** (LLM provider span hook, Langfuse
+  observer, OTel observer) read this to surface the entries on
+  backend-specific records.
+- **Downstream pipeline nodes** read the entries an earlier node
+  wrote. A common shape: an upstream `classify` node calls
+  `set_invocation_metadata(audit_kind="fraud")`; a terminal `persist`
+  node calls `get_invocation_metadata()` to read the audit kind
+  without round-tripping the field through State.
+- **Outside an invocation** the read returns the empty mapping
+  silently. Library functions that may be called both inside and
+  outside an invocation can branch on `bool(get_invocation_metadata())`
+  without special-casing.
+
+The read inherits the per-async-context scoping from `set` exactly:
+fan-out instance writes are isolated to the instance's copy and are
+NOT visible after the join. Implementations MUST NOT layer a
+separate global aggregator structure to make sibling-instance writes
+visible across the join — the read surface mirrors the write
+surface's scoping.
+
+## Queryable observer pattern
+
+The `Observer` protocol is intentionally minimal: a single async
+callable receiving the event union. **Concrete observer types MAY
+expose additional read methods on the instance** — pipeline nodes
+hold a reference to the observer they attached and consume those
+methods at runtime.
+
+This is the *queryable observer pattern*: a convention for letting
+an observer carry derived state across the event stream (per-node
+token rollups, per-node latency summaries, per-node error counts)
+that downstream pipeline nodes consume at the end of an invocation
+or at specific summary points.
+
+The pattern is convention, not protocol. The `Observer` surface's
+single async-callable shape is unchanged; the read methods live on
+the concrete observer type, not on the abstract protocol.
+
+### Read-method contract
+
+Read methods on a queryable observer MUST be:
+
+- **Query-only.** No graph state mutation; observers MUST NOT modify
+  pipeline state (the graph engine owns it exclusively).
+- **No routing side effects.** The read MUST NOT influence edge
+  resolution, conditional branching, or node dispatch.
+- **No observer-side emission.** Read methods MUST NOT emit events
+  to other observers, directly or indirectly. The observer's role
+  in the event stream is event consumption (via the
+  `Observer.__call__` surface); cross-observer notification would
+  create ordering dependencies the spec does not establish.
+- **Non-blocking from the event-loop perspective.** Read methods
+  SHOULD be local-state accesses (synchronous reads against
+  in-memory data the observer accumulated). I/O-backed reads are
+  not forbidden, but the concrete observer accepts responsibility
+  for the latency envelope and SHOULD document expectations.
+
+Queryable observers are a *read-augmenting* convenience for patterns
+where pipeline computation depends on cross-cutting data derived
+from event emissions. They are NOT a replacement for State — see
+*Three-channel data-access guidance* below.
+
+### Async-safety
+
+Read methods MAY race with concurrent event emission to the same
+observer. Concrete implementations MUST ensure their internal state
+is **read-consistent** — a read MUST NOT return a torn or
+partially-mutated view (no half-updated dictionaries, no
+inconsistent counter pairs) — but they MUST NOT guarantee that a
+read sees all events emitted up to a particular point in wall-clock
+time.
+
+A consumer that needs **post-completion stability** (e.g., a
+final-summary node that wants to read after every event for the
+invocation has been delivered) MUST gate the read on observing the
+invocation's completion signal. The strictly-serial observer
+delivery queue guarantees prior events are delivered before the
+invocation's terminal event reaches the observer — gating on the
+completion signal is the spec-mandated synchronization point.
+
+Concrete observers MAY offer stricter guarantees (e.g., a
+`get_stable_total()` accessor that blocks until completion); the
+floor is read-consistency.
+
+### Three-channel data-access guidance
+
+Pipelines have three distinct read surfaces for data accumulated
+across an invocation. Use the right one for the use case:
+
+| Channel | Shape | Use when |
+| --- | --- | --- |
+| **State** | Typed schema with declared reducers; participates in graph routing; survives checkpoint / resume; canonical mutable data plane | Pipeline computation data; data the next node's behavior depends on; data that needs to round-trip through reducers; data that needs to survive a crash |
+| **Invocation metadata** | Untyped per-invocation key/value channel; cross-cutting attribution; per-async-context scoped | Span / trace attributes; user / request IDs; audit context; values that don't belong in the typed schema; cross-cutting attribution consumed by one end-of-invocation node |
+| **Queryable observer accumulator** | Derived summary state on a concrete observer instance; queried via read methods at runtime | Per-node summaries derived from event emissions (usage tokens per node, latency per node, retry count per node); when adding the summary as a State field would force reducer-shape pollution |
+
+**Default: prefer State.** State is the canonical mutable data
+channel for pipeline computation. Invocation metadata and queryable
+observer accumulators are narrow carve-outs.
+
+**Invocation metadata** is the right answer when the data is
+cross-cutting attribution (user, request, audit context), adding it
+as a State field would be schema pollution, the data doesn't need
+reducer semantics, and the data doesn't survive across invocations.
+
+**Queryable observer accumulator** is the right answer when the
+data is a derived summary (counts, sums, ratios) over event
+emissions (not raw input), adding the summary as a State field
+would force schema pollution (incompatible reducer shapes, fan-out
+vs non-fan-out asymmetry), AND the consuming node is downstream of
+the event emissions it needs to read.
+
+The three channels are independent — a real pipeline may use all
+three. A `persist` node at the end of an invocation might read its
+canonical computation results from State, its user attribution from
+invocation metadata, and its per-LLM-call token rollup from a
+queryable accumulator.
+
+### Lifecycle
+
+The lifecycle rules below apply only to queryable observers that
+accumulate per-invocation state (e.g., per-node-summary accumulators).
+Observers that expose query methods over non-accumulated data (e.g.,
+a pass-through inspector that returns the latest event seen) are not
+subject to these rules.
+
+Accumulating queryable observers MUST NOT auto-drop accumulated
+state on the invocation's completion signal — an end-of-invocation
+reader (typically a `persist` or `summary` node running as the final
+invocation step) legitimately needs to read the bucket BEFORE the
+invocation completes; auto-drop on the completion signal would race
+against the read.
+
+Concrete accumulating observers MUST provide an **explicit drop /
+cleanup mechanism** — typically `drop(invocation_id)` — that
+releases the accumulated state for a given invocation. The consuming
+node calls drop after reading.
+
+Long-lived accumulators (an observer that survives across many
+invocations) accumulate buckets per `invocation_id` until explicitly
+dropped — a feature for session-scoped accumulators surviving across
+resumes; a cost in memory pressure if drops are missed. The spec does
+NOT mandate a maximum retention policy; concrete observers MAY offer
+LRU eviction or TTL-based cleanup on top.
+
+### Synchronization with the deliver loop
+
+A subtle race: the strictly-serial observer-delivery queue may still
+hold not-yet-dispatched events for the in-flight invocation at the
+moment a terminal node reads the accumulator. The accumulator's view
+in that moment can be one event behind reality, and a downstream
+read can miss the most-recent contribution.
+
+For accumulators where this matters (token rollups consumed by a
+`persist` node, latency summaries written to a canonical JSON
+artifact), gate the read on the per-invocation drain primitive
+`CompiledGraph.drain_events_for(invocation_id, *, timeout)`. The
+canonical two-step shape is *drain, then read, then drop* — read via
+the accumulator's documented query method (e.g. `get_bucket`), then
+release the bucket via the §9.4 `drop` discipline:
+
+```python
+async def persist(state: PipelineState) -> Mapping[str, Any]:
+    # 1. Wait for every event under this invocation_id to dispatch
+    #    to every attached observer; bounded by the timeout.
+    await graph.drain_events_for(state.invocation_id, timeout=2.0)
+    # 2. Read the bucket — the accumulator's view now reflects the
+    #    full event stream for this invocation.
+    usage_records = accumulator.get_bucket(state.invocation_id)
+    # 3. Release the bucket per §9.4. Skip this step only if the
+    #    accumulator is intentionally session-scoped across resumes.
+    accumulator.drop(state.invocation_id)
+    # ...
+```
+
+`drain_events_for` is symmetric with the existing process-wide
+`graph.drain()` but scoped to one invocation. Returns the same
+`DrainSummary` shape, with the same timeout discipline.
+
+!!! note "drain_events_for ships in v0.12.0 alongside the read API"
+    `CompiledGraph.drain_events_for` is the spec §6 / proposal 0054
+    pair to the §9.4 accumulator lifecycle described above. The two
+    proposals are bundled into the v0.12.0 release cycle as
+    architecturally paired: without the per-invocation drain, the
+    accumulator pattern would race against the deliver loop on the
+    last-event read. If you are reading this from a pre-v0.12.0
+    install, the primitive is not yet present; the docs document the
+    pattern's complete shape so the v0.12.0 upgrade is a straight
+    drop-in.
 
 ## OpenTelemetry mapping (opt-in)
 

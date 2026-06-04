@@ -113,8 +113,23 @@ def current_invocation_metadata() -> MappingProxyType[str, AttributeValue]:
     backend-specific records. The returned mapping is read-only;
     callers MUST NOT mutate it. Use :func:`set_invocation_metadata`
     to add entries.
+
+    Aliased as :func:`get_invocation_metadata` per spec §3.4 (proposal
+    0048, v0.40.0); the alias is the canonical spec-idiomatic name
+    paralleling :func:`set_invocation_metadata`. Both names point at
+    the same function — pick whichever reads naturally at the call
+    site.
     """
     return _invocation_metadata_var.get()
+
+
+# Proposal 0048 (observability §3.4, spec v0.40.0): canonical
+# spec-idiomatic public name for the read API, paralleling
+# ``set_invocation_metadata`` on the write side. Identical to
+# ``current_invocation_metadata`` — same function object — exposed
+# so callers wishing to use the symmetric ``get_/set_`` naming have
+# the entry point available.
+get_invocation_metadata = current_invocation_metadata
 
 
 def set_invocation_metadata(**entries: AttributeValue) -> None:
@@ -144,6 +159,10 @@ def set_invocation_metadata(**entries: AttributeValue) -> None:
     event is emitted. The empty-invocation case is supported for
     symmetry; users typically call this from inside a node body,
     middleware, or observer where an invocation is already in flight.
+
+    Symmetric with :func:`get_invocation_metadata` (proposal 0048,
+    spec §3.4 v0.40.0) which returns an immutable snapshot of the
+    current async context's view.
     """
     if not entries:
         return
@@ -301,6 +320,7 @@ def _reset_invocation_metadata(
 __all__ = [
     "AttributeValue",
     "current_invocation_metadata",
+    "get_invocation_metadata",
     "set_invocation_metadata",
     "validate_invocation_metadata",
     "_reset_invocation_metadata",

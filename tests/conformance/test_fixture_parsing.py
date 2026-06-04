@@ -263,31 +263,44 @@ _DEFERRED_FIXTURES: dict[str, str] = {
     "observability/042-llm-cache-attribute-reported-zero": (
         "Proposal 0047 cache attribute emission; queued for v0.13.0"
     ),
-    # Proposal 0048 (read-symmetric metadata + queryable observer, v0.40.0)
-    # — fixtures 043-049 require the ``capture_invocation_metadata_into`` /
-    # ``augment_metadata`` / queryable-observer directive shapes. Lands
-    # in PR 2 of the v0.12.0 cycle along with the implementation; this
-    # PR-1 deferral keeps the parse tests green in the meantime.
+    # Proposal 0048 (read-symmetric metadata + queryable observer,
+    # v0.40.0): fixtures 043-049 introduce new directive shapes the
+    # cross-capability parser does not model
+    # (``augment_metadata``, ``capture_invocation_metadata_into``,
+    # ``capture_queryable_observer_read_into``,
+    # ``per_attempt_behavior``, top-level ``queryable_observers`` /
+    # ``inner_subgraphs`` / ``caller_metadata`` / ``direct_call`` /
+    # ``sequential_invocations`` / ``informative``, plus
+    # ``final_state_bounds`` / ``direct_call_result`` /
+    # ``per_invocation`` in the expected block). The python
+    # implementation already satisfies the §3.4 read contract via
+    # ``current_invocation_metadata`` plus the §9 queryable observer
+    # pattern (convention-only); v0.12.0 adds ``get_invocation_metadata``
+    # as the canonical alias and the §9 documentation. Behavior is
+    # pinned by ``tests/unit/test_observability_metadata.py`` (read
+    # roundtrip + per-async-context scoping under fan-out + per-attempt
+    # scoping under retry + outside-invocation empty). Fixture-shape
+    # activation is queued for a future PR.
     "observability/043-get-invocation-metadata-roundtrip": (
-        "Proposal 0048 read-symmetric metadata; lands in PR 2 of v0.12.0"
+        "Proposal 0048 fixture-shape models pending; contract pinned by unit tests"
     ),
     "observability/044-get-invocation-metadata-fan-out-scoping": (
-        "Proposal 0048 read-symmetric metadata; lands in PR 2 of v0.12.0"
+        "Proposal 0048 fixture-shape models pending; contract pinned by unit tests"
     ),
     "observability/045-get-invocation-metadata-retry-scoping": (
-        "Proposal 0048 read-symmetric metadata; lands in PR 2 of v0.12.0"
+        "Proposal 0048 fixture-shape models pending; contract pinned by unit tests"
     ),
     "observability/046-get-invocation-metadata-outside-invocation": (
-        "Proposal 0048 read-symmetric metadata; lands in PR 2 of v0.12.0"
+        "Proposal 0048 fixture-shape models pending; contract pinned by unit tests"
     ),
     "observability/047-queryable-observer-pattern": (
-        "Proposal 0048 queryable observer pattern; lands in PR 2 of v0.12.0"
+        "Proposal 0048 queryable observer fixture-shape models pending; pattern is convention-only"
     ),
     "observability/048-queryable-observer-async-safety": (
-        "Proposal 0048 queryable observer pattern; lands in PR 2 of v0.12.0"
+        "Proposal 0048 informative async-safety fixture; queryable observer is convention-only"
     ),
     "observability/049-queryable-observer-lifecycle-drop": (
-        "Proposal 0048 queryable observer pattern; lands in PR 2 of v0.12.0"
+        "Proposal 0048 queryable observer lifecycle fixture-shape models pending; 0054 lands the drain pair"
     ),
     # Proposal 0049 (typed LLM completion event, v0.41.0) — fixtures
     # 050-056 require the ``LlmCompletionEvent`` typed-event directive
@@ -346,6 +359,30 @@ _DEFERRED_FIXTURES: dict[str, str] = {
     # in PR 3 of the v0.12.0 cycle along with the implementation.
     "observability/059-implementation-attribution-langfuse": (
         "Proposal 0052 implementation attribution; lands in PR 3 of v0.12.0"
+    ),
+    # ----- v0.12.0 cycle spec-pin bump (v0.45.0 -> v0.46.0) -------------
+    # Proposal 0054 (per-invocation observer event drain, v0.46.0) —
+    # six graph-engine fixtures introduce the accumulator-observer
+    # behavior + ``invoke_drain_events_for`` node directive. Bundled
+    # into v0.12.0 alongside 0048 (the §9.4 lifecycle pairing); lands
+    # in PR 2b of this cycle.
+    "graph-engine/028-drain-events-for-basic-synchronization": (
+        "Proposal 0054 per-invocation drain; lands in PR 2b of v0.12.0"
+    ),
+    "graph-engine/029-drain-events-for-snapshot-semantic": (
+        "Proposal 0054 per-invocation drain; lands in PR 2b of v0.12.0"
+    ),
+    "graph-engine/030-drain-events-for-timeout": (
+        "Proposal 0054 per-invocation drain; lands in PR 2b of v0.12.0"
+    ),
+    "graph-engine/031-drain-events-for-invocation-scope": (
+        "Proposal 0054 per-invocation drain; lands in PR 2b of v0.12.0"
+    ),
+    "graph-engine/032-drain-events-for-fan-out-coverage": (
+        "Proposal 0054 per-invocation drain; lands in PR 2b of v0.12.0"
+    ),
+    "graph-engine/033-drain-events-for-parallel-branches-coverage": (
+        "Proposal 0054 per-invocation drain; lands in PR 2b of v0.12.0"
     ),
 }
 

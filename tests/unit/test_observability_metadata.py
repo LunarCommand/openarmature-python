@@ -20,6 +20,7 @@ import pytest
 from openarmature.graph import END, GraphBuilder, State
 from openarmature.observability import (
     current_invocation_metadata,
+    get_invocation_metadata,
     set_invocation_metadata,
 )
 from openarmature.observability.metadata import (
@@ -499,3 +500,58 @@ async def test_invoke_rejects_empty_invocation_id() -> None:
     graph = _build_graph()
     with pytest.raises(ValueError, match="non-empty"):
         await graph.invoke(_SimpleState(), invocation_id="")
+
+
+# Proposal 0048: ``get_invocation_metadata`` is the canonical
+# spec-idiomatic public name for the §3.4 read API, paralleling
+# ``set_invocation_metadata`` on the write side. It is the same
+# function object as the historical ``current_invocation_metadata``;
+# the tests below pin the alias identity and the end-to-end roundtrip
+# the spec calls out — boundary baseline + in-node augment, with the
+# read returning an immutable mapping containing both.
+
+
+def test_get_invocation_metadata_is_same_callable_as_current() -> None:
+    assert get_invocation_metadata is current_invocation_metadata
+
+
+def test_get_invocation_metadata_empty_outside_invocation() -> None:
+    out = get_invocation_metadata()
+    assert dict(out) == {}
+
+
+def test_get_invocation_metadata_returns_immutable_mapping_outside_invocation() -> None:
+    from types import MappingProxyType
+
+    assert isinstance(get_invocation_metadata(), MappingProxyType)
+
+
+async def test_get_invocation_metadata_roundtrip_baseline_plus_augment() -> None:
+    from types import MappingProxyType
+
+    captured: dict[str, Any] = {}
+    captured_type: list[type] = []
+
+    async def _read_after_write(_s: _SimpleState) -> dict[str, Any]:
+        set_invocation_metadata(audit_kind="fraud")
+        read = get_invocation_metadata()
+        # Pin the immutable-mapping return type inside an active
+        # invocation too — the outside-invocation path returns the
+        # module-level ``_EMPTY_METADATA`` sentinel, but the
+        # mid-invocation path constructs a fresh MappingProxyType
+        # around the merged dict (see ``set_invocation_metadata``).
+        captured_type.append(type(read))
+        captured.update(dict(read))
+        return {"counter": 1}
+
+    graph = (
+        GraphBuilder(_SimpleState)
+        .add_node("read_after_write", _read_after_write)
+        .add_edge("read_after_write", END)
+        .set_entry("read_after_write")
+        .compile()
+    )
+    await graph.invoke(_SimpleState(), metadata={"tenantId": "T1"})
+    # Caller baseline + in-node write, both visible to the read.
+    assert captured == {"tenantId": "T1", "audit_kind": "fraud"}
+    assert captured_type == [MappingProxyType]
