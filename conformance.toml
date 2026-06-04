@@ -250,26 +250,39 @@ status = "not-yet"
 
 # Spec v0.40.0 (proposal 0048).  Read-symmetric invocation metadata.
 # Adds ``get_invocation_metadata()`` symmetric to the existing
-# ``set_invocation_metadata()`` write API.  The existing public
-# ``current_invocation_metadata()`` already satisfies the §3.4 read
-# contract end-to-end (returns ``MappingProxyType`` snapshot of the
-# current async context's view, silent no-op outside an invocation,
-# no observer emission, per-attempt scoping inherited from
-# 0034/0040/0045).  ``get_invocation_metadata`` lands as the canonical
-# spec-idiomatic public name; ``current_invocation_metadata`` stays
-# as a stable alias (Option A per the proposal-0048-implementation
-# coord thread).  Plus a new §9 *Queryable observer pattern* section
-# in ``docs/concepts/observability.md`` covering the §9.1 read-method
+# ``set_invocation_metadata()`` write API.  The python implementation
+# satisfies most of the §3.4 read contract via the pre-existing
+# ``current_invocation_metadata`` machinery: returns ``MappingProxyType``
+# snapshot of the current async context's view, silent no-op outside
+# an invocation, no observer emission, per-async-context scoping under
+# fan-out and parallel-branches (inherited from 0034/0040/0045).
+# ``get_invocation_metadata`` lands as the canonical spec-idiomatic
+# public name; ``current_invocation_metadata`` stays as a stable
+# alias (Option A per the proposal-0048-implementation coord thread).
+# Plus a new §9 *Queryable observer pattern* section in
+# ``docs/concepts/observability.md`` covering the §9.1 read-method
 # contract, §9.2 async-safety, §9.3 three-channel guidance, §9.4
 # lifecycle.  §9 is convention-only per spec — no new abstract
-# surface on ``Observer``.  Conformance fixtures 043-049 introduce
-# new directive shapes (augment_metadata / capture_invocation_metadata_into
-# / capture_queryable_observer_read_into / per_attempt_behavior +
+# surface on ``Observer``.
+#
+# Open gap: §3.4 *per-attempt scoping under retry middleware* is NOT
+# enforced in v0.12.0 — the retry middleware
+# (``src/openarmature/graph/middleware/retry.py``) manages the
+# ``attempt_index`` ContextVar but does NOT reset the
+# invocation-metadata ContextVar between attempts.  A write from a
+# failed attempt remains visible on the next attempt.  Closing this
+# gap is a follow-on PR (engine-side reset of ``_invocation_metadata_var``
+# around each retry iteration + a pinning unit test against spec
+# fixture 045's contract).
+#
+# Conformance fixtures 043-049 introduce new directive shapes
+# (augment_metadata / capture_invocation_metadata_into /
+# capture_queryable_observer_read_into / per_attempt_behavior +
 # queryable_observers / inner_subgraphs / caller_metadata /
 # direct_call / sequential_invocations top-level keys) that the
 # cross-capability parser doesn't model; fixture-shape activation is
-# queued for a future PR.  The behavioral contract is pinned by
-# explicit unit tests:
+# queued for a future PR.  The shipped portion of the contract is
+# pinned by explicit unit tests:
 #   - alias identity + roundtrip + immutable-mapping return:
 #     ``tests/unit/test_observability_metadata.py::
 #     test_get_invocation_metadata_is_same_callable_as_current``,
@@ -278,16 +291,11 @@ status = "not-yet"
 #   - mid-invocation augmentation visible to subsequent reads:
 #     ``::test_mid_invocation_augmentation_persists_to_next_node``;
 #   - outside-invocation empty:
-#     ``::test_current_invocation_metadata_empty_outside_invocation``;
-#   - per-async-context scoping under fan-out + per-attempt scoping
-#     under retry: predecessor proposal 0034/0040/0045 conformance
-#     fixtures (observability/026, 027, 029, 030, 034 — already
-#     marked implemented and passing on the existing harness)
-#     exercise the same underlying ContextVar machinery the new read
-#     API delegates to.
+#     ``::test_current_invocation_metadata_empty_outside_invocation``.
 [proposals."0048"]
-status = "implemented"
+status = "partial"
 since = "0.12.0"
+note = "Read API + §9 queryable observer pattern docs ship in v0.12.0. Spec §3.4 per-attempt scoping under retry middleware is NOT yet enforced — the python retry middleware does not reset the invocation-metadata ContextVar between attempts, so a failed attempt's writes remain visible on retry. Per-async-context scoping under fan-out and parallel-branches is fully implemented. Closing the retry-side gap is tracked for a follow-on PR."
 
 # Spec v0.41.0 (proposal 0049).  Typed LLM Completion Event — first
 # typed event variant on the observer event union.  Queued for
