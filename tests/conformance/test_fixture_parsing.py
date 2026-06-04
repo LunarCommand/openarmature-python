@@ -277,10 +277,18 @@ _DEFERRED_FIXTURES: dict[str, str] = {
     # ``current_invocation_metadata`` plus the §9 queryable observer
     # pattern (convention-only); v0.12.0 adds ``get_invocation_metadata``
     # as the canonical alias and the §9 documentation. Behavior is
-    # pinned by ``tests/unit/test_observability_metadata.py`` (read
-    # roundtrip + per-async-context scoping under fan-out + per-attempt
-    # scoping under retry + outside-invocation empty). Fixture-shape
-    # activation is queued for a future PR.
+    # pinned by:
+    #   - ``tests/unit/test_observability_metadata.py``: read
+    #     roundtrip + alias identity + mid-invocation augmentation
+    #     visible to next node + outside-invocation empty.
+    #   - Predecessor proposal 0034/0040 conformance fixtures
+    #     (observability/026, 027, 029, 030, 034 — already
+    #     implemented and exercised by the runtime harness) cover
+    #     per-async-context scoping under fan-out + parallel-branches.
+    #   - Per-attempt scoping under retry is the OPEN gap documented
+    #     on the 0048 manifest entry (status = "partial"); pinning
+    #     lands in the follow-on retry-metadata-reset PR.
+    # Fixture-shape activation is queued for a future PR.
     "observability/043-get-invocation-metadata-roundtrip": (
         "Proposal 0048 fixture-shape models pending; contract pinned by unit tests"
     ),

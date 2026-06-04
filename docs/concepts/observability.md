@@ -577,15 +577,19 @@ release the bucket via the §9.4 `drop` discipline:
 
 ```python
 async def persist(state: PipelineState) -> Mapping[str, Any]:
+    # current_invocation_id() returns the engine-minted (or
+    # caller-supplied) id of the active invocation; never None
+    # inside a node body.
+    invocation_id = current_invocation_id()
     # 1. Wait for every event under this invocation_id to dispatch
     #    to every attached observer; bounded by the timeout.
-    await graph.drain_events_for(state.invocation_id, timeout=2.0)
+    await graph.drain_events_for(invocation_id, timeout=2.0)
     # 2. Read the bucket — the accumulator's view now reflects the
     #    full event stream for this invocation.
-    usage_records = accumulator.get_bucket(state.invocation_id)
+    usage_records = accumulator.get_bucket(invocation_id)
     # 3. Release the bucket per §9.4. Skip this step only if the
     #    accumulator is intentionally session-scoped across resumes.
-    accumulator.drop(state.invocation_id)
+    accumulator.drop(invocation_id)
     # ...
 ```
 
