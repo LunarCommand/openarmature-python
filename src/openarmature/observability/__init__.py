@@ -46,8 +46,13 @@ from .llm_event import LLM_NAMESPACE, LlmEventPayload
 # call from inside node bodies / middleware / observers;
 # `current_invocation_metadata` is the public reader observers and
 # capability code consume.
+# v0.12.0 (proposal 0048): `get_invocation_metadata` adds the
+# spec-idiomatic canonical name for the read API paralleling
+# `set_invocation_metadata`. Same function object as
+# `current_invocation_metadata`; both are exported.
 from .metadata import (
     current_invocation_metadata,
+    get_invocation_metadata,
     set_invocation_metadata,
 )
 
@@ -62,5 +67,6 @@ __all__ = [
     "current_invocation_id",
     "current_invocation_metadata",
     "current_namespace_prefix",
+    "get_invocation_metadata",
     "set_invocation_metadata",
 ]

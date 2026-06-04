@@ -32,7 +32,7 @@
 
 [manifest]
 implementation = "openarmature-python"
-spec_pin = "v0.45.0"
+spec_pin = "v0.46.0"
 
 # Status values:
 #   implemented   — shipped behavior matches the proposal's contract
@@ -248,12 +248,54 @@ since = "0.11.0"
 [proposals."0047"]
 status = "not-yet"
 
-# Spec v0.40.0 (proposal 0048).  Read-symmetric invocation metadata
-# (``get_invocation_metadata()`` symmetric to ``set_invocation_metadata()``)
-# + queryable observer pattern blessing.  Queued for v0.12.0 (this
-# cycle); will flip to ``implemented`` in the implementation PR.
+# Spec v0.40.0 (proposal 0048).  Read-symmetric invocation metadata.
+# Adds ``get_invocation_metadata()`` symmetric to the existing
+# ``set_invocation_metadata()`` write API.  The python implementation
+# satisfies most of the §3.4 read contract via the pre-existing
+# ``current_invocation_metadata`` machinery: returns ``MappingProxyType``
+# snapshot of the current async context's view, silent no-op outside
+# an invocation, no observer emission, per-async-context scoping under
+# fan-out and parallel-branches (inherited from 0034/0040/0045).
+# ``get_invocation_metadata`` lands as the canonical spec-idiomatic
+# public name; ``current_invocation_metadata`` stays as a stable
+# alias (Option A per the proposal-0048-implementation coord thread).
+# Plus a new §9 *Queryable observer pattern* section in
+# ``docs/concepts/observability.md`` covering the §9.1 read-method
+# contract, §9.2 async-safety, §9.3 three-channel guidance, §9.4
+# lifecycle.  §9 is convention-only per spec — no new abstract
+# surface on ``Observer``.
+#
+# Open gap: §3.4 *per-attempt scoping under retry middleware* is NOT
+# enforced in v0.12.0 — the retry middleware
+# (``src/openarmature/graph/middleware/retry.py``) manages the
+# ``attempt_index`` ContextVar but does NOT reset the
+# invocation-metadata ContextVar between attempts.  A write from a
+# failed attempt remains visible on the next attempt.  Closing this
+# gap is a follow-on PR (engine-side reset of ``_invocation_metadata_var``
+# around each retry iteration + a pinning unit test against spec
+# fixture 045's contract).
+#
+# Conformance fixtures 043-049 introduce new directive shapes
+# (augment_metadata / capture_invocation_metadata_into /
+# capture_queryable_observer_read_into / per_attempt_behavior +
+# queryable_observers / inner_subgraphs / caller_metadata /
+# direct_call / sequential_invocations top-level keys) that the
+# cross-capability parser doesn't model; fixture-shape activation is
+# queued for a future PR.  The shipped portion of the contract is
+# pinned by explicit unit tests:
+#   - alias identity + roundtrip + immutable-mapping return:
+#     ``tests/unit/test_observability_metadata.py::
+#     test_get_invocation_metadata_is_same_callable_as_current``,
+#     ``::test_get_invocation_metadata_roundtrip_baseline_plus_augment``,
+#     ``::test_get_invocation_metadata_returns_immutable_mapping_outside_invocation``;
+#   - mid-invocation augmentation visible to subsequent reads:
+#     ``::test_mid_invocation_augmentation_persists_to_next_node``;
+#   - outside-invocation empty:
+#     ``::test_current_invocation_metadata_empty_outside_invocation``.
 [proposals."0048"]
-status = "not-yet"
+status = "partial"
+since = "0.12.0"
+note = "Read API + §9 queryable observer pattern docs ship in v0.12.0. Spec §3.4 per-attempt scoping under retry middleware is NOT yet enforced — the python retry middleware does not reset the invocation-metadata ContextVar between attempts, so a failed attempt's writes remain visible on retry. Per-async-context scoping under fan-out and parallel-branches is fully implemented. Closing the retry-side gap is tracked for a follow-on PR."
 
 # Spec v0.41.0 (proposal 0049).  Typed LLM Completion Event — first
 # typed event variant on the observer event union.  Queued for
@@ -296,3 +338,13 @@ status = "not-yet"
 [proposals."0053"]
 status = "textual-only"
 since = "0.12.0"
+
+# Spec v0.46.0 (proposal 0054).  Per-invocation observer event drain
+# (``drain_events_for(invocation_id, *, timeout) -> DrainSummary``).
+# Bundled into v0.12.0 per the 2026-06-03 decision in the
+# proposal-0048-implementation coord thread — 0054 directly resolves
+# the §9.4 accumulator-lifecycle synchronization race that 0048's
+# queryable observer pattern would otherwise expose.  Lands in
+# PR 2b (after this PR's 0048 implementation).
+[proposals."0054"]
+status = "not-yet"
