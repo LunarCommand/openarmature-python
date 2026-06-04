@@ -285,18 +285,19 @@
   padding-left: 0.75rem;
 }
 
-/* Source-box callout color (the ``!!! info "Source"`` admonition
- * inserted between the H1 and lead paragraph on every example
- * walk-through doc). Material's default ``info`` admonition uses
- * a blue accent; this override paints it in the project lavender
- * to match the ``#9d4edd`` brand purple and inline-code color
- * (``#e4c1f9`` ≈ rgb(228, 193, 249)) used elsewhere in the slate
- * theme. Scoped to ``.admonition.info``; currently the only
- * ``!!! info`` usage in the docs is the Source callout, so this
- * effectively styles "the Source box". If a future doc adds a
- * non-Source info admonition that should stay blue, switch the
- * walk-through callouts to a custom ``!!! source`` type and
- * re-scope this rule to ``.admonition.source``. */
+/* Brand-lavender callout color, applied to every ``!!! info``
+ * admonition site-wide. Material's default ``info`` admonition
+ * uses a blue accent; this override paints it in the project
+ * lavender to match the ``#9d4edd`` brand purple and inline-code
+ * color (``#e4c1f9`` ≈ rgb(228, 193, 249)) used elsewhere in the
+ * slate theme. Two usage shapes in the docs today:
+ *   - the ``!!! info "Source"`` box inserted between the H1 and
+ *     lead paragraph on every example walk-through page; and
+ *   - in-page concept callouts (e.g. the proposal-0054 bundling
+ *     note in ``concepts/observability.md``).
+ * If a future doc needs a generic info admonition that stays in
+ * Material's default blue, switch this rule to a custom
+ * ``!!! brand`` admonition type and migrate the existing call sites. */
 .md-typeset .admonition.info,
 .md-typeset details.info {
   border-color: rgb(228, 193, 249);

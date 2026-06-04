@@ -581,7 +581,7 @@ async def persist(state: PipelineState) -> Mapping[str, Any]:
 `graph.drain()` but scoped to one invocation. Returns the same
 `DrainSummary` shape, with the same timeout discipline.
 
-!!! note "drain_events_for ships in v0.12.0 alongside the read API"
+!!! info "drain_events_for ships in v0.12.0 alongside the read API"
     `CompiledGraph.drain_events_for` is the spec §6 / proposal 0054
     pair to the §9.4 accumulator lifecycle described above. The two
     proposals are bundled into the v0.12.0 release cycle as
@@ -933,7 +933,7 @@ same in tests and production. See
 [`examples/langfuse-observability`](../examples/langfuse-observability.md)
 for a runnable demo.
 
-!!! note "Langfuse SDK version compatibility"
+!!! info "Langfuse SDK version compatibility"
 
     Validated against `langfuse>=4.6,<5`. The v4 SDK introduced an
     OTel-based architecture with `start_observation` /
