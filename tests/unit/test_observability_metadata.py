@@ -13,6 +13,7 @@ tests focus on the python-side surface contract.
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Mapping
 from typing import Any
 
 import pytest
@@ -555,3 +556,112 @@ async def test_get_invocation_metadata_roundtrip_baseline_plus_augment() -> None
     # Caller baseline + in-node write, both visible to the read.
     assert captured == {"tenantId": "T1", "audit_kind": "fraud"}
     assert captured_type == [MappingProxyType]
+
+
+# Spec observability §3.4 *Per-attempt scoping*: under retry
+# middleware, each attempt sees only the metadata in scope at
+# retry-entry plus that attempt's own writes; failed-attempt
+# writes are discarded along with the attempt itself. The pin
+# below mirrors the spec's fixture 045 case shape (attempt 0
+# writes + fails, attempt 1 asserts marker absent + writes +
+# succeeds, downstream reads successful attempt's marker).
+# Companion test verifies the same discard discipline on
+# terminal failure (all retries exhausted).
+
+
+class _RetryTransient(Exception):
+    """Carries a transient category so the default classifier
+    treats it as retryable. Matches the ``provider_rate_limit``
+    category used in ``tests/unit/test_middleware.py``."""
+
+    category = "provider_rate_limit"
+
+
+async def test_per_attempt_scoping_under_retry_discards_failed_attempt_writes() -> None:
+    from openarmature.graph.middleware import RetryMiddleware
+
+    captured_attempt_1_read: dict[str, Any] = {}
+    captured_downstream_read: dict[str, Any] = {}
+    attempts: list[int] = []
+
+    async def _retried(_s: _SimpleState) -> dict[str, Any]:
+        attempt_n = len(attempts)
+        attempts.append(attempt_n)
+        if attempt_n == 0:
+            # First attempt: write a marker, then raise transient.
+            set_invocation_metadata(attempt_marker="first")
+            raise _RetryTransient()
+        # Second attempt: read first — assert the failed-attempt's
+        # marker is NOT visible — then write a new marker and succeed.
+        captured_attempt_1_read.update(dict(get_invocation_metadata()))
+        set_invocation_metadata(attempt_marker="second")
+        return {"counter": 1}
+
+    async def _downstream(_s: _SimpleState) -> dict[str, Any]:
+        captured_downstream_read.update(dict(get_invocation_metadata()))
+        return {"counter": 2}
+
+    graph = (
+        GraphBuilder(_SimpleState)
+        .add_node(
+            "retried",
+            _retried,
+            middleware=[RetryMiddleware(max_attempts=2, backoff=lambda _i: 0.0)],
+        )
+        .add_node("downstream", _downstream)
+        .add_edge("retried", "downstream")
+        .add_edge("downstream", END)
+        .set_entry("retried")
+        .compile()
+    )
+    await graph.invoke(_SimpleState(), metadata={"tenantId": "T1"})
+
+    assert attempts == [0, 1]
+    # Attempt 1's read: baseline only — attempt 0's transient
+    # ``attempt_marker=first`` write was discarded on failure.
+    assert captured_attempt_1_read == {"tenantId": "T1"}
+    # Downstream node: baseline + the successful attempt's write
+    # persists past the retry boundary.
+    assert captured_downstream_read == {"tenantId": "T1", "attempt_marker": "second"}
+
+
+async def test_terminal_failure_discards_final_failed_attempt_writes() -> None:
+    # Exercises the middleware directly via ``compose_chain`` so the
+    # post-retry metadata view is readable in the test scope (the
+    # engine's outer invoke() reset would otherwise pop the var back
+    # to empty before control returns to the test, masking the
+    # middleware's own discard). The contract pinned here is that
+    # AFTER the retry middleware re-raises a terminal failure, the
+    # metadata ContextVar is back at the pre-attempt baseline — no
+    # leak of the final failed attempt's writes.
+    from openarmature.graph.middleware import RetryMiddleware, compose_chain
+    from openarmature.observability.metadata import (
+        _reset_invocation_metadata,
+        _set_invocation_metadata,
+        validate_invocation_metadata,
+    )
+
+    attempts: list[int] = []
+
+    async def _always_fails(_state: Any) -> Mapping[str, Any]:
+        attempts.append(len(attempts))
+        set_invocation_metadata(attempt_marker=f"attempt_{len(attempts) - 1}")
+        raise _RetryTransient()
+
+    retry = RetryMiddleware(max_attempts=2, backoff=lambda _i: 0.0)
+    chain = compose_chain([retry], _always_fails)
+
+    # Establish a baseline outside the middleware so we can read it
+    # back post-failure. Mirrors how the engine sets the baseline
+    # at the invoke() boundary.
+    baseline_token = _set_invocation_metadata(validate_invocation_metadata({"tenantId": "T1"}))
+    try:
+        with pytest.raises(_RetryTransient):
+            await chain(_SimpleState())
+        # Both attempts ran.
+        assert attempts == [0, 1]
+        # Post-failure view: the pre-attempt baseline, with NO
+        # ``attempt_marker`` leaked from the final failed attempt.
+        assert dict(get_invocation_metadata()) == {"tenantId": "T1"}
+    finally:
+        _reset_invocation_metadata(baseline_token)
