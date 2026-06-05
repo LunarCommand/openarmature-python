@@ -665,3 +665,42 @@ async def test_terminal_failure_discards_final_failed_attempt_writes() -> None:
         assert dict(get_invocation_metadata()) == {"tenantId": "T1"}
     finally:
         _reset_invocation_metadata(baseline_token)
+
+
+async def test_cancellation_discards_in_flight_attempt_writes() -> None:
+    # Spec §3.4: failed-attempt metadata writes are discarded along
+    # with the attempt. When ``CancelledError`` (or any other
+    # ``BaseException``) ends the attempt, the same discard discipline
+    # applies — cancellation IS a failed attempt from the
+    # metadata-scoping perspective. Spec §6.1: cancellation MUST
+    # propagate (no retry, no swallow), so the reset must happen IN
+    # ADDITION to, not instead of, propagating ``CancelledError``.
+    from openarmature.graph.middleware import RetryMiddleware, compose_chain
+    from openarmature.observability.metadata import (
+        _reset_invocation_metadata,
+        _set_invocation_metadata,
+        validate_invocation_metadata,
+    )
+
+    attempts: list[int] = []
+
+    async def _writes_then_cancels(_state: Any) -> Mapping[str, Any]:
+        attempts.append(len(attempts))
+        set_invocation_metadata(attempt_marker="leaked")
+        raise asyncio.CancelledError("aborted")
+
+    retry = RetryMiddleware(max_attempts=3, backoff=lambda _i: 0.0)
+    chain = compose_chain([retry], _writes_then_cancels)
+
+    baseline_token = _set_invocation_metadata(validate_invocation_metadata({"tenantId": "T1"}))
+    try:
+        with pytest.raises(asyncio.CancelledError):
+            await chain(_SimpleState())
+        # Cancellation propagated — exactly ONE attempt ran (retry
+        # MUST NOT swallow ``CancelledError`` per spec §6.1).
+        assert attempts == [0]
+        # The cancelled attempt's metadata write was discarded per
+        # §3.4 — post-failure view is the pre-attempt baseline.
+        assert dict(get_invocation_metadata()) == {"tenantId": "T1"}
+    finally:
+        _reset_invocation_metadata(baseline_token)

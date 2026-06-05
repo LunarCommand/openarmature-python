@@ -288,7 +288,8 @@ status = "not-yet"
 #     ``::test_current_invocation_metadata_empty_outside_invocation``;
 #   - per-attempt scoping under retry (mirrors spec fixture 045):
 #     ``::test_per_attempt_scoping_under_retry_discards_failed_attempt_writes``,
-#     ``::test_terminal_failure_discards_final_failed_attempt_writes``.
+#     ``::test_terminal_failure_discards_final_failed_attempt_writes``,
+#     ``::test_cancellation_discards_in_flight_attempt_writes``.
 [proposals."0048"]
 status = "implemented"
 since = "0.12.0"

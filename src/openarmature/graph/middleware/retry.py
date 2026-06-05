@@ -182,6 +182,18 @@ class RetryMiddleware:
                         await self.on_retry(exc, attempt)
                     await asyncio.sleep(self.backoff(attempt))
                     attempt += 1
+                except BaseException:
+                    # Cancellation path. `CancelledError` (or other
+                    # `BaseException`) ends the attempt without retry —
+                    # spec §6.1 cancellation MUST propagate, never get
+                    # swallowed or retried. But spec §3.4 per-attempt
+                    # scoping still applies: cancellation IS a failed
+                    # attempt from the metadata-scoping perspective, so
+                    # its writes must be discarded too. Reset the token,
+                    # then re-raise. NO on_retry, NO sleep — straight
+                    # propagation.
+                    _reset_invocation_metadata(metadata_token)
+                    raise
             finally:
                 _reset_attempt_index(attempt_token)
 
