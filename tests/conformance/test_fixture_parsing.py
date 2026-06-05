@@ -369,28 +369,38 @@ _DEFERRED_FIXTURES: dict[str, str] = {
         "Proposal 0052 implementation attribution; lands in PR 3 of v0.12.0"
     ),
     # ----- v0.12.0 cycle spec-pin bump (v0.45.0 -> v0.46.0) -------------
-    # Proposal 0054 (per-invocation observer event drain, v0.46.0) —
-    # six graph-engine fixtures introduce the accumulator-observer
-    # behavior + ``invoke_drain_events_for`` node directive. Bundled
-    # into v0.12.0 alongside 0048 (the §9.4 lifecycle pairing); lands
-    # in PR 2b of this cycle.
+    # Proposal 0054 (per-invocation observer event drain, v0.46.0):
+    # six graph-engine fixtures introduce new directive shapes the
+    # cross-capability parser does not model (``observers[].behavior``,
+    # ``nodes.<name>.invoke_drain_events_for``, the accumulator-observer
+    # contract, the per-node ``node_drain_summaries`` /
+    # ``node_accumulator_snapshots`` assertion blocks). The python
+    # implementation already ships
+    # ``CompiledGraph.drain_events_for(invocation_id, *, timeout)`` in
+    # v0.12.0 (conformance manifest 0054 = implemented); behavior is
+    # pinned by ``tests/unit/test_drain.py`` (basic synchronization,
+    # worker-NOT-cancelled-on-timeout, invocation-scope isolation,
+    # zero-timeout non-blocking check, unknown id, negative + NaN
+    # boundary rejection). Fixture-shape activation is queued for a
+    # future PR slotted after the upcoming spec conformance-adapter
+    # capability ratifies the directive vocabulary.
     "graph-engine/028-drain-events-for-basic-synchronization": (
-        "Proposal 0054 per-invocation drain; lands in PR 2b of v0.12.0"
+        "Proposal 0054 fixture-shape models pending; contract pinned by unit tests"
     ),
     "graph-engine/029-drain-events-for-snapshot-semantic": (
-        "Proposal 0054 per-invocation drain; lands in PR 2b of v0.12.0"
+        "Proposal 0054 fixture-shape models pending; contract pinned by unit tests"
     ),
     "graph-engine/030-drain-events-for-timeout": (
-        "Proposal 0054 per-invocation drain; lands in PR 2b of v0.12.0"
+        "Proposal 0054 fixture-shape models pending; contract pinned by unit tests"
     ),
     "graph-engine/031-drain-events-for-invocation-scope": (
-        "Proposal 0054 per-invocation drain; lands in PR 2b of v0.12.0"
+        "Proposal 0054 fixture-shape models pending; contract pinned by unit tests"
     ),
     "graph-engine/032-drain-events-for-fan-out-coverage": (
-        "Proposal 0054 per-invocation drain; lands in PR 2b of v0.12.0"
+        "Proposal 0054 fixture-shape models pending; contract pinned by unit tests"
     ),
     "graph-engine/033-drain-events-for-parallel-branches-coverage": (
-        "Proposal 0054 per-invocation drain; lands in PR 2b of v0.12.0"
+        "Proposal 0054 fixture-shape models pending; contract pinned by unit tests"
     ),
 }
 

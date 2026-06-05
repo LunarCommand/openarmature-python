@@ -15,9 +15,10 @@ so the graph remains usable for subsequent invocations.
 import asyncio
 import time
 from collections.abc import Mapping
-from typing import Any
+from typing import Annotated, Any
 
 import pytest
+from pydantic import Field
 
 from openarmature.graph import (
     END,
@@ -27,6 +28,7 @@ from openarmature.graph import (
     NodeEvent,
     ObserverEvent,
     State,
+    append,
 )
 
 
@@ -253,3 +255,393 @@ async def test_drain_rejects_nan_timeout() -> None:
     compiled = _build_compiled()
     with pytest.raises(ValueError, match="non-negative"):
         await compiled.drain(timeout=float("nan"))
+
+
+# ---------------------------------------------------------------------------
+# Per-invocation drain (proposal 0054, spec graph-engine §6 *Per-invocation
+# drain*). Tests below mirror the spec fixtures 028-033's case shapes.
+# ---------------------------------------------------------------------------
+
+
+async def _capture_node_invocation_id() -> str:
+    """Helper used inside node bodies. Returns the current invocation_id
+    (never None inside a node body)."""
+    from openarmature.observability.correlation import current_invocation_id
+
+    inv = current_invocation_id()
+    assert inv is not None
+    return inv
+
+
+async def test_drain_events_for_unknown_invocation_returns_clean_summary() -> None:
+    # Unknown invocation_id (no active worker, or the invocation
+    # already drained and the worker exited) returns an empty summary
+    # rather than raising. The shape mirrors drain()'s no-active-workers
+    # path for consistency.
+    compiled = _build_compiled()
+    summary = await compiled.drain_events_for("nonexistent-id")
+    assert summary == DrainSummary(undelivered_count=0, timeout_reached=False)
+
+
+async def test_drain_events_for_basic_synchronization() -> None:
+    # Mirrors spec fixture 028: a slow observer is still in flight when
+    # a node calls drain_events_for; the drain blocks until the
+    # snapshotted set has fully delivered, then returns clean.
+    captured_invocation_id: list[str] = []
+    deliveries: list[str] = []
+
+    async def slow_obs(event: ObserverEvent) -> None:
+        await asyncio.sleep(0.02)
+        if isinstance(event, NodeEvent):
+            deliveries.append(f"{event.node_name}:{event.phase}")
+
+    async def _capture_then_drain(_s: _S) -> Mapping[str, Any]:
+        inv = await _capture_node_invocation_id()
+        captured_invocation_id.append(inv)
+        return {"v": 1}
+
+    builder: GraphBuilder[_S] = GraphBuilder(_S)
+    builder.set_entry("capture")
+    builder.add_node("capture", _capture_then_drain)
+    builder.add_edge("capture", END)
+    compiled = builder.compile()
+    compiled.attach_observer(slow_obs)
+
+    await compiled.invoke(_S())
+    # Drain blocks until every pre-call event has delivered.
+    summary = await compiled.drain_events_for(captured_invocation_id[0], timeout=5.0)
+
+    assert summary == DrainSummary(undelivered_count=0, timeout_reached=False)
+    # The capture node's started+completed pair delivered.
+    assert "capture:started" in deliveries
+    assert "capture:completed" in deliveries
+
+
+async def test_drain_events_for_timeout_does_not_cancel_worker() -> None:
+    # KEY divergence from drain(): per-invocation drain timeout MUST
+    # NOT cancel the deliver worker. The graph remains usable for
+    # subsequent invocations after the timeout fires, and the deliver
+    # loop keeps processing the queue. Mirrors spec fixture 030.
+    deliveries: list[str] = []
+
+    async def very_slow_obs(event: ObserverEvent) -> None:
+        # 100ms per event ensures the 50ms timeout fires before any
+        # delivery completes (the first await in deliver_loop is
+        # this observer's sleep, which already exceeds the budget).
+        await asyncio.sleep(0.1)
+        if isinstance(event, NodeEvent):
+            deliveries.append(event.node_name)
+
+    captured_inv_1: list[str] = []
+    captured_inv_2: list[str] = []
+
+    async def _capture_1(_s: _S) -> Mapping[str, Any]:
+        captured_inv_1.append(await _capture_node_invocation_id())
+        return {"v": 1}
+
+    async def _capture_2(_s: _S) -> Mapping[str, Any]:
+        captured_inv_2.append(await _capture_node_invocation_id())
+        return {"v": 2}
+
+    builder: GraphBuilder[_S] = GraphBuilder(_S)
+    builder.set_entry("n")
+    builder.add_node("n", _capture_1)
+    builder.add_edge("n", END)
+    compiled_1 = builder.compile()
+    compiled_1.attach_observer(very_slow_obs)
+    await compiled_1.invoke(_S())
+
+    started = time.monotonic()
+    summary = await compiled_1.drain_events_for(captured_inv_1[0], timeout=0.05)
+    elapsed = time.monotonic() - started
+
+    assert summary.timeout_reached is True
+    assert summary.undelivered_count > 0
+    # Drain returned within the deadline (no cancellation overhead).
+    assert elapsed < 0.3
+    # The worker is still running — a fresh invocation on the same
+    # graph still delivers events through the same deliver loop.
+    builder_2: GraphBuilder[_S] = GraphBuilder(_S)
+    builder_2.set_entry("m")
+    builder_2.add_node("m", _capture_2)
+    builder_2.add_edge("m", END)
+    compiled_2 = builder_2.compile()
+    compiled_2.attach_observer(very_slow_obs)
+    # The second invocation's drain (with a generous timeout) verifies
+    # the observer is still healthy and the deliver pipeline still
+    # processes events.
+    await compiled_2.invoke(_S())
+    summary_2 = await compiled_2.drain_events_for(captured_inv_2[0], timeout=5.0)
+    assert summary_2 == DrainSummary(undelivered_count=0, timeout_reached=False)
+
+
+async def test_drain_events_for_invocation_scope_isolation() -> None:
+    # Two serial invocations on the same compiled graph. Each drain
+    # sees only its own events. Drains for invocation A do not wait
+    # on invocation B's deliveries. Mirrors spec fixture 031.
+    captured: list[str] = []
+    delivery_log: list[tuple[str, str]] = []
+
+    async def obs(event: ObserverEvent) -> None:
+        await asyncio.sleep(0.01)
+        if isinstance(event, NodeEvent):
+            # capture (invocation_id, node_name) so we can assert
+            # which deliveries happened under which invocation.
+            from openarmature.observability.correlation import current_invocation_id
+
+            inv = current_invocation_id() or "?"
+            delivery_log.append((inv, event.node_name))
+
+    async def _capture(_s: _S) -> Mapping[str, Any]:
+        captured.append(await _capture_node_invocation_id())
+        return {"v": 1}
+
+    builder: GraphBuilder[_S] = GraphBuilder(_S)
+    builder.set_entry("n")
+    builder.add_node("n", _capture)
+    builder.add_edge("n", END)
+    compiled = builder.compile()
+    compiled.attach_observer(obs)
+
+    await compiled.invoke(_S())
+    inv_a = captured[-1]
+    summary_a = await compiled.drain_events_for(inv_a, timeout=5.0)
+    assert summary_a == DrainSummary(undelivered_count=0, timeout_reached=False)
+    # invocation A's events delivered before A's drain returned.
+    a_deliveries = [name for (inv, name) in delivery_log if inv == inv_a]
+    assert "n" in a_deliveries
+
+    # Drain on an UNRELATED invocation_id (still inv_a, but the worker
+    # exited at the end of invocation A — so this is effectively
+    # querying a stale id) returns immediately.
+    summary_stale = await compiled.drain_events_for(inv_a, timeout=5.0)
+    assert summary_stale == DrainSummary(undelivered_count=0, timeout_reached=False)
+
+
+async def test_drain_events_for_rejects_negative_timeout() -> None:
+    compiled = _build_compiled()
+    with pytest.raises(ValueError, match="non-negative"):
+        await compiled.drain_events_for("any-id", timeout=-1.0)
+
+
+async def test_drain_events_for_rejects_nan_timeout() -> None:
+    compiled = _build_compiled()
+    with pytest.raises(ValueError, match="non-negative"):
+        await compiled.drain_events_for("any-id", timeout=float("nan"))
+
+
+async def test_drain_events_for_zero_timeout_is_non_blocking_check() -> None:
+    # A zero timeout fires immediately if the snapshot target isn't
+    # met. Mirrors drain(timeout=0.0)'s non-blocking semantics.
+    captured: list[str] = []
+
+    async def slow_obs(_event: ObserverEvent) -> None:
+        await asyncio.sleep(0.2)
+
+    async def _capture(_s: _S) -> Mapping[str, Any]:
+        captured.append(await _capture_node_invocation_id())
+        return {"v": 1}
+
+    builder: GraphBuilder[_S] = GraphBuilder(_S)
+    builder.set_entry("n")
+    builder.add_node("n", _capture)
+    builder.add_edge("n", END)
+    compiled = builder.compile()
+    compiled.attach_observer(slow_obs)
+    await compiled.invoke(_S())
+
+    started = time.monotonic()
+    summary = await compiled.drain_events_for(captured[-1], timeout=0.0)
+    elapsed = time.monotonic() - started
+
+    assert summary.timeout_reached is True
+    assert summary.undelivered_count > 0
+    assert elapsed < 0.05
+
+
+async def test_drain_events_for_snapshot_semantic_does_not_wait_for_own_completed_event() -> None:
+    # Mirrors spec fixture 029. A node body calling
+    # ``drain_events_for`` from inside itself MUST NOT block on its
+    # own ``completed`` event — the snapshot is the ``dispatched``
+    # count AT CALL TIME, before the node's completed fires. Without
+    # the snapshot semantic the call would deadlock (the node body
+    # is awaiting the completed event, but the completed event only
+    # fires after the node body returns).
+    captured_summary: list[DrainSummary] = []
+    delivered_observer_events: list[str] = []
+
+    async def slow_obs(event: ObserverEvent) -> None:
+        await asyncio.sleep(0.01)
+        if isinstance(event, NodeEvent):
+            delivered_observer_events.append(f"{event.node_name}:{event.phase}")
+
+    compiled_ref: list[CompiledGraph[_S]] = []
+
+    async def _drain_from_inside(_s: _S) -> Mapping[str, Any]:
+        inv = await _capture_node_invocation_id()
+        summary = await compiled_ref[0].drain_events_for(inv, timeout=2.0)
+        captured_summary.append(summary)
+        return {"v": 1}
+
+    builder: GraphBuilder[_S] = GraphBuilder(_S)
+    builder.set_entry("drain_node")
+    builder.add_node("drain_node", _drain_from_inside)
+    builder.add_edge("drain_node", END)
+    compiled = builder.compile()
+    compiled_ref.append(compiled)
+    compiled.attach_observer(slow_obs)
+
+    # The whole invoke MUST complete within the outer timeout — if
+    # drain_events_for waited for the calling node's own completed
+    # event, this would deadlock and asyncio.wait_for would fire.
+    await asyncio.wait_for(compiled.invoke(_S()), timeout=5.0)
+
+    # The in-node drain returned cleanly with no undelivered events
+    # at its snapshot point.
+    assert captured_summary[0] == DrainSummary(undelivered_count=0, timeout_reached=False)
+
+
+async def test_drain_events_for_covers_fan_out_instance_events() -> None:
+    # Mirrors spec fixture 032. Fan-out instances share the parent
+    # invocation's ``_DrainCounters`` (subgraph descents pass the
+    # parent's counters down via ``descend_into_subgraph``), so
+    # ``drain_events_for(outer_invocation_id)`` MUST cover every
+    # event emitted under any of the fan-out's instance subgraph
+    # descents. Without shared counters the drain would miss
+    # instance events entirely.
+
+    class _ParentState(State):
+        items: list[int] = Field(default_factory=list[int])
+        results: Annotated[list[int], append] = Field(default_factory=list[int])
+
+    class _InstanceState(State):
+        item: int = 0
+        result: int = 0
+
+    async def _double(state: _InstanceState) -> Mapping[str, Any]:
+        return {"result": state.item * 2}
+
+    inner = (
+        GraphBuilder(_InstanceState)
+        .set_entry("double")
+        .add_node("double", _double)
+        .add_edge("double", END)
+        .compile()
+    )
+
+    captured_invocation_id: list[str] = []
+    delivered: list[str] = []
+
+    async def slow_obs(event: ObserverEvent) -> None:
+        await asyncio.sleep(0.005)
+        if isinstance(event, NodeEvent):
+            delivered.append(f"{event.namespace}/{event.node_name}:{event.phase}")
+
+    async def _capture_and_persist(_s: _ParentState) -> Mapping[str, Any]:
+        captured_invocation_id.append(await _capture_node_invocation_id())
+        return {}
+
+    builder: GraphBuilder[_ParentState] = GraphBuilder(_ParentState)
+    builder.set_entry("fan_out")
+    builder.add_fan_out_node(
+        "fan_out",
+        subgraph=inner,
+        items_field="items",
+        item_field="item",
+        collect_field="result",
+        target_field="results",
+    )
+    builder.add_node("persist", _capture_and_persist)
+    builder.add_edge("fan_out", "persist")
+    builder.add_edge("persist", END)
+    compiled = builder.compile()
+    compiled.attach_observer(slow_obs)
+
+    await compiled.invoke(_ParentState(items=[1, 2, 3]))
+    summary = await compiled.drain_events_for(captured_invocation_id[0], timeout=5.0)
+
+    assert summary == DrainSummary(undelivered_count=0, timeout_reached=False)
+    # Each of the 3 instances' ``double`` node fired a started +
+    # completed pair under its own namespace; all six MUST have
+    # delivered by the time drain_events_for returned.
+    instance_completions = [e for e in delivered if "/double:completed" in e]
+    assert len(instance_completions) == 3
+
+
+async def test_drain_events_for_covers_parallel_branches_events() -> None:
+    # Mirrors spec fixture 033. Parallel-branches branches share the
+    # parent invocation's ``_DrainCounters`` (same plumbing as
+    # fan-out instances), so ``drain_events_for(outer_invocation_id)``
+    # MUST cover every event from every branch's inner subgraph.
+
+    from openarmature.graph import BranchSpec
+
+    class _ParentState(State):
+        a_out: str = ""
+        b_out: str = ""
+
+    class _BranchAState(State):
+        v: str = ""
+
+    class _BranchBState(State):
+        v: str = ""
+
+    async def _do_a(_s: _BranchAState) -> Mapping[str, Any]:
+        return {"v": "a-done"}
+
+    async def _do_b(_s: _BranchBState) -> Mapping[str, Any]:
+        return {"v": "b-done"}
+
+    branch_a = (
+        GraphBuilder(_BranchAState)
+        .set_entry("a_node")
+        .add_node("a_node", _do_a)
+        .add_edge("a_node", END)
+        .compile()
+    )
+    branch_b = (
+        GraphBuilder(_BranchBState)
+        .set_entry("b_node")
+        .add_node("b_node", _do_b)
+        .add_edge("b_node", END)
+        .compile()
+    )
+
+    captured_invocation_id: list[str] = []
+    delivered: list[str] = []
+
+    async def slow_obs(event: ObserverEvent) -> None:
+        await asyncio.sleep(0.005)
+        if isinstance(event, NodeEvent):
+            delivered.append(f"{event.namespace}/{event.node_name}:{event.phase}")
+
+    async def _capture(_s: _ParentState) -> Mapping[str, Any]:
+        captured_invocation_id.append(await _capture_node_invocation_id())
+        return {}
+
+    builder: GraphBuilder[_ParentState] = GraphBuilder(_ParentState)
+    builder.set_entry("dispatcher")
+    builder.add_parallel_branches_node(
+        "dispatcher",
+        branches={
+            "branch_a": BranchSpec(subgraph=branch_a, outputs={"a_out": "v"}),
+            "branch_b": BranchSpec(subgraph=branch_b, outputs={"b_out": "v"}),
+        },
+    )
+    builder.add_node("persist", _capture)
+    builder.add_edge("dispatcher", "persist")
+    builder.add_edge("persist", END)
+    compiled = builder.compile()
+    compiled.attach_observer(slow_obs)
+
+    await compiled.invoke(_ParentState())
+    summary = await compiled.drain_events_for(captured_invocation_id[0], timeout=5.0)
+
+    assert summary == DrainSummary(undelivered_count=0, timeout_reached=False)
+    # Both branches' inner nodes (``a_node`` + ``b_node``) MUST have
+    # delivered their completed events by the time drain_events_for
+    # returned.
+    a_done = [e for e in delivered if "/a_node:completed" in e]
+    b_done = [e for e in delivered if "/b_node:completed" in e]
+    assert len(a_done) == 1
+    assert len(b_done) == 1
