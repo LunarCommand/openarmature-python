@@ -773,6 +773,101 @@ class CompiledGraph[StateT: State]:
 
         return DrainSummary(undelivered_count=undelivered, timeout_reached=timeout_reached)
 
+    # Spec graph-engine §6 *Per-invocation drain* (proposal 0054).
+    # Symmetric with the process-wide ``drain`` method on the same
+    # class but scoped to one in-flight invocation, with one
+    # spec-mandated divergence: the per-invocation primitive MUST
+    # NOT cancel the deliver worker on timeout (drain is shutdown
+    # semantics; this is in-flight synchronization). The snapshot
+    # semantic — events dispatched after the call begins do not
+    # extend the target — is what keeps an in-node call (e.g., a
+    # terminal node draining its own invocation before reading a
+    # queryable observer accumulator) from deadlocking on its own
+    # ``completed`` event.
+    async def drain_events_for(
+        self,
+        invocation_id: str,
+        *,
+        timeout: float | None = 5.0,
+    ) -> DrainSummary:
+        """Await delivery of every observer event tagged with
+        ``invocation_id`` that was dispatched as of this call's entry,
+        optionally bounded by ``timeout``.
+
+        Use this from a terminal node body to synchronize on the
+        observer event stream before reading derived observer state
+        (a queryable accumulator's per-invocation bucket, a latency
+        rollup, a token-usage record). The drain blocks until every
+        event dispatched up to the moment of the call has reached
+        every attached observer, then returns.
+
+        Snapshot semantic: the drain awaits the events dispatched as
+        of call time. Events emitted after the call begins (notably
+        the calling node's own ``completed`` event, which fires only
+        after the node body returns) are out of scope. This is what
+        allows an in-node call to avoid deadlocking on its own
+        completed event. The calling node's ``started`` event, by
+        contrast, fires immediately BEFORE the body runs and IS in
+        the snapshot — the drain awaits its delivery normally.
+
+        ``timeout`` is a non-negative duration in seconds (default
+        ``5.0``). ``None`` waits indefinitely. ``timeout=0.0`` is a
+        non-blocking check: returns immediately whether the snapshot
+        target was met. Raises :class:`ValueError` on negative or
+        ``NaN`` input.
+
+        On timeout the deliver worker is left running. The compiled
+        graph stays available to serve other invocations after a
+        per-invocation drain times out; the deliver loop continues
+        processing the queue, including the events the timed-out
+        caller failed to await. This is the load-bearing difference
+        from :meth:`drain`, which cancels its workers.
+
+        Returns a :class:`DrainSummary` with ``undelivered_count`` and
+        ``timeout_reached``. On the clean path both are zero / false;
+        on timeout ``undelivered_count`` is the snapshot target minus
+        the deliver loop's current ``delivered`` count for this
+        invocation. Unknown ``invocation_id`` (no active worker, or
+        the invocation has already drained and the worker has exited)
+        returns an empty summary — not an error.
+
+        Interaction with :meth:`drain`: if process-wide ``drain`` is
+        called while a per-invocation drain is pending, ``drain``'s
+        shutdown semantics take precedence. The deliver worker is
+        cancelled, its remaining events are not delivered, and the
+        per-invocation waker's target may never be reached. The
+        per-invocation call then blocks until its own ``timeout``
+        fires and returns ``timeout_reached=True``. Mixing the two
+        primitives in the same shutdown path is unusual; use
+        ``drain`` for lifespan / shutdown coordination and
+        ``drain_events_for`` for in-flight synchronization.
+        """
+        if timeout is not None and not (timeout >= 0):
+            raise ValueError(f"drain_events_for timeout must be non-negative, got {timeout!r}")
+
+        target_context: _InvocationContext | None = None
+        for context in self._active_workers.values():
+            if context.invocation_id == invocation_id:
+                target_context = context
+                break
+        if target_context is None:
+            return DrainSummary(undelivered_count=0, timeout_reached=False)
+
+        counters = target_context.drain_counters
+        snapshot_target = counters.dispatched
+        if counters.delivered >= snapshot_target:
+            return DrainSummary(undelivered_count=0, timeout_reached=False)
+
+        waker: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+        counters.drain_wakers.append((snapshot_target, waker))
+        try:
+            await asyncio.wait_for(waker, timeout=timeout)
+        except TimeoutError:
+            counters.drain_wakers = [(t, f) for t, f in counters.drain_wakers if f is not waker]
+            undelivered = max(0, snapshot_target - counters.delivered)
+            return DrainSummary(undelivered_count=undelivered, timeout_reached=True)
+        return DrainSummary(undelivered_count=0, timeout_reached=False)
+
     # ------------------------------------------------------------------
     # Public invocation
     # ------------------------------------------------------------------

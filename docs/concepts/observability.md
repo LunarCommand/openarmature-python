@@ -583,18 +583,14 @@ async def persist(state: PipelineState) -> Mapping[str, Any]:
 
 `drain_events_for` is symmetric with the existing process-wide
 `graph.drain()` but scoped to one invocation. Returns the same
-`DrainSummary` shape, with the same timeout discipline.
-
-!!! info "drain_events_for ships in v0.12.0 alongside the read API"
-    `CompiledGraph.drain_events_for` is the spec §6 / proposal 0054
-    pair to the §9.4 accumulator lifecycle described above. The two
-    proposals are bundled into the v0.12.0 release cycle as
-    architecturally paired: without the per-invocation drain, the
-    accumulator pattern would race against the deliver loop on the
-    last-event read. If you are reading this from a pre-v0.12.0
-    install, the primitive is not yet present; the docs document the
-    pattern's complete shape so the v0.12.0 upgrade is a straight
-    drop-in.
+`DrainSummary` shape with the same timeout discipline, but with one
+load-bearing divergence: a per-invocation drain timeout MUST NOT
+cancel the delivery worker. `graph.drain()` cancels because it is a
+shutdown primitive; per-invocation drain is an in-flight
+synchronization primitive, so the graph stays available to serve
+other invocations after the timeout fires, and the deliver loop
+keeps processing the queue. The default timeout is `5.0` seconds;
+pass `None` to wait indefinitely, or `0.0` for a non-blocking check.
 
 ## OpenTelemetry mapping (opt-in)
 

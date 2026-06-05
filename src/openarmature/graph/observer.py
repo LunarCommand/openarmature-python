@@ -285,6 +285,17 @@ _DRAIN_SENTINEL = None
 class _DrainCounters:
     dispatched: int = 0
     delivered: int = 0
+    # Per spec graph-engine §6 *Per-invocation drain* (proposal 0054):
+    # ``drain_events_for(invocation_id, *, timeout)`` callers register
+    # ``(target_delivered_count, Future)`` pairs here; the deliver
+    # loop fulfils any whose target has been reached after each
+    # ``delivered`` increment. The list is touched only from the
+    # single event-loop task running ``deliver_loop`` plus the
+    # caller of ``drain_events_for`` — no cross-thread access — so a
+    # plain list is sufficient.
+    drain_wakers: list[tuple[int, asyncio.Future[None]]] = field(
+        default_factory=list[tuple[int, asyncio.Future[None]]]
+    )
 
 
 # Spec: realizes graph-engine §6 Drain summary return shape (proposal
@@ -877,6 +888,23 @@ async def deliver_loop(
         # filtered out for every observer is still considered
         # delivered (we did all the work there was to do for it).
         counters.delivered += 1
+        # Per spec §6 *Per-invocation drain* (proposal 0054): wake any
+        # ``drain_events_for`` waiter whose ``target_delivered_count``
+        # has been reached. Mutate the list in place; the only other
+        # toucher is ``drain_events_for`` itself, running in the same
+        # event-loop task family. The ``not fut.done()`` guard absorbs
+        # the case where the waiter's own ``asyncio.wait_for`` timed
+        # out and cancelled the Future before the deliver loop got
+        # here.
+        if counters.drain_wakers:
+            still_pending: list[tuple[int, asyncio.Future[None]]] = []
+            for target, fut in counters.drain_wakers:
+                if counters.delivered >= target:
+                    if not fut.done():
+                        fut.set_result(None)
+                    continue
+                still_pending.append((target, fut))
+            counters.drain_wakers = still_pending
 
 
 __all__ = [

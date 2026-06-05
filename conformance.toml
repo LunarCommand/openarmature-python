@@ -337,11 +337,50 @@ status = "textual-only"
 since = "0.12.0"
 
 # Spec v0.46.0 (proposal 0054).  Per-invocation observer event drain
-# (``drain_events_for(invocation_id, *, timeout) -> DrainSummary``).
-# Bundled into v0.12.0 per the 2026-06-03 decision in the
-# proposal-0048-implementation coord thread — 0054 directly resolves
-# the §9.4 accumulator-lifecycle synchronization race that 0048's
-# queryable observer pattern would otherwise expose.  Lands in
-# PR 2b (after this PR's 0048 implementation).
+# (``CompiledGraph.drain_events_for(invocation_id, *, timeout) ->
+# DrainSummary``).  Shipped in v0.12.0 — the architectural pair to
+# 0048's §9.4 queryable observer accumulator lifecycle.  Engine
+# implementation: per-invocation waker Futures on the existing
+# ``_DrainCounters``; ``deliver_loop`` fulfils waiters whose target
+# delivered-count has been reached.  Reuses the existing
+# ``DrainSummary`` shape verbatim per the
+# discuss-per-invocation-event-drain coord thread's Q4 direction.
+# Default timeout is 5.0 seconds (recommended-value nudge per the
+# coord-thread Q3 direction; spec leaves the default to the
+# implementation).
+#
+# Key divergence from process-wide ``drain()``: per-invocation drain
+# MUST NOT cancel the deliver worker on timeout (the graph remains
+# active and other invocations may still be in flight); ``drain()``
+# cancels because it's a shutdown primitive.
+#
+# Conformance fixtures (graph-engine/028-033) stay deferred from the
+# cross-capability parser pending the upcoming spec conformance-
+# adapter capability — same Path A reasoning as the 0048 fixtures.
+# Behavior is pinned by unit tests:
+#   - basic synchronization (mirrors fixture 028):
+#     ``tests/unit/test_drain.py::
+#     test_drain_events_for_basic_synchronization``;
+#   - snapshot semantic / no-deadlock-on-own-completed-event
+#     (mirrors fixture 029):
+#     ``::test_drain_events_for_snapshot_semantic_does_not_wait_for_own_completed_event``;
+#   - worker-NOT-cancelled-on-timeout (mirrors fixture 030, the
+#     load-bearing divergence-from-drain contract):
+#     ``::test_drain_events_for_timeout_does_not_cancel_worker``;
+#   - invocation-scope isolation (mirrors fixture 031):
+#     ``::test_drain_events_for_invocation_scope_isolation``;
+#   - fan-out coverage (mirrors fixture 032; subgraph descents share
+#     parent counters):
+#     ``::test_drain_events_for_covers_fan_out_instance_events``;
+#   - parallel-branches coverage (mirrors fixture 033):
+#     ``::test_drain_events_for_covers_parallel_branches_events``;
+#   - zero-timeout non-blocking check:
+#     ``::test_drain_events_for_zero_timeout_is_non_blocking_check``;
+#   - unknown invocation_id returns clean summary:
+#     ``::test_drain_events_for_unknown_invocation_returns_clean_summary``;
+#   - negative + NaN timeout rejected at boundary:
+#     ``::test_drain_events_for_rejects_negative_timeout``,
+#     ``::test_drain_events_for_rejects_nan_timeout``.
 [proposals."0054"]
-status = "not-yet"
+status = "implemented"
+since = "0.12.0"
