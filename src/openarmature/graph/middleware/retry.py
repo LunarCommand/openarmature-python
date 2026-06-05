@@ -24,6 +24,11 @@ from typing import Any
 
 from openarmature.llm.errors import TRANSIENT_CATEGORIES
 from openarmature.observability.correlation import _reset_attempt_index, _set_attempt_index
+from openarmature.observability.metadata import (
+    _invocation_metadata_var,
+    _reset_invocation_metadata,
+    _set_invocation_metadata,
+)
 
 from ._core import NextCall
 
@@ -128,6 +133,14 @@ class RetryMiddleware:
 
     async def __call__(self, state: Any, next_: NextCall) -> Mapping[str, Any]:
         attempt = 0
+        # Spec observability §3.4 per-attempt scoping: each retry
+        # attempt sees only the metadata in scope at retry-loop entry
+        # ("pre-attempt baseline") plus that attempt's own writes;
+        # writes from a prior attempt that subsequently failed do NOT
+        # carry over. Captured once outside the loop because the
+        # baseline is the metadata view at retry-middleware entry, not
+        # at each iteration.
+        pre_attempt_baseline = _invocation_metadata_var.get()
         while True:
             # Spec graph-engine §6 (clarified in v0.16.1): the wrapping
             # retry's attempt counter MUST propagate to events emitted
@@ -137,22 +150,52 @@ class RetryMiddleware:
             # reset on exit; Python's ContextVar token stack gives
             # innermost-wins precedence for free when retry middlewares
             # nest.
-            token = _set_attempt_index(attempt)
+            attempt_token = _set_attempt_index(attempt)
+            # Reset the metadata ContextVar to the pre-attempt baseline.
+            # The token captures the var's state at the moment of the
+            # set call — on failure we reset against this token to
+            # discard any writes the attempt's node body issued.
+            metadata_token = _set_invocation_metadata(pre_attempt_baseline)
             try:
                 try:
-                    return await next_(state)
+                    result = await next_(state)
+                    # Success path: keep the successful attempt's
+                    # metadata writes in scope so downstream nodes see
+                    # them. Do NOT reset metadata_token here — the
+                    # engine's outer reset (around the whole invoke)
+                    # pops the stack at invocation exit.
+                    return result
                 except Exception as exc:
                     # Spec §6.1: cancellation propagates by virtue of
                     # `CancelledError` extending `BaseException`, not
                     # `Exception` — it never enters this branch in Python.
+                    # Failure path (retry-eligible OR terminal):
+                    # discard the failed attempt's metadata writes per
+                    # §3.4. Reset BEFORE the re-raise so the caller's
+                    # error-handling path (e.g., observer hooks reading
+                    # metadata for the error span) sees the baseline,
+                    # not the failed attempt's transient state.
+                    _reset_invocation_metadata(metadata_token)
                     if attempt + 1 >= self.max_attempts or not self.classifier(exc, state):
                         raise
                     if self.on_retry is not None:
                         await self.on_retry(exc, attempt)
                     await asyncio.sleep(self.backoff(attempt))
                     attempt += 1
+                except BaseException:
+                    # Cancellation path. `CancelledError` (or other
+                    # `BaseException`) ends the attempt without retry —
+                    # spec §6.1 cancellation MUST propagate, never get
+                    # swallowed or retried. But spec §3.4 per-attempt
+                    # scoping still applies: cancellation IS a failed
+                    # attempt from the metadata-scoping perspective, so
+                    # its writes must be discarded too. Reset the token,
+                    # then re-raise. NO on_retry, NO sleep — straight
+                    # propagation.
+                    _reset_invocation_metadata(metadata_token)
+                    raise
             finally:
-                _reset_attempt_index(token)
+                _reset_attempt_index(attempt_token)
 
 
 __all__ = [

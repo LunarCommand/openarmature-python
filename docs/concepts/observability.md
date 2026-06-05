@@ -391,22 +391,10 @@ that context, per normal `ContextVar` semantics.
 `openarmature.observability.get_invocation_metadata()` returns an
 immutable `MappingProxyType` snapshot of the entries visible in the
 current async context's view, or an empty mapping outside any active
-invocation. Reads do NOT emit a metadata-augmentation event; the
-augmentation event signals mutations to backends, not consumer
-reads.
-
-!!! info "Per-attempt retry scoping is partial in v0.12.0"
-    Spec §3.4 specifies that values written during a failed retry
-    attempt MUST NOT carry over to subsequent attempts. The v0.12.0
-    python retry middleware manages the `attempt_index` ContextVar
-    but does NOT reset the invocation-metadata ContextVar between
-    attempts; a write from a failed attempt remains visible on the
-    next attempt. Closing this gap is tracked for a follow-on PR
-    (engine-side reset of the metadata ContextVar around each retry
-    iteration, with the per-attempt scoping unit test pinned by
-    spec fixture 045). Per-async-context scoping under fan-out and
-    parallel-branches is fully implemented; only the retry-side
-    reset is the open gap.
+invocation. The read is per-attempt scoped under retry middleware:
+values written in a prior failed attempt are not visible. Reads do
+NOT emit a metadata-augmentation event; the augmentation event
+signals mutations to backends, not consumer reads.
 
 The existing `current_invocation_metadata()` is a stable alias
 pointing at the same function; both names live in `__all__`. Pick
