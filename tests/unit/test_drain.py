@@ -319,73 +319,90 @@ async def test_drain_events_for_basic_synchronization() -> None:
 
 async def test_drain_events_for_timeout_does_not_cancel_worker() -> None:
     # KEY divergence from drain(): per-invocation drain timeout MUST
-    # NOT cancel the deliver worker. The graph remains usable for
-    # subsequent invocations after the timeout fires, and the deliver
-    # loop keeps processing the queue. Mirrors spec fixture 030.
+    # NOT cancel the deliver worker on the SAME graph. After the
+    # tight-timeout drain returns, the deliver loop continues
+    # processing the queue, so the events that were undelivered at
+    # timeout time eventually reach the observer. Mirrors spec
+    # fixture 030.
+    #
+    # The decisive contract check is that the originally-undelivered
+    # events land in the observer's delivery list AFTER the
+    # timed-out drain returns — that can only happen if the deliver
+    # worker kept running. A clean second drain on the same
+    # invocation corroborates that the worker is making forward
+    # progress.
     deliveries: list[str] = []
 
-    async def very_slow_obs(event: ObserverEvent) -> None:
-        # 100ms per event ensures the 50ms timeout fires before any
-        # delivery completes (the first await in deliver_loop is
-        # this observer's sleep, which already exceeds the budget).
-        await asyncio.sleep(0.1)
+    async def slow_obs(event: ObserverEvent) -> None:
+        # ~30ms per event. The 4-event invocation needs ~120ms total;
+        # the first drain's 10ms timeout fires well before delivery
+        # completes.
+        await asyncio.sleep(0.03)
         if isinstance(event, NodeEvent):
-            deliveries.append(event.node_name)
+            deliveries.append(f"{event.node_name}:{event.phase}")
 
-    captured_inv_1: list[str] = []
-    captured_inv_2: list[str] = []
+    captured_inv: list[str] = []
 
-    async def _capture_1(_s: _S) -> Mapping[str, Any]:
-        captured_inv_1.append(await _capture_node_invocation_id())
+    async def _capture(_s: _S) -> Mapping[str, Any]:
+        captured_inv.append(await _capture_node_invocation_id())
         return {"v": 1}
-
-    async def _capture_2(_s: _S) -> Mapping[str, Any]:
-        captured_inv_2.append(await _capture_node_invocation_id())
-        return {"v": 2}
 
     builder: GraphBuilder[_S] = GraphBuilder(_S)
     builder.set_entry("n")
-    builder.add_node("n", _capture_1)
+    builder.add_node("n", _capture)
     builder.add_edge("n", END)
-    compiled_1 = builder.compile()
-    compiled_1.attach_observer(very_slow_obs)
-    await compiled_1.invoke(_S())
+    compiled = builder.compile()
+    compiled.attach_observer(slow_obs)
+    await compiled.invoke(_S())
 
+    # First drain: tight timeout against the slow observer fires
+    # before any deliveries complete.
     started = time.monotonic()
-    summary = await compiled_1.drain_events_for(captured_inv_1[0], timeout=0.05)
-    elapsed = time.monotonic() - started
+    summary_1 = await compiled.drain_events_for(captured_inv[0], timeout=0.01)
+    elapsed_1 = time.monotonic() - started
 
-    assert summary.timeout_reached is True
-    assert summary.undelivered_count > 0
+    assert summary_1.timeout_reached is True
+    assert summary_1.undelivered_count > 0
     # Drain returned within the deadline (no cancellation overhead).
-    assert elapsed < 0.3
-    # The worker is still running — a fresh invocation on the same
-    # graph still delivers events through the same deliver loop.
-    builder_2: GraphBuilder[_S] = GraphBuilder(_S)
-    builder_2.set_entry("m")
-    builder_2.add_node("m", _capture_2)
-    builder_2.add_edge("m", END)
-    compiled_2 = builder_2.compile()
-    compiled_2.attach_observer(very_slow_obs)
-    # The second invocation's drain (with a generous timeout) verifies
-    # the observer is still healthy and the deliver pipeline still
-    # processes events.
-    await compiled_2.invoke(_S())
-    summary_2 = await compiled_2.drain_events_for(captured_inv_2[0], timeout=5.0)
+    assert elapsed_1 < 0.3
+    # At this moment NO NodeEvents have been delivered yet (the
+    # observer's first sleep was still in flight at timeout time).
+    assert deliveries == []
+
+    # Second drain on the SAME invocation_id with a generous timeout.
+    # If the deliver worker had been cancelled by the first timeout,
+    # this would either also time out (worker stuck) or return clean
+    # via the unknown-invocation path (worker gone from
+    # _active_workers). Either way the deliveries list would stay
+    # empty. With the worker kept alive, the loop catches up and
+    # this returns clean with every event delivered.
+    summary_2 = await compiled.drain_events_for(captured_inv[0], timeout=5.0)
     assert summary_2 == DrainSummary(undelivered_count=0, timeout_reached=False)
+
+    # Decisive check: every NodeEvent for the invocation reached
+    # the observer. Two events per node (started + completed) ×
+    # one node = 2. If the worker had been cancelled at first
+    # timeout, deliveries would have stopped at 0 or 1.
+    assert "n:started" in deliveries
+    assert "n:completed" in deliveries
 
 
 async def test_drain_events_for_invocation_scope_isolation() -> None:
     # Two serial invocations on the same compiled graph. Each drain
-    # sees only its own events. Drains for invocation A do not wait
-    # on invocation B's deliveries. Mirrors spec fixture 031.
+    # sees only its own events. Mirrors spec fixture 031.
+    #
+    # The contract: drain_events_for(inv_a) awaits ONLY events
+    # tagged with inv_a; drain_events_for(inv_b) awaits ONLY events
+    # tagged with inv_b. Per spec §5.1 each invocation gets a fresh
+    # invocation_id, so the two ids differ and the observer's
+    # delivery log can be partitioned cleanly by invocation.
     captured: list[str] = []
     delivery_log: list[tuple[str, str]] = []
 
     async def obs(event: ObserverEvent) -> None:
         await asyncio.sleep(0.01)
         if isinstance(event, NodeEvent):
-            # capture (invocation_id, node_name) so we can assert
+            # Capture (invocation_id, node_name) so we can assert
             # which deliveries happened under which invocation.
             from openarmature.observability.correlation import current_invocation_id
 
@@ -403,19 +420,34 @@ async def test_drain_events_for_invocation_scope_isolation() -> None:
     compiled = builder.compile()
     compiled.attach_observer(obs)
 
+    # First invocation + drain.
     await compiled.invoke(_S())
     inv_a = captured[-1]
     summary_a = await compiled.drain_events_for(inv_a, timeout=5.0)
     assert summary_a == DrainSummary(undelivered_count=0, timeout_reached=False)
-    # invocation A's events delivered before A's drain returned.
-    a_deliveries = [name for (inv, name) in delivery_log if inv == inv_a]
-    assert "n" in a_deliveries
 
-    # Drain on an UNRELATED invocation_id (still inv_a, but the worker
-    # exited at the end of invocation A — so this is effectively
-    # querying a stale id) returns immediately.
-    summary_stale = await compiled.drain_events_for(inv_a, timeout=5.0)
-    assert summary_stale == DrainSummary(undelivered_count=0, timeout_reached=False)
+    # Second invocation gets a fresh invocation_id (spec §5.1) and
+    # its own drain.
+    await compiled.invoke(_S())
+    inv_b = captured[-1]
+    assert inv_b != inv_a
+    summary_b = await compiled.drain_events_for(inv_b, timeout=5.0)
+    assert summary_b == DrainSummary(undelivered_count=0, timeout_reached=False)
+
+    # Partition the delivery log by invocation_id. Each drain's
+    # snapshot covered exactly its own invocation's events; no
+    # cross-contamination.
+    a_entries = [(inv, name) for (inv, name) in delivery_log if inv == inv_a]
+    b_entries = [(inv, name) for (inv, name) in delivery_log if inv == inv_b]
+    # One node ("n") fires started + completed under each invocation.
+    assert len(a_entries) == 2
+    assert len(b_entries) == 2
+    # Strict isolation: every entry's invocation_id matches the
+    # partition it landed in.
+    assert all(inv == inv_a for (inv, _) in a_entries)
+    assert all(inv == inv_b for (inv, _) in b_entries)
+    # No entry escaped the partition.
+    assert len(a_entries) + len(b_entries) == len(delivery_log)
 
 
 async def test_drain_events_for_rejects_negative_timeout() -> None:

@@ -791,7 +791,7 @@ class CompiledGraph[StateT: State]:
         timeout: float | None = 5.0,
     ) -> DrainSummary:
         """Await delivery of every observer event tagged with
-        ``invocation_id`` that was dispatched before this call returns,
+        ``invocation_id`` that was dispatched as of this call's entry,
         optionally bounded by ``timeout``.
 
         Use this from a terminal node body to synchronize on the
@@ -802,10 +802,13 @@ class CompiledGraph[StateT: State]:
         every attached observer, then returns.
 
         Snapshot semantic: the drain awaits the events dispatched as
-        of call time. Events emitted after the call begins (including
-        the calling node's own ``started`` / ``completed`` pair) are
-        out of scope. This is what allows an in-node call to avoid
-        deadlocking on its own completed event.
+        of call time. Events emitted after the call begins (notably
+        the calling node's own ``completed`` event, which fires only
+        after the node body returns) are out of scope. This is what
+        allows an in-node call to avoid deadlocking on its own
+        completed event. The calling node's ``started`` event, by
+        contrast, fires immediately BEFORE the body runs and IS in
+        the snapshot — the drain awaits its delivery normally.
 
         ``timeout`` is a non-negative duration in seconds (default
         ``5.0``). ``None`` waits indefinitely. ``timeout=0.0`` is a
