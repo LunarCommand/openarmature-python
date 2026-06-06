@@ -41,12 +41,26 @@ requestId / featureFlag) propagating to both observers in one
   ``LangfuseSDKAdapter(Langfuse(...))`` and
   ``BatchSpanProcessor(OTLPSpanExporter(...))`` respectively; the
   observer call surface doesn't change.
+- **Queryable accumulator observer + per-invocation drain.** A
+  third observer (``LlmUsageAccumulator``) rolls up LLM token
+  totals per invocation. A terminal ``persist`` node calls
+  ``graph.drain_events_for(state.invocation_id)`` to synchronize on
+  the deliver loop, then reads the accumulator's bucket and drops
+  it. Without the drain, the bucket would be missing the most
+  recent LLM event's tokens (the deliver loop hasn't reached them
+  yet). This is the canonical shape for per-invocation cost
+  attribution at request scope, replacing the round-trip-through-
+  State workarounds that pre-v0.12.0 deployments used. The pattern
+  is convention-only at the observer level: ``Observer`` itself
+  stays a single-callable protocol; the queryable accumulator just
+  exposes its own read methods (``get_bucket`` / ``drop``) that the
+  persist node knows about.
 
 Complementary to the observer-hooks example (three observers
 side-by-side) and the langfuse-observability example (Langfuse
 observer + LangfusePromptBackend prompt linkage).  This example's
-headline is the production-shape wiring, not the hook surface or
-the prompt linkage.
+headline is the production-shape wiring + per-invocation cost
+attribution, not the hook surface or the prompt linkage.
 
 **Configuration** (env vars; OpenAI defaults shown):
 
@@ -70,6 +84,7 @@ import asyncio
 import os
 import sys
 import uuid
+from dataclasses import dataclass
 from typing import Any
 
 from opentelemetry.sdk.resources import Resource
@@ -79,7 +94,15 @@ from opentelemetry.sdk.trace.export.in_memory_span_exporter import (
     InMemorySpanExporter,
 )
 
-from openarmature.graph import END, GraphBuilder, NodeException, State
+from openarmature.graph import (
+    END,
+    CompiledGraph,
+    GraphBuilder,
+    NodeEvent,
+    NodeException,
+    ObserverEvent,
+    State,
+)
 from openarmature.graph.middleware import TimingMiddleware, TimingRecord
 from openarmature.llm import (
     LlmProviderError,
@@ -88,6 +111,8 @@ from openarmature.llm import (
     SystemMessage,
     UserMessage,
 )
+from openarmature.observability import LLM_NAMESPACE, LlmEventPayload
+from openarmature.observability.correlation import current_invocation_id
 from openarmature.observability.langfuse import (
     InMemoryLangfuseClient,
     LangfuseObservation,
@@ -123,6 +148,101 @@ class BriefingState(State):
     question: str
     answer: str = ""
     model_used: str = ""
+
+
+# ---------------------------------------------------------------------------
+# Queryable accumulator observer (per-invocation LLM token rollup)
+# ---------------------------------------------------------------------------
+# A third observer alongside the OTel + Langfuse pair.  Its job is to
+# accumulate per-invocation LLM token usage in memory so a terminal
+# persist node can read the totals at request scope (rather than
+# round-tripping every count through State).  The Observer protocol is
+# a single async callable; the accumulator adds its own read methods
+# (``get_bucket`` / ``drop``) on the instance for the persist node to
+# consume.  Convention only; openarmature does not ship a base class
+# for accumulators.
+#
+# The accumulator subscribes to every event but only records the LLM-
+# namespace ones (provider-emitted ``openarmature.llm.complete`` event
+# pair carrying an LlmEventPayload on ``pre_state``).  Per-invocation
+# isolation is by ``current_invocation_id()`` — read inside the
+# observer callback from the worker's Context, populated by the
+# engine at worker create time. Concurrent invocations on one
+# observer each get their own bucket.
+
+
+@dataclass
+class _UsageBucket:
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    total_tokens: int = 0
+    call_count: int = 0
+
+
+class LlmUsageAccumulator:
+    """Per-invocation LLM token rollup."""
+
+    def __init__(self) -> None:
+        # Concurrent invocations on one observer each land in their
+        # own bucket.  Production deployments with high concurrency
+        # would want an eviction policy on top to bound memory; the
+        # demo's persist node drops the bucket explicitly after read.
+        self._by_invocation: dict[str, _UsageBucket] = {}
+
+    async def __call__(self, event: ObserverEvent) -> None:
+        if not isinstance(event, NodeEvent):
+            return
+        if event.namespace != LLM_NAMESPACE:
+            return
+        # Only the completed half of the pair carries the token counts.
+        if event.phase != "completed":
+            return
+        if not isinstance(event.pre_state, LlmEventPayload):
+            return
+        # NodeEvent doesn't carry invocation_id on the dataclass;
+        # observers read it from the ContextVar, which the
+        # deliver-loop worker's Context carries from the engine task
+        # at worker create-time (per-invocation worker, per-invocation
+        # Context).
+        invocation_id = current_invocation_id()
+        if invocation_id is None:
+            return
+        payload = event.pre_state
+        bucket = self._by_invocation.setdefault(invocation_id, _UsageBucket())
+        if payload.prompt_tokens is not None:
+            bucket.prompt_tokens += payload.prompt_tokens
+        if payload.completion_tokens is not None:
+            bucket.completion_tokens += payload.completion_tokens
+        if payload.total_tokens is not None:
+            bucket.total_tokens += payload.total_tokens
+        bucket.call_count += 1
+
+    # Consumers MUST synchronize on ``drain_events_for`` before
+    # calling ``get_bucket`` if completeness matters — without the
+    # drain the deliver loop may still hold pending events whose
+    # tokens have not been added yet. ``None`` is returned when
+    # nothing has been recorded yet (e.g., an invocation with no
+    # LLM calls).
+    def get_bucket(self, invocation_id: str) -> _UsageBucket | None:
+        """Read the accumulated bucket for an invocation."""
+        return self._by_invocation.get(invocation_id)
+
+    # The accumulator does NOT auto-drop on
+    # ``InvocationCompletedEvent`` — a terminal node legitimately
+    # needs to read the bucket BEFORE the invocation completes, and
+    # auto-drop would race the read. Callers invoke ``drop()``
+    # explicitly after reading.
+    def drop(self, invocation_id: str) -> None:
+        """Release the bucket for an invocation."""
+        self._by_invocation.pop(invocation_id, None)
+
+
+# Module-level singletons make the persist node closure-free and
+# match how ``_provider_instance`` is handled.  In an application
+# server, these would live on a request-scoped or app-scoped
+# container instead.
+_accumulator: LlmUsageAccumulator | None = None
+_compiled_graph: CompiledGraph[BriefingState] | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -195,23 +315,78 @@ async def respond(state: BriefingState) -> dict[str, Any]:
     }
 
 
+# Terminal node. State is intentionally unused — this node's job is
+# to synchronize on the observer deliver loop and report a derived
+# rollup, not to read or modify pipeline state.
+#
+# ``drain_events_for`` blocks until every event dispatched up to this
+# point has reached every attached observer. Without it the
+# accumulator's bucket may still be missing the most-recent LLM
+# event's tokens — the deliver loop hasn't processed them yet when
+# the node body runs. Snapshot semantic: the drain awaits only
+# events dispatched BEFORE the call (this node's own ``started``
+# event included), not events that fire after the call begins
+# (notably this node's own ``completed`` event, which only fires
+# after the body returns — that's how the call avoids deadlocking
+# on itself).
+#
+# Default timeout is 5.0s; the demo tightens to 2.0s so a stuck
+# observer surfaces fast. Production teams pick the threshold against
+# their observer SLO. Returning a timeout summary instead of raising
+# lets the caller record an SLO breach and proceed with whatever
+# data is available, rather than failing the whole invocation.
+async def persist(_state: BriefingState) -> dict[str, Any]:
+    """Drain the deliver loop, read the LLM-usage rollup, drop the bucket."""
+    assert _compiled_graph is not None
+    assert _accumulator is not None
+    invocation_id = current_invocation_id()
+    assert invocation_id is not None
+    summary = await _compiled_graph.drain_events_for(invocation_id, timeout=2.0)
+    if summary.timeout_reached:
+        # Production: emit an SLO-breach metric.  Demo: surface the
+        # gap inline so a reader sees what an incomplete drain looks
+        # like.
+        print(f"[persist] drain incomplete: {summary.undelivered_count} events still pending after 2.0s")
+    bucket = _accumulator.get_bucket(invocation_id)
+    _accumulator.drop(invocation_id)
+    if bucket is None:
+        print("[persist] no LLM usage recorded for this invocation")
+        return {}
+    # In production, this is where you'd write the canonical
+    # invocation artifact to durable storage: a JSON record with the
+    # answer + per-invocation token cost + caller metadata + trace
+    # IDs for cross-system join.  The demo prints the rollup so the
+    # pattern is legible.
+    print(
+        f"[persist] LLM usage: prompt={bucket.prompt_tokens}, "
+        f"completion={bucket.completion_tokens}, total={bucket.total_tokens} "
+        f"across {bucket.call_count} call(s)"
+    )
+    return {}
+
+
 # ---------------------------------------------------------------------------
 # Graph
 # ---------------------------------------------------------------------------
 
 
-def build_graph():
-    """Single-node graph: respond -> END.
+def build_graph() -> CompiledGraph[BriefingState]:
+    """Two-node graph: respond -> persist -> END.
 
     TimingMiddleware wraps the respond node so wall-clock duration
-    is captured per call.  No other middleware (RetryMiddleware lives
-    in the fan-out-with-retry / parallel-branches examples; this
-    one's scope is observability)."""
+    is captured per call.  The persist node runs synchronously after
+    respond returns; it drains the deliver loop for the current
+    invocation, reads the LLM-usage accumulator's bucket, drops the
+    bucket, and prints a cost summary.  No other middleware
+    (RetryMiddleware lives in the fan-out-with-retry / parallel-
+    branches examples; this one's scope is observability)."""
     timing = TimingMiddleware(node_name="respond", on_complete=_emit_timing)
     return (
         GraphBuilder(BriefingState)
         .add_node("respond", respond, middleware=[timing])
-        .add_edge("respond", END)
+        .add_node("persist", persist)
+        .add_edge("respond", "persist")
+        .add_edge("persist", END)
         .set_entry("respond")
         .compile()
     )
@@ -349,9 +524,16 @@ async def main() -> None:
     span_exporter = InMemorySpanExporter()
     langfuse_client = InMemoryLangfuseClient()
 
-    graph = build_graph()
-    graph.attach_observer(_build_otel_observer(span_exporter))
-    graph.attach_observer(_build_langfuse_observer(langfuse_client))
+    # Module-level singletons populated before invoke so the persist
+    # node (which is plain-async, no closure) can reach the graph for
+    # drain_events_for and the accumulator for the read + drop.
+    global _accumulator, _compiled_graph
+    _accumulator = LlmUsageAccumulator()
+    _compiled_graph = build_graph()
+    _compiled_graph.attach_observer(_build_otel_observer(span_exporter))
+    _compiled_graph.attach_observer(_build_langfuse_observer(langfuse_client))
+    _compiled_graph.attach_observer(_accumulator)
+    graph = _compiled_graph
 
     # Caller-supplied multi-tenant metadata.  Both observers pick
     # the entries up: OTel attaches them as ``openarmature.user.*``
