@@ -155,6 +155,21 @@ def _read_spec_version() -> str:
     return __spec_version__
 
 
+# Proposal 0052: implementation attribution attributes sourced from
+# the package's identity constants. Same lazy-import discipline as
+# ``_read_spec_version`` to avoid a load-time cycle.
+def _read_implementation_name() -> str:
+    from openarmature import __implementation_name__
+
+    return __implementation_name__
+
+
+def _read_implementation_version() -> str:
+    from openarmature import __version__
+
+    return __version__
+
+
 def _apply_caller_metadata(attrs: dict[str, Any], metadata: Mapping[str, Any]) -> None:
     """Merge caller-supplied invocation metadata into a span's
     attribute dict as ``openarmature.user.<key>`` entries per
@@ -440,6 +455,16 @@ class OTelObserver:
     # spec submodule + the two version fields automatically updates
     # the value reported on every invocation span.
     spec_version: str = field(default_factory=_read_spec_version)
+    # Proposal 0052 (spec v0.44.0): implementation identity emitted on
+    # every invocation span. ``implementation_name`` is the package
+    # registry name (``openarmature-python``);
+    # ``implementation_version`` is ``openarmature.__version__``.
+    # Configurable for test parameterization but defaults to the
+    # package-pinned values; the always-emit invariant means neither
+    # ``disable_state_payload``, ``disable_llm_payload``, nor any
+    # other privacy knob gates them.
+    implementation_name: str = field(default_factory=_read_implementation_name)
+    implementation_version: str = field(default_factory=_read_implementation_version)
 
     # Internal state, populated in __post_init__ and during invocation.
     _provider: TracerProvider = field(init=False, repr=False)
@@ -1241,6 +1266,11 @@ class OTelObserver:
         attrs: dict[str, Any] = {
             "openarmature.graph.entry_node": event.node_name,
             "openarmature.graph.spec_version": self.spec_version,
+            # Proposal 0052 §5.1: implementation attribution attributes.
+            # Always-emit on every invocation span; not cross-cutting
+            # (§5.6) so inner-node spans don't carry them.
+            "openarmature.implementation.name": self.implementation_name,
+            "openarmature.implementation.version": self.implementation_version,
             "openarmature.invocation_id": invocation_id,
         }
         if correlation_id is not None:

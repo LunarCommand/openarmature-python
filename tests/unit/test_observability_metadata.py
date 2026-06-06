@@ -427,6 +427,47 @@ async def test_invoke_rejects_reserved_detached_from_invocation_id_at_boundary()
 
 
 # ---------------------------------------------------------------------------
+# Reserved exact key names extension (proposal 0052) — implementation
+# attribution attributes. The 24-name set grows to 26 with
+# implementation_name + implementation_version reserved so a caller
+# can't clobber the implementation-emitted Trace metadata / OTel
+# attribute values by passing the same key in invoke(metadata=...).
+# ---------------------------------------------------------------------------
+
+
+def test_validate_rejects_reserved_implementation_name() -> None:
+    with pytest.raises(ValueError, match="is reserved"):
+        validate_invocation_metadata({"implementation_name": "spoof"})
+
+
+def test_validate_rejects_reserved_implementation_version() -> None:
+    with pytest.raises(ValueError, match="is reserved"):
+        validate_invocation_metadata({"implementation_version": "9.9.9"})
+
+
+def test_set_invocation_metadata_rejects_reserved_implementation_name() -> None:
+    with pytest.raises(ValueError, match="is reserved"):
+        set_invocation_metadata(implementation_name="spoof")
+
+
+def test_set_invocation_metadata_rejects_reserved_implementation_version() -> None:
+    with pytest.raises(ValueError, match="is reserved"):
+        set_invocation_metadata(implementation_version="9.9.9")
+
+
+async def test_invoke_rejects_reserved_implementation_name_at_boundary() -> None:
+    graph = _build_graph()
+    with pytest.raises(ValueError, match="is reserved"):
+        await graph.invoke(_SimpleState(), metadata={"implementation_name": "spoof"})
+
+
+async def test_invoke_rejects_reserved_implementation_version_at_boundary() -> None:
+    graph = _build_graph()
+    with pytest.raises(ValueError, match="is reserved"):
+        await graph.invoke(_SimpleState(), metadata={"implementation_version": "9.9.9"})
+
+
+# ---------------------------------------------------------------------------
 # Caller-supplied invocation_id (proposal 0039)
 # ---------------------------------------------------------------------------
 

@@ -362,11 +362,25 @@ _DEFERRED_FIXTURES: dict[str, str] = {
     "pipeline-utilities/063-failure-isolation-default-predicate-bare-exception": (
         "Proposal 0050 failure-isolation middleware; queued for v0.14.0"
     ),
-    # Proposal 0052 (implementation attribution attributes, v0.44.0)
-    # — observability/059 is the Langfuse-side mapping fixture. Lands
-    # in PR 3 of the v0.12.0 cycle along with the implementation.
+    # Proposal 0052 (implementation attribution attributes, v0.44.0):
+    # observability/059 is the Langfuse-side mapping fixture; uses the
+    # ``langfuse_observer_config`` + ``harness_parameterized`` directive
+    # shapes the cross-capability parser doesn't model. The python
+    # implementation ships in v0.12.0 (manifest 0052 = implemented);
+    # behavior is pinned by unit tests in
+    # ``tests/unit/test_observability_metadata.py``,
+    # ``tests/unit/test_observability_otel.py``, and
+    # ``tests/unit/test_observability_langfuse.py``. Fixture-shape
+    # activation is queued for a future PR slotted after the upcoming
+    # spec conformance-adapter capability ratifies the directive
+    # vocabulary.  058 (the OTel-side mapping fixture) parses cleanly
+    # against the existing ``span_tree`` + ``attributes_absent``
+    # directive shapes and is therefore NOT deferred from parsing;
+    # runtime exec is gated by ``_SUPPORTED_FIXTURES`` in
+    # ``test_observability.py`` until the harness wires up the
+    # canonical-value parameterization.
     "observability/059-implementation-attribution-langfuse": (
-        "Proposal 0052 implementation attribution; lands in PR 3 of v0.12.0"
+        "Proposal 0052 fixture-shape models pending; contract pinned by unit tests"
     ),
     # ----- v0.12.0 cycle spec-pin bump (v0.45.0 -> v0.46.0) -------------
     # Proposal 0054 (per-invocation observer event drain, v0.46.0):

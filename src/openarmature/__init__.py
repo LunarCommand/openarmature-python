@@ -26,3 +26,17 @@ your environment can reach:
 
 __version__ = "0.11.0"
 __spec_version__ = "0.46.0"
+# Proposal 0052 (spec observability §5.1 / §8.4.1): canonical
+# package-registry name for this implementation. Surfaces on every
+# OTel invocation span as ``openarmature.implementation.name`` and on
+# every Langfuse trace as ``trace.metadata.implementation_name``.
+# Matches the PyPI distribution name so operators can paste it
+# straight into a registry search box.
+#
+# No symmetric ``__implementation_version__`` constant — the spec
+# requires the implementation_version value to match the package's
+# release identity, which is already exposed as ``__version__`` above.
+# Both observers source the version from ``__version__`` directly to
+# avoid the maintenance trap of two constants that have to stay in
+# lockstep across releases.
+__implementation_name__ = "openarmature-python"

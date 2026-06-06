@@ -64,6 +64,21 @@ def _read_spec_version() -> str:
     return __spec_version__
 
 
+# Proposal 0052: implementation attribution attributes. Sourced from
+# the package identity constants via the same lazy-import discipline
+# as ``_read_spec_version``.
+def _read_implementation_name() -> str:
+    from openarmature import __implementation_name__
+
+    return __implementation_name__
+
+
+def _read_implementation_version() -> str:
+    from openarmature import __version__
+
+    return __version__
+
+
 # In-flight Span observation handle, keyed by the standard span-stack
 # key (namespace, attempt_index, fan_out_index, branch_name).
 # ``branch_name`` discriminates concurrent same-named inner nodes
@@ -298,6 +313,14 @@ class LangfuseObserver:
     detached_subgraphs: frozenset[str] = field(default_factory=_empty_str_frozenset)
     detached_fan_outs: frozenset[str] = field(default_factory=_empty_str_frozenset)
     spec_version: str = field(default_factory=_read_spec_version)
+    # Proposal 0052 §8.4.1: implementation attribution rows on every
+    # Trace. Configurable for test parameterization; defaults to the
+    # package identity. Always-emit invariant inherited from §5.1 —
+    # ``disable_state_payload`` and the other privacy knobs do not
+    # gate these rows because they describe runtime identity, not
+    # runtime data.
+    implementation_name: str = field(default_factory=_read_implementation_name)
+    implementation_version: str = field(default_factory=_read_implementation_version)
     # Proposal 0043 §8.4.1 *Trace input/output sourcing*.
     disable_state_payload: bool = True
     trace_input_from_state: Callable[[Any], Any] | None = None
@@ -682,6 +705,9 @@ class LangfuseObserver:
         metadata: dict[str, Any] = {
             "entry_node": entry_node,
             "spec_version": self.spec_version,
+            # Proposal 0052 §8.4.1: implementation attribution rows.
+            "implementation_name": self.implementation_name,
+            "implementation_version": self.implementation_version,
         }
         if correlation_id is not None:
             metadata["correlation_id"] = correlation_id
@@ -703,6 +729,9 @@ class LangfuseObserver:
         metadata: dict[str, Any] = {
             "entry_node": entry_node,
             "spec_version": self.spec_version,
+            # Proposal 0052 §8.4.1: implementation attribution rows.
+            "implementation_name": self.implementation_name,
+            "implementation_version": self.implementation_version,
         }
         if correlation_id is not None:
             metadata["correlation_id"] = correlation_id
