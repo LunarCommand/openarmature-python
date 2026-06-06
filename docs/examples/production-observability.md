@@ -132,9 +132,10 @@ answer:      The primary objective of Apollo 11 was ...
 model:       gpt-4o-mini-2024-07-18
 
 --- captured OTel spans ---
-  [openarmature.invocation] 1240.0ms  openarmature.user.tenantId='demo-acme', ...
+  [openarmature.invocation] 1240.0ms  openarmature.graph.entry_node='respond', openarmature.graph.spec_version='0.46.0', openarmature.implementation.name='openarmature-python', openarmature.implementation.version='0.12.0'
   [respond] 1235.0ms  openarmature.node.name='respond', openarmature.user.tenantId='demo-acme', ...
-  [openarmature.llm.complete] 1200.0ms  gen_ai.system='openai', gen_ai.usage.input_tokens=42, ...
+  [openarmature.llm.complete] 1200.0ms  openarmature.user.tenantId='demo-acme', gen_ai.system='openai', gen_ai.usage.input_tokens=42, ...
+  [persist] 2.0ms  openarmature.node.name='persist', openarmature.user.tenantId='demo-acme', ...
 
 --- captured Langfuse trace ---
 Trace id=<uuid>
@@ -166,9 +167,23 @@ Trace id=<uuid>
 - **OTel spans block**: one line per captured span, sorted by
   start time. The relevant attributes shown are a curated subset
   for readability; the full attribute set is on each `Span` object
-  for any reader inspecting them programmatically. Note the
-  `openarmature.user.*` attributes appearing on every span (the
-  cross-cutting attribute propagation from `invoke(metadata=...)`).
+  for any reader inspecting them programmatically. Note three
+  attribute families worth telling apart:
+    - The root `openarmature.invocation` span carries
+      `openarmature.graph.spec_version` plus the
+      `openarmature.implementation.name` / `.version` attribution
+      attributes. These are invocation-span-only (per spec §5.1) —
+      operators filtering by library version use these.
+    - The `openarmature.user.*` attributes appear on every span,
+      reflecting the cross-cutting propagation from
+      `invoke(metadata=...)`.
+    - `gen_ai.usage.*` lands on the LLM span only, sourced from the
+      provider's wire response.
+
+    The invocation span only lands in the exporter after the OTel
+    observer's `shutdown()` is called (closing the root span). The
+    demo calls it after `drain()` in the `finally` block; production
+    long-running processes call it at process exit.
 - **Langfuse trace block**: the same invocation as seen by the
   Langfuse data model. `trace.input` / `trace.output` come from the
   caller hooks (`{"question": ...}` / `{"answer": ..., "model": ...}`)

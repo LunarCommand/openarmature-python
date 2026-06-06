@@ -444,8 +444,43 @@ def _build_langfuse_observer(client: InMemoryLangfuseClient) -> LangfuseObserver
 # have ingested.
 
 
+# Invocation-span-only attributes (spec 5.1).  Surface these only on
+# the root ``openarmature.invocation`` span line; inner spans don't
+# carry them (they're invocation-level constants, not cross-cutting
+# 5.6 attributes).
+_INVOCATION_SPAN_KEYS = (
+    "openarmature.graph.entry_node",
+    "openarmature.graph.spec_version",
+    "openarmature.implementation.name",
+    "openarmature.implementation.version",
+)
+
+# Per-node + cross-cutting attributes (5.6 + GenAI semconv).  Surface
+# these on inner-node spans only; they propagate to the invocation
+# span too but showing them there is redundant once they appear on
+# every node line below.
+_INNER_SPAN_KEYS = (
+    "openarmature.node.name",
+    "openarmature.user.tenantId",
+    "openarmature.user.requestId",
+    "openarmature.user.featureFlag",
+    "gen_ai.system",
+    "gen_ai.usage.input_tokens",
+    "gen_ai.usage.output_tokens",
+)
+
+
 def _format_otel_spans(spans: list[ReadableSpan]) -> str:
-    """One line per span: name, duration, key attributes."""
+    """One line per span: name, duration, key attributes.
+
+    The ``openarmature.invocation`` root span closes on observer
+    ``shutdown()`` and surfaces only its invocation-level
+    attributes (spec 5.1 — entry_node, spec_version, implementation
+    name + version).  Inner-node spans surface the cross-cutting
+    caller metadata + GenAI semconv attributes; printing them on
+    the invocation line too would just repeat data shown three
+    more times below.
+    """
     if not spans:
         return "  (no spans captured)"
     lines: list[str] = []
@@ -453,18 +488,8 @@ def _format_otel_spans(spans: list[ReadableSpan]) -> str:
     spans_sorted = sorted(spans, key=lambda s: s.start_time or 0)
     for span in spans_sorted:
         attrs = span.attributes or {}
-        # Pull a few interesting attributes for the summary; the
-        # full set is in span.attributes for any reader who wants it.
-        keys_of_interest = (
-            "openarmature.node.name",
-            "openarmature.user.tenantId",
-            "openarmature.user.requestId",
-            "openarmature.user.featureFlag",
-            "gen_ai.system",
-            "gen_ai.usage.input_tokens",
-            "gen_ai.usage.output_tokens",
-        )
-        relevant = {k: v for k in keys_of_interest if (v := attrs.get(k)) is not None}
+        keys = _INVOCATION_SPAN_KEYS if span.name == "openarmature.invocation" else _INNER_SPAN_KEYS
+        relevant = {k: v for k in keys if (v := attrs.get(k)) is not None}
         duration_ms = 0.0
         if span.start_time is not None and span.end_time is not None:
             duration_ms = (span.end_time - span.start_time) / 1_000_000.0
@@ -530,7 +555,13 @@ async def main() -> None:
     global _accumulator, _compiled_graph
     _accumulator = LlmUsageAccumulator()
     _compiled_graph = build_graph()
-    _compiled_graph.attach_observer(_build_otel_observer(span_exporter))
+    # Keep the OTel observer reachable so we can ``shutdown()`` it
+    # after drain — the root ``openarmature.invocation`` span only
+    # closes on shutdown, and the in-memory exporter only surfaces
+    # closed spans through ``get_finished_spans()``.  Production
+    # deployments do the same dance at process exit.
+    otel_observer = _build_otel_observer(span_exporter)
+    _compiled_graph.attach_observer(otel_observer)
     _compiled_graph.attach_observer(_build_langfuse_observer(langfuse_client))
     _compiled_graph.attach_observer(_accumulator)
     graph = _compiled_graph
@@ -581,8 +612,14 @@ async def main() -> None:
     finally:
         # drain() is required for short-lived processes: invoke()
         # returns when the graph reaches END regardless of whether
-        # the observer queue has finished draining.
+        # the observer queue has finished draining.  shutdown() on
+        # the OTel observer closes the root ``openarmature.invocation``
+        # span so it lands in the exporter alongside the per-node
+        # spans; the Langfuse observer has no analog because it
+        # writes Trace + Observation entities synchronously through
+        # the client.
         await graph.drain()
+        otel_observer.shutdown()
         await _get_provider().aclose()
 
     if final is not None:
