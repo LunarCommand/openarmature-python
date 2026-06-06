@@ -1,4 +1,4 @@
-# Production observability with dual observers and timing middleware
+# Production observability with dual observers, timing middleware, and per-invocation cost rollup
 
 !!! info "Source"
     [https://github.com/LunarCommand/openarmature-python/blob/main/examples/production-observability/main.py](https://github.com/LunarCommand/openarmature-python/blob/main/examples/production-observability/main.py){target="_blank" rel="noopener"}
@@ -7,14 +7,19 @@ A single-turn lunar-mission Q&A endpoint instrumented the way you'd
 ship it: BOTH OTel and Langfuse observers attached to the same
 graph, caller hooks deriving domain-shaped `trace.input` /
 `trace.output` from State, the built-in `TimingMiddleware`
-recording per-node duration, and multi-tenant caller-supplied
-metadata propagating to both observers in one `invoke()` call.
+recording per-node duration, multi-tenant caller-supplied
+metadata propagating to both observers in one `invoke()` call, AND
+a third queryable-accumulator observer that a terminal `persist`
+node reads at request scope after synchronizing on the deliver
+loop with `drain_events_for`.
 
 ## Overview
 
-One node, one LLM call, two production-grade observability
-backends. The pipeline takes a question, calls the LLM, returns the
-answer. The interesting part is the observability wiring:
+Two nodes (`respond` then `persist`), one LLM call, three observers
+attached before invoke. The pipeline takes a question, calls the
+LLM, returns the answer, then synchronizes on the observer queue
+and rolls up token cost. The interesting part is the observability
+wiring:
 
 - `OTelObserver` attached with an `InMemorySpanExporter`
   (production swaps this for `BatchSpanProcessor` +
@@ -77,6 +82,23 @@ sees the same logical events represented two ways.
   `InMemorySpanExporter` records every Span. Production
   deployments swap each for a real exporter / SDK adapter; the
   observer call surface doesn't change.
+- **Queryable accumulator + `drain_events_for`**
+  ([queryable observer pattern](../concepts/observability.md)).
+  A third observer — `LlmUsageAccumulator` — subscribes to the
+  same event stream but only records the LLM-namespace events
+  carrying an `LlmEventPayload`. It accumulates per-invocation
+  token totals in memory, indexed by `current_invocation_id()`.
+  The terminal `persist` node calls
+  `await graph.drain_events_for(current_invocation_id(), timeout=2.0)`
+  to synchronize on the deliver loop, then reads the accumulator's
+  bucket and drops it. Without the drain, the bucket might be
+  missing the most-recent LLM event's tokens (the deliver loop
+  hasn't reached them yet). The `Observer` protocol itself stays
+  a single-callable shape; the accumulator just exposes its own
+  read methods (`get_bucket` / `drop`) that the persist node knows
+  about. This is the canonical shape for per-invocation cost
+  attribution at request scope, replacing the round-trip-through-
+  State workarounds that pre-v0.12.0 deployments used.
 
 ## How to run
 
@@ -105,13 +127,15 @@ request id:  <uuid>
 feature flag:v2-canary
 
 [timing] respond: 1234.5ms (success)
+[persist] LLM usage: prompt=42, completion=38, total=80 across 1 call(s)
 answer:      The primary objective of Apollo 11 was ...
 model:       gpt-4o-mini-2024-07-18
 
 --- captured OTel spans ---
-  [openarmature.invocation] 1240.0ms  openarmature.user.tenantId='demo-acme', ...
+  [openarmature.invocation] 1240.0ms  openarmature.graph.entry_node='respond', openarmature.graph.spec_version='0.46.0', openarmature.implementation.name='openarmature-python', openarmature.implementation.version='0.12.0'
   [respond] 1235.0ms  openarmature.node.name='respond', openarmature.user.tenantId='demo-acme', ...
-  [openarmature.llm.complete] 1200.0ms  gen_ai.system='openai', gen_ai.usage.input_tokens=42, ...
+  [openarmature.llm.complete] 1200.0ms  openarmature.user.tenantId='demo-acme', gen_ai.system='openai', gen_ai.usage.input_tokens=42, ...
+  [persist] 2.0ms  openarmature.node.name='persist', openarmature.user.tenantId='demo-acme', ...
 
 --- captured Langfuse trace ---
 Trace id=<uuid>
@@ -133,12 +157,33 @@ Trace id=<uuid>
   `TimingMiddleware` callback as soon as the respond chain returns.
   `outcome` is `"success"` here; a `ProviderRateLimit` would surface
   as `outcome="exception"` with `exception_category="provider_rate_limit"`.
+- **`[persist] LLM usage: ...`**: emitted by the `persist` node
+  after it drains the deliver loop and reads the
+  `LlmUsageAccumulator`'s bucket for this invocation. If the drain
+  times out (slow / hung observer), the persist line is prefixed by
+  a `[persist] drain incomplete: N events still pending after 2.0s`
+  surface — the production version of that log would also flip an
+  SLO-breach metric.
 - **OTel spans block**: one line per captured span, sorted by
   start time. The relevant attributes shown are a curated subset
   for readability; the full attribute set is on each `Span` object
-  for any reader inspecting them programmatically. Note the
-  `openarmature.user.*` attributes appearing on every span (the
-  cross-cutting attribute propagation from `invoke(metadata=...)`).
+  for any reader inspecting them programmatically. Note three
+  attribute families worth telling apart:
+    - The root `openarmature.invocation` span carries
+      `openarmature.graph.spec_version` plus the
+      `openarmature.implementation.name` / `.version` attribution
+      attributes. These are invocation-span-only (per spec §5.1) —
+      operators filtering by library version use these.
+    - The `openarmature.user.*` attributes appear on every span,
+      reflecting the cross-cutting propagation from
+      `invoke(metadata=...)`.
+    - `gen_ai.usage.*` lands on the LLM span only, sourced from the
+      provider's wire response.
+
+    The invocation span only lands in the exporter after the OTel
+    observer's `shutdown()` is called (closing the root span). The
+    demo calls it after `drain()` in the `finally` block; production
+    long-running processes call it at process exit.
 - **Langfuse trace block**: the same invocation as seen by the
   Langfuse data model. `trace.input` / `trace.output` come from the
   caller hooks (`{"question": ...}` / `{"answer": ..., "model": ...}`)
