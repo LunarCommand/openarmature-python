@@ -31,6 +31,7 @@ from typing import Any, cast
 from openarmature.graph.events import (
     InvocationCompletedEvent,
     InvocationStartedEvent,
+    LlmCompletionEvent,
     MetadataAugmentationEvent,
     NodeEvent,
 )
@@ -351,13 +352,28 @@ class LangfuseObserver:
 
     async def __call__(
         self,
-        event: (NodeEvent | MetadataAugmentationEvent | InvocationStartedEvent | InvocationCompletedEvent),
+        event: (
+            NodeEvent
+            | MetadataAugmentationEvent
+            | InvocationStartedEvent
+            | InvocationCompletedEvent
+            | LlmCompletionEvent
+        ),
     ) -> None:
         if isinstance(event, InvocationStartedEvent):
             self._handle_invocation_started(event)
             return
         if isinstance(event, InvocationCompletedEvent):
             self._handle_invocation_completed(event)
+            return
+        # Proposal 0049 typed LlmCompletionEvent: ignored during the
+        # dual-emit window — the Langfuse mapping continues to drive
+        # its §5.5 Generation observation lifecycle off the sentinel
+        # NodeEvent pair the provider emits alongside the typed event.
+        # Migration to type discrimination lands in a subsequent PR;
+        # this early-return keeps the observer Protocol-compatible
+        # without changing behavior.
+        if isinstance(event, LlmCompletionEvent):
             return
         if isinstance(event, MetadataAugmentationEvent):
             self._handle_metadata_augmentation(event)

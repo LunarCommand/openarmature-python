@@ -11,10 +11,15 @@ the canonical category-string contract, and the
 
 from __future__ import annotations
 
+from collections.abc import Callable
+from contextvars import Token
+
 import httpx
 import pytest
 from pydantic import ValidationError
 
+from openarmature.graph.events import LlmCompletionEvent, NodeEvent
+from openarmature.graph.observer import ObserverEvent
 from openarmature.llm import (
     PROVIDER_AUTHENTICATION,
     PROVIDER_INVALID_MODEL,
@@ -44,6 +49,18 @@ from openarmature.llm import (
     validate_message_list,
     validate_tools,
 )
+from openarmature.observability.correlation import (
+    _set_active_dispatch,
+    _set_attempt_index,
+    _set_branch_name,
+    _set_correlation_id,
+    _set_fan_out_index,
+    _set_invocation_id,
+    _set_namespace_prefix,
+)
+from openarmature.observability.metadata import set_invocation_metadata
+
+_DispatchToken = Token[Callable[[ObserverEvent], None] | None]
 
 # ---------------------------------------------------------------------------
 # Per-role message construction (Pydantic-on-Message layer)
@@ -1178,3 +1195,290 @@ async def test_ready_chat_completions_503_model_not_loaded() -> None:
             await provider.ready()
     finally:
         await provider.aclose()
+
+
+# ---------------------------------------------------------------------------
+# LlmCompletionEvent dual-emit (proposal 0049)
+# ---------------------------------------------------------------------------
+
+
+def _collecting_dispatch() -> tuple[list[ObserverEvent], _DispatchToken]:
+    """Install a collecting dispatch callback into the
+    ``current_dispatch`` ContextVar and return ``(events, token)``.
+    The caller is responsible for resetting the token in a try/finally.
+    """
+    events: list[ObserverEvent] = []
+
+    def _dispatch(event: ObserverEvent) -> None:
+        events.append(event)
+
+    token = _set_active_dispatch(_dispatch)
+    return events, token
+
+
+def _release_dispatch(token: _DispatchToken) -> None:
+    from openarmature.observability.correlation import _reset_active_dispatch
+
+    _reset_active_dispatch(token)
+
+
+async def test_complete_success_emits_both_sentinel_and_typed_event() -> None:
+    # Dual-emit window per proposal 0049 §5.5.7 SHOULD-emit-both
+    # transition: the provider emits BOTH the existing sentinel
+    # NodeEvent pair (started + completed) AND the new typed
+    # LlmCompletionEvent on success.
+    events, token = _collecting_dispatch()
+    transport = _make_openai_response_with_usage(
+        {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
+    )
+    provider = OpenAIProvider(base_url="http://test", model="m", api_key="k", transport=transport)
+    try:
+        await provider.complete([UserMessage(content="hi")])
+    finally:
+        await provider.aclose()
+        _release_dispatch(token)
+
+    node_events = [e for e in events if isinstance(e, NodeEvent)]
+    typed_events = [e for e in events if isinstance(e, LlmCompletionEvent)]
+    # Sentinel pair: started + completed (the existing pattern).
+    assert len(node_events) == 2
+    assert [e.phase for e in node_events] == ["started", "completed"]
+    # One typed event (success-only emission).
+    assert len(typed_events) == 1
+
+
+async def test_complete_failure_emits_only_sentinel_no_typed_event() -> None:
+    # Per proposal 0049 §3 alternative 3: LlmCompletionEvent fires on
+    # successful structured-response completion only. Provider
+    # exceptions (provider_unavailable etc.) flow through the
+    # existing exception path; the sentinel NodeEvent(completed,
+    # error=...) keeps firing for backwards-compat failure
+    # observability.
+    from openarmature.graph.events import LlmCompletionEvent, NodeEvent
+
+    def _503(_req: httpx.Request) -> httpx.Response:
+        return httpx.Response(503, json={"error": {"message": "down"}})
+
+    events, token = _collecting_dispatch()
+    provider = OpenAIProvider(
+        base_url="http://test", model="m", api_key="k", transport=httpx.MockTransport(_503)
+    )
+    try:
+        with pytest.raises(ProviderUnavailable):
+            await provider.complete([UserMessage(content="hi")])
+    finally:
+        await provider.aclose()
+        _release_dispatch(token)
+
+    node_events = [e for e in events if isinstance(e, NodeEvent)]
+    typed_events = [e for e in events if isinstance(e, LlmCompletionEvent)]
+    # Sentinel pair fires; the completed event carries error details
+    # on its LlmEventPayload.
+    assert len(node_events) == 2
+    assert [e.phase for e in node_events] == ["started", "completed"]
+    # No typed event on the failure path.
+    assert typed_events == []
+
+
+async def test_llm_completion_event_carries_typed_outcome_fields() -> None:
+    # Field sourcing: provider / model / usage / request_id / finish_reason
+    # / latency_ms are all populated from the response + instance state.
+    events, token = _collecting_dispatch()
+    transport = _make_openai_response_with_usage(
+        {
+            "prompt_tokens": 100,
+            "completion_tokens": 20,
+            "total_tokens": 120,
+            "prompt_tokens_details": {"cached_tokens": 50},
+        }
+    )
+    provider = OpenAIProvider(
+        base_url="http://test", model="m-test", api_key="k", transport=transport, genai_system="vllm"
+    )
+    try:
+        await provider.complete([UserMessage(content="hi")])
+    finally:
+        await provider.aclose()
+        _release_dispatch(token)
+
+    typed_events = [e for e in events if isinstance(e, LlmCompletionEvent)]
+    assert len(typed_events) == 1
+    typed = typed_events[0]
+    assert typed.provider == "vllm"
+    assert typed.model == "m-test"
+    assert typed.finish_reason == "stop"
+    assert typed.request_id == "x"  # the helper returns id="x"
+    # usage flows through the shared Usage shape; cache field surfaces
+    # via the typed event without separate plumbing per the
+    # proposal-0047 + proposal-0049 architectural pair.
+    assert typed.usage is not None
+    assert typed.usage.cached_tokens == 50
+    assert typed.latency_ms is not None
+    assert typed.latency_ms >= 0.0
+
+
+async def test_caller_invocation_metadata_off_by_default() -> None:
+    # Per proposal 0049's OPT-IN contract: default absent / None.
+    events, token = _collecting_dispatch()
+    transport = _make_openai_response_with_usage(
+        {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
+    )
+    provider = OpenAIProvider(base_url="http://test", model="m", api_key="k", transport=transport)
+    try:
+        await provider.complete([UserMessage(content="hi")])
+    finally:
+        await provider.aclose()
+        _release_dispatch(token)
+
+    typed = next(e for e in events if isinstance(e, LlmCompletionEvent))
+    assert typed.caller_invocation_metadata is None
+
+
+async def test_caller_invocation_metadata_populated_when_opted_in() -> None:
+    # Per proposal 0049 Q2 ack: opt-in via provider constructor knob.
+    # When True, the typed event carries a snapshot of the metadata
+    # mapping at LLM-call time.
+    events, token = _collecting_dispatch()
+    transport = _make_openai_response_with_usage(
+        {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
+    )
+    provider = OpenAIProvider(
+        base_url="http://test",
+        model="m",
+        api_key="k",
+        transport=transport,
+        populate_caller_metadata=True,
+    )
+    try:
+        set_invocation_metadata(user_id="u-123")
+        await provider.complete([UserMessage(content="hi")])
+    finally:
+        await provider.aclose()
+        _release_dispatch(token)
+
+    typed = next(e for e in events if isinstance(e, LlmCompletionEvent))
+    assert typed.caller_invocation_metadata is not None
+    assert typed.caller_invocation_metadata.get("user_id") == "u-123"
+
+
+async def test_llm_completion_event_request_id_none_when_response_omits_id() -> None:
+    # Spec proposal 0049: request_id is the provider-returned response
+    # id when present; None otherwise. Pin the None case explicitly.
+    def _handler(_req: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                # Note: no "id" field on the response body.
+                "object": "chat.completion",
+                "created": 0,
+                "model": "m",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "ok"},
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+            },
+        )
+
+    events, token = _collecting_dispatch()
+    provider = OpenAIProvider(
+        base_url="http://test", model="m", api_key="k", transport=httpx.MockTransport(_handler)
+    )
+    try:
+        await provider.complete([UserMessage(content="hi")])
+    finally:
+        await provider.aclose()
+        _release_dispatch(token)
+
+    typed = next(e for e in events if isinstance(e, LlmCompletionEvent))
+    assert typed.request_id is None
+
+
+async def test_llm_completion_event_arrives_after_sentinel_completed_within_provider_emission() -> None:
+    # Within the provider's own emission window (sentinel started →
+    # sentinel completed → typed event), the typed LlmCompletionEvent
+    # MUST arrive after the sentinel NodeEvent(completed). Spec
+    # fixture 056 pins the broader contract (typed event arrives
+    # between the CALLING NODE's started/completed pair); this test
+    # locks down the provider-internal sub-ordering that contract
+    # depends on. The full bracketing (calling-node started → ... →
+    # calling-node completed) is covered by the conformance fixture
+    # which exercises a real CompiledGraph.
+    events, token = _collecting_dispatch()
+    transport = _make_openai_response_with_usage(
+        {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+    )
+    provider = OpenAIProvider(base_url="http://test", model="m", api_key="k", transport=transport)
+    try:
+        await provider.complete([UserMessage(content="hi")])
+    finally:
+        await provider.aclose()
+        _release_dispatch(token)
+
+    # Build a type+phase tag for each event in arrival order.
+    sequence: list[str] = []
+    for ev in events:
+        if isinstance(ev, NodeEvent):
+            sequence.append(f"sentinel:{ev.phase}")
+        elif isinstance(ev, LlmCompletionEvent):
+            sequence.append("typed:completed")
+    assert sequence == ["sentinel:started", "sentinel:completed", "typed:completed"]
+
+
+async def test_llm_completion_event_sources_node_identity_from_calling_context() -> None:
+    # When the provider is called inside a node body, the typed event
+    # sources node_name / namespace / attempt_index / fan_out_index /
+    # branch_name from the calling-node ContextVars. The five tests
+    # above all ran outside any node body (default empty/None values);
+    # this test installs the ContextVars manually to confirm the
+    # sourcing path actually reaches the typed event.
+    events, token = _collecting_dispatch()
+    namespace_token = _set_namespace_prefix(("outer", "scoring"))
+    attempt_token = _set_attempt_index(2)
+    fan_out_token = _set_fan_out_index(3)
+    branch_token = _set_branch_name("fast")
+    invocation_token = _set_invocation_id("inv-abc")
+    correlation_token = _set_correlation_id("corr-xyz")
+    transport = _make_openai_response_with_usage(
+        {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+    )
+    provider = OpenAIProvider(base_url="http://test", model="m", api_key="k", transport=transport)
+    try:
+        await provider.complete([UserMessage(content="hi")])
+    finally:
+        await provider.aclose()
+        _release_dispatch(token)
+        # Reset the calling-node ContextVars in the same order would
+        # work but the engine's normal teardown handles this in
+        # production; for the test, the order doesn't matter since
+        # we're at end-of-scope.
+        from openarmature.observability.correlation import (
+            _reset_attempt_index,
+            _reset_branch_name,
+            _reset_correlation_id,
+            _reset_fan_out_index,
+            _reset_invocation_id,
+            _reset_namespace_prefix,
+        )
+
+        _reset_correlation_id(correlation_token)
+        _reset_invocation_id(invocation_token)
+        _reset_branch_name(branch_token)
+        _reset_fan_out_index(fan_out_token)
+        _reset_attempt_index(attempt_token)
+        _reset_namespace_prefix(namespace_token)
+
+    typed = next(e for e in events if isinstance(e, LlmCompletionEvent))
+    assert typed.invocation_id == "inv-abc"
+    assert typed.correlation_id == "corr-xyz"
+    assert typed.namespace == ("outer", "scoring")
+    # node_name is the last element of the namespace per the spec
+    # field-table description ("the user-defined node that issued
+    # the call").
+    assert typed.node_name == "scoring"
+    assert typed.attempt_index == 2
+    assert typed.fan_out_index == 3
+    assert typed.branch_name == "fast"

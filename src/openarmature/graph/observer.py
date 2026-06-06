@@ -37,17 +37,28 @@ from typing import Any, Literal, Protocol
 from .events import (
     InvocationCompletedEvent,
     InvocationStartedEvent,
+    LlmCompletionEvent,
     MetadataAugmentationEvent,
     NodeEvent,
 )
 from .state import State
 
 # Union of every event variant an Observer may receive. NodeEvent is
-# the original §6 started/completed/checkpoint shape; the other three
-# are side-channel events (proposal 0040 for augmentation; proposal
-# 0043 for invocation-boundary trace.input/output sourcing) that
-# bypass the phase filter and reach every subscribed observer.
-ObserverEvent = NodeEvent | MetadataAugmentationEvent | InvocationStartedEvent | InvocationCompletedEvent
+# the original §6 started/completed/checkpoint shape; the other
+# variants are side-channel events that bypass the phase filter and
+# reach every subscribed observer — MetadataAugmentationEvent
+# (proposal 0040 mid-invocation metadata augmentation),
+# InvocationStartedEvent / InvocationCompletedEvent (proposal 0043
+# trace.input/output sourcing), and LlmCompletionEvent (proposal
+# 0049 typed LLM provider call event, dispatched on every successful
+# LLM completion alongside the calling node's NodeEvent pair).
+ObserverEvent = (
+    NodeEvent
+    | MetadataAugmentationEvent
+    | InvocationStartedEvent
+    | InvocationCompletedEvent
+    | LlmCompletionEvent
+)
 
 
 class Observer(Protocol):

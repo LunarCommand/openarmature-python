@@ -16,12 +16,20 @@ Frozen dataclass; observers receive a snapshot, not a live handle.
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from types import MappingProxyType
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from openarmature.observability.metadata import AttributeValue
 
 from .errors import RuntimeGraphError
 from .state import State
+
+# TYPE_CHECKING import — the runtime Usage class lives in the llm
+# package, which transitively imports from graph.events (the
+# OpenAI provider imports NodeEvent). Using a TYPE_CHECKING import
+# plus a string annotation on LlmCompletionEvent.usage avoids the
+# circular runtime import while keeping pyright type-safe.
+if TYPE_CHECKING:
+    from openarmature.llm.response import Usage
 
 # Sentinel empty metadata mapping for events constructed without a
 # live caller-metadata snapshot (test helpers, synthetic events).
@@ -430,10 +438,82 @@ class InvocationCompletedEvent:
     correlation_id: str | None
 
 
+# Spec: realizes proposal 0049's first spec-normatively-typed event
+# variant on the observer event union (graph-engine §6 +
+# observability §5.5.7). Dispatched on every LLM provider call that
+# returns a structured response, alongside the calling node's
+# NodeEvent pair. Failure cases (provider exceptions, malformed
+# responses) flow through the existing exception path and do NOT
+# emit this variant. Not subject to the §6 ``phases`` subscription
+# filter (matches MetadataAugmentationEvent / InvocationStartedEvent
+# / InvocationCompletedEvent treatment).
+#
+# Field naming matches the spec-canonical names verbatim per the spec
+# Q5 ack — Python snake_case happens to match the spec table 1:1.
+@dataclass(frozen=True)
+class LlmCompletionEvent:
+    """A typed LLM provider call event delivered to observers.
+
+    Carries identity, scoping, and outcome data for an LLM call as
+    structured fields. Observer code filters by type discrimination
+    (``isinstance(event, LlmCompletionEvent)``) rather than by the
+    impl-current sentinel-namespace string match the legacy
+    NodeEvent pattern uses.
+
+    Field set:
+
+    - ``invocation_id``: the outer invocation's identifier.
+    - ``correlation_id``: cross-backend correlation id when present.
+    - ``node_name``: the user-defined node that issued the call.
+    - ``namespace``: the calling node's namespace tuple (NOT the
+      legacy sentinel namespace).
+    - ``attempt_index``: retry-attempt index (0 on first attempt).
+    - ``fan_out_index``: fan-out instance index when the calling
+      node ran inside a fan-out instance; ``None`` otherwise.
+    - ``branch_name``: parallel-branches branch name when the
+      calling node ran inside a branch; ``None`` otherwise.
+    - ``provider``: provider identifier; matches ``gen_ai.system``.
+    - ``model``: the model identifier the call targeted.
+    - ``request_id``: provider-returned response id; ``None`` when
+      the provider didn't return one.
+    - ``usage``: token-accounting record per ``Response.usage``
+      shape. Reuses the existing ``openarmature.llm.response.Usage``
+      class. ``None`` when the call returned no usage at all.
+    - ``latency_ms``: wall-clock latency measured at the adapter
+      boundary, in milliseconds. ``None`` when latency was not
+      measured.
+    - ``finish_reason``: the call's finish reason; ``None`` when
+      the call did not complete normally.
+    - ``caller_invocation_metadata``: optional snapshot of caller-
+      supplied invocation metadata at LLM-call time. Populated
+      only when the provider's opt-in flag is set (per-language
+      mechanism); default ``None``.
+    """
+
+    invocation_id: str
+    correlation_id: str | None
+    node_name: str
+    namespace: tuple[str, ...]
+    attempt_index: int
+    fan_out_index: int | None
+    branch_name: str | None
+    provider: str
+    model: str
+    request_id: str | None
+    # Usage is a string-typed forward reference per the TYPE_CHECKING
+    # import above — keeps the runtime import direction graph → llm
+    # off the module-load path while preserving pyright resolution.
+    usage: "Usage | None"
+    latency_ms: float | None
+    finish_reason: str | None
+    caller_invocation_metadata: Mapping[str, AttributeValue] | None = None
+
+
 __all__ = [
     "FanOutEventConfig",
     "InvocationCompletedEvent",
     "InvocationStartedEvent",
+    "LlmCompletionEvent",
     "MetadataAugmentationEvent",
     "NodeEvent",
     "ParallelBranchesEventConfig",
