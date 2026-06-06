@@ -666,6 +666,50 @@ async def test_complete_cached_tokens_absent_when_nested_key_missing() -> None:
         await provider.aclose()
 
 
+async def test_complete_excludes_unset_cached_tokens_when_wire_did_not_report() -> None:
+    # When the wire response doesn't carry prompt_tokens_details (or
+    # carries it without a cached_tokens key), the parser leaves the
+    # Pydantic field unset. model_dump(exclude_unset=True) then omits
+    # cached_tokens entirely, giving downstream consumers a clean
+    # wire-shape projection. Attribute access still returns None per
+    # the spec's absent-vs-reported distinction.
+    transport = _make_openai_response_with_usage(
+        {"prompt_tokens": 100, "completion_tokens": 20, "total_tokens": 120}
+    )
+    provider = OpenAIProvider(base_url="http://test", model="m", api_key="k", transport=transport)
+    try:
+        response = await provider.complete([UserMessage(content="hi")])
+        assert response.usage.cached_tokens is None
+        dumped = response.usage.model_dump(exclude_unset=True)
+        assert "cached_tokens" not in dumped
+        # Conversely, when the wire DID report (covered separately
+        # above), the field IS set and appears in the projection.
+    finally:
+        await provider.aclose()
+
+
+async def test_complete_includes_cached_tokens_in_exclude_unset_dump_when_wire_reported() -> None:
+    # Companion to the no-wire-report case above: when the wire reports
+    # prompt_tokens_details.cached_tokens, the field IS marked set and
+    # appears in model_dump(exclude_unset=True). Locks down the
+    # bidirectional projection for downstream consumers.
+    transport = _make_openai_response_with_usage(
+        {
+            "prompt_tokens": 100,
+            "completion_tokens": 20,
+            "total_tokens": 120,
+            "prompt_tokens_details": {"cached_tokens": 75},
+        }
+    )
+    provider = OpenAIProvider(base_url="http://test", model="m", api_key="k", transport=transport)
+    try:
+        response = await provider.complete([UserMessage(content="hi")])
+        dumped = response.usage.model_dump(exclude_unset=True)
+        assert dumped.get("cached_tokens") == 75
+    finally:
+        await provider.aclose()
+
+
 async def test_complete_cached_tokens_absent_when_prompt_tokens_details_not_a_dict() -> None:
     # Defensive against malformed wire responses: if prompt_tokens_details
     # is a non-dict scalar / string / list, the isinstance guard in the

@@ -662,28 +662,30 @@ class OpenAIProvider:
                     if isinstance(prompt_tokens_details_raw, dict)
                     else None
                 )
-                # Pydantic validates the value (rejects malformed types
-                # via ValidationError → ProviderInvalidResponse) — same
-                # path the other token-count fields take. Wire shape:
-                # absent prompt_tokens_details → cached_tokens stays
-                # None; present with the cached_tokens key absent →
-                # also None (dict.get default).
-                usage = Usage(
-                    prompt_tokens=usage_wire.get("prompt_tokens"),
-                    completion_tokens=usage_wire.get("completion_tokens"),
-                    total_tokens=usage_wire.get("total_tokens"),
-                    cached_tokens=(
-                        prompt_tokens_details.get("cached_tokens")
-                        if prompt_tokens_details is not None
-                        else None
-                    ),
-                )
+                # Conditional set: only pass cached_tokens to Usage(...)
+                # when the wire actually reports the nested key. Pydantic
+                # tracks the field as "set" only when explicitly passed;
+                # downstream consumers using model_dump(exclude_unset=True)
+                # then get a clean wire-shape projection (cached_tokens
+                # omitted entirely when the provider didn't report it).
+                # Attribute access (usage.cached_tokens) still returns
+                # None when absent per the spec's absent-vs-reported
+                # distinction. Malformed values surface as
+                # ProviderInvalidResponse via the same Pydantic validation
+                # path the other token-count fields take.
+                usage_kwargs: dict[str, Any] = {
+                    "prompt_tokens": usage_wire.get("prompt_tokens"),
+                    "completion_tokens": usage_wire.get("completion_tokens"),
+                    "total_tokens": usage_wire.get("total_tokens"),
+                }
+                if prompt_tokens_details is not None and "cached_tokens" in prompt_tokens_details:
+                    usage_kwargs["cached_tokens"] = prompt_tokens_details["cached_tokens"]
+                usage = Usage(**usage_kwargs)
             else:
                 usage = Usage(
                     prompt_tokens=None,
                     completion_tokens=None,
                     total_tokens=None,
-                    cached_tokens=None,
                 )
         except ValidationError as exc:
             raise ProviderInvalidResponse(f"invalid usage record: {exc}") from exc
