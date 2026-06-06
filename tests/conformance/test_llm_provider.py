@@ -430,7 +430,17 @@ def _assert_response_matches(actual: Response, expected: Mapping[str, Any]) -> N
         assert actual.finish_reason == expected["finish_reason"]
     if "usage" in expected:
         expected_usage = expected["usage"]
-        actual_usage = actual.usage.model_dump()
+        # Subset comparison: spec fixtures assert which usage fields
+        # MUST be present with what values. Impl-extension fields
+        # outside the fixture's expected set (e.g., the 0047
+        # cache-stat fields on impls that have adopted them but
+        # against fixtures that pre-date the proposal) are ignored
+        # when the fixture doesn't assert about them. A fixture key
+        # that's absent from actual surfaces as a missing key in the
+        # filtered dict and fails the comparison; the impl can't
+        # silently drop a field the spec requires.
+        actual_usage_full = actual.usage.model_dump()
+        actual_usage = {k: v for k, v in actual_usage_full.items() if k in expected_usage}
         assert actual_usage == expected_usage, (
             f"usage mismatch: actual={actual_usage}, expected={expected_usage}"
         )
