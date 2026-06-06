@@ -646,13 +646,45 @@ class OpenAIProvider:
         try:
             if isinstance(usage_wire_raw, dict):
                 usage_wire = cast("dict[str, Any]", usage_wire_raw)
+                # cached_tokens sources from
+                # usage.prompt_tokens_details.cached_tokens per spec
+                # §8.1.2; vLLM and other OpenAI-compatible servers that
+                # surface implicit-cache stats follow the same nesting.
+                # Defaults to None when prompt_tokens_details is absent
+                # or when the nested cached_tokens key is missing
+                # (preserves the absent-vs-reported-zero distinction).
+                # cache_creation_tokens stays None — OpenAI-compatible
+                # providers do not report a discrete cache-creation
+                # count under this mapping.
+                prompt_tokens_details_raw = usage_wire.get("prompt_tokens_details")
+                prompt_tokens_details: dict[str, Any] | None = (
+                    cast("dict[str, Any]", prompt_tokens_details_raw)
+                    if isinstance(prompt_tokens_details_raw, dict)
+                    else None
+                )
+                # Pydantic validates the value (rejects malformed types
+                # via ValidationError → ProviderInvalidResponse) — same
+                # path the other token-count fields take. Wire shape:
+                # absent prompt_tokens_details → cached_tokens stays
+                # None; present with the cached_tokens key absent →
+                # also None (dict.get default).
                 usage = Usage(
                     prompt_tokens=usage_wire.get("prompt_tokens"),
                     completion_tokens=usage_wire.get("completion_tokens"),
                     total_tokens=usage_wire.get("total_tokens"),
+                    cached_tokens=(
+                        prompt_tokens_details.get("cached_tokens")
+                        if prompt_tokens_details is not None
+                        else None
+                    ),
                 )
             else:
-                usage = Usage(prompt_tokens=None, completion_tokens=None, total_tokens=None)
+                usage = Usage(
+                    prompt_tokens=None,
+                    completion_tokens=None,
+                    total_tokens=None,
+                    cached_tokens=None,
+                )
         except ValidationError as exc:
             raise ProviderInvalidResponse(f"invalid usage record: {exc}") from exc
 

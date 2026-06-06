@@ -534,6 +534,179 @@ async def test_complete_negative_usage_surfaces_as_invalid_response() -> None:
         await provider.aclose()
 
 
+# ---------------------------------------------------------------------------
+# Usage cache-stat fields (proposal 0047 — llm-provider §6 extension)
+# ---------------------------------------------------------------------------
+
+
+def test_usage_cache_fields_default_to_none() -> None:
+    # Backwards-compat: existing Usage constructions that don't pass
+    # cache fields produce instances with cached_tokens = None and
+    # cache_creation_tokens = None (the "not reported" state, distinct
+    # from a "reported zero" value of 0).
+    usage = Usage(prompt_tokens=1, completion_tokens=2, total_tokens=3)
+    assert usage.cached_tokens is None
+    assert usage.cache_creation_tokens is None
+
+
+def test_usage_negative_cached_tokens_rejected_at_construction() -> None:
+    with pytest.raises(ValidationError):
+        Usage(prompt_tokens=0, completion_tokens=0, total_tokens=0, cached_tokens=-1)
+
+
+def test_usage_negative_cache_creation_tokens_rejected_at_construction() -> None:
+    with pytest.raises(ValidationError):
+        Usage(prompt_tokens=0, completion_tokens=0, total_tokens=0, cache_creation_tokens=-1)
+
+
+def _make_openai_response_with_usage(usage_body: dict[str, object]) -> httpx.MockTransport:
+    """Build a MockTransport returning a minimal Chat Completions
+    response with the given ``usage`` body. Helper for the cache-stat
+    end-to-end tests below.
+    """
+
+    def _handler(_req: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "id": "x",
+                "object": "chat.completion",
+                "created": 0,
+                "model": "m",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "ok"},
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": usage_body,
+            },
+        )
+
+    return httpx.MockTransport(_handler)
+
+
+async def test_complete_sources_cached_tokens_from_nested_prompt_tokens_details() -> None:
+    # Cache-hit reported with a positive value. Spec §8.1.2: the
+    # OpenAI-compat mapping sources cached_tokens from
+    # usage.prompt_tokens_details.cached_tokens.
+    transport = _make_openai_response_with_usage(
+        {
+            "prompt_tokens": 100,
+            "completion_tokens": 20,
+            "total_tokens": 120,
+            "prompt_tokens_details": {"cached_tokens": 75},
+        }
+    )
+    provider = OpenAIProvider(base_url="http://test", model="m", api_key="k", transport=transport)
+    try:
+        response = await provider.complete([UserMessage(content="hi")])
+        assert response.usage.cached_tokens == 75
+        # cache_creation_tokens is not sourced by the OpenAI-compat
+        # mapping per spec §8.1.2.
+        assert response.usage.cache_creation_tokens is None
+    finally:
+        await provider.aclose()
+
+
+async def test_complete_reports_zero_cached_tokens_distinct_from_absent() -> None:
+    # The spec mandates the absent-vs-reported-zero distinction:
+    # absent (None) means the provider didn't report; 0 means the
+    # provider reported zero hits. Locks down the distinction.
+    transport = _make_openai_response_with_usage(
+        {
+            "prompt_tokens": 100,
+            "completion_tokens": 20,
+            "total_tokens": 120,
+            "prompt_tokens_details": {"cached_tokens": 0},
+        }
+    )
+    provider = OpenAIProvider(base_url="http://test", model="m", api_key="k", transport=transport)
+    try:
+        response = await provider.complete([UserMessage(content="hi")])
+        assert response.usage.cached_tokens == 0
+    finally:
+        await provider.aclose()
+
+
+async def test_complete_cached_tokens_absent_when_prompt_tokens_details_missing() -> None:
+    # Common pre-cache path: vLLM without --enable-prompt-tokens-details,
+    # OpenAI responses pre-cache-support, etc. No prompt_tokens_details
+    # nesting at all → cached_tokens stays None.
+    transport = _make_openai_response_with_usage(
+        {"prompt_tokens": 100, "completion_tokens": 20, "total_tokens": 120}
+    )
+    provider = OpenAIProvider(base_url="http://test", model="m", api_key="k", transport=transport)
+    try:
+        response = await provider.complete([UserMessage(content="hi")])
+        assert response.usage.cached_tokens is None
+    finally:
+        await provider.aclose()
+
+
+async def test_complete_cached_tokens_absent_when_nested_key_missing() -> None:
+    # Defensive: prompt_tokens_details dict exists (provider may report
+    # other details there, e.g., audio_tokens) but cached_tokens is
+    # absent within it. Sourcing path stays defensive — no KeyError,
+    # cached_tokens stays None.
+    transport = _make_openai_response_with_usage(
+        {
+            "prompt_tokens": 100,
+            "completion_tokens": 20,
+            "total_tokens": 120,
+            "prompt_tokens_details": {"audio_tokens": 0},
+        }
+    )
+    provider = OpenAIProvider(base_url="http://test", model="m", api_key="k", transport=transport)
+    try:
+        response = await provider.complete([UserMessage(content="hi")])
+        assert response.usage.cached_tokens is None
+    finally:
+        await provider.aclose()
+
+
+async def test_complete_cached_tokens_absent_when_prompt_tokens_details_not_a_dict() -> None:
+    # Defensive against malformed wire responses: if prompt_tokens_details
+    # is a non-dict scalar / string / list, the isinstance guard in the
+    # parser treats it as absent rather than crashing. cached_tokens
+    # stays None.
+    transport = _make_openai_response_with_usage(
+        {
+            "prompt_tokens": 100,
+            "completion_tokens": 20,
+            "total_tokens": 120,
+            "prompt_tokens_details": "unexpected_shape",
+        }
+    )
+    provider = OpenAIProvider(base_url="http://test", model="m", api_key="k", transport=transport)
+    try:
+        response = await provider.complete([UserMessage(content="hi")])
+        assert response.usage.cached_tokens is None
+    finally:
+        await provider.aclose()
+
+
+async def test_complete_negative_cached_tokens_surfaces_as_invalid_response() -> None:
+    # Same invariant the existing test pins for prompt_tokens — a
+    # wire response carrying a negative cache count MUST surface as
+    # ``provider_invalid_response`` rather than silently passing through.
+    transport = _make_openai_response_with_usage(
+        {
+            "prompt_tokens": 100,
+            "completion_tokens": 20,
+            "total_tokens": 120,
+            "prompt_tokens_details": {"cached_tokens": -1},
+        }
+    )
+    provider = OpenAIProvider(base_url="http://test", model="m", api_key="k", transport=transport)
+    try:
+        with pytest.raises(ProviderInvalidResponse, match="invalid usage record"):
+            await provider.complete([UserMessage(content="hi")])
+    finally:
+        await provider.aclose()
+
+
 # RuntimeConfig.from_partial — Python ergonomic introduced alongside
 # proposal 0032. Wire-layer null-skip already drops Nones; this just
 # lets callers splat a partial dict without filtering at the call site.
