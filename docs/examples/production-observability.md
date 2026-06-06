@@ -89,7 +89,7 @@ sees the same logical events represented two ways.
   carrying an `LlmEventPayload`. It accumulates per-invocation
   token totals in memory, indexed by `current_invocation_id()`.
   The terminal `persist` node calls
-  `await graph.drain_events_for(state.invocation_id, timeout=2.0)`
+  `await graph.drain_events_for(current_invocation_id(), timeout=2.0)`
   to synchronize on the deliver loop, then reads the accumulator's
   bucket and drops it. Without the drain, the bucket might be
   missing the most-recent LLM event's tokens (the deliver loop
