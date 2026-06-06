@@ -4,6 +4,8 @@ All notable changes to `openarmature-python` are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). The package follows [Semantic Versioning](https://semver.org/); pre-1.0 minor bumps may carry behavioral changes per [spec governance](https://github.com/LunarCommand/openarmature-spec/blob/main/GOVERNANCE.md).
 
+## [Unreleased]
+
 ## [0.12.0] — 2026-06-05
 
 Observability release. The pinned spec advances from v0.38.0 to v0.46.0, absorbing eight accepted proposals (0047-0054). Three ship as fully implemented this cycle: proposal 0048 grows a read-symmetric `get_invocation_metadata()` API + a §9 *Queryable observer pattern* concept doc section; proposal 0052 puts `openarmature.implementation.name` + `.version` attribution attributes on every OTel invocation span + every Langfuse Trace; proposal 0054 ships `CompiledGraph.drain_events_for(invocation_id, *, timeout)` as the architectural pair to 0048's §9.4 accumulator lifecycle. Two ship as textual-only acks (0051 Langfuse trace I/O caveat; 0053 §3.4 shared-parent boundary clarification). One Fixed: the retry middleware now resets the invocation-metadata ContextVar between attempts per §3.4. The production-observability example grows the queryable accumulator + drain_events_for pattern end-to-end so the new APIs have a runnable demo.
