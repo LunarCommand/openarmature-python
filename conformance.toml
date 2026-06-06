@@ -341,9 +341,13 @@ since = "0.12.0"
 # and ``implementation_version`` reject caller-supplied collision at
 # the ``invoke()`` API boundary.
 #
-# Conformance fixtures (observability/058 OTel + observability/059
-# Langfuse) stay deferred from the cross-capability parser pending
-# the upcoming conformance-adapter capability — same Path A
+# Conformance fixtures: 058 (OTel) parses cleanly via the existing
+# ``span_tree`` + ``attributes_absent`` directive shapes — its
+# cross-capability parser test passes; runtime exec is gated by
+# ``_SUPPORTED_FIXTURES`` in ``test_observability.py`` until the
+# harness wires up the canonical-value parameterization. 059
+# (Langfuse) stays deferred from the cross-capability parser
+# pending the upcoming conformance-adapter capability — same Path A
 # reasoning as the 0048 / 0054 fixtures. Behavior is pinned by unit
 # tests:
 #   - reserved-key rejection (validate / set_invocation_metadata /

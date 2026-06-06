@@ -412,6 +412,15 @@ class OTelObserver:
       caught and warned; never propagated.
     - ``spec_version``: string surfaced as
       ``openarmature.graph.spec_version`` on the invocation span.
+    - ``implementation_name``: string surfaced as
+      ``openarmature.implementation.name`` on the invocation span.
+      Defaults to the package's ``__implementation_name__``
+      (``"openarmature-python"``). Configurable for test
+      parameterization.
+    - ``implementation_version``: string surfaced as
+      ``openarmature.implementation.version`` on the invocation span.
+      Defaults to ``openarmature.__version__``. Always-emit invariant:
+      not gated by any privacy knob.
 
     Safe to share across concurrent invocations and across resumes of
     the same correlation_id; every internal span map is outer-keyed by

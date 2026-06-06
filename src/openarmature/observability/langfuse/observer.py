@@ -299,6 +299,16 @@ class LangfuseObserver:
       ``disable_state_payload=False``, minimal stub otherwise).
     - ``trace_output_from_state``: same shape for ``trace.output``,
       called once per invocation at the ``InvocationCompletedEvent``.
+    - ``implementation_name``: string surfaced as
+      ``trace.metadata.implementation_name`` on every Trace. Defaults
+      to the package's ``__implementation_name__``
+      (``"openarmature-python"``). Configurable for test
+      parameterization.
+    - ``implementation_version``: string surfaced as
+      ``trace.metadata.implementation_version`` on every Trace.
+      Defaults to ``openarmature.__version__``. Always-emit invariant
+      inherited from §5.1 — not gated by ``disable_state_payload``,
+      ``disable_llm_payload``, or any other privacy knob.
 
     The observer reads the spec version from the package at
     construction time. Safe to share across concurrent invocations
