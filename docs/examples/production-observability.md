@@ -16,7 +16,7 @@ loop with `drain_events_for`.
 ## Overview
 
 Two nodes (`respond` then `persist`), one LLM call, three observers
-attached at compile time. The pipeline takes a question, calls the
+attached before invoke. The pipeline takes a question, calls the
 LLM, returns the answer, then synchronizes on the observer queue
 and rolls up token cost. The interesting part is the observability
 wiring:

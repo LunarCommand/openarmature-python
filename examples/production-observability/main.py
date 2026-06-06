@@ -44,17 +44,17 @@ requestId / featureFlag) propagating to both observers in one
 - **Queryable accumulator observer + per-invocation drain.** A
   third observer (``LlmUsageAccumulator``) rolls up LLM token
   totals per invocation. A terminal ``persist`` node calls
-  ``graph.drain_events_for(current_invocation_id())`` to synchronize on
-  the deliver loop, then reads the accumulator's bucket and drops
-  it. Without the drain, the bucket would be missing the most
-  recent LLM event's tokens (the deliver loop hasn't reached them
-  yet). This is the canonical shape for per-invocation cost
-  attribution at request scope, replacing the round-trip-through-
-  State workarounds that pre-v0.12.0 deployments used. The pattern
-  is convention-only at the observer level: ``Observer`` itself
-  stays a single-callable protocol; the queryable accumulator just
-  exposes its own read methods (``get_bucket`` / ``drop``) that the
-  persist node knows about.
+  ``await graph.drain_events_for(current_invocation_id(), timeout=2.0)``
+  to synchronize on the deliver loop, then reads the accumulator's
+  bucket and drops it. Without the drain, the bucket would be
+  missing the most recent LLM event's tokens (the deliver loop
+  hasn't reached them yet). This is the canonical shape for
+  per-invocation cost attribution at request scope, replacing the
+  round-trip-through-State workarounds that pre-v0.12.0 deployments
+  used. The pattern is convention-only at the observer level:
+  ``Observer`` itself stays a single-callable protocol; the
+  queryable accumulator just exposes its own read methods
+  (``get_bucket`` / ``drop``) that the persist node knows about.
 
 Complementary to the observer-hooks example (three observers
 side-by-side) and the langfuse-observability example (Langfuse
@@ -243,11 +243,15 @@ class LlmUsageAccumulator:
         """Read the accumulated bucket for an invocation."""
         return self._by_invocation.get(invocation_id)
 
-    # The accumulator does NOT auto-drop on
-    # ``InvocationCompletedEvent`` — a terminal node legitimately
-    # needs to read the bucket BEFORE the invocation completes, and
-    # auto-drop would race the read. Callers invoke ``drop()``
-    # explicitly after reading.
+    # Bucket lifecycle is two-step. Fast path: a terminal node calls
+    # ``drop()`` immediately after reading via ``get_bucket()`` —
+    # that's the normal case and runs while the invocation is still
+    # active. Backstop: the accumulator's ``__call__`` also drops
+    # any bucket still present when ``InvocationCompletedEvent``
+    # arrives. The backstop closes the leak where
+    # ``drain_events_for`` times out, the terminal node drops a
+    # stale bucket, then late-delivered LLM events ``setdefault()``
+    # a fresh bucket that nothing would otherwise clean up.
     def drop(self, invocation_id: str) -> None:
         """Release the bucket for an invocation."""
         self._by_invocation.pop(invocation_id, None)
@@ -360,7 +364,7 @@ async def persist(_state: BriefingState) -> dict[str, Any]:
     if _compiled_graph is None or _accumulator is None:
         raise RuntimeError(
             "persist node requires _compiled_graph and _accumulator to be set "
-            "before invoke() — see main() for the initialization pattern"
+            "before invoke() — see build_graph() for the initialization pattern"
         )
     invocation_id = current_invocation_id()
     if invocation_id is None:
