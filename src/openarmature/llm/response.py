@@ -41,11 +41,18 @@ ParsedValue = dict[str, Any] | BaseModel | None
 FinishReason = Literal["stop", "length", "tool_calls", "content_filter", "error"]
 
 
+# Cache-stat fields (cached_tokens / cache_creation_tokens) are
+# optional and default to None. The absent-vs-reported-zero distinction
+# is observable: None means the provider did not report the field; 0
+# means the provider reported the field with value zero (a "reported
+# miss"). Each per-provider wire-format mapping documents which fields
+# it sources.
 class Usage(BaseModel):
     """Token-accounting record.
 
     Each field is a non-negative integer or ``None``. If the provider
-    does not report usage, all three MUST be ``None``.
+    does not report token counts, ``prompt_tokens`` / ``completion_tokens``
+    / ``total_tokens`` MUST be ``None``.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -53,6 +60,19 @@ class Usage(BaseModel):
     prompt_tokens: int | None = Field(ge=0)
     completion_tokens: int | None = Field(ge=0)
     total_tokens: int | None = Field(ge=0)
+    # The count of input tokens that hit a prefix cache, sourced from
+    # the provider's response. Absent (None) when the provider does
+    # not report cache statistics; set to 0 when the provider reports
+    # zero cache-hit tokens. Each wire-format mapping documents the
+    # provider response field this value is sourced from.
+    cached_tokens: int | None = Field(default=None, ge=0)
+    # The count of input tokens written to the cache during the call.
+    # Populated primarily by providers with explicit cache-control
+    # surfaces that report a discrete cache-creation count alongside
+    # cache reads. Absent (None) for providers that only report
+    # implicit cache reads (the §8.1 OpenAI-compat mapping leaves this
+    # field absent).
+    cache_creation_tokens: int | None = Field(default=None, ge=0)
 
 
 class Response(BaseModel):
