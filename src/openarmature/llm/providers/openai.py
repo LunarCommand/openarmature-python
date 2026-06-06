@@ -53,8 +53,9 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import time
 import uuid
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from typing import Any, Literal, cast
 from urllib.parse import urlparse
 
@@ -62,16 +63,18 @@ import httpx
 import jsonschema
 from pydantic import BaseModel, ValidationError
 
-from openarmature.graph.events import NodeEvent
+from openarmature.graph.events import LlmCompletionEvent, NodeEvent
 from openarmature.observability.correlation import (
     current_attempt_index,
     current_branch_name,
+    current_correlation_id,
     current_dispatch,
     current_fan_out_index,
+    current_invocation_id,
     current_namespace_prefix,
 )
 from openarmature.observability.llm_event import LlmEventPayload
-from openarmature.observability.metadata import current_invocation_metadata
+from openarmature.observability.metadata import AttributeValue, current_invocation_metadata
 
 # ``current_prompt_group`` / ``current_prompt_result`` are imported
 # lazily inside :meth:`OpenAIProvider.complete` to avoid a module-load
@@ -157,6 +160,7 @@ class OpenAIProvider:
         force_prompt_augmentation_fallback: bool = False,
         genai_system: str = "openai",
         readiness_probe: Literal["models", "chat_completions", "both"] = "chat_completions",
+        populate_caller_metadata: bool = False,
     ) -> None:
         self.base_url = _validate_and_normalize_base_url(base_url)
         self.model = model
@@ -189,6 +193,14 @@ class OpenAIProvider:
                 f"readiness_probe must be one of {sorted(_VALID_READINESS_PROBES)} (got {readiness_probe!r})"
             )
         self._readiness_probe = readiness_probe
+        # Proposal 0049's caller_invocation_metadata field is OPTIONAL
+        # on the typed LlmCompletionEvent: default absent, populated
+        # only when the consumer opts in. The per-language opt-in
+        # mechanism is constructor-knob here so the provider can decide
+        # at emission time without engine-level observer introspection.
+        # Off by default to avoid bloating every event with potentially-
+        # large metadata snapshots when nothing downstream consumes them.
+        self._populate_caller_metadata = populate_caller_metadata
         self._headers: dict[str, str] = {"Content-Type": "application/json"}
         if api_key is not None:
             self._headers["Authorization"] = f"Bearer {api_key}"
@@ -443,10 +455,30 @@ class OpenAIProvider:
                 )
             )
 
+        # Wall-clock latency measured at the adapter boundary per
+        # proposal 0049's LlmCompletionEvent.latency_ms contract. The
+        # boundary spans from "just before _do_complete is called" to
+        # "_do_complete returns with a parsed Response in hand" —
+        # covers HTTP setup, request emission, provider compute,
+        # response receive, AND response parsing into the typed
+        # Response. The spec text "wall-clock latency of the LLM call
+        # measured at the adapter boundary" is silent on whether
+        # parsing is included; including it matches the operator's
+        # mental model of "how long until I had a usable answer"
+        # better than just-the-HTTP-call. perf_counter is the monotonic
+        # high-resolution clock for elapsed-time measurements.
+        adapter_start = time.perf_counter()
         try:
             response = await self._do_complete(body, schema_dict, schema_class)
         except Exception as exc:
             if dispatch is not None:
+                # Failure path: only the sentinel NodeEvent pair fires.
+                # Per proposal 0049 §3 (alternative 3): LlmCompletionEvent
+                # is completion-only; failures flow through the
+                # llm-provider §7 exception path. The error continues
+                # to surface through the existing observer chain via
+                # the sentinel NodeEvent's error_type / error_category
+                # fields on LlmEventPayload.
                 dispatch(
                     _make_llm_event(
                         "completed",
@@ -462,8 +494,14 @@ class OpenAIProvider:
                     )
                 )
             raise
+        latency_ms = (time.perf_counter() - adapter_start) * 1000.0
 
         if dispatch is not None:
+            # Sentinel NodeEvent pair stays during the dual-emit window
+            # per proposal 0049 §5.5.7 SHOULD-emit-both transition. The
+            # window stays open through v0.13.0 with the sentinel
+            # emission removed in v0.15.0 (CHANGELOG callout pinned to
+            # the v0.13.0 release notes).
             dispatch(
                 _make_llm_event(
                     "completed",
@@ -482,7 +520,62 @@ class OpenAIProvider:
                     active_prompt_group=active_prompt_group,
                 )
             )
+            # The new typed LlmCompletionEvent — observers filtering via
+            # isinstance(event, LlmCompletionEvent) receive this; legacy
+            # observers filtering on the sentinel namespace see the
+            # NodeEvent pair above. Failure path doesn't reach here.
+            dispatch(
+                self._build_llm_completion_event(response, latency_ms),
+            )
         return response
+
+    def _build_llm_completion_event(self, response: Response, latency_ms: float) -> LlmCompletionEvent:
+        """Construct the typed LlmCompletionEvent for the success path.
+
+        Sources identity / scoping fields from the calling-node
+        ContextVars and outcome fields from the response. The calling-
+        node namespace is the FULL namespace tuple (not the legacy
+        sentinel pseudo-namespace); node_name is the last element of
+        the namespace (the user-defined node that issued the call).
+        Outside any node body (namespace empty), node_name is the
+        empty string.
+        """
+
+        namespace = current_namespace_prefix()
+        node_name = namespace[-1] if namespace else ""
+        # invocation_id is normally always present once invoke() entry
+        # has run, but the LLM provider can be exercised in test
+        # fixtures outside an invocation. Spec proposal 0049's field
+        # table types invocation_id as a non-nullable string, so we
+        # fall back to empty string rather than None to keep the event
+        # constructable. Downstream observers using invocation_id as a
+        # correlation key should treat "" as "not in an invocation"
+        # and either skip or special-case those events; collisions
+        # across multiple out-of-invocation calls are theoretically
+        # possible but not a path production code should hit.
+        invocation_id = current_invocation_id() or ""
+        caller_metadata: Mapping[str, AttributeValue] | None = None
+        if self._populate_caller_metadata:
+            # Snapshot via dict() so downstream consumers see a stable
+            # frozen view; if a node body mutates metadata after the
+            # snapshot, the event still carries the at-emission view.
+            caller_metadata = dict(current_invocation_metadata())
+        return LlmCompletionEvent(
+            invocation_id=invocation_id,
+            correlation_id=current_correlation_id(),
+            node_name=node_name,
+            namespace=namespace,
+            attempt_index=current_attempt_index(),
+            fan_out_index=current_fan_out_index(),
+            branch_name=current_branch_name(),
+            provider=self._genai_system,
+            model=self.model,
+            request_id=response.response_id,
+            usage=response.usage,
+            latency_ms=latency_ms,
+            finish_reason=response.finish_reason,
+            caller_invocation_metadata=caller_metadata,
+        )
 
     async def _do_complete(
         self,

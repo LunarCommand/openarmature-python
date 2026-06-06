@@ -38,6 +38,7 @@ from .errors import (
 from .events import (
     InvocationCompletedEvent,
     InvocationStartedEvent,
+    LlmCompletionEvent,
     MetadataAugmentationEvent,
     NodeEvent,
 )
@@ -84,6 +85,7 @@ __all__ = [
     "GraphError",
     "InvocationCompletedEvent",
     "InvocationStartedEvent",
+    "LlmCompletionEvent",
     "MappingReferencesUndeclaredField",
     "MetadataAugmentationEvent",
     "Middleware",

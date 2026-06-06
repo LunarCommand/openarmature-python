@@ -39,6 +39,7 @@ if TYPE_CHECKING:
     from openarmature.graph.events import (
         InvocationCompletedEvent,
         InvocationStartedEvent,
+        LlmCompletionEvent,
         MetadataAugmentationEvent,
         NodeEvent,
     )
@@ -215,7 +216,13 @@ def _reset_active_observers(token: Token[tuple[SubscribedObserver, ...]]) -> Non
 
 _active_dispatch_var: ContextVar[
     Callable[
-        [NodeEvent | MetadataAugmentationEvent | InvocationStartedEvent | InvocationCompletedEvent],
+        [
+            NodeEvent
+            | MetadataAugmentationEvent
+            | InvocationStartedEvent
+            | InvocationCompletedEvent
+            | LlmCompletionEvent
+        ],
         None,
     ]
     | None
@@ -224,7 +231,13 @@ _active_dispatch_var: ContextVar[
 
 def current_dispatch() -> (
     Callable[
-        [NodeEvent | MetadataAugmentationEvent | InvocationStartedEvent | InvocationCompletedEvent],
+        [
+            NodeEvent
+            | MetadataAugmentationEvent
+            | InvocationStartedEvent
+            | InvocationCompletedEvent
+            | LlmCompletionEvent
+        ],
         None,
     ]
     | None
@@ -244,12 +257,24 @@ def current_dispatch() -> (
 
 def _set_active_dispatch(
     dispatch: Callable[
-        [NodeEvent | MetadataAugmentationEvent | InvocationStartedEvent | InvocationCompletedEvent],
+        [
+            NodeEvent
+            | MetadataAugmentationEvent
+            | InvocationStartedEvent
+            | InvocationCompletedEvent
+            | LlmCompletionEvent
+        ],
         None,
     ],
 ) -> Token[
     Callable[
-        [NodeEvent | MetadataAugmentationEvent | InvocationStartedEvent | InvocationCompletedEvent],
+        [
+            NodeEvent
+            | MetadataAugmentationEvent
+            | InvocationStartedEvent
+            | InvocationCompletedEvent
+            | LlmCompletionEvent
+        ],
         None,
     ]
     | None
@@ -262,7 +287,13 @@ def _set_active_dispatch(
 def _reset_active_dispatch(
     token: Token[
         Callable[
-            [NodeEvent | MetadataAugmentationEvent | InvocationStartedEvent | InvocationCompletedEvent],
+            [
+                NodeEvent
+                | MetadataAugmentationEvent
+                | InvocationStartedEvent
+                | InvocationCompletedEvent
+                | LlmCompletionEvent
+            ],
             None,
         ]
         | None
