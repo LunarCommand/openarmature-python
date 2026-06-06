@@ -318,11 +318,80 @@ status = "textual-only"
 since = "0.12.0"
 
 # Spec v0.44.0 (proposal 0052).  Implementation attribution attributes
-# (``openarmature.implementation.name`` + ``openarmature.implementation.version``
-# on every invocation span).  Queued for v0.12.0 (this cycle); will
-# flip to ``implemented`` in the implementation PR.
+# on every invocation span (§5.1) + every Langfuse Trace (§8.4.1).
+# The OTel observer emits ``openarmature.implementation.name`` +
+# ``openarmature.implementation.version`` on the invocation span
+# alongside the existing ``openarmature.graph.spec_version``; inner
+# spans do NOT carry them (per §5.1 they are invocation-span-only,
+# not cross-cutting §5.6).  The Langfuse observer mirrors with
+# ``trace.metadata.implementation_name`` +
+# ``trace.metadata.implementation_version`` rows on both trace-open
+# paths (the proposal 0043 boundary-event lazy-open path and the
+# legacy NodeEvent path).  Always-emit invariant: neither
+# ``disable_state_payload`` nor any other privacy knob gates these
+# attributes — they describe runtime identity, not runtime data.
+#
+# Source: ``__implementation_name__`` ("openarmature-python") added
+# to ``openarmature/__init__.py`` alongside the existing version
+# constants; ``__version__`` is the package version source.
+# Configurable via dataclass fields on both observers for test
+# parameterization.
+#
+# §3.4 reserved-key set grows 24 -> 26 names: ``implementation_name``
+# and ``implementation_version`` reject caller-supplied collision at
+# the ``invoke()`` API boundary.
+#
+# Conformance fixtures: 058 (OTel) parses cleanly via the existing
+# ``span_tree`` + ``attributes_absent`` directive shapes — its
+# cross-capability parser test passes; runtime exec is gated by
+# ``_SUPPORTED_FIXTURES`` in ``test_observability.py`` until the
+# harness wires up the canonical-value parameterization. 059
+# (Langfuse) stays deferred from the cross-capability parser
+# pending the upcoming conformance-adapter capability — same Path A
+# reasoning as the 0048 / 0054 fixtures. Behavior is pinned by unit
+# tests:
+#   - reserved-key rejection (validate / set_invocation_metadata /
+#     invoke() boundary for both names):
+#     ``tests/unit/test_observability_metadata.py::
+#     test_validate_rejects_reserved_implementation_name``,
+#     ``::test_validate_rejects_reserved_implementation_version``,
+#     ``::test_set_invocation_metadata_rejects_reserved_implementation_name``,
+#     ``::test_set_invocation_metadata_rejects_reserved_implementation_version``,
+#     ``::test_invoke_rejects_reserved_implementation_name_at_boundary``,
+#     ``::test_invoke_rejects_reserved_implementation_version_at_boundary``;
+#   - OTel invocation span carries the attributes; inner spans do
+#     not:
+#     ``tests/unit/test_observability_otel.py::
+#     test_invocation_span_carries_implementation_attribution_attributes``;
+#   - OTel always-emit invariant under ``disable_llm_payload``,
+#     ``disable_genai_semconv``, ``disable_llm_spans``:
+#     ``::test_invocation_span_attribution_emits_under_disable_llm_payload``;
+#   - OTel attributes emit on every invocation span across a
+#     reused observer (3 sequential invocations):
+#     ``::test_invocation_span_attribution_emits_on_every_invocation``;
+#   - Langfuse Trace metadata carries the rows + always-emit
+#     invariant under ``disable_state_payload=True``:
+#     ``tests/unit/test_observability_langfuse.py::
+#     test_trace_metadata_carries_implementation_attribution_rows``,
+#     ``::test_implementation_attribution_rows_emit_with_disable_state_payload_enabled``;
+#   - Langfuse rows emit on every Trace across a reused observer (3
+#     sequential invocations):
+#     ``::test_implementation_attribution_rows_emit_on_every_trace``.
+#
+# Fixture 058 case 2 ("detached_subgraph_attribution_propagates_
+# _to_child_trace_invocation_span") expects two ``openarmature.invocation``
+# spans (parent + detached child trace), but fixture 008 establishes
+# that detached subgraphs root in their subgraph-dispatch span — NOT
+# in a separate invocation span. The two fixtures appear inconsistent.
+# Not deferring 058's parsing (it parses cleanly), but the runtime
+# exec contract for the detached-child-invocation-span case needs
+# coord-thread resolution before activation. The python implementation
+# emits the attribution attributes on every invocation span it opens
+# (pinned by the multi-invocation test above), so the 0052 contract
+# itself is honored.
 [proposals."0052"]
-status = "not-yet"
+status = "implemented"
+since = "0.12.0"
 
 # Spec v0.45.0 (proposal 0053).  §3.4 shared-parent boundary
 # clarification.  Purely textual: tightens the structural-shared-parent

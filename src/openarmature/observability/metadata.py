@@ -100,6 +100,15 @@ _RESERVED_KEY_NAMES: frozenset[str] = frozenset(
         "branch_name",
         "detached",
         "detached_from_invocation_id",
+        # Proposal 0052 (spec v0.44.0): implementation attribution
+        # attributes emitted on every invocation span / Trace metadata.
+        # Reserved so a caller passing ``implementation_name`` or
+        # ``implementation_version`` in ``invocation_metadata`` is
+        # rejected at the ``invoke()`` boundary rather than silently
+        # clobbering the implementation-emitted value. The set grows
+        # from 24 (post-0042) to 26.
+        "implementation_name",
+        "implementation_version",
     }
 )
 

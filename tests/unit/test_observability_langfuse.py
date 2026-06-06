@@ -1121,3 +1121,87 @@ async def test_failure_path_final_state_is_outer_type_when_parallel_branch_raise
     assert not isinstance(captured_output_state[0], _ParBrBranchXState)
     assert not isinstance(captured_output_state[0], _ParBrBranchYState)
     assert captured_output_state[0].outer_a_done is True
+
+
+# Spec §8.4.1 / proposal 0052: implementation attribution rows on
+# every Langfuse Trace. The two rows source from the §5.1
+# attributes; the always-emit invariant inherits from §5.1 so the
+# privacy knobs do not gate them.
+
+
+async def test_trace_metadata_carries_implementation_attribution_rows() -> None:
+    from openarmature import __version__
+
+    graph = (
+        GraphBuilder(_S)
+        .add_node("entry", lambda _s: _record("entry"))
+        .add_edge("entry", END)
+        .set_entry("entry")
+        .compile()
+    )
+    graph, client, _ = _attach(graph)
+
+    await graph.invoke(_S())
+    await graph.drain()
+
+    trace = next(iter(client.traces.values()))
+    assert trace.metadata.get("implementation_name") == "openarmature-python"
+    assert trace.metadata.get("implementation_version") == __version__
+    # Non-empty-string contract per spec §5.1.
+    assert isinstance(trace.metadata["implementation_name"], str)
+    assert trace.metadata["implementation_name"]
+    assert isinstance(trace.metadata["implementation_version"], str)
+    assert trace.metadata["implementation_version"]
+
+
+async def test_implementation_attribution_rows_emit_with_disable_state_payload_enabled() -> None:
+    # Always-emit invariant: regardless of disable_state_payload (the
+    # privacy knob that gates state payloads on trace.input /
+    # trace.output), the implementation attribution rows MUST appear.
+    # They describe runtime identity, not runtime data.
+    client = InMemoryLangfuseClient()
+    observer = LangfuseObserver(client=client, disable_state_payload=True)
+
+    graph = (
+        GraphBuilder(_S)
+        .add_node("entry", lambda _s: _record("entry"))
+        .add_edge("entry", END)
+        .set_entry("entry")
+        .compile()
+    )
+    graph.attach_observer(observer)
+
+    await graph.invoke(_S())
+    await graph.drain()
+
+    trace = next(iter(client.traces.values()))
+    assert "implementation_name" in trace.metadata
+    assert "implementation_version" in trace.metadata
+    assert trace.metadata["implementation_name"] == "openarmature-python"
+
+
+# Spec §8.4.1 / proposal 0052: every Trace carries the attribution
+# rows. An observer reused across multiple invocations on the same
+# compiled graph MUST emit the rows on every Trace, not just the
+# first. Mirrors the OTel-side test_invocation_span_attribution_
+# emits_on_every_invocation contract.
+async def test_implementation_attribution_rows_emit_on_every_trace() -> None:
+    graph = (
+        GraphBuilder(_S)
+        .add_node("entry", lambda _s: _record("entry"))
+        .add_edge("entry", END)
+        .set_entry("entry")
+        .compile()
+    )
+    graph, client, _ = _attach(graph)
+
+    for _ in range(3):
+        await graph.invoke(_S())
+        await graph.drain()
+
+    # Three invocations → three traces. Every one carries the rows.
+    assert len(client.traces) == 3, f"expected three traces, got {len(client.traces)}"
+    for trace in client.traces.values():
+        assert trace.metadata.get("implementation_name") == "openarmature-python"
+        assert isinstance(trace.metadata.get("implementation_version"), str)
+        assert trace.metadata["implementation_version"]

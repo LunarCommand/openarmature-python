@@ -197,6 +197,102 @@ async def test_invocation_span_carries_required_attributes() -> None:
     assert isinstance(attrs.get("openarmature.graph.spec_version"), str)
 
 
+# Spec §5.1 / proposal 0052: invocation span MUST carry
+# ``openarmature.implementation.name`` and
+# ``openarmature.implementation.version`` as non-empty strings; name
+# matches the package-registry canonical value (``openarmature-python``).
+# Inner-node spans MUST NOT carry them — the attributes live in §5.1,
+# not the cross-cutting §5.6 family.
+async def test_invocation_span_carries_implementation_attribution_attributes() -> None:
+    from openarmature import __version__
+
+    exporter = InMemorySpanExporter()
+    observer = OTelObserver(span_processor=SimpleSpanProcessor(exporter))
+    g, _ = _build_linear_graph(observer)
+    await g.invoke(_LinearState())  # type: ignore[attr-defined]
+    await g.drain()  # type: ignore[attr-defined]
+    observer.shutdown()
+    spans = exporter.get_finished_spans()
+
+    inv = next((s for s in spans if s.name == "openarmature.invocation"), None)
+    assert inv is not None
+    inv_attrs = dict(inv.attributes or {})
+    assert inv_attrs.get("openarmature.implementation.name") == "openarmature-python"
+    assert inv_attrs.get("openarmature.implementation.version") == __version__
+    assert isinstance(inv_attrs["openarmature.implementation.name"], str)
+    assert inv_attrs["openarmature.implementation.name"]  # non-empty
+    assert isinstance(inv_attrs["openarmature.implementation.version"], str)
+    assert inv_attrs["openarmature.implementation.version"]  # non-empty
+
+    # Inner-node spans MUST NOT carry the attribution attributes.
+    inner_spans = [s for s in spans if s.name != "openarmature.invocation"]
+    assert inner_spans, "expected at least one inner node span"
+    for span in inner_spans:
+        span_attrs = dict(span.attributes or {})
+        assert "openarmature.implementation.name" not in span_attrs, (
+            f"inner span {span.name!r} unexpectedly carries implementation.name"
+        )
+        assert "openarmature.implementation.version" not in span_attrs, (
+            f"inner span {span.name!r} unexpectedly carries implementation.version"
+        )
+
+
+# Spec §5.1 / proposal 0052: always-emit invariant. The attribution
+# attributes describe runtime identity, not runtime data, so the
+# privacy knobs that gate payload-shaped attributes (LLM payload,
+# state payload, GenAI semconv) MUST NOT gate the attribution. This
+# pins the OTel side of the contract; the Langfuse-side equivalent
+# lives in test_observability_langfuse.py against
+# disable_state_payload=True.
+async def test_invocation_span_attribution_emits_under_disable_llm_payload() -> None:
+    exporter = InMemorySpanExporter()
+    observer = OTelObserver(
+        span_processor=SimpleSpanProcessor(exporter),
+        disable_llm_payload=True,
+        disable_genai_semconv=True,
+        disable_llm_spans=True,
+    )
+    g, _ = _build_linear_graph(observer)
+    await g.invoke(_LinearState())  # type: ignore[attr-defined]
+    await g.drain()  # type: ignore[attr-defined]
+    observer.shutdown()
+    spans = exporter.get_finished_spans()
+
+    inv = next((s for s in spans if s.name == "openarmature.invocation"), None)
+    assert inv is not None
+    attrs = dict(inv.attributes or {})
+    assert attrs.get("openarmature.implementation.name") == "openarmature-python"
+    assert isinstance(attrs.get("openarmature.implementation.version"), str)
+    assert attrs["openarmature.implementation.version"]
+
+
+# Spec §5.1 / proposal 0052: every invocation span carries the
+# attribution attributes. An observer reused across multiple
+# invocations on the same compiled graph MUST emit the attributes on
+# every invocation's span — not just the first. The dataclass-field
+# defaults are computed once at observer construction, so a regression
+# where the values were instance-scoped (read-once) instead of
+# emit-each-time would silently break this contract.
+async def test_invocation_span_attribution_emits_on_every_invocation() -> None:
+    exporter = InMemorySpanExporter()
+    observer = OTelObserver(span_processor=SimpleSpanProcessor(exporter))
+    g, _ = _build_linear_graph(observer)
+
+    for _ in range(3):
+        await g.invoke(_LinearState())  # type: ignore[attr-defined]
+        await g.drain()  # type: ignore[attr-defined]
+    observer.shutdown()
+    spans = exporter.get_finished_spans()
+
+    inv_spans = [s for s in spans if s.name == "openarmature.invocation"]
+    assert len(inv_spans) == 3, f"expected three invocation spans, got {len(inv_spans)}"
+    for span in inv_spans:
+        attrs = dict(span.attributes or {})
+        assert attrs.get("openarmature.implementation.name") == "openarmature-python"
+        assert isinstance(attrs.get("openarmature.implementation.version"), str)
+        assert attrs["openarmature.implementation.version"]
+
+
 # ---------------------------------------------------------------------------
 # §4.2 status mapping
 # ---------------------------------------------------------------------------
