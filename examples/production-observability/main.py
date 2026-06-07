@@ -49,9 +49,10 @@ requestId / featureFlag) propagating to both observers in one
   bucket and drops it. Without the drain, the bucket would be
   missing the most recent LLM event's tokens (the deliver loop
   hasn't reached them yet). This is the canonical shape for
-  per-invocation cost attribution at request scope, replacing the
-  round-trip-through-State workarounds that pre-v0.12.0 deployments
-  used. The pattern is convention-only at the observer level:
+  per-invocation cost attribution at request scope, in place of
+  routing every token count through State (a workaround pattern
+  that pollutes the state schema with non-pipeline data). The
+  pattern is convention-only at the observer level:
   ``Observer`` itself stays a single-callable protocol; the
   queryable accumulator just exposes its own read methods
   (``get_bucket`` / ``drop``) that the persist node knows about.
@@ -99,7 +100,7 @@ from openarmature.graph import (
     CompiledGraph,
     GraphBuilder,
     InvocationCompletedEvent,
-    NodeEvent,
+    LlmCompletionEvent,
     NodeException,
     ObserverEvent,
     State,
@@ -112,7 +113,6 @@ from openarmature.llm import (
     SystemMessage,
     UserMessage,
 )
-from openarmature.observability import LLM_NAMESPACE, LlmEventPayload
 from openarmature.observability.correlation import current_invocation_id
 from openarmature.observability.langfuse import (
     InMemoryLangfuseClient,
@@ -163,13 +163,31 @@ class BriefingState(State):
 # consume.  Convention only; openarmature does not ship a base class
 # for accumulators.
 #
-# The accumulator subscribes to every event but only records the LLM-
-# namespace ones (provider-emitted ``openarmature.llm.complete`` event
-# pair carrying an LlmEventPayload on ``pre_state``).  Per-invocation
-# isolation is by ``current_invocation_id()`` — read inside the
-# observer callback from the worker's Context, populated by the
-# engine at worker create time. Concurrent invocations on one
-# observer each get their own bucket.
+# The accumulator subscribes to every event but only records the
+# typed ``LlmCompletionEvent`` variant — one event per successful LLM
+# call, structured outcome fields read directly off the event without
+# the namespace-string-match + payload-narrow dance the legacy
+# sentinel pattern needed. The provider also dual-emits a sentinel
+# ``NodeEvent`` pair during the transition period for backwards
+# compatibility with older accumulators; this accumulator ignores
+# the sentinel pair because the typed event carries the same outcome
+# data without the pair-join logic. New accumulators should follow
+# the isinstance-based filter shape here; the CHANGELOG tracks when
+# the sentinel emission is removed.
+#
+# Per-invocation isolation is by ``LlmCompletionEvent.invocation_id``
+# — read directly off the event, no ContextVar lookup needed.
+# Concurrent invocations on one observer each get their own bucket.
+#
+# ``LlmCompletionEvent`` is success-only by spec design. Failed LLM
+# calls flow through the exception path and do NOT emit the typed
+# event, so ``bucket.call_count`` here reflects successful calls
+# only. This is the right semantic for a usage accumulator (failed
+# calls produce no tokens / cost). A pipeline tracking attempt-level
+# failure rates needs a separate listener — either a custom observer
+# on the sentinel ``NodeEvent`` pair, or a future
+# ``LlmCallFailedEvent`` typed variant if and when that proposal
+# lands.
 
 
 @dataclass
@@ -199,38 +217,31 @@ class LlmUsageAccumulator:
         if isinstance(event, InvocationCompletedEvent):
             self._by_invocation.pop(event.invocation_id, None)
             return
-        if not isinstance(event, NodeEvent):
+        if not isinstance(event, LlmCompletionEvent):
             return
-        if event.namespace != LLM_NAMESPACE:
+        # The typed event's usage field is nullable per the spec
+        # contract ("may be null when the provider does not report
+        # usage"). Python's provider always passes a Usage instance
+        # (with all-None fields when not reported), but the defensive
+        # guard keeps the accumulator robust against future providers
+        # that exercise the null option.
+        usage = event.usage
+        if usage is None:
             return
-        # Only the completed half of the pair carries the token counts.
-        if event.phase != "completed":
-            return
-        if not isinstance(event.pre_state, LlmEventPayload):
-            return
-        # NodeEvent doesn't carry invocation_id on the dataclass;
-        # observers read it from the ContextVar, which the
-        # deliver-loop worker's Context carries from the engine task
-        # at worker create-time (per-invocation worker, per-invocation
-        # Context).
-        invocation_id = current_invocation_id()
-        if invocation_id is None:
-            return
-        payload = event.pre_state
-        bucket = self._by_invocation.setdefault(invocation_id, _UsageBucket())
-        if payload.prompt_tokens is not None:
-            bucket.prompt_tokens += payload.prompt_tokens
-        if payload.completion_tokens is not None:
-            bucket.completion_tokens += payload.completion_tokens
+        bucket = self._by_invocation.setdefault(event.invocation_id, _UsageBucket())
+        if usage.prompt_tokens is not None:
+            bucket.prompt_tokens += usage.prompt_tokens
+        if usage.completion_tokens is not None:
+            bucket.completion_tokens += usage.completion_tokens
         # Prefer the provider-reported total when present; otherwise
         # derive from prompt + completion when at least one is known.
-        # A payload with all three None (rare; provider didn't report
-        # usage at all) contributes zero, which is the only honest
-        # value we can record.
-        if payload.total_tokens is not None:
-            bucket.total_tokens += payload.total_tokens
-        elif payload.prompt_tokens is not None or payload.completion_tokens is not None:
-            bucket.total_tokens += (payload.prompt_tokens or 0) + (payload.completion_tokens or 0)
+        # A usage record with all three None (rare; provider didn't
+        # report counts at all) contributes zero, which is the only
+        # honest value we can record.
+        if usage.total_tokens is not None:
+            bucket.total_tokens += usage.total_tokens
+        elif usage.prompt_tokens is not None or usage.completion_tokens is not None:
+            bucket.total_tokens += (usage.prompt_tokens or 0) + (usage.completion_tokens or 0)
         bucket.call_count += 1
 
     # Consumers MUST synchronize on ``drain_events_for`` before

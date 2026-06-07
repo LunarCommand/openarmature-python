@@ -85,10 +85,11 @@ sees the same logical events represented two ways.
 - **Queryable accumulator + `drain_events_for`**
   ([queryable observer pattern](../concepts/observability.md)).
   A third observer — `LlmUsageAccumulator` — subscribes to the
-  same event stream but only records the LLM-namespace events
-  carrying an `LlmEventPayload`. It accumulates per-invocation
-  token totals in memory, indexed by `current_invocation_id()`.
-  The terminal `persist` node calls
+  same event stream but only records the typed
+  `LlmCompletionEvent` variant (one event per successful LLM call;
+  outcome fields read directly off the event). It accumulates
+  per-invocation token totals in memory, indexed by
+  `event.invocation_id`. The terminal `persist` node calls
   `await graph.drain_events_for(current_invocation_id(), timeout=2.0)`
   to synchronize on the deliver loop, then reads the accumulator's
   bucket and drops it. Without the drain, the bucket might be
@@ -97,8 +98,32 @@ sees the same logical events represented two ways.
   a single-callable shape; the accumulator just exposes its own
   read methods (`get_bucket` / `drop`) that the persist node knows
   about. This is the canonical shape for per-invocation cost
-  attribution at request scope, replacing the round-trip-through-
-  State workarounds that pre-v0.12.0 deployments used.
+  attribution at request scope, in place of routing every token
+  count through State (a workaround that pollutes the state
+  schema with non-pipeline data).
+
+  The filter shape is `isinstance(event, LlmCompletionEvent)` —
+  one isinstance check against the typed event variant on the
+  observer event union. The provider also dual-emits a sentinel
+  `NodeEvent` pair during the transition period for backwards
+  compatibility with older accumulators; this example's
+  accumulator ignores the sentinel pair because the typed event
+  carries the same outcome data without the pair-join logic. New
+  accumulators should follow the isinstance-based filter shape
+  here; the CHANGELOG tracks when the sentinel emission is
+  removed.
+
+  `LlmCompletionEvent` is success-only by spec design. Failed LLM
+  calls flow through the exception path and do not emit the typed
+  event, so `bucket.call_count` reflects successful calls only.
+  This is the right semantic for a usage accumulator (failed
+  calls produce no tokens). A pipeline tracking attempt-level
+  failure rates needs a separate listener — either a custom
+  observer on the sentinel `NodeEvent` pair or a future
+  failure-event typed variant if and when that proposal lands.
+  Production code migrating an existing accumulator from the
+  sentinel pattern should expect this counting shift if it was
+  previously counting failure-path events.
 
 ## How to run
 
@@ -167,8 +192,15 @@ Trace id=<uuid>
 - **OTel spans block**: one line per captured span, sorted by
   start time. The relevant attributes shown are a curated subset
   for readability; the full attribute set is on each `Span` object
-  for any reader inspecting them programmatically. Note three
-  attribute families worth telling apart:
+  for any reader inspecting them programmatically. The
+  `openarmature.llm.complete` span name + the `gen_ai.usage.*`
+  attribute family come from the OTel observer's current
+  sentinel-`NodeEvent` handler — the OTel and Langfuse observers
+  have not yet migrated to consuming the typed `LlmCompletionEvent`
+  variant. Span names and attribute paths may shift when the
+  observer migration lands; the example's emitted span structure
+  tracks the current observer behavior. Note three attribute
+  families worth telling apart:
     - The root `openarmature.invocation` span carries
       `openarmature.graph.spec_version` plus the
       `openarmature.implementation.name` / `.version` attribution
