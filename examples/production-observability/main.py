@@ -219,16 +219,25 @@ class LlmUsageAccumulator:
             return
         if not isinstance(event, LlmCompletionEvent):
             return
+        # call_count tracks successful LLM calls (the typed event is
+        # success-only by spec design). Spec contract has "call
+        # happened" and "usage reported" as INDEPENDENT — a provider
+        # may legitimately omit usage on a successful call. Create the
+        # bucket and increment call_count unconditionally so the
+        # counter reflects all successful calls; gate only the
+        # token-counting math on usage being populated.
+        bucket = self._by_invocation.setdefault(event.invocation_id, _UsageBucket())
+        bucket.call_count += 1
         # The typed event's usage field is nullable per the spec
         # contract ("may be null when the provider does not report
         # usage"). Python's provider always passes a Usage instance
         # (with all-None fields when not reported), but the defensive
         # guard keeps the accumulator robust against future providers
-        # that exercise the null option.
+        # that exercise the null option. Calls without reported usage
+        # contribute zero tokens (the only honest value we can record).
         usage = event.usage
         if usage is None:
             return
-        bucket = self._by_invocation.setdefault(event.invocation_id, _UsageBucket())
         if usage.prompt_tokens is not None:
             bucket.prompt_tokens += usage.prompt_tokens
         if usage.completion_tokens is not None:
@@ -242,7 +251,6 @@ class LlmUsageAccumulator:
             bucket.total_tokens += usage.total_tokens
         elif usage.prompt_tokens is not None or usage.completion_tokens is not None:
             bucket.total_tokens += (usage.prompt_tokens or 0) + (usage.completion_tokens or 0)
-        bucket.call_count += 1
 
     # Consumers MUST synchronize on ``drain_events_for`` before
     # calling ``get_bucket`` if completeness matters — without the
