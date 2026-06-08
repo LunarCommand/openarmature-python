@@ -121,6 +121,19 @@ _SUPPORTED_FIXTURES = frozenset(
         # gen_ai.*) MUST raise at the ``invoke()`` boundary before
         # any work begins. Two cases (one per reserved prefix).
         "028-caller-metadata-namespace-rejection",
+        # v0.41.0 — proposal 0049 (typed LlmCompletionEvent variant on
+        # the observer event union). Seven fixtures exercise dispatch
+        # shape (050), type discrimination (051), opt-in caller
+        # metadata (052), success-only scope on failure paths (053),
+        # fan_out_index / branch_name population (054 / 055), and
+        # strict-serial arrival ordering (056).
+        "050-llm-completion-event-dispatch",
+        "051-llm-completion-event-type-discrimination",
+        "052-llm-completion-event-caller-metadata-opt-in",
+        "053-llm-completion-event-no-event-on-failure",
+        "054-llm-completion-event-fan-out-index-population",
+        "055-llm-completion-event-branch-name-population",
+        "056-llm-completion-event-strict-serial-ordering",
     }
 )
 
@@ -192,6 +205,20 @@ async def test_observability_fixture(fixture_path: Path) -> None:
         await _run_fixture_028(spec)
     elif fixture_id == "038-otel-parallel-branches-dispatch-span":
         await _run_fixture_038(spec)
+    elif fixture_id == "050-llm-completion-event-dispatch":
+        await _run_fixture_050(spec)
+    elif fixture_id == "051-llm-completion-event-type-discrimination":
+        await _run_fixture_051(spec)
+    elif fixture_id == "052-llm-completion-event-caller-metadata-opt-in":
+        await _run_fixture_052(spec)
+    elif fixture_id == "053-llm-completion-event-no-event-on-failure":
+        await _run_fixture_053(spec)
+    elif fixture_id == "054-llm-completion-event-fan-out-index-population":
+        await _run_fixture_054(spec)
+    elif fixture_id == "055-llm-completion-event-branch-name-population":
+        await _run_fixture_055(spec)
+    elif fixture_id == "056-llm-completion-event-strict-serial-ordering":
+        await _run_fixture_056(spec)
     elif fixture_id in {
         "012-otel-llm-payload-default-off",
         "013-otel-llm-payload-enabled",
@@ -2655,3 +2682,806 @@ def _check_payload_span_tree(
                 _walk(children)
 
     _walk(expected_tree)
+
+
+# ---------------------------------------------------------------------------
+# Proposal 0049 — typed LlmCompletionEvent fixtures (050-056)
+# ---------------------------------------------------------------------------
+#
+# Activates the seven 050-056 conformance fixtures introduced by spec
+# proposal 0049. The fixtures exercise the typed event variant on the
+# observer event union: dispatch shape, type-discrimination filtering,
+# the OPTIONAL caller_invocation_metadata opt-in, the success-only
+# scope, fan_out_index + branch_name population, and strict-serial
+# arrival ordering.
+#
+# Harness directives introduced:
+#   - ``typed_observers`` at the case top level — list of observer
+#     definitions with ``kind: typed_event_collector`` plus optional
+#     flags (``filter_event_type``, ``include_caller_metadata``,
+#     ``retains_arrival_order``).
+#   - ``caller_metadata`` at the case top level — a mapping passed to
+#     ``graph.invoke(metadata=...)`` for the run.
+#   - Assertion shapes under ``expected.observers.<name>``:
+#     ``contains_event``, ``contains_exactly_one_event_of_type``,
+#     ``contains_event_of_type``, ``contains_exactly_n_events_of_type``,
+#     ``does_not_contain_event_of_type``,
+#     ``captured_event_field_values_cover``,
+#     ``every_captured_event_has``, ``relative_order_of_events_matching``.
+
+
+def _mock_model_from_first_response(case: Mapping[str, Any]) -> str | None:
+    """Return the ``model`` declared on the first ``mock_llm`` response
+    body (if any). Used to bind the test provider to the same model
+    the fixture's expected events report.
+    """
+    responses = cast("list[dict[str, Any]] | None", case.get("mock_llm")) or []
+    if not responses:
+        return None
+    body = cast("dict[str, Any] | None", responses[0].get("body")) or {}
+    model = body.get("model")
+    return model if isinstance(model, str) else None
+
+
+class _TypedEventCollector:
+    """Observer adapter that captures events for fixture introspection.
+
+    Implements the Observer protocol. Appends every event to an
+    internal list. When ``filter_event_type`` is set, only events
+    whose class name matches are captured; ``None`` captures every
+    event (preserves cross-event-type arrival order). The
+    ``include_caller_metadata`` directive on the fixture YAML is
+    consumed at parse time to set the provider's
+    ``populate_caller_metadata`` knob and is not threaded through
+    the collector instance. ``retains_arrival_order`` is preserved
+    for spec-text fidelity but has no runtime effect (lists preserve
+    insertion order).
+    """
+
+    def __init__(self, *, filter_event_type: str | None = None) -> None:
+        self.filter_event_type = filter_event_type
+        self.events: list[Any] = []
+
+    async def __call__(self, event: Any) -> None:
+        if self.filter_event_type is not None:
+            if type(event).__name__ != self.filter_event_type:
+                return
+        self.events.append(event)
+
+
+def _parse_typed_observers(
+    case: Mapping[str, Any],
+) -> tuple[dict[str, _TypedEventCollector], bool]:
+    """Parse the ``typed_observers`` directive into a name → collector
+    mapping plus the aggregate ``populate_caller_metadata`` flag for
+    the provider (True when ANY collector's ``include_caller_metadata``
+    flag is set).
+    """
+    raw = cast("list[dict[str, Any]] | None", case.get("typed_observers")) or []
+    collectors: dict[str, _TypedEventCollector] = {}
+    populate_caller_metadata = False
+    for entry in raw:
+        name = cast("str", entry["name"])
+        kind = cast("str", entry.get("kind", "typed_event_collector"))
+        assert kind == "typed_event_collector", f"unsupported typed_observer kind: {kind!r}"
+        collectors[name] = _TypedEventCollector(
+            filter_event_type=cast("str | None", entry.get("filter_event_type")),
+        )
+        if bool(entry.get("include_caller_metadata", False)):
+            populate_caller_metadata = True
+    return collectors, populate_caller_metadata
+
+
+def _build_simple_llm_graph(
+    case: Mapping[str, Any],
+    *,
+    populate_caller_metadata: bool,
+) -> tuple[Any, type[Any]]:
+    """Build a single-node graph that calls the LLM provider against a
+    mock transport. Matches the simple entry → ask → END pattern used
+    by fixtures 050, 051, 052, 053, 056. Returns ``(compiled_graph,
+    state_cls)`` so the caller can construct State instances without
+    re-deriving the class.
+    """
+    import json
+
+    import httpx
+
+    from openarmature.graph import END, GraphBuilder
+    from openarmature.llm import OpenAIProvider, UserMessage
+
+    from .adapter import build_state_cls
+
+    mock_responses = list(cast("list[dict[str, Any]]", case.get("mock_llm") or []))
+
+    def _handler(_request: httpx.Request) -> httpx.Response:
+        if not mock_responses:
+            raise AssertionError("mock_llm queue exhausted")
+        spec_resp = mock_responses.pop(0)
+        body = cast("dict[str, Any]", spec_resp.get("body") or {})
+        return httpx.Response(
+            int(spec_resp.get("status", 200)),
+            content=json.dumps(body).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+        )
+
+    transport = httpx.MockTransport(_handler)
+    # Bind the provider to the model the mock responses report (see
+    # the first response body). The typed event's ``model`` field
+    # carries the provider's bound identifier (the REQUEST-side
+    # model per spec §5.5.7); hard-coding "test-model" mismatches
+    # fixtures whose expected events name a specific model.
+    bound_model = _mock_model_from_first_response(case) or "test-model"
+    provider = OpenAIProvider(
+        base_url="http://mock-llm.test",
+        model=bound_model,
+        api_key="test",
+        transport=transport,
+        populate_caller_metadata=populate_caller_metadata,
+    )
+
+    state_fields = cast("dict[str, dict[str, Any]]", case["state"]["fields"])
+    state_cls = build_state_cls("LlmTypedFixtureState", state_fields)
+
+    nodes = cast("dict[str, Any]", case["nodes"])
+    entry_name = cast("str", case["entry"])
+    calls_llm_spec = cast("dict[str, Any]", nodes[entry_name]["calls_llm"])
+    stores_in = cast("str", calls_llm_spec.get("stores_response_in", "msg"))
+    messages_spec = cast("list[dict[str, str]]", calls_llm_spec.get("messages", []))
+    messages = [UserMessage(content=m["content"]) for m in messages_spec if m.get("role") == "user"]
+
+    async def ask_body(_s: Any) -> dict[str, str]:
+        response = await provider.complete(messages)
+        return {stores_in: response.message.content or ""}
+
+    builder = (
+        GraphBuilder(state_cls).add_node(entry_name, ask_body).add_edge(entry_name, END).set_entry(entry_name)
+    )
+    return builder.compile(), state_cls
+
+
+def _make_state_instance(case: Mapping[str, Any], state_cls: type[Any]) -> Any:
+    """Construct a State instance from the case's ``initial_state`` plus
+    field defaults declared on the fixture state schema.
+    """
+    state_fields = cast("dict[str, dict[str, Any]]", case["state"]["fields"])
+    initial = cast("dict[str, Any]", case.get("initial_state") or {})
+    state_kwargs: dict[str, Any] = {}
+    for field_name, field_spec in state_fields.items():
+        if field_name in initial:
+            state_kwargs[field_name] = initial[field_name]
+        elif "default" in field_spec:
+            state_kwargs[field_name] = field_spec["default"]
+    return state_cls(**state_kwargs)
+
+
+async def _invoke_typed_fixture(
+    case: Mapping[str, Any],
+    collectors: Mapping[str, _TypedEventCollector],
+    graph: Any,
+    state_cls: type[Any],
+    *,
+    extra_observer: Any | None = None,
+) -> tuple[Any | None, Exception | None]:
+    """Attach collectors, invoke the graph with the case's
+    ``caller_metadata`` (when present), and return the final state +
+    any propagated exception. ``extra_observer`` (when provided, e.g.,
+    the failure-path NodeEvent collector) is attached alongside.
+    Errors are captured rather than raised so failure-path fixtures
+    (053) can assert on observer state.
+    """
+    from openarmature.graph import NodeException
+
+    handles = [graph.attach_observer(c) for c in collectors.values()]
+    if extra_observer is not None:
+        handles.append(graph.attach_observer(extra_observer))
+    metadata = cast("dict[str, Any] | None", case.get("caller_metadata"))
+    state_instance = _make_state_instance(case, state_cls)
+    try:
+        # ``is not None`` so an explicit ``caller_metadata: {}`` is
+        # passed through to graph.invoke() (truthy check would collapse
+        # the empty-mapping case to "no metadata" and drop the kwarg).
+        if metadata is not None:
+            final = await graph.invoke(state_instance, metadata=metadata)
+        else:
+            final = await graph.invoke(state_instance)
+        return final, None
+    except NodeException as exc:
+        return None, exc
+    finally:
+        for handle in handles:
+            handle.remove()
+        await graph.drain()
+
+
+# Known assertion shape keys on ``expected.observers.<name>``. Used by
+# ``_assert_observer_expectations`` to detect fixture typos (an unknown
+# key would otherwise silently skip the assertion).
+_OBSERVER_ASSERTION_KEYS = frozenset(
+    {
+        "contains_event",
+        "contains_exactly_one_event_of_type",
+        "contains_event_of_type",
+        "contains_exactly_n_events_of_type",
+        "does_not_contain_event_of_type",
+        "captured_event_field_values_cover",
+        "every_captured_event_has",
+        "relative_order_of_events_matching",
+        # Informational flags carried by fixtures but not driving an
+        # assertion in this harness; tracked here so they don't trip
+        # the unknown-key guard.
+        "sentinel_node_event_emission_is_impl_defined",
+    }
+)
+
+
+def _assert_observer_expectations(
+    name: str,
+    collector: _TypedEventCollector,
+    spec: Mapping[str, Any],
+) -> None:
+    """Apply each observer-level assertion shape from a fixture's
+    ``expected.observers.<name>`` block against the collector's
+    captured events. Catches fixture typos by rejecting unknown
+    assertion keys.
+    """
+    unknown_keys = set(spec.keys()) - _OBSERVER_ASSERTION_KEYS
+    assert not unknown_keys, (
+        f"observer {name!r}: unknown assertion key(s) {sorted(unknown_keys)!r}; "
+        f"supported keys are {sorted(_OBSERVER_ASSERTION_KEYS)!r}"
+    )
+    events = collector.events
+    if "contains_event" in spec:
+        sub = cast("dict[str, Any]", spec["contains_event"])
+        _assert_contains_event(name, events, sub)
+    if "contains_exactly_one_event_of_type" in spec:
+        type_name = cast("str", spec["contains_exactly_one_event_of_type"])
+        matching = [e for e in events if type(e).__name__ == type_name]
+        assert len(matching) == 1, (
+            f"observer {name!r}: expected exactly one {type_name} event; got {len(matching)}"
+        )
+    if "contains_event_of_type" in spec:
+        type_name = cast("str", spec["contains_event_of_type"])
+        matching = [e for e in events if type(e).__name__ == type_name]
+        assert len(matching) >= 1, f"observer {name!r}: expected at least one {type_name} event; got 0"
+    if "contains_exactly_n_events_of_type" in spec:
+        sub = cast("dict[str, Any]", spec["contains_exactly_n_events_of_type"])
+        type_name = cast("str", sub["event_type"])
+        expected_count = int(cast("int", sub["count"]))
+        matching = [e for e in events if type(e).__name__ == type_name]
+        assert len(matching) == expected_count, (
+            f"observer {name!r}: expected exactly {expected_count} {type_name} events; got {len(matching)}"
+        )
+    if "does_not_contain_event_of_type" in spec:
+        type_name = cast("str", spec["does_not_contain_event_of_type"])
+        matching = [e for e in events if type(e).__name__ == type_name]
+        assert len(matching) == 0, f"observer {name!r}: expected zero {type_name} events; got {len(matching)}"
+    if "captured_event_field_values_cover" in spec:
+        sub = cast("dict[str, Any]", spec["captured_event_field_values_cover"])
+        field_name = cast("str", sub["field"])
+        expected_values = cast("list[Any]", sub["values"])
+        captured_values = [getattr(e, field_name) for e in events if hasattr(e, field_name)]
+        # "Cover" is set-equality semantics: the captured field-value
+        # set MUST equal the expected set. Using ``set`` rather than
+        # sorted-by-str avoids the latter's ambiguity around None +
+        # primitives and matches what the spec text means by "cover".
+        try:
+            captured_set = set(captured_values)
+            expected_set = set(expected_values)
+        except TypeError as e:  # unhashable values (lists, dicts) in either side
+            raise AssertionError(
+                f"observer {name!r}: captured_event_field_values_cover requires hashable "
+                f"field values for field {field_name!r}; got captured={captured_values!r}"
+            ) from e
+        assert captured_set == expected_set, (
+            f"observer {name!r}: field {field_name!r} values across captured events: "
+            f"got {sorted(captured_values, key=repr)}, "
+            f"expected {sorted(expected_values, key=repr)}"
+        )
+    if "every_captured_event_has" in spec:
+        sub = cast("dict[str, Any]", spec["every_captured_event_has"])
+        for event in events:
+            for field_name, expected_value in sub.items():
+                if not hasattr(event, field_name):
+                    raise AssertionError(
+                        f"observer {name!r}: every_captured_event_has names field "
+                        f"{field_name!r} that does not exist on {type(event).__name__}; "
+                        f"check for typos in the fixture YAML or add a filter_event_type "
+                        f"to scope the captured set"
+                    )
+                actual = getattr(event, field_name)
+                assert actual == expected_value, (
+                    f"observer {name!r}: expected every event to have "
+                    f"{field_name}={expected_value!r}; got {actual!r} on {type(event).__name__}"
+                )
+    if "relative_order_of_events_matching" in spec:
+        sub = cast("dict[str, Any]", spec["relative_order_of_events_matching"])
+        _assert_relative_order(name, events, sub)
+
+
+def _assert_contains_event(
+    observer_name: str,
+    events: Sequence[Any],
+    spec: Mapping[str, Any],
+) -> None:
+    """Match ``spec.event_type`` + ``spec.fields`` against captured
+    events. At least one event must match every declared field. None
+    values in the fixture YAML are matched exactly.
+    """
+    type_name = cast("str", spec["event_type"])
+    expected_fields = cast("dict[str, Any]", spec.get("fields") or {})
+    matching_type = [e for e in events if type(e).__name__ == type_name]
+    assert matching_type, (
+        f"observer {observer_name!r}: contains_event expected at least one {type_name}; got none"
+    )
+    for event in matching_type:
+        if _event_fields_match(event, expected_fields):
+            return
+    raise AssertionError(
+        f"observer {observer_name!r}: no {type_name} event matched fields {expected_fields!r}; "
+        f"captured: {[_event_to_repr(e) for e in matching_type]}"
+    )
+
+
+def _event_fields_match(event: Any, expected: Mapping[str, Any]) -> bool:
+    """Return True when every key in ``expected`` matches the event's
+    field. Nested ``usage`` mappings compare against the Usage record
+    via attribute access; mapping equality otherwise uses ``==``.
+
+    Raises AssertionError when the fixture names a field that doesn't
+    exist on the event type. Upstream filtering by event type means
+    a missing attribute signals a fixture-side typo (e.g.,
+    ``node_nam: null`` instead of ``node_name: null``), not a None
+    value worth silently matching.
+    """
+    for field_name, expected_value in expected.items():
+        if not hasattr(event, field_name):
+            raise AssertionError(
+                f"fixture references field {field_name!r} that does not exist on "
+                f"{type(event).__name__}; check for typos in the fixture YAML"
+            )
+        actual: Any = getattr(event, field_name)
+        # The 050 fixture's ``usage`` field expectation is a flat
+        # mapping; the typed event carries a Usage instance. Compare
+        # field-by-field.
+        if field_name == "usage" and isinstance(expected_value, Mapping) and actual is not None:
+            expected_mapping = cast("Mapping[str, Any]", expected_value)
+            for sub_name, sub_value in expected_mapping.items():
+                if getattr(actual, sub_name, None) != sub_value:
+                    return False
+            continue
+        # The 050 fixture's ``namespace`` expectation is a list; the
+        # typed event carries a tuple. Compare as sequences.
+        if isinstance(expected_value, list) and isinstance(actual, tuple):
+            actual_tuple = cast("tuple[Any, ...]", actual)
+            if list(actual_tuple) != expected_value:
+                return False
+            continue
+        if actual != expected_value:
+            return False
+    return True
+
+
+def _event_to_repr(event: Any) -> dict[str, Any]:
+    """Compact field dump for assertion error messages."""
+    keys = ("invocation_id", "node_name", "namespace", "model", "provider", "finish_reason")
+    return {k: getattr(event, k, None) for k in keys}
+
+
+def _assert_relative_order(
+    observer_name: str,
+    events: Sequence[Any],
+    spec: Mapping[str, Any],
+) -> None:
+    """Filter events by the fixture's ``filter`` map, then assert the
+    resulting subsequence's first len(expected_order) entries match
+    the expected (event_type, optional phase) pattern.
+    """
+    filter_spec = cast("dict[str, Any]", spec.get("filter") or {})
+    expected_order = cast("list[dict[str, Any]]", spec.get("expected_order") or [])
+
+    def _matches(event: Any, filt: Mapping[str, Any]) -> bool:
+        for key, value in filt.items():
+            actual = getattr(event, key, None)
+            if actual != value:
+                return False
+        return True
+
+    filtered = [e for e in events if _matches(e, filter_spec)]
+    assert len(filtered) >= len(expected_order), (
+        f"observer {observer_name!r}: relative_order expected at least {len(expected_order)} "
+        f"filtered events; got {len(filtered)} (captured types: "
+        f"{[type(e).__name__ for e in filtered]})"
+    )
+    for index, expected in enumerate(expected_order):
+        event = filtered[index]
+        expected_type = cast("str", expected["event_type"])
+        assert type(event).__name__ == expected_type, (
+            f"observer {observer_name!r}: relative_order at position {index} expected "
+            f"{expected_type}; got {type(event).__name__}"
+        )
+        if "phase" in expected:
+            expected_phase = expected["phase"]
+            actual_phase = getattr(event, "phase", None)
+            assert actual_phase == expected_phase, (
+                f"observer {observer_name!r}: relative_order at position {index} expected "
+                f"phase {expected_phase!r}; got {actual_phase!r}"
+            )
+
+
+def _assert_node_completed_event_carries_error(
+    events: Sequence[Any],
+    spec: Mapping[str, Any],
+) -> None:
+    """Failure-path assertion (fixture 053): the calling node's
+    completed NodeEvent carries an error whose cause chain bottoms
+    out in an llm-provider §7 category matching the expectation.
+    The engine wraps the underlying ProviderUnavailable (etc.) in a
+    NodeException; walk ``__cause__`` to reach the categorized cause.
+    """
+    node_name = cast("str", spec["node_name"])
+    expected_category = cast("str", spec["error_category"])
+    for event in events:
+        if type(event).__name__ != "NodeEvent":
+            continue
+        if getattr(event, "node_name", None) != node_name:
+            continue
+        if getattr(event, "phase", None) != "completed":
+            continue
+        error: Any = getattr(event, "error", None)
+        # Walk the cause chain for a category attribute. The
+        # NodeException wrapper itself is uncategorized; the
+        # LlmProviderError underneath carries the canonical category.
+        while error is not None:
+            category = getattr(error, "category", None)
+            if category == expected_category:
+                return
+            error = getattr(error, "__cause__", None)
+    raise AssertionError(
+        f"no NodeEvent(completed, node_name={node_name!r}) with error category {expected_category!r} found"
+    )
+
+
+# Use a single collector that captures EVERY event for fixtures that
+# need to assert on NodeEvent(completed, error=...). Distinct from the
+# fixture's named typed_observers; attached temporarily and detached
+# before fixture assertions run.
+class _AllEventsCollector:
+    def __init__(self) -> None:
+        self.events: list[Any] = []
+
+    async def __call__(self, event: Any) -> None:
+        self.events.append(event)
+
+
+async def _run_typed_event_fixture_case(
+    case: Mapping[str, Any],
+    *,
+    expect_failure: bool = False,
+) -> None:
+    """Shared runner for the 050-056 simple-shape cases. Parses
+    typed_observers, builds the graph, invokes with caller_metadata,
+    runs the assertion shapes.
+
+    Failure-path fixtures (053) need access to the calling node's
+    ``completed`` NodeEvent (with the wrapped error) to assert error
+    category. Unfiltered named collectors capture every event by
+    construction; failure-path runs without an unfiltered named
+    collector attach a separate ``_AllEventsCollector`` to provide
+    the same surface.
+    """
+    collectors, populate_caller_metadata = _parse_typed_observers(case)
+    graph, state_cls = _build_simple_llm_graph(case, populate_caller_metadata=populate_caller_metadata)
+    extra: _AllEventsCollector | None = None
+    if expect_failure and not any(c.filter_event_type is None for c in collectors.values()):
+        extra = _AllEventsCollector()
+    final, exc = await _invoke_typed_fixture(case, collectors, graph, state_cls, extra_observer=extra)
+
+    expected = cast("dict[str, Any]", case.get("expected") or {})
+    if expect_failure:
+        assert exc is not None, "failure-path fixture expected an exception"
+        node_completed = cast("dict[str, Any] | None", expected.get("node_completed_event_carries_error"))
+        if node_completed:
+            # Source for the assertion: an unfiltered named collector
+            # when present, otherwise the failure-path-only extra
+            # ``_AllEventsCollector``.
+            unfiltered_named = next((c for c in collectors.values() if c.filter_event_type is None), None)
+            source = (
+                unfiltered_named.events
+                if unfiltered_named is not None
+                else (extra.events if extra is not None else [])
+            )
+            _assert_node_completed_event_carries_error(source, node_completed)
+    else:
+        if final is None:
+            raise AssertionError("expected a non-None final state on success path")
+    observer_expectations = cast("dict[str, Any]", expected.get("observers") or {})
+    for name, expectations in observer_expectations.items():
+        collector = collectors.get(name)
+        if collector is None:
+            raise AssertionError(f"fixture references unknown observer {name!r}")
+        _assert_observer_expectations(name, collector, cast("dict[str, Any]", expectations))
+
+
+async def _run_fixture_050(spec: Mapping[str, Any]) -> None:
+    cases = cast("list[dict[str, Any]]", spec["cases"])
+    for case in cases:
+        case_name = cast("str", case["name"])
+        try:
+            await _run_typed_event_fixture_case(case)
+        except AssertionError as e:
+            raise AssertionError(f"case {case_name!r}: {e}") from e
+
+
+async def _run_fixture_051(spec: Mapping[str, Any]) -> None:
+    await _run_fixture_050(spec)
+
+
+async def _run_fixture_052(spec: Mapping[str, Any]) -> None:
+    await _run_fixture_050(spec)
+
+
+async def _run_fixture_053(spec: Mapping[str, Any]) -> None:
+    cases = cast("list[dict[str, Any]]", spec["cases"])
+    for case in cases:
+        case_name = cast("str", case["name"])
+        try:
+            await _run_typed_event_fixture_case(case, expect_failure=True)
+        except AssertionError as e:
+            raise AssertionError(f"case {case_name!r}: {e}") from e
+
+
+async def _run_fixture_056(spec: Mapping[str, Any]) -> None:
+    await _run_fixture_050(spec)
+
+
+async def _run_fixture_054(spec: Mapping[str, Any]) -> None:
+    cases = cast("list[dict[str, Any]]", spec["cases"])
+    for case in cases:
+        case_name = cast("str", case["name"])
+        try:
+            await _run_typed_event_fanout_case(case)
+        except AssertionError as e:
+            raise AssertionError(f"case {case_name!r}: {e}") from e
+
+
+async def _run_fixture_055(spec: Mapping[str, Any]) -> None:
+    cases = cast("list[dict[str, Any]]", spec["cases"])
+    for case in cases:
+        case_name = cast("str", case["name"])
+        try:
+            await _run_typed_event_branches_case(case)
+        except AssertionError as e:
+            raise AssertionError(f"case {case_name!r}: {e}") from e
+
+
+async def _run_typed_event_fanout_case(case: Mapping[str, Any]) -> None:
+    """Fan-out case (054): outer fan-out node dispatching one inner
+    subgraph per item; each inner subgraph runs an LLM-calling node.
+    """
+    import json
+
+    import httpx
+
+    from openarmature.graph import END, GraphBuilder
+    from openarmature.llm import OpenAIProvider, UserMessage
+
+    from .adapter import build_state_cls
+
+    collectors, populate_caller_metadata = _parse_typed_observers(case)
+
+    mock_responses = list(cast("list[dict[str, Any]]", case.get("mock_llm") or []))
+
+    def _handler(_request: httpx.Request) -> httpx.Response:
+        if not mock_responses:
+            raise AssertionError("mock_llm queue exhausted")
+        spec_resp = mock_responses.pop(0)
+        body = cast("dict[str, Any]", spec_resp.get("body") or {})
+        return httpx.Response(
+            int(spec_resp.get("status", 200)),
+            content=json.dumps(body).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+        )
+
+    provider = OpenAIProvider(
+        base_url="http://mock-llm.test",
+        model=_mock_model_from_first_response(case) or "test-model",
+        api_key="test",
+        transport=httpx.MockTransport(_handler),
+        populate_caller_metadata=populate_caller_metadata,
+    )
+
+    inner_subgraphs = cast("dict[str, Any]", case["inner_subgraphs"])
+    inner_id = next(iter(inner_subgraphs))
+    inner_spec = cast("dict[str, Any]", inner_subgraphs[inner_id])
+    ask_spec = cast("dict[str, Any]", inner_spec["nodes"]["ask"]["calls_llm"])
+    stores_in = cast("str", ask_spec.get("stores_response_in", "score"))
+    msgs_spec = cast("list[dict[str, str]]", ask_spec.get("messages", []))
+    inner_messages = [UserMessage(content=m["content"]) for m in msgs_spec if m.get("role") == "user"]
+
+    # Inner subgraph state: an ``input`` field receives the fan-out
+    # item (a dict per the fixture's products list); ``score`` holds
+    # the LLM response. The fan-out wires items_field=products →
+    # item_field=input on dispatch, and inner score → outer results
+    # on collect.
+    inner_state_cls = build_state_cls(
+        f"FanOutInner_{inner_id}",
+        {
+            "input": {"type": "dict", "default": {}},
+            stores_in: {"type": "string", "default": ""},
+        },
+    )
+
+    async def _ask_body(_s: Any) -> dict[str, str]:
+        response = await provider.complete(inner_messages)
+        return {stores_in: response.message.content or ""}
+
+    inner_builder = (
+        GraphBuilder(inner_state_cls).add_node("ask", _ask_body).add_edge("ask", END).set_entry("ask")
+    )
+    inner_compiled = inner_builder.compile()
+
+    outer_state_fields = cast("dict[str, dict[str, Any]]", case["state"]["fields"])
+    # The outer state needs a transient ``products`` field for the
+    # fan-out source plus the existing ``results`` accumulator. The
+    # inner ``score`` is a string (LLM output); the fixture YAML
+    # declares ``results: list<dict>`` which mismatches the string
+    # we collect. Override to plain ``list`` so the collect step
+    # type-checks without forcing the inner subgraph to wrap each
+    # score in a dict.
+    #
+    # TODO: revisit this override if a future spec revision adds
+    # final-state assertions to the 054 fixture — the override
+    # would silently pass against the wrong shape. The current
+    # fixture asserts only on observer events.
+    outer_fields_extended = dict(outer_state_fields)
+    outer_fields_extended["results"] = {"type": "list", "reducer": "append", "default": []}
+    outer_fields_extended.setdefault("products", {"type": "list", "default": []})
+    outer_state_cls = build_state_cls("FanOutOuter", outer_fields_extended)
+
+    outer_builder = (
+        GraphBuilder(outer_state_cls)
+        .add_fan_out_node(
+            "fan_out_node",
+            subgraph=inner_compiled,
+            items_field="products",
+            item_field="input",
+            collect_field=stores_in,
+            target_field="results",
+        )
+        .add_edge("fan_out_node", END)
+        .set_entry("fan_out_node")
+    )
+    outer_compiled = outer_builder.compile()
+
+    initial = cast("dict[str, Any]", case.get("initial_state") or {})
+    state_kwargs: dict[str, Any] = {}
+    for field_name, field_spec in outer_fields_extended.items():
+        if field_name in initial:
+            state_kwargs[field_name] = initial[field_name]
+        elif "default" in field_spec:
+            state_kwargs[field_name] = field_spec["default"]
+    state_instance = outer_state_cls(**state_kwargs)
+
+    handles = [outer_compiled.attach_observer(c) for c in collectors.values()]
+    try:
+        metadata = cast("dict[str, Any] | None", case.get("caller_metadata"))
+        # ``is not None`` so an explicit empty mapping reaches invoke().
+        if metadata is not None:
+            await outer_compiled.invoke(state_instance, metadata=metadata)
+        else:
+            await outer_compiled.invoke(state_instance)
+    finally:
+        for handle in handles:
+            handle.remove()
+        await outer_compiled.drain()
+
+    expected = cast("dict[str, Any]", case.get("expected") or {})
+    observer_expectations = cast("dict[str, Any]", expected.get("observers") or {})
+    for name, expectations in observer_expectations.items():
+        collector = collectors.get(name)
+        if collector is None:
+            raise AssertionError(f"fixture references unknown observer {name!r}")
+        _assert_observer_expectations(name, collector, cast("dict[str, Any]", expectations))
+
+
+async def _run_typed_event_branches_case(case: Mapping[str, Any]) -> None:
+    """Parallel-branches case (055): each named branch runs an
+    LLM-calling node.
+    """
+    import json
+
+    import httpx
+
+    from openarmature.graph import END, BranchSpec, GraphBuilder
+    from openarmature.llm import OpenAIProvider, UserMessage
+
+    from .adapter import build_state_cls
+
+    collectors, populate_caller_metadata = _parse_typed_observers(case)
+
+    mock_responses = list(cast("list[dict[str, Any]]", case.get("mock_llm") or []))
+
+    def _handler(_request: httpx.Request) -> httpx.Response:
+        if not mock_responses:
+            raise AssertionError("mock_llm queue exhausted")
+        spec_resp = mock_responses.pop(0)
+        body = cast("dict[str, Any]", spec_resp.get("body") or {})
+        return httpx.Response(
+            int(spec_resp.get("status", 200)),
+            content=json.dumps(body).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+        )
+
+    provider = OpenAIProvider(
+        base_url="http://mock-llm.test",
+        model=_mock_model_from_first_response(case) or "test-model",
+        api_key="test",
+        transport=httpx.MockTransport(_handler),
+        populate_caller_metadata=populate_caller_metadata,
+    )
+
+    inner_subgraphs = cast("dict[str, Any]", case["inner_subgraphs"])
+
+    def _build_branch(branch_name: str) -> Any:
+        inner_spec = cast("dict[str, Any]", inner_subgraphs[branch_name])
+        ask_spec = cast("dict[str, Any]", inner_spec["nodes"]["ask"]["calls_llm"])
+        stores_in = cast("str", ask_spec.get("stores_response_in", "score"))
+        msgs_spec = cast("list[dict[str, str]]", ask_spec.get("messages", []))
+        msgs = [UserMessage(content=m["content"]) for m in msgs_spec if m.get("role") == "user"]
+        inner_state_cls = build_state_cls(
+            f"Branch_{branch_name}",
+            {stores_in: {"type": "string", "default": ""}},
+        )
+
+        async def _body(_s: Any, _msgs: Any = msgs, _stores: str = stores_in) -> dict[str, str]:
+            response = await provider.complete(list(_msgs))
+            return {_stores: response.message.content or ""}
+
+        builder = GraphBuilder(inner_state_cls).add_node("ask", _body).add_edge("ask", END).set_entry("ask")
+        return builder.compile()
+
+    branches_spec = cast("dict[str, Any]", case["nodes"]["branches_node"]["parallel_branches"])
+    branch_names = cast("list[str]", branches_spec["branches"])
+    branches_map = {name: BranchSpec(subgraph=_build_branch(name)) for name in branch_names}
+
+    outer_state_fields = cast("dict[str, dict[str, Any]]", case["state"]["fields"])
+    outer_state_cls = build_state_cls("ParallelBranchesOuter", outer_state_fields)
+
+    outer_builder = (
+        GraphBuilder(outer_state_cls)
+        .add_parallel_branches_node("branches_node", branches=branches_map)
+        .add_edge("branches_node", END)
+        .set_entry("branches_node")
+    )
+    outer_compiled = outer_builder.compile()
+
+    initial = cast("dict[str, Any]", case.get("initial_state") or {})
+    state_kwargs: dict[str, Any] = {}
+    for field_name, field_spec in outer_state_fields.items():
+        if field_name in initial:
+            state_kwargs[field_name] = initial[field_name]
+        elif "default" in field_spec:
+            state_kwargs[field_name] = field_spec["default"]
+    state_instance = outer_state_cls(**state_kwargs)
+
+    handles = [outer_compiled.attach_observer(c) for c in collectors.values()]
+    try:
+        metadata = cast("dict[str, Any] | None", case.get("caller_metadata"))
+        # ``is not None`` so an explicit empty mapping reaches invoke().
+        if metadata is not None:
+            await outer_compiled.invoke(state_instance, metadata=metadata)
+        else:
+            await outer_compiled.invoke(state_instance)
+    finally:
+        for handle in handles:
+            handle.remove()
+        await outer_compiled.drain()
+
+    expected = cast("dict[str, Any]", case.get("expected") or {})
+    observer_expectations = cast("dict[str, Any]", expected.get("observers") or {})
+    for name, expectations in observer_expectations.items():
+        collector = collectors.get(name)
+        if collector is None:
+            raise AssertionError(f"fixture references unknown observer {name!r}")
+        _assert_observer_expectations(name, collector, cast("dict[str, Any]", expectations))
