@@ -408,9 +408,10 @@ class OTelObserver:
       construction time below that).
     - ``attribute_enrichers``: optional sequence of callables run just
       before the observer ends each span. Each receives the live
-      :class:`Span` plus the :class:`NodeEvent` that triggered the
-      close (or ``None`` on synthetic close sites). Exceptions are
-      caught and warned; never propagated.
+      :class:`Span` plus the :class:`NodeEvent` or
+      :class:`LlmCompletionEvent` that triggered the close (or
+      ``None`` on synthetic close sites). Exceptions are caught and
+      warned; never propagated.
     - ``spec_version``: string surfaced as
       ``openarmature.graph.spec_version`` on the invocation span.
     - ``implementation_name``: string surfaced as
@@ -459,7 +460,7 @@ class OTelObserver:
     # span.end() the observer issues. NodeEvent is None on synthetic
     # close sites (subgraph dispatch, detached root, fan-out instance,
     # invocation span, shutdown drain).
-    attribute_enrichers: Sequence[Callable[[Span, NodeEvent | None], None]] = ()
+    attribute_enrichers: Sequence[Callable[[Span, NodeEvent | LlmCompletionEvent | None], None]] = ()
     # Read from the package's ``__spec_version__`` (one of the three
     # places the spec version is pinned per CLAUDE.md). Bumping the
     # spec submodule + the two version fields automatically updates
@@ -530,7 +531,7 @@ class OTelObserver:
     # warned, never propagated to the dispatch worker.
     # ``event`` is None on synthetic close sites (subgraph dispatch,
     # detached root, fan-out instance, invocation span, orphan drain).
-    def _run_enrichers(self, span: Span, event: NodeEvent | None) -> None:
+    def _run_enrichers(self, span: Span, event: NodeEvent | LlmCompletionEvent | None) -> None:
         """Invoke configured enrichers against ``span`` before
         ``span.end()`` is called."""
         if not self.attribute_enrichers:
@@ -1235,11 +1236,7 @@ class OTelObserver:
             attrs_out = _truncate_for_attribute(event.output_content, self.payload_max_bytes)
             span.set_attribute("openarmature.llm.output.content", attrs_out)
         span.set_status(Status(StatusCode.OK))
-        # Enrichers receive None for the NodeEvent slot — the typed
-        # event is not a NodeEvent. Enricher signatures already accept
-        # ``NodeEvent | None`` for the same reason synthetic close
-        # sites pass None.
-        self._run_enrichers(span, None)
+        self._run_enrichers(span, event)
         span.end(end_time=end_time_ns)
 
     def _handle_llm_error_event(self, event: NodeEvent) -> None:

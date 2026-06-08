@@ -19,8 +19,8 @@ def make_typed_event(**overrides: Any) -> LlmCompletionEvent:
     base: dict[str, Any] = {
         "invocation_id": "inv-1",
         "correlation_id": None,
-        "node_name": "openarmature.llm.complete",
-        "namespace": ("openarmature.llm.complete",),
+        "node_name": "ask",
+        "namespace": ("ask",),
         "attempt_index": 0,
         "fan_out_index": None,
         "branch_name": None,
