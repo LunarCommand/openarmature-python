@@ -643,6 +643,100 @@ async def test_llm_span_has_no_prompt_attributes_when_no_active_prompt() -> None
     assert not any(k.startswith("openarmature.prompt.") for k in attrs)
 
 
+async def _drive_llm_span_with_cached_tokens(
+    *,
+    cached_tokens: int | None,
+    cache_creation_tokens: int | None = None,
+) -> dict[str, Any]:
+    """Drive the OTel observer through a sentinel started/completed
+    NodeEvent pair with the supplied cache-stat fields on the
+    completed-phase payload. Returns the LLM-span's attribute map.
+    """
+    from openarmature.graph.events import NodeEvent
+    from openarmature.observability.correlation import (
+        _reset_invocation_id,
+        _set_invocation_id,
+    )
+    from openarmature.observability.llm_event import LlmEventPayload
+
+    exporter = InMemorySpanExporter()
+    observer = OTelObserver(span_processor=SimpleSpanProcessor(exporter))
+    token = _set_invocation_id("inv-cache")
+    try:
+        started = NodeEvent(
+            node_name="openarmature.llm.complete",
+            namespace=("openarmature.llm.complete",),
+            step=-1,
+            phase="started",
+            pre_state=LlmEventPayload(call_id="cc-cache", model="test-m"),
+            post_state=None,
+            error=None,
+            parent_states=(),
+        )
+        completed = NodeEvent(
+            node_name="openarmature.llm.complete",
+            namespace=("openarmature.llm.complete",),
+            step=-1,
+            phase="completed",
+            pre_state=LlmEventPayload(
+                call_id="cc-cache",
+                model="test-m",
+                finish_reason="stop",
+                prompt_tokens=100,
+                completion_tokens=5,
+                total_tokens=105,
+                cached_tokens=cached_tokens,
+                cache_creation_tokens=cache_creation_tokens,
+            ),
+            post_state=None,
+            error=None,
+            parent_states=(),
+        )
+        await observer(started)
+        await observer(completed)
+    finally:
+        _reset_invocation_id(token)
+    observer.shutdown()
+    llm_spans = [s for s in exporter.get_finished_spans() if s.name == "openarmature.llm.complete"]
+    assert len(llm_spans) == 1
+    return dict(llm_spans[0].attributes or {})
+
+
+async def test_llm_span_emits_cache_read_attribute_when_provider_reports_hit() -> None:
+    # Proposal 0047 §5.5.3.1: openarmature.llm.cache_read.input_tokens
+    # is set on the LLM span when the payload carries a non-None
+    # cached_tokens value sourced from Response.usage.cached_tokens.
+    attrs = await _drive_llm_span_with_cached_tokens(cached_tokens=42)
+    assert attrs.get("openarmature.llm.cache_read.input_tokens") == 42
+    assert "openarmature.llm.cache_creation.input_tokens" not in attrs
+
+
+async def test_llm_span_emits_cache_read_attribute_with_reported_zero() -> None:
+    # The absent-vs-reported-zero distinction is observable on the
+    # span: a payload with cached_tokens=0 produces the attribute
+    # with value 0 (not omitted).
+    attrs = await _drive_llm_span_with_cached_tokens(cached_tokens=0)
+    assert attrs.get("openarmature.llm.cache_read.input_tokens") == 0
+
+
+async def test_llm_span_omits_cache_attribute_when_provider_silent() -> None:
+    # When the provider doesn't report cache stats (cached_tokens=None
+    # on the payload), the OTel observer does NOT emit the attribute
+    # per the §5.5.3 conditional-emission convention.
+    attrs = await _drive_llm_span_with_cached_tokens(cached_tokens=None)
+    assert "openarmature.llm.cache_read.input_tokens" not in attrs
+    assert "openarmature.llm.cache_creation.input_tokens" not in attrs
+
+
+async def test_llm_span_emits_cache_creation_attribute_when_payload_carries_it() -> None:
+    # The OpenAI-compatible mapping never sources cache_creation_tokens
+    # (per spec §8.1.2), but the observer side honors the field when
+    # any future provider populates it.
+    attrs = await _drive_llm_span_with_cached_tokens(cached_tokens=20, cache_creation_tokens=5)
+    assert attrs.get("openarmature.llm.cache_read.input_tokens") == 20
+    assert attrs.get("openarmature.llm.cache_creation.input_tokens") == 5
+
+
 async def test_disable_llm_spans_skips_llm_provider_span() -> None:
     """Spec §5.5: ``disable_llm_spans=True`` MUST suppress the
     LLM-provider span emission while leaving all other spans intact."""

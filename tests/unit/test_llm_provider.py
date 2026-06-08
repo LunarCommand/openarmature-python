@@ -768,6 +768,74 @@ async def test_complete_negative_cached_tokens_surfaces_as_invalid_response() ->
         await provider.aclose()
 
 
+async def test_complete_populates_cached_tokens_on_llm_event_payload() -> None:
+    # Proposal 0047: _make_llm_event MUST propagate
+    # Response.usage.cached_tokens onto the sentinel LlmEventPayload
+    # so observers driving §5.5.3.1 cache attribute emission off the
+    # sentinel NodeEvent pair have the cache stat available. The
+    # conformance fixture 040 covers this end-to-end via OTel span
+    # attribute assertion; this test localizes the assertion to the
+    # provider-payload boundary so a regression here surfaces
+    # independently of the observer rendering layer.
+    from openarmature.observability.llm_event import LlmEventPayload
+
+    events, token = _collecting_dispatch()
+    transport = _make_openai_response_with_usage(
+        {
+            "prompt_tokens": 100,
+            "completion_tokens": 5,
+            "total_tokens": 105,
+            "prompt_tokens_details": {"cached_tokens": 42},
+        }
+    )
+    provider = OpenAIProvider(base_url="http://test", model="m", api_key="k", transport=transport)
+    try:
+        await provider.complete([UserMessage(content="hi")])
+    finally:
+        await provider.aclose()
+        _release_dispatch(token)
+
+    completed_payloads = [
+        e.pre_state
+        for e in events
+        if isinstance(e, NodeEvent) and e.phase == "completed" and isinstance(e.pre_state, LlmEventPayload)
+    ]
+    assert len(completed_payloads) == 1
+    payload = completed_payloads[0]
+    assert payload.cached_tokens == 42
+    # The OpenAI-compat mapping leaves cache_creation_tokens absent
+    # per spec §8.1.2; verify the field stays None on the payload.
+    assert payload.cache_creation_tokens is None
+
+
+async def test_complete_leaves_cached_tokens_none_when_provider_silent() -> None:
+    # Companion to the populated case: when the wire response omits
+    # prompt_tokens_details, Response.usage.cached_tokens stays None
+    # and the LlmEventPayload reflects that. Locks the absent path
+    # at the provider-payload boundary.
+    from openarmature.observability.llm_event import LlmEventPayload
+
+    events, token = _collecting_dispatch()
+    transport = _make_openai_response_with_usage(
+        {"prompt_tokens": 100, "completion_tokens": 5, "total_tokens": 105}
+    )
+    provider = OpenAIProvider(base_url="http://test", model="m", api_key="k", transport=transport)
+    try:
+        await provider.complete([UserMessage(content="hi")])
+    finally:
+        await provider.aclose()
+        _release_dispatch(token)
+
+    completed_payloads = [
+        e.pre_state
+        for e in events
+        if isinstance(e, NodeEvent) and e.phase == "completed" and isinstance(e.pre_state, LlmEventPayload)
+    ]
+    assert len(completed_payloads) == 1
+    assert completed_payloads[0].cached_tokens is None
+    assert completed_payloads[0].cache_creation_tokens is None
+
+
 # RuntimeConfig.from_partial — Python ergonomic introduced alongside
 # proposal 0032. Wire-layer null-skip already drops Nones; this just
 # lets callers splat a partial dict without filtering at the call site.

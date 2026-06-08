@@ -1457,6 +1457,8 @@ def _make_llm_event(
         prompt_tokens=usage.prompt_tokens if usage is not None else None,
         completion_tokens=usage.completion_tokens if usage is not None else None,
         total_tokens=usage.total_tokens if usage is not None else None,
+        cached_tokens=usage.cached_tokens if usage is not None else None,
+        cache_creation_tokens=usage.cache_creation_tokens if usage is not None else None,
         error_type=error_type,
         error_message=error_message,
         error_category=error_category,
