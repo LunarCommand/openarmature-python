@@ -539,9 +539,13 @@ class LlmCompletionEvent:
       lifetime, unique within the run. Distinct from
       ``response_id``.
     - ``caller_invocation_metadata``: optional snapshot of caller-
-      supplied invocation metadata at LLM-call time. Populated
-      only when the provider's opt-in flag is set (per-language
-      mechanism); default ``None``.
+      supplied invocation metadata at LLM-call time. Spec-defined as
+      OPTIONAL; the python OpenAIProvider populates it by default so
+      the bundled OTel/Langfuse observers can emit the §5.6
+      ``openarmature.user.<key>`` span-attribute family without an
+      extra opt-in. Pass ``populate_caller_metadata=False`` to suppress
+      the snapshot. Future non-OpenAI providers MAY default to
+      ``None``.
     """
 
     invocation_id: str
