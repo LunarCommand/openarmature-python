@@ -1199,6 +1199,20 @@ class OTelObserver:
                 span.set_attribute("openarmature.llm.usage.completion_tokens", payload.completion_tokens)
             if payload.total_tokens is not None:
                 span.set_attribute("openarmature.llm.usage.total_tokens", payload.total_tokens)
+            # Spec proposal 0047 §5.5.3.1: OA-namespace cache attributes.
+            # Conditional emission per the §5.5.3 convention — the
+            # absent-vs-zero distinction is preserved: absent (None)
+            # means the provider did not report cache stats; 0 means
+            # the provider reported zero hits. OA-namespace per the
+            # stable-only upstream adoption policy because the upstream
+            # OTel GenAI cache attributes are at Development status.
+            if payload.cached_tokens is not None:
+                span.set_attribute("openarmature.llm.cache_read.input_tokens", payload.cached_tokens)
+            if payload.cache_creation_tokens is not None:
+                span.set_attribute(
+                    "openarmature.llm.cache_creation.input_tokens",
+                    payload.cache_creation_tokens,
+                )
             # §5.5.3 GenAI semconv response attributes (gated by
             # ``disable_genai_semconv``). Tokens mirror the baseline
             # OA-prefixed usage attributes; finish_reasons wraps the

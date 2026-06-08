@@ -79,6 +79,16 @@ class LlmEventPayload(BaseModel):
     prompt_tokens: int | None = None
     completion_tokens: int | None = None
     total_tokens: int | None = None
+    # Cache-stat fields sourced from Response.usage per spec proposal
+    # 0047 (§5.5.3.1 OA-namespace cache attributes). Absent (None)
+    # when the provider does not report cache stats; set to 0 when
+    # the provider reports zero hits (the "reported miss" case,
+    # distinct from absent). The OTel observer emits the
+    # openarmature.llm.cache_read.input_tokens span attribute when
+    # cached_tokens is populated; same conditional for
+    # cache_creation.
+    cached_tokens: int | None = None
+    cache_creation_tokens: int | None = None
     # error_category is the canonical llm-provider §7 category
     # (provider_unavailable, etc.) when the failed exception carried
     # one — the provider caller doesn't have a graph-engine §4
