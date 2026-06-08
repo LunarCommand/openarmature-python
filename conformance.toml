@@ -295,10 +295,19 @@ status = "implemented"
 since = "0.12.0"
 
 # Spec v0.41.0 (proposal 0049).  Typed LLM Completion Event — first
-# typed event variant on the observer event union.  Queued for
-# v0.13.0 alongside 0047.
+# typed event variant on the observer event union.  Shipped in
+# v0.13.0: provider dual-emits the typed event alongside the sentinel
+# NodeEvent pair (success-only per spec scope); LlmCompletionEvent
+# carries identity/scoping/outcome fields per the spec field table.
+# Conformance fixtures 050-056 activated by the typed_event_collector
+# harness directive.  The OTel + Langfuse observers continue to drive
+# their §5.5 / §8.4.4 surface off the sentinel NodeEvent pair during
+# the dual-emit transition window; type-discrimination migration
+# lands once the follow-on request-side-fields extension (proposal
+# 0057) ships.
 [proposals."0049"]
-status = "not-yet"
+status = "implemented"
+since = "0.13.0"
 
 # Spec v0.42.0 (proposal 0050).  Retry & degradation primitives —
 # failure-isolation middleware + call-level retry.  Queued for
