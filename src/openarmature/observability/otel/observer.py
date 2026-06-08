@@ -75,6 +75,7 @@ carries an OTel :class:`Link` to the detached trace.
 from __future__ import annotations
 
 import json
+import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, cast
@@ -316,7 +317,6 @@ class _InvState:
     the same correlation_id) don't collide."""
 
     open_spans: dict[_StackKey, _OpenSpan] = field(default_factory=dict[_StackKey, _OpenSpan])
-    open_llm_spans: dict[str, _OpenSpan] = field(default_factory=dict[str, _OpenSpan])
     subgraph_spans: dict[tuple[str, ...], _OpenSpan] = field(default_factory=dict[tuple[str, ...], _OpenSpan])
     detached_roots: dict[tuple[str, ...], _OpenSpan] = field(default_factory=dict[tuple[str, ...], _OpenSpan])
     fan_out_instance_root_prefixes: set[tuple[str, ...]] = field(default_factory=set[tuple[str, ...]])
@@ -408,9 +408,10 @@ class OTelObserver:
       construction time below that).
     - ``attribute_enrichers``: optional sequence of callables run just
       before the observer ends each span. Each receives the live
-      :class:`Span` plus the :class:`NodeEvent` that triggered the
-      close (or ``None`` on synthetic close sites). Exceptions are
-      caught and warned; never propagated.
+      :class:`Span` plus the :class:`NodeEvent` or
+      :class:`LlmCompletionEvent` that triggered the close (or
+      ``None`` on synthetic close sites). Exceptions are caught and
+      warned; never propagated.
     - ``spec_version``: string surfaced as
       ``openarmature.graph.spec_version`` on the invocation span.
     - ``implementation_name``: string surfaced as
@@ -459,7 +460,7 @@ class OTelObserver:
     # span.end() the observer issues. NodeEvent is None on synthetic
     # close sites (subgraph dispatch, detached root, fan-out instance,
     # invocation span, shutdown drain).
-    attribute_enrichers: Sequence[Callable[[Span, NodeEvent | None], None]] = ()
+    attribute_enrichers: Sequence[Callable[[Span, NodeEvent | LlmCompletionEvent | None], None]] = ()
     # Read from the package's ``__spec_version__`` (one of the three
     # places the spec version is pinned per CLAUDE.md). Bumping the
     # spec submodule + the two version fields automatically updates
@@ -530,7 +531,7 @@ class OTelObserver:
     # warned, never propagated to the dispatch worker.
     # ``event`` is None on synthetic close sites (subgraph dispatch,
     # detached root, fan-out instance, invocation span, orphan drain).
-    def _run_enrichers(self, span: Span, event: NodeEvent | None) -> None:
+    def _run_enrichers(self, span: Span, event: NodeEvent | LlmCompletionEvent | None) -> None:
         """Invoke configured enrichers against ``span`` before
         ``span.end()`` is called."""
         if not self.attribute_enrichers:
@@ -583,23 +584,25 @@ class OTelObserver:
         # before any node-specific logic runs.
         if isinstance(event, InvocationStartedEvent | InvocationCompletedEvent):
             return
-        # Proposal 0049 typed LlmCompletionEvent: ignored during the
-        # dual-emit window — the OTel mapping continues to drive its
-        # §5.5 LLM span lifecycle off the sentinel NodeEvent pair the
-        # provider emits alongside the typed event. Migration to type
-        # discrimination lands in a subsequent PR; this early-return
-        # keeps the observer Protocol-compatible without changing
-        # behavior.
+        # Proposal 0049 typed LlmCompletionEvent (success path).
+        # Drives the openarmature.llm.complete span lifecycle for
+        # successful provider calls. Failures don't emit this variant;
+        # they flow through the sentinel-pair error path below.
         if isinstance(event, LlmCompletionEvent):
+            if not self.disable_llm_spans:
+                self._handle_typed_llm_completion(event)
             return
         if isinstance(event, MetadataAugmentationEvent):
             self._handle_metadata_augmentation(event)
             return
-        # LLM provider events use a sentinel namespace so we can route
-        # them to the dedicated §5.5 span path.
+        # LLM provider sentinel events: success-path is a no-op (the
+        # typed event handler above owns the span). Failure-path
+        # completed events open + close an error span; sentinel-started
+        # and successful-completed are no-ops here. Dual-emit window
+        # closes in v0.15.0 per the CHANGELOG note pinned to v0.13.0.
         if event.namespace == _LLM_NAMESPACE:
             if not self.disable_llm_spans:
-                self._handle_llm_event(event)
+                self._handle_llm_error_event(event)
             return
         if event.phase == "checkpoint_saved":
             self._emit_checkpoint_save_span(event)
@@ -1073,14 +1076,22 @@ class OTelObserver:
         span.end()
 
     # LLM provider span per observability §5.5 — parented to the
-    # calling node's span via the calling-node identity carried on
-    # the LlmEventPayload (namespace_prefix + attempt_index +
-    # fan_out_index). Lookup hits the per-invocation_id open_spans
-    # so concurrent fan-out instances each find their own calling
-    # node, not a sibling's.
+    # calling node's span via the calling-node identity carried on the
+    # event (namespace + attempt_index + fan_out_index + branch_name).
+    # Lookup hits the per-invocation_id open_spans so concurrent fan-out
+    # instances each find their own calling node, not a sibling's.
     #
-    # v0.17.0 attribute set (proposal 0024):
-    #   - Baseline openarmature.llm.* attributes (preserved)
+    # v0.13.0 (proposal 0049 + 0057): the success-path span lifecycle is
+    # driven by the typed LlmCompletionEvent — opened and closed in one
+    # shot at typed-event arrival, with start_time back-dated by
+    # latency_ms so the span duration matches the adapter-boundary
+    # measurement. The error-path span is still driven by the sentinel
+    # NodeEvent pair the provider emits (LlmCompletionEvent is success-
+    # only per proposal 0049 §3 alternative 3). Dual-emit window closes
+    # in v0.15.0 — the sentinel pair will then drop entirely.
+    #
+    # v0.17.0 attribute set (proposal 0024) preserved unchanged:
+    #   - Baseline openarmature.llm.* attributes
     #   - §5.5.1 payload (input.messages, output.content,
     #     request.extras) gated by disable_llm_payload
     #   - §5.5.2 gen_ai.request.* request params
@@ -1088,184 +1099,256 @@ class OTelObserver:
     #   - §5.5.4 opt-out flags
     #   - §5.5.5 truncation contract on payload attributes
     #
-    # Prompt-identity attributes come from the LlmEventPayload
-    # active_prompt / active_prompt_group snapshots taken at dispatch
-    # time — NOT the ContextVar. The dispatch worker's task-local
-    # Context doesn't see node-body ContextVar writes.
-    def _handle_llm_event(self, event: NodeEvent) -> None:
-        """Build and close the ``openarmature.llm.complete`` span for an
-        LLM provider event pair."""
+    # Prompt-identity attributes come from the active_prompt /
+    # active_prompt_group snapshots taken at dispatch time — NOT the
+    # ContextVar. The dispatch worker's task-local Context doesn't see
+    # node-body ContextVar writes.
+    def _handle_typed_llm_completion(self, event: LlmCompletionEvent) -> None:
+        """Open + close the ``openarmature.llm.complete`` span from the
+        typed LlmCompletionEvent (success path)."""
+        # Mid-call metadata augmentation can't reach this span: the
+        # typed event arrives only after complete() returns, and the
+        # span is back-dated past any augmentation event that fired
+        # while the call was in flight. Since complete() is awaited,
+        # node bodies can't actually run augmentation mid-call, so
+        # this is theoretical only — but it does mean the snapshot
+        # on the event is what the span reflects, not a later view.
         from openarmature.observability.correlation import (
             current_correlation_id,
             current_invocation_id,
         )
 
+        invocation_id = current_invocation_id()
+        if invocation_id is None:
+            return
+        inv_state = self._inv_state_for(invocation_id)
+        # Back-date start_time using latency_ms so the span's duration
+        # reflects the actual adapter-boundary measurement rather than
+        # dispatcher queue delay. When latency is missing, fall back to
+        # a zero-duration span at end_time.
+        end_time_ns = time.time_ns()
+        if event.latency_ms is not None:
+            start_time_ns = end_time_ns - int(event.latency_ms * 1_000_000)
+        else:
+            start_time_ns = end_time_ns
+        parent_ctx = self._resolve_llm_parent(
+            inv_state,
+            invocation_id,
+            calling_namespace_prefix=event.namespace,
+            calling_attempt_index=event.attempt_index,
+            calling_fan_out_index=event.fan_out_index,
+            calling_branch_name=event.branch_name,
+        )
+        attrs: dict[str, Any] = {"openarmature.llm.model": event.model}
+        cid = current_correlation_id()
+        if cid is not None:
+            attrs["openarmature.correlation_id"] = cid
+        # Asymmetric guard with _handle_llm_error_event below: the typed
+        # event types ``caller_invocation_metadata`` as ``Mapping | None``
+        # while LlmEventPayload defaults to an empty mapping (never None).
+        # Don't "normalize" the two paths without also normalizing the
+        # source types.
+        if event.caller_invocation_metadata is not None:
+            _apply_caller_metadata(attrs, event.caller_invocation_metadata)
+        active_prompt = event.active_prompt
+        if active_prompt is not None:
+            attrs["openarmature.prompt.name"] = active_prompt.name
+            attrs["openarmature.prompt.version"] = active_prompt.version
+            attrs["openarmature.prompt.label"] = active_prompt.label
+            attrs["openarmature.prompt.template_hash"] = active_prompt.template_hash
+            attrs["openarmature.prompt.rendered_hash"] = active_prompt.rendered_hash
+        active_group = event.active_prompt_group
+        if active_group is not None:
+            attrs["openarmature.prompt.group_name"] = active_group.group_name
+        if not self.disable_genai_semconv:
+            attrs["gen_ai.system"] = event.provider
+            attrs["gen_ai.request.model"] = event.model
+            request_params = event.request_params or {}
+            if "temperature" in request_params:
+                attrs["gen_ai.request.temperature"] = request_params["temperature"]
+            if "max_tokens" in request_params:
+                attrs["gen_ai.request.max_tokens"] = request_params["max_tokens"]
+            if "top_p" in request_params:
+                attrs["gen_ai.request.top_p"] = request_params["top_p"]
+            if "seed" in request_params:
+                attrs["gen_ai.request.seed"] = request_params["seed"]
+            if "frequency_penalty" in request_params:
+                attrs["gen_ai.request.frequency_penalty"] = request_params["frequency_penalty"]
+            if "presence_penalty" in request_params:
+                attrs["gen_ai.request.presence_penalty"] = request_params["presence_penalty"]
+            if "stop_sequences" in request_params:
+                attrs["gen_ai.request.stop_sequences"] = request_params["stop_sequences"]
+        if not self.disable_llm_payload:
+            if event.input_messages:
+                serialized = _serialize_for_attribute(event.input_messages)
+                attrs["openarmature.llm.input.messages"] = _truncate_for_attribute(
+                    serialized, self.payload_max_bytes
+                )
+            if event.request_extras:
+                serialized_extras = _serialize_for_attribute(event.request_extras)
+                attrs["openarmature.llm.request.extras"] = _truncate_for_attribute(
+                    serialized_extras, self.payload_max_bytes
+                )
+        span = self._tracer.start_span(
+            name="openarmature.llm.complete",
+            context=cast("Any", parent_ctx),
+            kind=SpanKind.CLIENT,
+            attributes=attrs,
+            start_time=start_time_ns,
+        )
+        usage = event.usage
+        if event.finish_reason is not None:
+            span.set_attribute("openarmature.llm.finish_reason", event.finish_reason)
+        if usage is not None:
+            if usage.prompt_tokens is not None:
+                span.set_attribute("openarmature.llm.usage.prompt_tokens", usage.prompt_tokens)
+            if usage.completion_tokens is not None:
+                span.set_attribute("openarmature.llm.usage.completion_tokens", usage.completion_tokens)
+            if usage.total_tokens is not None:
+                span.set_attribute("openarmature.llm.usage.total_tokens", usage.total_tokens)
+            # Proposal 0047 §5.5.3.1 cache attributes. Absent (None)
+            # means the provider didn't report; 0 is "reported miss"
+            # and distinct from absent.
+            if usage.cached_tokens is not None:
+                span.set_attribute("openarmature.llm.cache_read.input_tokens", usage.cached_tokens)
+            if usage.cache_creation_tokens is not None:
+                span.set_attribute(
+                    "openarmature.llm.cache_creation.input_tokens",
+                    usage.cache_creation_tokens,
+                )
+        if not self.disable_genai_semconv:
+            if usage is not None:
+                if usage.prompt_tokens is not None:
+                    span.set_attribute("gen_ai.usage.input_tokens", usage.prompt_tokens)
+                if usage.completion_tokens is not None:
+                    span.set_attribute("gen_ai.usage.output_tokens", usage.completion_tokens)
+            if event.finish_reason is not None:
+                span.set_attribute("gen_ai.response.finish_reasons", [event.finish_reason])
+            if event.response_id is not None:
+                span.set_attribute("gen_ai.response.id", event.response_id)
+            if event.response_model is not None:
+                span.set_attribute("gen_ai.response.model", event.response_model)
+        # §5.5.1 output payload. Assistant messages with empty content
+        # (tool-call-only responses) MUST NOT emit this attribute per
+        # spec — ``output_content`` is already None in that case (see
+        # provider.py).
+        if not self.disable_llm_payload and event.output_content:
+            attrs_out = _truncate_for_attribute(event.output_content, self.payload_max_bytes)
+            span.set_attribute("openarmature.llm.output.content", attrs_out)
+        span.set_status(Status(StatusCode.OK))
+        self._run_enrichers(span, event)
+        span.end(end_time=end_time_ns)
+
+    def _handle_llm_error_event(self, event: NodeEvent) -> None:
+        """Emit the error-path ``openarmature.llm.complete`` span from
+        the sentinel NodeEvent. Success-path completed events and the
+        started event are no-ops here — the typed LlmCompletionEvent
+        handler owns the success-path span."""
+        from openarmature.observability.correlation import (
+            current_correlation_id,
+            current_invocation_id,
+        )
+
+        if event.phase != "completed":
+            return
         if not isinstance(event.pre_state, LlmEventPayload):
-            # Defensive — callers other than the OpenAIProvider hook
-            # shouldn't dispatch through the LLM_NAMESPACE sentinel.
+            return
+        payload = event.pre_state
+        if payload.error_type is None:
+            # Success-path completed: typed-event handler owns the span.
             return
         invocation_id = current_invocation_id()
         if invocation_id is None:
             return
         inv_state = self._inv_state_for(invocation_id)
-        payload = event.pre_state
-        if event.phase == "started":
-            parent_ctx = self._resolve_llm_parent(inv_state, invocation_id, payload)
-            attrs: dict[str, Any] = {"openarmature.llm.model": payload.model}
-            cid = current_correlation_id()
-            if cid is not None:
-                attrs["openarmature.correlation_id"] = cid
-            _apply_caller_metadata(attrs, payload.caller_invocation_metadata)
-            # Prompt-identity attributes: sourced from the dispatch-
-            # time snapshot on the payload. Reading the ContextVar
-            # here would return None because the dispatch worker
-            # task's Context was snapshotted at ``invoke()`` entry,
-            # before any node body opened a ``with_active_prompt``
-            # block.
-            active_prompt = payload.active_prompt
-            if active_prompt is not None:
-                attrs["openarmature.prompt.name"] = active_prompt.name
-                attrs["openarmature.prompt.version"] = active_prompt.version
-                attrs["openarmature.prompt.label"] = active_prompt.label
-                attrs["openarmature.prompt.template_hash"] = active_prompt.template_hash
-                attrs["openarmature.prompt.rendered_hash"] = active_prompt.rendered_hash
-            active_group = payload.active_prompt_group
-            if active_group is not None:
-                attrs["openarmature.prompt.group_name"] = active_group.group_name
-            # §5.5.2 + §5.5.3 GenAI semconv attributes (gated by
-            # ``disable_genai_semconv``). Emit gen_ai.system,
-            # gen_ai.request.model (mirrors openarmature.llm.model),
-            # and per-set gen_ai.request.* params (only fields the
-            # caller supplied — absence is meaningful).
-            if not self.disable_genai_semconv:
-                attrs["gen_ai.system"] = payload.genai_system
-                attrs["gen_ai.request.model"] = payload.model
-                request_params = payload.request_params or {}
-                if "temperature" in request_params:
-                    attrs["gen_ai.request.temperature"] = request_params["temperature"]
-                if "max_tokens" in request_params:
-                    attrs["gen_ai.request.max_tokens"] = request_params["max_tokens"]
-                if "top_p" in request_params:
-                    attrs["gen_ai.request.top_p"] = request_params["top_p"]
-                if "seed" in request_params:
-                    attrs["gen_ai.request.seed"] = request_params["seed"]
-                # Three new request-param attrs from proposal 0032
-                # (spec v0.24.0). The §8.4.3 Langfuse mapping picks
-                # these up by inclusion via the gen_ai.request.* →
-                # generation.modelParameters.<suffix> rule with no
-                # §8 edit.
-                if "frequency_penalty" in request_params:
-                    attrs["gen_ai.request.frequency_penalty"] = request_params["frequency_penalty"]
-                if "presence_penalty" in request_params:
-                    attrs["gen_ai.request.presence_penalty"] = request_params["presence_penalty"]
-                if "stop_sequences" in request_params:
-                    attrs["gen_ai.request.stop_sequences"] = request_params["stop_sequences"]
-            # §5.5.1 payload attributes (gated by ``disable_llm_payload``).
-            # ``input.messages`` and ``request.extras`` go on the started
-            # span; ``output.content`` lands on the completed branch.
-            if not self.disable_llm_payload:
-                if payload.input_messages:
-                    serialized = _serialize_for_attribute(payload.input_messages)
-                    attrs["openarmature.llm.input.messages"] = _truncate_for_attribute(
-                        serialized, self.payload_max_bytes
-                    )
-                if payload.request_extras:
-                    serialized_extras = _serialize_for_attribute(payload.request_extras)
-                    attrs["openarmature.llm.request.extras"] = _truncate_for_attribute(
-                        serialized_extras, self.payload_max_bytes
-                    )
-            span = self._tracer.start_span(
-                name="openarmature.llm.complete",
-                context=cast("Any", parent_ctx),
-                kind=SpanKind.CLIENT,
-                attributes=attrs,
-            )
-            inv_state.open_llm_spans[payload.call_id] = _OpenSpan(
-                span=span,
-                fan_out_index_chain=event.fan_out_index_chain,
-                branch_name_chain=event.branch_name_chain,
-            )
-        elif event.phase == "completed":
-            open_span = inv_state.open_llm_spans.pop(payload.call_id, None)
-            if open_span is None:
-                return
-            span = open_span.span
-            # Baseline §5.5 attributes (preserved from v0.7.0).
-            if payload.finish_reason is not None:
-                span.set_attribute("openarmature.llm.finish_reason", payload.finish_reason)
-            if payload.prompt_tokens is not None:
-                span.set_attribute("openarmature.llm.usage.prompt_tokens", payload.prompt_tokens)
-            if payload.completion_tokens is not None:
-                span.set_attribute("openarmature.llm.usage.completion_tokens", payload.completion_tokens)
-            if payload.total_tokens is not None:
-                span.set_attribute("openarmature.llm.usage.total_tokens", payload.total_tokens)
-            # Spec proposal 0047 §5.5.3.1: OA-namespace cache attributes.
-            # Conditional emission per the §5.5.3 convention — the
-            # absent-vs-zero distinction is preserved: absent (None)
-            # means the provider did not report cache stats; 0 means
-            # the provider reported zero hits. OA-namespace per the
-            # stable-only upstream adoption policy because the upstream
-            # OTel GenAI cache attributes are at Development status.
-            if payload.cached_tokens is not None:
-                span.set_attribute("openarmature.llm.cache_read.input_tokens", payload.cached_tokens)
-            if payload.cache_creation_tokens is not None:
-                span.set_attribute(
-                    "openarmature.llm.cache_creation.input_tokens",
-                    payload.cache_creation_tokens,
+        parent_ctx = self._resolve_llm_parent(
+            inv_state,
+            invocation_id,
+            calling_namespace_prefix=payload.calling_namespace_prefix,
+            calling_attempt_index=payload.calling_attempt_index,
+            calling_fan_out_index=payload.calling_fan_out_index,
+            calling_branch_name=payload.calling_branch_name,
+        )
+        attrs: dict[str, Any] = {"openarmature.llm.model": payload.model}
+        cid = current_correlation_id()
+        if cid is not None:
+            attrs["openarmature.correlation_id"] = cid
+        _apply_caller_metadata(attrs, payload.caller_invocation_metadata)
+        active_prompt = payload.active_prompt
+        if active_prompt is not None:
+            attrs["openarmature.prompt.name"] = active_prompt.name
+            attrs["openarmature.prompt.version"] = active_prompt.version
+            attrs["openarmature.prompt.label"] = active_prompt.label
+            attrs["openarmature.prompt.template_hash"] = active_prompt.template_hash
+            attrs["openarmature.prompt.rendered_hash"] = active_prompt.rendered_hash
+        active_group = payload.active_prompt_group
+        if active_group is not None:
+            attrs["openarmature.prompt.group_name"] = active_group.group_name
+        if not self.disable_genai_semconv:
+            attrs["gen_ai.system"] = payload.genai_system
+            attrs["gen_ai.request.model"] = payload.model
+            request_params = payload.request_params or {}
+            if "temperature" in request_params:
+                attrs["gen_ai.request.temperature"] = request_params["temperature"]
+            if "max_tokens" in request_params:
+                attrs["gen_ai.request.max_tokens"] = request_params["max_tokens"]
+            if "top_p" in request_params:
+                attrs["gen_ai.request.top_p"] = request_params["top_p"]
+            if "seed" in request_params:
+                attrs["gen_ai.request.seed"] = request_params["seed"]
+            if "frequency_penalty" in request_params:
+                attrs["gen_ai.request.frequency_penalty"] = request_params["frequency_penalty"]
+            if "presence_penalty" in request_params:
+                attrs["gen_ai.request.presence_penalty"] = request_params["presence_penalty"]
+            if "stop_sequences" in request_params:
+                attrs["gen_ai.request.stop_sequences"] = request_params["stop_sequences"]
+        if not self.disable_llm_payload:
+            if payload.input_messages:
+                serialized = _serialize_for_attribute(payload.input_messages)
+                attrs["openarmature.llm.input.messages"] = _truncate_for_attribute(
+                    serialized, self.payload_max_bytes
                 )
-            # §5.5.3 GenAI semconv response attributes (gated by
-            # ``disable_genai_semconv``). Tokens mirror the baseline
-            # OA-prefixed usage attributes; finish_reasons wraps the
-            # scalar in a single-element array per semconv;
-            # response.{id,model} emit only when the provider
-            # returned non-null values.
-            if not self.disable_genai_semconv:
-                if payload.prompt_tokens is not None:
-                    span.set_attribute("gen_ai.usage.input_tokens", payload.prompt_tokens)
-                if payload.completion_tokens is not None:
-                    span.set_attribute("gen_ai.usage.output_tokens", payload.completion_tokens)
-                if payload.finish_reason is not None:
-                    span.set_attribute("gen_ai.response.finish_reasons", [payload.finish_reason])
-                if payload.response_id is not None:
-                    span.set_attribute("gen_ai.response.id", payload.response_id)
-                if payload.response_model is not None:
-                    span.set_attribute("gen_ai.response.model", payload.response_model)
-            # §5.5.1 output payload. Assistant messages with empty
-            # content (tool-call-only responses) MUST NOT emit this
-            # attribute per spec — ``output_content`` on the payload
-            # is already None in that case (see provider.py).
-            if not self.disable_llm_payload and payload.output_content:
-                attrs_out = _truncate_for_attribute(payload.output_content, self.payload_max_bytes)
-                span.set_attribute("openarmature.llm.output.content", attrs_out)
-            if payload.error_type is not None:
-                span.set_status(
-                    Status(
-                        StatusCode.ERROR,
-                        description=payload.error_category or payload.error_type,
-                    )
+            if payload.request_extras:
+                serialized_extras = _serialize_for_attribute(payload.request_extras)
+                attrs["openarmature.llm.request.extras"] = _truncate_for_attribute(
+                    serialized_extras, self.payload_max_bytes
                 )
-                if payload.error_category is not None:
-                    span.set_attribute("openarmature.error.category", payload.error_category)
-            else:
-                span.set_status(Status(StatusCode.OK))
-            self._run_enrichers(span, event)
-            span.end()
+        span = self._tracer.start_span(
+            name="openarmature.llm.complete",
+            context=cast("Any", parent_ctx),
+            kind=SpanKind.CLIENT,
+            attributes=attrs,
+        )
+        span.set_status(
+            Status(
+                StatusCode.ERROR,
+                description=payload.error_category or payload.error_type,
+            )
+        )
+        if payload.error_category is not None:
+            span.set_attribute("openarmature.error.category", payload.error_category)
+        self._run_enrichers(span, event)
+        span.end()
 
     def _resolve_llm_parent(
         self,
         inv_state: _InvState,
         invocation_id: str,
-        payload: Any,
+        *,
+        calling_namespace_prefix: tuple[str, ...],
+        calling_attempt_index: int,
+        calling_fan_out_index: int | None,
+        calling_branch_name: str | None,
     ) -> object:
         """Look up the calling node's span using the calling-node
-        identity carried on the LLM event payload, fall back through
-        subgraph dispatch / invocation span."""
+        identity, fall back through subgraph dispatch / invocation
+        span."""
         # 1. Direct match on the calling node's ``_StackKey``.
         calling_key: _StackKey = (
-            payload.calling_namespace_prefix,
-            payload.calling_attempt_index,
-            payload.calling_fan_out_index,
-            payload.calling_branch_name,
+            calling_namespace_prefix,
+            calling_attempt_index,
+            calling_fan_out_index,
+            calling_branch_name,
         )
         calling = inv_state.open_spans.get(calling_key)
         if calling is not None:
@@ -1273,9 +1356,8 @@ class OTelObserver:
         # 2. Walk up the calling namespace prefix for a synthetic
         #    subgraph dispatch span at any ancestor — covers LLM
         #    calls from inside subgraph wrapper middleware.
-        prefix = payload.calling_namespace_prefix
-        for plen in range(len(prefix), 0, -1):
-            ancestor = prefix[:plen]
+        for plen in range(len(calling_namespace_prefix), 0, -1):
+            ancestor = calling_namespace_prefix[:plen]
             sg = inv_state.subgraph_spans.get(ancestor)
             if sg is not None:
                 return set_span_in_context(sg.span)
@@ -1985,15 +2067,13 @@ class OTelObserver:
 
     def _drain_inv_state(self, inv_state: _InvState) -> None:
         """Close any still-open spans in a per-invocation state
-        container in child→parent order. LLM spans (deepest leaves)
-        → leaf node spans (sorted deepest-first by namespace) →
-        non-detached fan-out per-instance dispatch spans → detached
-        roots → subgraph dispatch spans. Matches the ordering used in
-        ``shutdown``."""
-        for call_id in list(inv_state.open_llm_spans.keys()):
-            open_span = inv_state.open_llm_spans.pop(call_id, None)
-            if open_span is not None:
-                self._drain_open_span(open_span)
+        container in child→parent order. Leaf node spans (sorted
+        deepest-first by namespace) → non-detached fan-out per-instance
+        dispatch spans → detached roots → subgraph dispatch spans.
+        Matches the ordering used in ``shutdown``. LLM spans don't
+        appear here — both the success and error paths open + close
+        the span in one shot at handler-time, so there are no in-flight
+        LLM spans to drain."""
         # Inner-node spans (depth >= 2) drain first — these include
         # the inner-node bodies inside fan-out instances, which are
         # children of the per-instance dispatch spans.

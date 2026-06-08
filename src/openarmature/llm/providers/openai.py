@@ -160,7 +160,7 @@ class OpenAIProvider:
         force_prompt_augmentation_fallback: bool = False,
         genai_system: str = "openai",
         readiness_probe: Literal["models", "chat_completions", "both"] = "chat_completions",
-        populate_caller_metadata: bool = False,
+        populate_caller_metadata: bool = True,
     ) -> None:
         self.base_url = _validate_and_normalize_base_url(base_url)
         self.model = model
@@ -194,12 +194,13 @@ class OpenAIProvider:
             )
         self._readiness_probe = readiness_probe
         # Proposal 0049's caller_invocation_metadata field is OPTIONAL
-        # on the typed LlmCompletionEvent: default absent, populated
-        # only when the consumer opts in. The per-language opt-in
-        # mechanism is constructor-knob here so the provider can decide
-        # at emission time without engine-level observer introspection.
-        # Off by default to avoid bloating every event with potentially-
-        # large metadata snapshots when nothing downstream consumes them.
+        # on the typed LlmCompletionEvent. The python implementation
+        # defaults the opt-in to True because the bundled OTel and
+        # Langfuse observers read the field to populate caller-metadata
+        # span attributes (§5.6); leaving it off by default would
+        # silently strip those attributes after the typed-event
+        # migration. Pass ``populate_caller_metadata=False`` to suppress
+        # the snapshot when no downstream consumer needs it.
         self._populate_caller_metadata = populate_caller_metadata
         self._headers: dict[str, str] = {"Content-Type": "application/json"}
         if api_key is not None:

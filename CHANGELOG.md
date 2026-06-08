@@ -6,6 +6,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). The
 
 ## [Unreleased]
 
+### Changed
+
+- **OTel observer drives the `openarmature.llm.complete` span lifecycle from the typed `LlmCompletionEvent`** (proposal 0049 + 0057, observability §5.5.7). Successful LLM-provider calls now open + close the span in one shot at typed-event arrival, with `start_time` back-dated by `LlmCompletionEvent.latency_ms` so the span duration reflects the actual adapter-boundary measurement rather than dispatcher queue delay. Failure-path spans continue to fire from the sentinel `NodeEvent` pair (the typed event is success-only per the proposal). The §5.5 attribute set is unchanged. Dual-emit window: the provider still emits both the sentinel pair AND the typed event during v0.13.0; the sentinel pair drops in v0.15.0.
+- **`OpenAIProvider(populate_caller_metadata=...)` default flipped from `False` to `True`.** The python implementation now populates `LlmCompletionEvent.caller_invocation_metadata` by default so the bundled OTel and Langfuse observers can emit the §5.6 `openarmature.user.<key>` span-attribute family without a separate opt-in. Pass `populate_caller_metadata=False` to suppress the snapshot when no downstream consumer needs it. The spec-defined opt-in mechanism is unchanged; only the python default flips.
+
+### Added
+
+- **`LlmCompletionEvent` extended with proposal 0057 request-side fields** (spec v0.51.0). The typed event now carries `input_messages`, `output_content`, `request_params`, `request_extras`, `active_prompt`, `active_prompt_group`, `call_id`, and `response_model` alongside the existing v0.49.0 fields. `request_id` renamed to `response_id` per the proposal's response-side naming. Inline image bytes in `input_messages` stay redacted per observability §5.5.5 — the OpenAI provider reuses the existing message-serialization helper for the projection. Observer-side privacy gates (OTel `disable_llm_payload`, Langfuse equivalents) apply at rendering, symmetric with the §5.5.1 span attribute path.
+
 ## [0.12.0] — 2026-06-05
 
 Observability release. The pinned spec advances from v0.38.0 to v0.46.0, absorbing eight accepted proposals (0047-0054). Three ship as fully implemented this cycle: proposal 0048 grows a read-symmetric `get_invocation_metadata()` API + a §9 *Queryable observer pattern* concept doc section; proposal 0052 puts `openarmature.implementation.name` + `.version` attribution attributes on every OTel invocation span + every Langfuse Trace; proposal 0054 ships `CompiledGraph.drain_events_for(invocation_id, *, timeout)` as the architectural pair to 0048's §9.4 accumulator lifecycle. Two ship as textual-only acks (0051 Langfuse trace I/O caveat; 0053 §3.4 shared-parent boundary clarification). One Fixed: the retry middleware now resets the invocation-metadata ContextVar between attempts per §3.4. The production-observability example grows the queryable accumulator + drain_events_for pattern end-to-end so the new APIs have a runnable demo.

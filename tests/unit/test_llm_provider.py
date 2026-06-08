@@ -1622,38 +1622,15 @@ async def test_llm_completion_event_input_messages_redacts_inline_image_bytes() 
     assert "byte_count" in serialized
 
 
-async def test_caller_invocation_metadata_off_by_default() -> None:
-    # Per proposal 0049's OPT-IN contract: default absent / None.
+async def test_caller_invocation_metadata_populated_by_default() -> None:
+    # Python default flips proposal 0049's spec-recommended off-by-default
+    # so the bundled OTel/Langfuse observers can emit caller-metadata
+    # span attributes (§5.6) without callers having to opt in.
     events, token = _collecting_dispatch()
     transport = _make_openai_response_with_usage(
         {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
     )
     provider = OpenAIProvider(base_url="http://test", model="m", api_key="k", transport=transport)
-    try:
-        await provider.complete([UserMessage(content="hi")])
-    finally:
-        await provider.aclose()
-        _release_dispatch(token)
-
-    typed = next(e for e in events if isinstance(e, LlmCompletionEvent))
-    assert typed.caller_invocation_metadata is None
-
-
-async def test_caller_invocation_metadata_populated_when_opted_in() -> None:
-    # Per proposal 0049 Q2 ack: opt-in via provider constructor knob.
-    # When True, the typed event carries a snapshot of the metadata
-    # mapping at LLM-call time.
-    events, token = _collecting_dispatch()
-    transport = _make_openai_response_with_usage(
-        {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
-    )
-    provider = OpenAIProvider(
-        base_url="http://test",
-        model="m",
-        api_key="k",
-        transport=transport,
-        populate_caller_metadata=True,
-    )
     try:
         set_invocation_metadata(user_id="u-123")
         await provider.complete([UserMessage(content="hi")])
@@ -1664,6 +1641,32 @@ async def test_caller_invocation_metadata_populated_when_opted_in() -> None:
     typed = next(e for e in events if isinstance(e, LlmCompletionEvent))
     assert typed.caller_invocation_metadata is not None
     assert typed.caller_invocation_metadata.get("user_id") == "u-123"
+
+
+async def test_caller_invocation_metadata_omitted_when_opted_out() -> None:
+    # The spec's OPTIONAL contract on caller_invocation_metadata is
+    # still honored: pass ``populate_caller_metadata=False`` to suppress
+    # the snapshot.
+    events, token = _collecting_dispatch()
+    transport = _make_openai_response_with_usage(
+        {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
+    )
+    provider = OpenAIProvider(
+        base_url="http://test",
+        model="m",
+        api_key="k",
+        transport=transport,
+        populate_caller_metadata=False,
+    )
+    try:
+        set_invocation_metadata(user_id="u-123")
+        await provider.complete([UserMessage(content="hi")])
+    finally:
+        await provider.aclose()
+        _release_dispatch(token)
+
+    typed = next(e for e in events if isinstance(e, LlmCompletionEvent))
+    assert typed.caller_invocation_metadata is None
 
 
 async def test_llm_completion_event_request_id_none_when_response_omits_id() -> None:

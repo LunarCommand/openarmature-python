@@ -499,9 +499,7 @@ async def test_active_prompt_propagates_to_llm_span_attributes() -> None:
     ``with_active_prompt_group`` adds ``openarmature.prompt.group_name``."""
     from datetime import UTC, datetime
 
-    from openarmature.graph.events import NodeEvent
     from openarmature.llm.messages import UserMessage
-    from openarmature.llm.providers.openai import LlmEventPayload
     from openarmature.observability.correlation import (
         _reset_invocation_id,
         _set_invocation_id,
@@ -511,6 +509,7 @@ async def test_active_prompt_propagates_to_llm_span_attributes() -> None:
         PromptResult,
         TextPrompt,
     )
+    from tests._helpers.typed_event import make_typed_event
 
     exporter = InMemorySpanExporter()
     observer = OTelObserver(span_processor=SimpleSpanProcessor(exporter))
@@ -541,46 +540,11 @@ async def test_active_prompt_propagates_to_llm_span_attributes() -> None:
     try:
         # Proposal 0024 / friction-roundup #3: the provider captures
         # ``current_prompt_result()`` and ``current_prompt_group()``
-        # at dispatch time and puts them on the LLM event payload.
-        # The observer reads from the payload, NOT from the live
+        # at dispatch time and puts them on the LlmCompletionEvent.
+        # The observer reads from the typed event, NOT from the live
         # ContextVar — that ContextVar is unreachable from the
-        # dispatch worker's task-local Context. This test verifies
-        # the observer correctly surfaces prompt attributes when the
-        # payload carries them; the cross-task regression case is
-        # covered separately by an end-to-end test.
-        started = NodeEvent(
-            node_name="openarmature.llm.complete",
-            namespace=("openarmature.llm.complete",),
-            step=-1,
-            phase="started",
-            pre_state=LlmEventPayload(
-                call_id="test-call-prompt",
-                model="test-m",
-                active_prompt=result,
-                active_prompt_group=group,
-            ),
-            post_state=None,
-            error=None,
-            parent_states=(),
-        )
-        completed = NodeEvent(
-            node_name="openarmature.llm.complete",
-            namespace=("openarmature.llm.complete",),
-            step=-1,
-            phase="completed",
-            pre_state=LlmEventPayload(
-                call_id="test-call-prompt",
-                model="test-m",
-                finish_reason="stop",
-                active_prompt=result,
-                active_prompt_group=group,
-            ),
-            post_state=None,
-            error=None,
-            parent_states=(),
-        )
-        await observer(started)
-        await observer(completed)
+        # dispatch worker's task-local Context.
+        await observer(make_typed_event(active_prompt=result, active_prompt_group=group))
     finally:
         _reset_invocation_id(token)
 
@@ -599,40 +563,18 @@ async def test_active_prompt_propagates_to_llm_span_attributes() -> None:
 async def test_llm_span_has_no_prompt_attributes_when_no_active_prompt() -> None:
     """Without ``with_active_prompt``, the LLM-call span MUST NOT carry
     ``openarmature.prompt.*`` attributes."""
-    from openarmature.graph.events import NodeEvent
     from openarmature.observability.correlation import (
         _reset_invocation_id,
         _set_invocation_id,
     )
-    from openarmature.observability.llm_event import LlmEventPayload
+    from tests._helpers.typed_event import make_typed_event
 
     exporter = InMemorySpanExporter()
     observer = OTelObserver(span_processor=SimpleSpanProcessor(exporter))
 
     token = _set_invocation_id("inv-2")
     try:
-        started = NodeEvent(
-            node_name="openarmature.llm.complete",
-            namespace=("openarmature.llm.complete",),
-            step=-1,
-            phase="started",
-            pre_state=LlmEventPayload(call_id="test-call-noprompt", model="test-m"),
-            post_state=None,
-            error=None,
-            parent_states=(),
-        )
-        completed = NodeEvent(
-            node_name="openarmature.llm.complete",
-            namespace=("openarmature.llm.complete",),
-            step=-1,
-            phase="completed",
-            pre_state=LlmEventPayload(call_id="test-call-noprompt", model="test-m", finish_reason="stop"),
-            post_state=None,
-            error=None,
-            parent_states=(),
-        )
-        await observer(started)
-        await observer(completed)
+        await observer(make_typed_event())
     finally:
         _reset_invocation_id(token)
     observer.shutdown()
@@ -648,52 +590,32 @@ async def _drive_llm_span_with_cached_tokens(
     cached_tokens: int | None,
     cache_creation_tokens: int | None = None,
 ) -> dict[str, Any]:
-    """Drive the OTel observer through a sentinel started/completed
-    NodeEvent pair with the supplied cache-stat fields on the
-    completed-phase payload. Returns the LLM-span's attribute map.
+    """Drive the OTel observer through a typed LlmCompletionEvent
+    carrying the supplied cache-stat fields on the event's Usage
+    record. Returns the LLM-span's attribute map.
     """
-    from openarmature.graph.events import NodeEvent
+    from openarmature.llm.response import Usage
     from openarmature.observability.correlation import (
         _reset_invocation_id,
         _set_invocation_id,
     )
-    from openarmature.observability.llm_event import LlmEventPayload
+    from tests._helpers.typed_event import make_typed_event
 
     exporter = InMemorySpanExporter()
     observer = OTelObserver(span_processor=SimpleSpanProcessor(exporter))
     token = _set_invocation_id("inv-cache")
     try:
-        started = NodeEvent(
-            node_name="openarmature.llm.complete",
-            namespace=("openarmature.llm.complete",),
-            step=-1,
-            phase="started",
-            pre_state=LlmEventPayload(call_id="cc-cache", model="test-m"),
-            post_state=None,
-            error=None,
-            parent_states=(),
+        await observer(
+            make_typed_event(
+                usage=Usage(
+                    prompt_tokens=100,
+                    completion_tokens=5,
+                    total_tokens=105,
+                    cached_tokens=cached_tokens,
+                    cache_creation_tokens=cache_creation_tokens,
+                ),
+            )
         )
-        completed = NodeEvent(
-            node_name="openarmature.llm.complete",
-            namespace=("openarmature.llm.complete",),
-            step=-1,
-            phase="completed",
-            pre_state=LlmEventPayload(
-                call_id="cc-cache",
-                model="test-m",
-                finish_reason="stop",
-                prompt_tokens=100,
-                completion_tokens=5,
-                total_tokens=105,
-                cached_tokens=cached_tokens,
-                cache_creation_tokens=cache_creation_tokens,
-            ),
-            post_state=None,
-            error=None,
-            parent_states=(),
-        )
-        await observer(started)
-        await observer(completed)
     finally:
         _reset_invocation_id(token)
     observer.shutdown()
@@ -781,6 +703,162 @@ async def test_disable_llm_spans_skips_llm_provider_span() -> None:
     observer.shutdown()
     llm_spans = [s for s in exporter.get_finished_spans() if s.name == "openarmature.llm.complete"]
     assert llm_spans == []
+
+
+async def test_llm_span_duration_matches_typed_event_latency() -> None:
+    # Proposal 0049 + PR 3b: the success-path span's duration is
+    # back-dated using LlmCompletionEvent.latency_ms, so observers see
+    # the adapter-boundary measurement instead of dispatcher queue
+    # delay. Verify the span's end-minus-start lands within tolerance
+    # of the typed event's latency_ms.
+    from openarmature.observability.correlation import (
+        _reset_invocation_id,
+        _set_invocation_id,
+    )
+    from tests._helpers.typed_event import make_typed_event
+
+    exporter = InMemorySpanExporter()
+    observer = OTelObserver(span_processor=SimpleSpanProcessor(exporter))
+    latency_ms = 123.456
+    token = _set_invocation_id("inv-duration")
+    try:
+        await observer(make_typed_event(latency_ms=latency_ms))
+    finally:
+        _reset_invocation_id(token)
+    observer.shutdown()
+    llm_spans = [s for s in exporter.get_finished_spans() if s.name == "openarmature.llm.complete"]
+    assert len(llm_spans) == 1
+    span = llm_spans[0]
+    assert span.start_time is not None and span.end_time is not None
+    duration_ms = (span.end_time - span.start_time) / 1_000_000
+    # Tolerance covers integer-nanosecond truncation and float->int
+    # rounding; the back-date is exact apart from those.
+    assert abs(duration_ms - latency_ms) < 1.0
+
+
+async def test_llm_span_zero_duration_when_latency_missing() -> None:
+    # When the typed event omits latency_ms (None), the handler falls
+    # back to a zero-duration span at end_time rather than guessing
+    # the start. Pin the fallback so a future "let's just use now() for
+    # both endpoints" tweak doesn't accidentally swap to a small
+    # positive duration.
+    from openarmature.observability.correlation import (
+        _reset_invocation_id,
+        _set_invocation_id,
+    )
+    from tests._helpers.typed_event import make_typed_event
+
+    exporter = InMemorySpanExporter()
+    observer = OTelObserver(span_processor=SimpleSpanProcessor(exporter))
+    token = _set_invocation_id("inv-no-latency")
+    try:
+        await observer(make_typed_event(latency_ms=None))
+    finally:
+        _reset_invocation_id(token)
+    observer.shutdown()
+    llm_spans = [s for s in exporter.get_finished_spans() if s.name == "openarmature.llm.complete"]
+    assert len(llm_spans) == 1
+    span = llm_spans[0]
+    assert span.start_time is not None and span.end_time is not None
+    assert span.start_time == span.end_time
+
+
+async def test_typed_llm_event_drops_silently_outside_invocation() -> None:
+    # No invocation in scope (no _set_invocation_id) → the handler
+    # MUST early-return without emitting a span. Symmetric with the
+    # error path's no-invocation drop.
+    from tests._helpers.typed_event import make_typed_event
+
+    exporter = InMemorySpanExporter()
+    observer = OTelObserver(span_processor=SimpleSpanProcessor(exporter))
+    await observer(make_typed_event())
+    observer.shutdown()
+    llm_spans = [s for s in exporter.get_finished_spans() if s.name == "openarmature.llm.complete"]
+    assert llm_spans == []
+
+
+async def test_disable_llm_spans_skips_typed_event_path() -> None:
+    # disable_llm_spans MUST gate the typed-event handler too — not
+    # just the sentinel-pair branch. Companion to
+    # ``test_disable_llm_spans_skips_llm_provider_span`` which covers
+    # the sentinel side.
+    from openarmature.observability.correlation import (
+        _reset_invocation_id,
+        _set_invocation_id,
+    )
+    from tests._helpers.typed_event import make_typed_event
+
+    exporter = InMemorySpanExporter()
+    observer = OTelObserver(
+        span_processor=SimpleSpanProcessor(exporter),
+        disable_llm_spans=True,
+    )
+    token = _set_invocation_id("inv-disabled")
+    try:
+        await observer(make_typed_event())
+    finally:
+        _reset_invocation_id(token)
+    observer.shutdown()
+    llm_spans = [s for s in exporter.get_finished_spans() if s.name == "openarmature.llm.complete"]
+    assert llm_spans == []
+
+
+async def test_llm_error_path_emits_error_span_from_sentinel_completed() -> None:
+    # Failure-path LLM calls don't emit the typed LlmCompletionEvent
+    # (per proposal 0049 §3 alternative 3). The OTel observer keeps
+    # the sentinel-pair error path alive so error-status spans still
+    # fire. Sentinel started + non-error completed are no-ops; only
+    # completed-with-error_type produces a span.
+    from opentelemetry.trace import StatusCode
+
+    from openarmature.graph.events import NodeEvent
+    from openarmature.observability.correlation import (
+        _reset_invocation_id,
+        _set_invocation_id,
+    )
+    from openarmature.observability.llm_event import LlmEventPayload
+
+    exporter = InMemorySpanExporter()
+    observer = OTelObserver(span_processor=SimpleSpanProcessor(exporter))
+    token = _set_invocation_id("inv-err")
+    try:
+        started = NodeEvent(
+            node_name="openarmature.llm.complete",
+            namespace=("openarmature.llm.complete",),
+            step=-1,
+            phase="started",
+            pre_state=LlmEventPayload(call_id="cc-err", model="test-m"),
+            post_state=None,
+            error=None,
+            parent_states=(),
+        )
+        completed = NodeEvent(
+            node_name="openarmature.llm.complete",
+            namespace=("openarmature.llm.complete",),
+            step=-1,
+            phase="completed",
+            pre_state=LlmEventPayload(
+                call_id="cc-err",
+                model="test-m",
+                error_type="ProviderRateLimit",
+                error_category="provider_rate_limited",
+                error_message="429 from upstream",
+            ),
+            post_state=None,
+            error=None,
+            parent_states=(),
+        )
+        await observer(started)
+        await observer(completed)
+    finally:
+        _reset_invocation_id(token)
+    observer.shutdown()
+    llm_spans = [s for s in exporter.get_finished_spans() if s.name == "openarmature.llm.complete"]
+    assert len(llm_spans) == 1
+    span = llm_spans[0]
+    assert span.status.status_code == StatusCode.ERROR
+    attrs = dict(span.attributes or {})
+    assert attrs.get("openarmature.error.category") == "provider_rate_limited"
 
 
 # ---------------------------------------------------------------------------
