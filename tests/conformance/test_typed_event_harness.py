@@ -129,6 +129,17 @@ def test_event_fields_match_caller_metadata_none_matches_none() -> None:
     assert _event_fields_match(event, {"caller_invocation_metadata": None}) is True
 
 
+def test_event_fields_match_missing_attribute_raises_for_fixture_typo() -> None:
+    # A fixture-side field-name typo (e.g., ``node_nam`` instead of
+    # ``node_name``) must fail loudly rather than silently matching
+    # None. Upstream type filtering guarantees the typed event has
+    # all canonical fields, so a missing attribute can only be a
+    # fixture authoring bug.
+    event = _make_typed_event()
+    with pytest.raises(AssertionError, match="does not exist on LlmCompletionEvent"):
+        _event_fields_match(event, {"node_nam": None})  # type: ignore[arg-type]
+
+
 # ---------------------------------------------------------------------------
 # _assert_observer_expectations — unknown-key detection
 # ---------------------------------------------------------------------------
@@ -164,6 +175,20 @@ def test_assert_observer_expectations_no_shape_keys_passes_silently() -> None:
     # An empty spec is benign; only typos in shape keys should fail.
     collector = _TypedEventCollector(filter_event_type=None)
     _assert_observer_expectations("collector", collector, {})
+
+
+def test_every_captured_event_has_raises_on_missing_attribute() -> None:
+    # When the fixture asserts a field that doesn't exist on the
+    # captured event type, the harness raises a clear error rather
+    # than silently matching None.
+    collector = _TypedEventCollector(filter_event_type="LlmCompletionEvent")
+    collector.events.append(_make_typed_event())
+    with pytest.raises(AssertionError, match="does not exist on LlmCompletionEvent"):
+        _assert_observer_expectations(
+            "collector",
+            collector,
+            {"every_captured_event_has": {"node_nam": "ask"}},  # typo
+        )
 
 
 # ---------------------------------------------------------------------------

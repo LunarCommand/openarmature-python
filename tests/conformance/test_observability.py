@@ -2878,7 +2878,10 @@ async def _invoke_typed_fixture(
     metadata = cast("dict[str, Any] | None", case.get("caller_metadata"))
     state_instance = _make_state_instance(case, state_cls)
     try:
-        if metadata:
+        # ``is not None`` so an explicit ``caller_metadata: {}`` is
+        # passed through to graph.invoke() (truthy check would collapse
+        # the empty-mapping case to "no metadata" and drop the kwarg).
+        if metadata is not None:
             final = await graph.invoke(state_instance, metadata=metadata)
         else:
             final = await graph.invoke(state_instance)
@@ -2979,7 +2982,14 @@ def _assert_observer_expectations(
         sub = cast("dict[str, Any]", spec["every_captured_event_has"])
         for event in events:
             for field_name, expected_value in sub.items():
-                actual = getattr(event, field_name, None)
+                if not hasattr(event, field_name):
+                    raise AssertionError(
+                        f"observer {name!r}: every_captured_event_has names field "
+                        f"{field_name!r} that does not exist on {type(event).__name__}; "
+                        f"check for typos in the fixture YAML or add a filter_event_type "
+                        f"to scope the captured set"
+                    )
+                actual = getattr(event, field_name)
                 assert actual == expected_value, (
                     f"observer {name!r}: expected every event to have "
                     f"{field_name}={expected_value!r}; got {actual!r} on {type(event).__name__}"
@@ -3017,9 +3027,20 @@ def _event_fields_match(event: Any, expected: Mapping[str, Any]) -> bool:
     """Return True when every key in ``expected`` matches the event's
     field. Nested ``usage`` mappings compare against the Usage record
     via attribute access; mapping equality otherwise uses ``==``.
+
+    Raises AssertionError when the fixture names a field that doesn't
+    exist on the event type. Upstream filtering by event type means
+    a missing attribute signals a fixture-side typo (e.g.,
+    ``node_nam: null`` instead of ``node_name: null``), not a None
+    value worth silently matching.
     """
     for field_name, expected_value in expected.items():
-        actual: Any = getattr(event, field_name, None)
+        if not hasattr(event, field_name):
+            raise AssertionError(
+                f"fixture references field {field_name!r} that does not exist on "
+                f"{type(event).__name__}; check for typos in the fixture YAML"
+            )
+        actual: Any = getattr(event, field_name)
         # The 050 fixture's ``usage`` field expectation is a flat
         # mapping; the typed event carries a Usage instance. Compare
         # field-by-field.
@@ -3345,7 +3366,8 @@ async def _run_typed_event_fanout_case(case: Mapping[str, Any]) -> None:
     handles = [outer_compiled.attach_observer(c) for c in collectors.values()]
     try:
         metadata = cast("dict[str, Any] | None", case.get("caller_metadata"))
-        if metadata:
+        # ``is not None`` so an explicit empty mapping reaches invoke().
+        if metadata is not None:
             await outer_compiled.invoke(state_instance, metadata=metadata)
         else:
             await outer_compiled.invoke(state_instance)
@@ -3446,7 +3468,8 @@ async def _run_typed_event_branches_case(case: Mapping[str, Any]) -> None:
     handles = [outer_compiled.attach_observer(c) for c in collectors.values()]
     try:
         metadata = cast("dict[str, Any] | None", case.get("caller_metadata"))
-        if metadata:
+        # ``is not None`` so an explicit empty mapping reaches invoke().
+        if metadata is not None:
             await outer_compiled.invoke(state_instance, metadata=metadata)
         else:
             await outer_compiled.invoke(state_instance)
