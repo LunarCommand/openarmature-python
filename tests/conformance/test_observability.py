@@ -2789,12 +2789,13 @@ def _build_simple_llm_graph(
     case: Mapping[str, Any],
     *,
     populate_caller_metadata: bool,
-) -> tuple[Any, type[Any]]:
+) -> tuple[Any, type[Any], Any]:
     """Build a single-node graph that calls the LLM provider against a
     mock transport. Matches the simple entry → ask → END pattern used
     by fixtures 050, 051, 052, 053, 056. Returns ``(compiled_graph,
-    state_cls)`` so the caller can construct State instances without
-    re-deriving the class.
+    state_cls, provider)`` — the caller owns the provider's lifecycle
+    and MUST call ``await provider.aclose()`` after invoke completes
+    to release the underlying httpx.AsyncClient connection pool.
     """
     import json
 
@@ -2850,7 +2851,7 @@ def _build_simple_llm_graph(
     builder = (
         GraphBuilder(state_cls).add_node(entry_name, ask_body).add_edge(entry_name, END).set_entry(entry_name)
     )
-    return builder.compile(), state_cls
+    return builder.compile(), state_cls, provider
 
 
 def _make_state_instance(case: Mapping[str, Any], state_cls: type[Any]) -> Any:
@@ -3253,6 +3254,10 @@ async def _run_llm_cache_fixture_case(case: Mapping[str, Any]) -> None:
     finally:
         await graph.drain()
         observer.shutdown()
+        # OpenAIProvider owns an httpx.AsyncClient; closing it releases
+        # the connection pool. Matches the convention used by fixture
+        # 005 / 038 runners elsewhere in this file.
+        await provider.aclose()
 
     expected = cast("dict[str, Any]", case["expected"])
 
@@ -3312,36 +3317,44 @@ async def _run_typed_event_fixture_case(
     the same surface.
     """
     collectors, populate_caller_metadata = _parse_typed_observers(case)
-    graph, state_cls = _build_simple_llm_graph(case, populate_caller_metadata=populate_caller_metadata)
-    extra: _AllEventsCollector | None = None
-    if expect_failure and not any(c.filter_event_type is None for c in collectors.values()):
-        extra = _AllEventsCollector()
-    final, exc = await _invoke_typed_fixture(case, collectors, graph, state_cls, extra_observer=extra)
+    graph, state_cls, provider = _build_simple_llm_graph(
+        case, populate_caller_metadata=populate_caller_metadata
+    )
+    try:
+        extra: _AllEventsCollector | None = None
+        if expect_failure and not any(c.filter_event_type is None for c in collectors.values()):
+            extra = _AllEventsCollector()
+        final, exc = await _invoke_typed_fixture(case, collectors, graph, state_cls, extra_observer=extra)
 
-    expected = cast("dict[str, Any]", case.get("expected") or {})
-    if expect_failure:
-        assert exc is not None, "failure-path fixture expected an exception"
-        node_completed = cast("dict[str, Any] | None", expected.get("node_completed_event_carries_error"))
-        if node_completed:
-            # Source for the assertion: an unfiltered named collector
-            # when present, otherwise the failure-path-only extra
-            # ``_AllEventsCollector``.
-            unfiltered_named = next((c for c in collectors.values() if c.filter_event_type is None), None)
-            source = (
-                unfiltered_named.events
-                if unfiltered_named is not None
-                else (extra.events if extra is not None else [])
-            )
-            _assert_node_completed_event_carries_error(source, node_completed)
-    else:
-        if final is None:
-            raise AssertionError("expected a non-None final state on success path")
-    observer_expectations = cast("dict[str, Any]", expected.get("observers") or {})
-    for name, expectations in observer_expectations.items():
-        collector = collectors.get(name)
-        if collector is None:
-            raise AssertionError(f"fixture references unknown observer {name!r}")
-        _assert_observer_expectations(name, collector, cast("dict[str, Any]", expectations))
+        expected = cast("dict[str, Any]", case.get("expected") or {})
+        if expect_failure:
+            assert exc is not None, "failure-path fixture expected an exception"
+            node_completed = cast("dict[str, Any] | None", expected.get("node_completed_event_carries_error"))
+            if node_completed:
+                # Source for the assertion: an unfiltered named collector
+                # when present, otherwise the failure-path-only extra
+                # ``_AllEventsCollector``.
+                unfiltered_named = next((c for c in collectors.values() if c.filter_event_type is None), None)
+                source = (
+                    unfiltered_named.events
+                    if unfiltered_named is not None
+                    else (extra.events if extra is not None else [])
+                )
+                _assert_node_completed_event_carries_error(source, node_completed)
+        else:
+            if final is None:
+                raise AssertionError("expected a non-None final state on success path")
+        observer_expectations = cast("dict[str, Any]", expected.get("observers") or {})
+        for name, expectations in observer_expectations.items():
+            collector = collectors.get(name)
+            if collector is None:
+                raise AssertionError(f"fixture references unknown observer {name!r}")
+            _assert_observer_expectations(name, collector, cast("dict[str, Any]", expectations))
+    finally:
+        # _build_simple_llm_graph hands ownership of the provider's
+        # httpx.AsyncClient to the runner; close it to release the
+        # connection pool.
+        await provider.aclose()
 
 
 async def _run_fixture_050(spec: Mapping[str, Any]) -> None:
@@ -3516,6 +3529,8 @@ async def _run_typed_event_fanout_case(case: Mapping[str, Any]) -> None:
         for handle in handles:
             handle.remove()
         await outer_compiled.drain()
+        # Release the underlying httpx.AsyncClient connection pool.
+        await provider.aclose()
 
     expected = cast("dict[str, Any]", case.get("expected") or {})
     observer_expectations = cast("dict[str, Any]", expected.get("observers") or {})
@@ -3618,6 +3633,8 @@ async def _run_typed_event_branches_case(case: Mapping[str, Any]) -> None:
         for handle in handles:
             handle.remove()
         await outer_compiled.drain()
+        # Release the underlying httpx.AsyncClient connection pool.
+        await provider.aclose()
 
     expected = cast("dict[str, Any]", case.get("expected") or {})
     observer_expectations = cast("dict[str, Any]", expected.get("observers") or {})
