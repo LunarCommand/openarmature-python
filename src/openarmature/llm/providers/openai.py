@@ -525,20 +525,46 @@ class OpenAIProvider:
             # observers filtering on the sentinel namespace see the
             # NodeEvent pair above. Failure path doesn't reach here.
             dispatch(
-                self._build_llm_completion_event(response, latency_ms),
+                self._build_llm_completion_event(
+                    response,
+                    latency_ms,
+                    call_id=call_id,
+                    input_messages=serialized_messages,
+                    request_params=request_params,
+                    request_extras=request_extras,
+                    active_prompt=active_prompt,
+                    active_prompt_group=active_prompt_group,
+                ),
             )
         return response
 
-    def _build_llm_completion_event(self, response: Response, latency_ms: float) -> LlmCompletionEvent:
+    def _build_llm_completion_event(
+        self,
+        response: Response,
+        latency_ms: float,
+        *,
+        call_id: str,
+        input_messages: list[dict[str, Any]],
+        request_params: dict[str, Any],
+        request_extras: dict[str, Any],
+        active_prompt: Any,
+        active_prompt_group: Any,
+    ) -> LlmCompletionEvent:
         """Construct the typed LlmCompletionEvent for the success path.
 
         Sources identity / scoping fields from the calling-node
-        ContextVars and outcome fields from the response. The calling-
-        node namespace is the FULL namespace tuple (not the legacy
-        sentinel pseudo-namespace); node_name is the last element of
-        the namespace (the user-defined node that issued the call).
-        Outside any node body (namespace empty), node_name is the
-        empty string.
+        ContextVars and outcome fields from the response. Request-side
+        fields (per proposal 0057) are passed through from the
+        provider's complete() local state — serialized message list,
+        the gen_ai.request.* parameter mapping, the RuntimeConfig
+        extras, the prompt-context snapshots taken at dispatch time,
+        and the call-id minted at the call's start.
+
+        The calling-node namespace is the FULL namespace tuple (not
+        the legacy sentinel pseudo-namespace); node_name is the last
+        element of the namespace (the user-defined node that issued
+        the call). Outside any node body (namespace empty), node_name
+        is the empty string.
         """
 
         namespace = current_namespace_prefix()
@@ -560,6 +586,14 @@ class OpenAIProvider:
             # frozen view; if a node body mutates metadata after the
             # snapshot, the event still carries the at-emission view.
             caller_metadata = dict(current_invocation_metadata())
+        # ``output_content`` is None on tool-call-only assistant
+        # messages per llm-provider §6 mutual-exclusion: the
+        # tool-call path and structured-content path are mutually
+        # exclusive at the response level, and provider.complete()
+        # leaves the AssistantMessage.content as the empty string on
+        # the tool-call path (which we project to None per the
+        # typed-event contract).
+        output_content = response.message.content or None
         return LlmCompletionEvent(
             invocation_id=invocation_id,
             correlation_id=current_correlation_id(),
@@ -570,10 +604,18 @@ class OpenAIProvider:
             branch_name=current_branch_name(),
             provider=self._genai_system,
             model=self.model,
-            request_id=response.response_id,
+            response_id=response.response_id,
+            response_model=response.response_model,
             usage=response.usage,
             latency_ms=latency_ms,
             finish_reason=response.finish_reason,
+            input_messages=input_messages,
+            output_content=output_content,
+            request_params=request_params,
+            request_extras=request_extras,
+            active_prompt=active_prompt,
+            active_prompt_group=active_prompt_group,
+            call_id=call_id,
             caller_invocation_metadata=caller_metadata,
         )
 

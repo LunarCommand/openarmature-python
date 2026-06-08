@@ -450,6 +450,22 @@ class InvocationCompletedEvent:
 #
 # Field naming matches the spec-canonical names verbatim per the spec
 # Q5 ack — Python snake_case happens to match the spec table 1:1.
+#
+# Spec proposal 0057 (v0.51.0) extension: adds 8 additive request-side
+# fields (input_messages, output_content, request_params,
+# request_extras, active_prompt, active_prompt_group, call_id,
+# response_model) and renames request_id → response_id to match the
+# response-side data the field carries. Inline image bytes in
+# input_messages MUST be redacted per observability §5.5.5 before
+# population — the provider reuses _serialize_messages_for_payload
+# which already enforces the redaction. The three payload-bearing
+# fields (input_messages, output_content, request_extras) are
+# populated unconditionally on the typed event per §5.5.7; observer-
+# side privacy gates (OTel disable_llm_payload, Langfuse equivalents)
+# apply at rendering, symmetric with the §5.5.1 span attribute path.
+# Custom queryable observers (per observability §9) own their own
+# redaction posture — gating belongs at rendering with the consumer's
+# awareness.
 @dataclass(frozen=True)
 class LlmCompletionEvent:
     """A typed LLM provider call event delivered to observers.
@@ -473,17 +489,55 @@ class LlmCompletionEvent:
     - ``branch_name``: parallel-branches branch name when the
       calling node ran inside a branch; ``None`` otherwise.
     - ``provider``: provider identifier; matches ``gen_ai.system``.
-    - ``model``: the model identifier the call targeted.
-    - ``request_id``: provider-returned response id; ``None`` when
+    - ``model``: the model identifier the call targeted (the
+      request-side bound model; distinct from ``response_model``).
+    - ``response_id``: provider-returned response id; ``None`` when
       the provider didn't return one.
-    - ``usage``: token-accounting record per ``Response.usage``
-      shape. Reuses the existing ``openarmature.llm.response.Usage``
-      class. ``None`` when the call returned no usage at all.
+    - ``response_model``: provider-returned model identifier;
+      distinct from ``model`` (the provider may return a more
+      specific identifier than the one requested). ``None`` when
+      the provider didn't return one.
+    - ``usage``: token-accounting record reusing the existing
+      ``openarmature.llm.response.Usage`` class. ``None`` when the
+      call returned no usage at all.
     - ``latency_ms``: wall-clock latency measured at the adapter
       boundary, in milliseconds. ``None`` when latency was not
       measured.
     - ``finish_reason``: the call's finish reason; ``None`` when
       the call did not complete normally.
+    - ``input_messages``: the message list the call was made with,
+      serialized to the plain-dict shape. Non-nullable; empty list
+      when the call had no history. Inline image bytes are
+      redacted before population (see the comment block above for
+      the redaction contract).
+    - ``output_content``: the assistant message's content string
+      from the response. ``None`` on tool-call-only responses
+      (the structured-response and tool-call paths are mutually
+      exclusive at the response level).
+    - ``request_params``: the GenAI request-parameter set the
+      caller supplied. Absence-is-meaningful: only caller-supplied
+      keys appear; empty mapping when none supplied. Keys are the
+      cross-vendor parameter names without the ``gen_ai.request.``
+      prefix (e.g. ``temperature``, ``max_tokens``).
+    - ``request_extras``: the ``RuntimeConfig`` extras pass-
+      through bag in native mapping form (not JSON-encoded).
+      Empty mapping when no extras supplied.
+    - ``active_prompt``: 5-field identity snapshot of the active
+      ``PromptResult`` at LLM-call time (``name`` / ``version`` /
+      ``label`` / ``template_hash`` / ``rendered_hash``).
+      ``None`` when the call ran outside any prompt-context
+      binding. Typed as ``Any`` because the prompts package
+      imports State indirectly; observer-side narrowing reads
+      the attribute names directly.
+    - ``active_prompt_group``: ``{group_name}`` snapshot when the
+      call ran inside a ``PromptGroup`` context; ``None``
+      otherwise. Same ``Any`` typing rationale as
+      ``active_prompt``.
+    - ``call_id``: per-call disambiguator minted by the
+      implementation. Always present, freshly minted per
+      ``provider.complete()`` call, stable for the call's
+      lifetime, unique within the run. Distinct from
+      ``response_id``.
     - ``caller_invocation_metadata``: optional snapshot of caller-
       supplied invocation metadata at LLM-call time. Populated
       only when the provider's opt-in flag is set (per-language
@@ -499,13 +553,26 @@ class LlmCompletionEvent:
     branch_name: str | None
     provider: str
     model: str
-    request_id: str | None
+    response_id: str | None
+    response_model: str | None
     # Usage is a string-typed forward reference per the TYPE_CHECKING
     # import above — keeps the runtime import direction graph → llm
     # off the module-load path while preserving pyright resolution.
     usage: "Usage | None"
     latency_ms: float | None
     finish_reason: str | None
+    # Proposal 0057 (spec v0.51.0) additive request-side fields.
+    # Non-nullable for input_messages / request_params /
+    # request_extras — absence is represented as empty list / empty
+    # mapping, not None. output_content stays nullable for tool-
+    # call-only assistant messages.
+    input_messages: list[dict[str, Any]]
+    output_content: str | None
+    request_params: Mapping[str, Any]
+    request_extras: Mapping[str, Any]
+    active_prompt: Any
+    active_prompt_group: Any
+    call_id: str
     caller_invocation_metadata: Mapping[str, AttributeValue] | None = None
 
 

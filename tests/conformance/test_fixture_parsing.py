@@ -334,6 +334,37 @@ _DEFERRED_FIXTURES: dict[str, str] = {
     "observability/056-llm-completion-event-strict-serial-ordering": (
         "Proposal 0049 typed LLM completion event; queued for v0.13.0"
     ),
+    # Proposal 0057 (LlmCompletionEvent field-set extension, v0.51.0)
+    # — fixtures 060-068 share the same ``typed_observers`` directive
+    # shape as 050-056 and inherit the same parser-deferral status
+    # pending the harness model's typed-event-collector schema work.
+    "observability/060-llm-completion-event-input-messages-populated": (
+        "Proposal 0057 typed event request-side fields; queued for v0.13.0"
+    ),
+    "observability/061-llm-completion-event-output-content-populated": (
+        "Proposal 0057 typed event request-side fields; queued for v0.13.0"
+    ),
+    "observability/062-llm-completion-event-request-params-populated": (
+        "Proposal 0057 typed event request-side fields; queued for v0.13.0"
+    ),
+    "observability/063-llm-completion-event-request-extras-populated": (
+        "Proposal 0057 typed event request-side fields; queued for v0.13.0"
+    ),
+    "observability/064-llm-completion-event-active-prompt-populated": (
+        "Proposal 0057 typed event request-side fields; queued for v0.13.0"
+    ),
+    "observability/065-llm-completion-event-active-prompt-null": (
+        "Proposal 0057 typed event request-side fields; queued for v0.13.0"
+    ),
+    "observability/066-llm-completion-event-active-prompt-group-populated": (
+        "Proposal 0057 typed event request-side fields; queued for v0.13.0"
+    ),
+    "observability/067-llm-completion-event-call-id-always-present-and-distinct": (
+        "Proposal 0057 typed event request-side fields; queued for v0.13.0"
+    ),
+    "observability/068-llm-completion-event-response-model-distinct-from-request": (
+        "Proposal 0057 typed event request-side fields; queued for v0.13.0"
+    ),
     # Proposal 0050 (failure-isolation middleware + call-level retry,
     # v0.42.0) — llm-provider fixtures 056-058 (call-level retry) and
     # pipeline-utilities fixtures 058-063 (failure-isolation

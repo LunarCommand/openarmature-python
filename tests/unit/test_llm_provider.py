@@ -1375,7 +1375,7 @@ async def test_llm_completion_event_carries_typed_outcome_fields() -> None:
     assert typed.provider == "vllm"
     assert typed.model == "m-test"
     assert typed.finish_reason == "stop"
-    assert typed.request_id == "x"  # the helper returns id="x"
+    assert typed.response_id == "x"  # the helper returns id="x"
     # usage flows through the shared Usage shape; cache field surfaces
     # via the typed event without separate plumbing per the
     # proposal-0047 + proposal-0049 architectural pair.
@@ -1383,6 +1383,243 @@ async def test_llm_completion_event_carries_typed_outcome_fields() -> None:
     assert typed.usage.cached_tokens == 50
     assert typed.latency_ms is not None
     assert typed.latency_ms >= 0.0
+
+
+async def test_llm_completion_event_carries_input_messages_and_output_content() -> None:
+    # Proposal 0057 request-side fields: input_messages carries the
+    # serialized message list; output_content carries the assistant
+    # message's text. Both populated unconditionally on the typed
+    # event (privacy gating sits at observer rendering).
+    events, token = _collecting_dispatch()
+    transport = _make_openai_response_with_usage(
+        {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
+    )
+    provider = OpenAIProvider(base_url="http://test", model="m", api_key="k", transport=transport)
+    try:
+        await provider.complete(
+            [SystemMessage(content="Be helpful."), UserMessage(content="hi")],
+        )
+    finally:
+        await provider.aclose()
+        _release_dispatch(token)
+
+    typed = next(e for e in events if isinstance(e, LlmCompletionEvent))
+    assert typed.input_messages == [
+        {"role": "system", "content": "Be helpful."},
+        {"role": "user", "content": "hi"},
+    ]
+    # The mock response returns content="ok" — see _make_openai_response_with_usage.
+    assert typed.output_content == "ok"
+
+
+async def test_llm_completion_event_output_content_none_on_tool_call_response() -> None:
+    # Per llm-provider §6 mutual-exclusion: tool-call responses leave
+    # AssistantMessage.content as the empty string. The typed event
+    # projects that to None.
+    def _handler(_req: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "id": "x",
+                "object": "chat.completion",
+                "created": 0,
+                "model": "m",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": "",
+                            "tool_calls": [
+                                {
+                                    "id": "call_1",
+                                    "type": "function",
+                                    "function": {"name": "echo", "arguments": '{"x": 1}'},
+                                }
+                            ],
+                        },
+                        "finish_reason": "tool_calls",
+                    }
+                ],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+            },
+        )
+
+    events, token = _collecting_dispatch()
+    provider = OpenAIProvider(
+        base_url="http://test",
+        model="m",
+        api_key="k",
+        transport=httpx.MockTransport(_handler),
+    )
+    try:
+        await provider.complete(
+            [UserMessage(content="call echo")],
+            tools=[Tool(name="echo", description="", parameters={})],
+        )
+    finally:
+        await provider.aclose()
+        _release_dispatch(token)
+
+    typed = next(e for e in events if isinstance(e, LlmCompletionEvent))
+    assert typed.output_content is None
+    assert typed.finish_reason == "tool_calls"
+
+
+async def test_llm_completion_event_request_params_only_carries_supplied_keys() -> None:
+    # Proposal 0057 request_params shape: absence-is-meaningful. Only
+    # caller-supplied gen_ai.request.* keys appear; unset RuntimeConfig
+    # fields are omitted from the mapping (NOT included with None
+    # values).
+    from openarmature.llm import RuntimeConfig
+
+    events, token = _collecting_dispatch()
+    transport = _make_openai_response_with_usage(
+        {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+    )
+    provider = OpenAIProvider(base_url="http://test", model="m", api_key="k", transport=transport)
+    try:
+        await provider.complete(
+            [UserMessage(content="hi")],
+            config=RuntimeConfig(temperature=0.7, max_tokens=64),
+        )
+    finally:
+        await provider.aclose()
+        _release_dispatch(token)
+
+    typed = next(e for e in events if isinstance(e, LlmCompletionEvent))
+    # Only the two caller-supplied keys; not top_p / seed / etc.
+    assert dict(typed.request_params) == {"temperature": 0.7, "max_tokens": 64}
+
+
+async def test_llm_completion_event_request_extras_flows_through() -> None:
+    # Proposal 0057 request_extras: RuntimeConfig extras pass-through
+    # in native mapping form (not JSON-encoded).
+    from openarmature.llm import RuntimeConfig
+
+    events, token = _collecting_dispatch()
+    transport = _make_openai_response_with_usage(
+        {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+    )
+    provider = OpenAIProvider(base_url="http://test", model="m", api_key="k", transport=transport)
+    try:
+        # ``guided_decoding`` is a vLLM-specific extra; RuntimeConfig
+        # accepts undeclared fields via extra="allow". Use model_validate
+        # so pyright doesn't flag the undeclared kwarg.
+        await provider.complete(
+            [UserMessage(content="hi")],
+            config=RuntimeConfig.model_validate({"guided_decoding": {"choice": ["a", "b"]}}),
+        )
+    finally:
+        await provider.aclose()
+        _release_dispatch(token)
+
+    typed = next(e for e in events if isinstance(e, LlmCompletionEvent))
+    assert dict(typed.request_extras) == {"guided_decoding": {"choice": ["a", "b"]}}
+
+
+async def test_llm_completion_event_response_model_distinct_from_request_model() -> None:
+    # Proposal 0057 response_model: provider-returned identifier,
+    # distinct from the request-bound model. The OpenAI Chat Completions
+    # spec lets the provider return a more specific identifier
+    # (e.g. requested gpt-4o → response model gpt-4o-2024-08-06).
+    def _handler(_req: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "id": "cc-1",
+                "object": "chat.completion",
+                "created": 0,
+                "model": "gpt-4o-2024-08-06",  # distinct from bound model
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "ok"},
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+            },
+        )
+
+    events, token = _collecting_dispatch()
+    provider = OpenAIProvider(
+        base_url="http://test", model="gpt-4o", api_key="k", transport=httpx.MockTransport(_handler)
+    )
+    try:
+        await provider.complete([UserMessage(content="hi")])
+    finally:
+        await provider.aclose()
+        _release_dispatch(token)
+
+    typed = next(e for e in events if isinstance(e, LlmCompletionEvent))
+    assert typed.model == "gpt-4o"  # request-side bound model
+    assert typed.response_model == "gpt-4o-2024-08-06"  # provider-returned
+
+
+async def test_llm_completion_event_call_id_always_present_and_distinct_across_calls() -> None:
+    # Proposal 0057 call_id contract: always present, freshly minted
+    # per provider.complete() call. Two calls produce two distinct
+    # call_ids.
+    events, token = _collecting_dispatch()
+    transport = _make_openai_response_with_usage(
+        {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+    )
+    provider = OpenAIProvider(base_url="http://test", model="m", api_key="k", transport=transport)
+    try:
+        await provider.complete([UserMessage(content="hi")])
+        await provider.complete([UserMessage(content="hi again")])
+    finally:
+        await provider.aclose()
+        _release_dispatch(token)
+
+    typed_events = [e for e in events if isinstance(e, LlmCompletionEvent)]
+    assert len(typed_events) == 2
+    assert typed_events[0].call_id
+    assert typed_events[1].call_id
+    assert typed_events[0].call_id != typed_events[1].call_id
+
+
+async def test_llm_completion_event_input_messages_redacts_inline_image_bytes() -> None:
+    # Privacy contract: inline image bytes are redacted from
+    # input_messages before population. The serializer replaces the
+    # ImageSourceInline source with {"type": "inline_redacted",
+    # "byte_count": N}; the raw base64_data must never appear on the
+    # typed event. Catches regressions in _serialize_messages_for_payload
+    # that would leak bytes through the typed-event surface.
+    from openarmature.llm import ImageBlock, ImageSourceInline, TextBlock
+
+    inline_bytes = "ZmFrZS1iYXNlNjQtZGF0YQ=="  # arbitrary base64
+    events, token = _collecting_dispatch()
+    transport = _make_openai_response_with_usage(
+        {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+    )
+    provider = OpenAIProvider(base_url="http://test", model="m", api_key="k", transport=transport)
+    try:
+        await provider.complete(
+            [
+                UserMessage(
+                    content=[
+                        TextBlock(text="Describe this."),
+                        ImageBlock(
+                            source=ImageSourceInline(base64_data=inline_bytes),
+                            media_type="image/png",
+                        ),
+                    ]
+                )
+            ]
+        )
+    finally:
+        await provider.aclose()
+        _release_dispatch(token)
+
+    typed = next(e for e in events if isinstance(e, LlmCompletionEvent))
+    # Raw base64 bytes MUST NOT appear anywhere in input_messages.
+    serialized = repr(typed.input_messages)
+    assert inline_bytes not in serialized, "inline image bytes leaked into LlmCompletionEvent.input_messages"
+    # Sanity: the redaction marker IS present.
+    assert "inline_redacted" in serialized
+    assert "byte_count" in serialized
 
 
 async def test_caller_invocation_metadata_off_by_default() -> None:
@@ -1462,7 +1699,7 @@ async def test_llm_completion_event_request_id_none_when_response_omits_id() -> 
         _release_dispatch(token)
 
     typed = next(e for e in events if isinstance(e, LlmCompletionEvent))
-    assert typed.request_id is None
+    assert typed.response_id is None
 
 
 async def test_llm_completion_event_arrives_after_sentinel_completed_within_provider_emission() -> None:

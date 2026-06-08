@@ -32,7 +32,7 @@
 
 [manifest]
 implementation = "openarmature-python"
-spec_pin = "v0.46.0"
+spec_pin = "v0.51.0"
 
 # Status values:
 #   implemented   — shipped behavior matches the proposal's contract
@@ -200,6 +200,21 @@ since = "0.11.0"
 status = "not-yet"
 
 [proposals."0020"]
+status = "not-yet"
+
+# Spec (proposal 0021).  Suspension capability — async-pause +
+# resume primitive (``suspend()`` + ``resume()``) layering on the
+# graph engine.  Python has not yet shipped suspension; v0.13.0
+# leaves the capability not-yet-implemented.
+[proposals."0021"]
+status = "not-yet"
+
+# Spec v0.49.0 (proposal 0022).  Harness capability — abstract
+# contract for wrapping the engine in deployment runtimes
+# (HTTP / event-bus / queue / CLI / streaming).  Python has not
+# yet shipped a harness binding; v0.13.0 leaves the capability
+# not-yet-implemented.  Composes with 0056 (chat sub-spec).
+[proposals."0022"]
 status = "not-yet"
 
 [proposals."0042"]
@@ -462,3 +477,35 @@ since = "0.12.0"
 [proposals."0054"]
 status = "implemented"
 since = "0.12.0"
+
+# Spec v0.47.0 (proposal 0055).  Conformance-adapter capability —
+# descriptive ratification of the existing fixture / directive
+# system. No code change; python's adapter is already structured
+# per the spec text by virtue of having grown alongside the
+# fixtures since proposal 0001.  Matches the Textual impl-tracking
+# precedent (0019 / 0026 / 0030 / 0051 / 0053).
+[proposals."0055"]
+status = "textual-only"
+since = "0.13.0"
+
+# Spec v0.48.0 (proposal 0056).  Harness-chat capability — new
+# harness sub-spec ratifying the chat-loop deployment shape
+# (ChatMessage, conversation-history convention, send() callable,
+# send_streaming() forward-looking surface, error-bucket → user-
+# facing-reply mapping).  Python does not yet ship a chat-harness
+# binding; v0.13.0 leaves the capability not-yet-implemented.
+[proposals."0056"]
+status = "not-yet"
+
+# Spec v0.51.0 (proposal 0057).  LlmCompletionEvent field-set
+# extension — eight additive request-side fields on the typed
+# event variant + ``request_id`` → ``response_id`` rename + new
+# ``response_model`` field.  Python lands the field-set extension
+# + rename + provider population in v0.13.0 PR 3a; OTel + Langfuse
+# observers continue driving their §5.5 surface off the sentinel
+# NodeEvent pair through this PR (observer migration to type
+# discrimination is queued for follow-up PRs 3b / 3c against the
+# same v0.13.0 release).
+[proposals."0057"]
+status = "implemented"
+since = "0.13.0"
