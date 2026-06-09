@@ -204,7 +204,11 @@ def _capability_summaries(spec_tag: str) -> str:
         (
             f"_Sourced from openarmature-spec {spec_tag}. Each entry below "
             + "reproduces §1 (Purpose) and §2 (Concepts) of the capability's "
-            + "`spec.md`. For the full spec text (execution model, error semantics, "
+            + "`spec.md` verbatim — including additions from accepted proposals "
+            + "that this Python implementation may not yet ship. For per-proposal "
+            + "implementation status (implemented / partial / textual-only / "
+            + "not-yet), see the `conformance.toml` manifest at the repo root. "
+            + "For the full spec text (execution model, error semantics, "
             + "determinism, observer hooks, etc.) see the linked docs site._"
         ),
     ]
