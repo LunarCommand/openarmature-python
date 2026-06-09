@@ -26,6 +26,7 @@ import json
 import uuid
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
+from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 
 from openarmature.graph.events import (
@@ -191,7 +192,6 @@ class _InvState:
     open_observations: dict[_StackKey, _OpenObservation] = field(
         default_factory=dict[_StackKey, _OpenObservation]
     )
-    open_llm_observations: dict[str, _OpenObservation] = field(default_factory=dict[str, _OpenObservation])
     # Synthetic subgraph dispatch Span observations, keyed by namespace
     # prefix. Per spec §8.3 each subgraph wrapper produces a Span
     # observation in its parent's Trace; descendant node observations
@@ -366,23 +366,23 @@ class LangfuseObserver:
         if isinstance(event, InvocationCompletedEvent):
             self._handle_invocation_completed(event)
             return
-        # Proposal 0049 typed LlmCompletionEvent: ignored during the
-        # dual-emit window — the Langfuse mapping continues to drive
-        # its §5.5 Generation observation lifecycle off the sentinel
-        # NodeEvent pair the provider emits alongside the typed event.
-        # Migration to type discrimination lands in a subsequent PR;
-        # this early-return keeps the observer Protocol-compatible
-        # without changing behavior.
+        # Proposal 0049 typed LlmCompletionEvent (success path). Drives
+        # the §5.5 Generation observation lifecycle for successful
+        # provider calls. Failures don't emit this variant; they flow
+        # through the sentinel-pair error path below.
         if isinstance(event, LlmCompletionEvent):
+            if not self.disable_llm_spans:
+                self._handle_typed_llm_completion(event)
             return
         if isinstance(event, MetadataAugmentationEvent):
             self._handle_metadata_augmentation(event)
             return
-        # LLM provider events use a sentinel namespace per §5.5; route
-        # them to the dedicated Generation path.
+        # LLM provider sentinel events: failure-path completed opens +
+        # closes an ERROR-level Generation; everything else is a no-op
+        # (success-path typed handler above owns the Generation).
         if event.namespace == LLM_NAMESPACE:
             if not self.disable_llm_spans:
-                self._handle_llm_event(event)
+                self._handle_llm_error_event(event)
             return
         if event.phase == "started":
             self._open_started_observation(event)
@@ -1244,13 +1244,12 @@ class LangfuseObserver:
         if inv_state is None:
             return
         # Order: deepest leaves first so parents see all children
-        # closed before they end. LLM observations → leaf nodes
-        # (sorted deepest-first by namespace length) → per-instance
-        # fan-out dispatches → subgraph dispatches.
-        for call_id in list(inv_state.open_llm_observations.keys()):
-            obs = inv_state.open_llm_observations.pop(call_id, None)
-            if obs is not None:
-                obs.handle.end()
+        # closed before they end. Leaf node observations (sorted
+        # deepest-first by namespace length) → per-instance fan-out
+        # dispatches → subgraph dispatches. LLM observations don't
+        # appear here — both the success and error paths open + close
+        # the Generation in one shot at handler-time, so there are no
+        # in-flight LLM observations to drain.
         for key in sorted(
             inv_state.open_observations.keys(),
             key=lambda k: -len(k[0]),
@@ -1321,82 +1320,155 @@ class LangfuseObserver:
     # Generation observation lifecycle (LLM provider events)
     # ------------------------------------------------------------------
 
-    def _handle_llm_event(self, event: NodeEvent) -> None:
+    # v0.13.0 (proposal 0049 + 0057): success-path Generation lifecycle
+    # is driven by the typed LlmCompletionEvent — opened and closed in
+    # one shot at typed-event arrival, with start_time back-dated by
+    # latency_ms so the observation's duration reflects the adapter-
+    # boundary measurement rather than dispatcher queue delay. Failure
+    # path keeps the sentinel NodeEvent pair (LlmCompletionEvent is
+    # success-only per proposal 0049 §3 alternative 3). The provider
+    # also dropped sentinel-pair emission on the success path in this
+    # release, so on success the typed event is the only signal the
+    # Generation observation has to fire from.
+    def _handle_typed_llm_completion(self, event: LlmCompletionEvent) -> None:
+        """Open + close the Generation observation from the typed
+        LlmCompletionEvent (success path)."""
+        # Mid-call metadata augmentation can't reach this observation:
+        # the typed event arrives only after complete() returns, and
+        # the observation is back-dated past any augmentation event
+        # that fired while the call was in flight. Since complete()
+        # is awaited, node bodies can't actually run augmentation
+        # mid-call, so this is theoretical only.
         from openarmature.observability.correlation import (
             current_correlation_id,
             current_invocation_id,
         )
 
+        invocation_id = current_invocation_id()
+        if invocation_id is None:
+            return
+        correlation_id = current_correlation_id()
+        # The Trace MAY not exist yet if the LLM call fires before any
+        # node `started` event has hit this observer. Create-on-demand
+        # mirrors the sentinel-pair handler's behavior.
+        if invocation_id not in self._inv_states:
+            self._open_trace_for_typed_event(invocation_id, correlation_id, event)
+        inv_state = self._inv_states[invocation_id]
+        # Back-date start_time using latency_ms; fall back to end_time
+        # for both when latency is missing (zero-duration observation,
+        # mirroring the OTel path).
+        end_time = datetime.now(UTC)
+        if event.latency_ms is not None:
+            start_time = end_time - timedelta(milliseconds=event.latency_ms)
+        else:
+            start_time = end_time
+        parent_observation_id = self._resolve_llm_parent_observation_id(
+            inv_state,
+            calling_namespace_prefix=event.namespace,
+            calling_attempt_index=event.attempt_index,
+            calling_fan_out_index=event.fan_out_index,
+            calling_branch_name=event.branch_name,
+        )
+        metadata = self._typed_event_metadata(event, correlation_id)
+        model_parameters: dict[str, Any] = dict(event.request_params or {})
+        input_value: Any = None
+        output_value: Any = None
+        if not self.disable_llm_payload:
+            if event.input_messages:
+                input_value = self._maybe_truncate_for_input(event.input_messages)
+            if event.output_content is not None:
+                output_value = self._maybe_truncate_for_output(event.output_content)
+            if event.request_extras:
+                metadata["request_extras"] = self._maybe_truncate_for_extras(dict(event.request_extras))
+        target_trace_id = self._trace_id_for(inv_state, event.namespace, event.fan_out_index)
+        handle = self.client.generation(
+            trace_id=target_trace_id,
+            name="openarmature.llm.complete",
+            model=event.model,
+            model_parameters=model_parameters,
+            input=input_value,
+            output=output_value,
+            metadata=metadata,
+            parent_observation_id=parent_observation_id,
+            prompt=self._resolve_prompt_link_from_typed_event(event),
+            start_time=start_time,
+        )
+        usage = self._usage_from_typed_event(event)
+        end_kwargs: dict[str, Any] = {}
+        if usage is not None:
+            end_kwargs["usage"] = usage
+        handle.end(end_time=end_time, **end_kwargs)
+
+    def _handle_llm_error_event(self, event: NodeEvent) -> None:
+        """Emit an ERROR-level Generation observation from the sentinel
+        NodeEvent on the failure path. Success-path sentinel completion
+        is no longer emitted by the provider in v0.13.0; this handler
+        only fires for failures."""
+        from openarmature.observability.correlation import (
+            current_correlation_id,
+            current_invocation_id,
+        )
+
+        if event.phase != "completed":
+            # Sentinel started becomes a no-op once the success-side
+            # emission drops. Failures only emit the completed half.
+            return
         if not isinstance(event.pre_state, LlmEventPayload):
-            # Defensive — sentinel-namespaced events MUST carry an
-            # LlmEventPayload per llm-provider / observability §5.5.
+            return
+        payload = event.pre_state
+        if payload.error_type is None:
+            # Defensive — success path no longer emits the sentinel
+            # pair; if a non-error sentinel completion slips through
+            # (e.g., legacy custom provider not yet migrated), the
+            # typed event handler owns the Generation.
             return
         invocation_id = current_invocation_id()
         if invocation_id is None:
             return
-        payload = event.pre_state
-        # The Trace MAY not exist yet if the LLM call fires before any
-        # node `started` event has hit this observer (race-y under
-        # tests that prepare via `prepare_sync` only). The in-memory
-        # client tolerates create-on-demand; production SDK adapters
-        # should too.
-        if invocation_id not in self._inv_states:
-            self._open_trace(invocation_id, current_correlation_id(), event)
-        inv_state = self._inv_states[invocation_id]
         correlation_id = current_correlation_id()
-
-        if event.phase == "started":
-            parent_observation_id = self._resolve_llm_parent_observation_id(inv_state, payload)
-            metadata, model_parameters, input_value, output_value = self._llm_metadata_and_payload(
-                payload, correlation_id, phase="started"
-            )
-            target_trace_id = self._trace_id_for(
-                inv_state, payload.calling_namespace_prefix, payload.calling_fan_out_index
-            )
-            handle = self.client.generation(
-                trace_id=target_trace_id,
-                name="openarmature.llm.complete",
-                model=payload.model,
-                model_parameters=model_parameters,
-                input=input_value,
-                output=output_value,
-                metadata=metadata,
-                parent_observation_id=parent_observation_id,
-                prompt=self._resolve_prompt_link(payload),
-            )
-            inv_state.open_llm_observations[payload.call_id] = _OpenObservation(
-                handle=handle,
-                fan_out_index_chain=event.fan_out_index_chain,
-                branch_name_chain=event.branch_name_chain,
-            )
-            return
-
-        # completed: pop the started handle and finalize.
-        observation = inv_state.open_llm_observations.pop(payload.call_id, None)
-        if observation is None:
-            return
-        metadata, _model_parameters, _input_value, output_value = self._llm_metadata_and_payload(
-            payload, correlation_id, phase="completed"
+        if invocation_id not in self._inv_states:
+            self._open_trace(invocation_id, correlation_id, event)
+        inv_state = self._inv_states[invocation_id]
+        parent_observation_id = self._resolve_llm_parent_observation_id(
+            inv_state,
+            calling_namespace_prefix=payload.calling_namespace_prefix,
+            calling_attempt_index=payload.calling_attempt_index,
+            calling_fan_out_index=payload.calling_fan_out_index,
+            calling_branch_name=payload.calling_branch_name,
         )
-        end_kwargs: dict[str, Any] = {"metadata": metadata}
-        if output_value is not None:
-            end_kwargs["output"] = output_value
-        usage = self._usage_from_payload(payload)
-        if usage is not None:
-            end_kwargs["usage"] = usage
-        # Error-category mapping: §8.4.2 + §8.4.3 (an LLM provider
-        # error_category lands on the Generation observation's level
-        # and statusMessage the same as on a Span observation).
-        if payload.error_category is not None:
-            end_kwargs["level"] = "ERROR"
-            end_kwargs["status_message"] = payload.error_category
-        observation.handle.end(**end_kwargs)
+        metadata, model_parameters, input_value, _ = self._llm_metadata_and_payload(
+            payload, correlation_id, phase="started"
+        )
+        target_trace_id = self._trace_id_for(
+            inv_state, payload.calling_namespace_prefix, payload.calling_fan_out_index
+        )
+        handle = self.client.generation(
+            trace_id=target_trace_id,
+            name="openarmature.llm.complete",
+            model=payload.model,
+            model_parameters=model_parameters,
+            input=input_value,
+            metadata=metadata,
+            parent_observation_id=parent_observation_id,
+            prompt=self._resolve_prompt_link(payload),
+        )
+        # Error-category mapping: §8.4.2 + §8.4.3.
+        end_kwargs: dict[str, Any] = {
+            "level": "ERROR",
+            "status_message": payload.error_category or payload.error_type,
+        }
+        handle.end(**end_kwargs)
 
     def _resolve_llm_parent_observation_id(
-        self, inv_state: _InvState, payload: LlmEventPayload
+        self,
+        inv_state: _InvState,
+        *,
+        calling_namespace_prefix: tuple[str, ...],
+        calling_attempt_index: int,
+        calling_fan_out_index: int | None,
+        calling_branch_name: str | None,
     ) -> str | None:
-        # Calling-node identity comes from the payload (set at
-        # dispatch time per llm-provider §5.5). Precedence:
+        # Calling-node identity precedence:
         #   1. Exact-match leaf node at the calling key.
         #   2. Per-instance fan-out dispatch observation when the
         #      call originated inside a fan-out instance.
@@ -1407,27 +1479,114 @@ class LangfuseObserver:
         # exact-match miss would otherwise need a leaf-ancestor walk
         # to handle.
         key: _StackKey = (
-            payload.calling_namespace_prefix,
-            payload.calling_attempt_index,
-            payload.calling_fan_out_index,
-            payload.calling_branch_name,
+            calling_namespace_prefix,
+            calling_attempt_index,
+            calling_fan_out_index,
+            calling_branch_name,
         )
         observation = inv_state.open_observations.get(key)
         if observation is not None:
             return observation.handle.id
         # Per-instance fan-out dispatch.
-        if payload.calling_fan_out_index is not None and payload.calling_namespace_prefix:
-            instance_key = payload.calling_namespace_prefix[:1] + (str(payload.calling_fan_out_index),)
+        if calling_fan_out_index is not None and calling_namespace_prefix:
+            instance_key = calling_namespace_prefix[:1] + (str(calling_fan_out_index),)
             dispatch = inv_state.fan_out_instance_observations.get(instance_key)
             if dispatch is not None:
                 return dispatch.handle.id
         # Subgraph dispatch, longest-prefix-first.
-        for prefix_len in range(len(payload.calling_namespace_prefix), 0, -1):
-            prefix = payload.calling_namespace_prefix[:prefix_len]
+        for prefix_len in range(len(calling_namespace_prefix), 0, -1):
+            prefix = calling_namespace_prefix[:prefix_len]
             sg = inv_state.subgraph_observations.get(prefix)
             if sg is not None:
                 return sg.handle.id
         return None
+
+    def _typed_event_metadata(self, event: LlmCompletionEvent, correlation_id: str | None) -> dict[str, Any]:
+        """Build the Generation observation's metadata dict from the
+        typed event. Mirrors _llm_metadata_and_payload's metadata
+        construction but reads from LlmCompletionEvent fields, and
+        combines started + completed phases into a single populated
+        dict (the typed event carries everything at once)."""
+        metadata: dict[str, Any] = {}
+        if correlation_id is not None:
+            metadata["correlation_id"] = correlation_id
+        metadata["system"] = event.provider
+        active_prompt = event.active_prompt
+        if active_prompt is not None:
+            metadata["prompt"] = {
+                "name": active_prompt.name,
+                "version": active_prompt.version,
+                "label": active_prompt.label,
+                "template_hash": active_prompt.template_hash,
+                "rendered_hash": active_prompt.rendered_hash,
+            }
+        active_group = event.active_prompt_group
+        if active_group is not None:
+            metadata["prompt_group_name"] = active_group.group_name
+        # Asymmetric guard with _llm_metadata_and_payload below: the
+        # typed event types caller_invocation_metadata as Mapping | None
+        # while LlmEventPayload defaults to an empty mapping (never
+        # None). Don't "normalize" the two paths without normalizing
+        # the source types.
+        if event.caller_invocation_metadata is not None:
+            _apply_caller_metadata(metadata, event.caller_invocation_metadata)
+        if event.finish_reason is not None:
+            metadata["finish_reason"] = event.finish_reason
+        if event.response_model is not None:
+            metadata["response_model"] = event.response_model
+        if event.response_id is not None:
+            metadata["response_id"] = event.response_id
+        return metadata
+
+    def _usage_from_typed_event(self, event: LlmCompletionEvent) -> LangfuseUsage | None:
+        """Map the typed event's Usage onto the Langfuse Usage record
+        per §8.4.3. Returns None when no usage was reported."""
+        usage = event.usage
+        if usage is None:
+            return None
+        if usage.prompt_tokens is None and usage.completion_tokens is None and usage.total_tokens is None:
+            return None
+        return LangfuseUsage(
+            input=usage.prompt_tokens,
+            output=usage.completion_tokens,
+            total=usage.total_tokens,
+        )
+
+    def _resolve_prompt_link_from_typed_event(self, event: LlmCompletionEvent) -> Any:
+        """§8.4.4 case discrimination on the typed event's active_prompt
+        snapshot. Same logic as _resolve_prompt_link but reads from
+        LlmCompletionEvent instead of LlmEventPayload."""
+        active_prompt = event.active_prompt
+        if active_prompt is None:
+            return None
+        entities = getattr(active_prompt, "observability_entities", None)
+        if not isinstance(entities, dict):
+            return None
+        return cast("dict[str, Any]", entities).get("langfuse_prompt")
+
+    def _open_trace_for_typed_event(
+        self, invocation_id: str, correlation_id: str | None, event: LlmCompletionEvent
+    ) -> None:
+        """Trace open path for a typed LlmCompletionEvent arriving
+        before any node-started event reached this observer.
+        Synthesizes the minimal trace shape from the typed event's
+        scoping fields."""
+        if event.namespace:
+            entry_node = event.namespace[0]
+        else:
+            entry_node = event.node_name or "openarmature.llm.complete"
+        metadata: dict[str, Any] = {
+            "entry_node": entry_node,
+            "spec_version": self.spec_version,
+            "implementation_name": self.implementation_name,
+            "implementation_version": self.implementation_version,
+        }
+        if correlation_id is not None:
+            metadata["correlation_id"] = correlation_id
+        if event.caller_invocation_metadata is not None:
+            _apply_caller_metadata(metadata, event.caller_invocation_metadata)
+        self.client.trace(id=invocation_id, name=entry_node, metadata=metadata)
+        self._inv_states[invocation_id] = _InvState(trace_id=invocation_id)
 
     def _llm_metadata_and_payload(
         self,

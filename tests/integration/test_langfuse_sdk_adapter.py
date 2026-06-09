@@ -138,3 +138,98 @@ async def test_sdk_adapter_handles_invocation_with_no_real_observation() -> None
     assert trace.output == expected_output
     assert len(trace.observations) == 1
     assert trace.observations[0].name == "openarmature.trace_io"
+
+
+@pytest.mark.integration
+async def test_sdk_adapter_generation_timestamps_round_trip_through_langfuse() -> None:
+    """End-to-end verification that explicit start_time / end_time on
+    the adapter's generation(...) / handle.end(...) calls actually
+    land on the Langfuse-side observation. The unit tests cover the
+    SDK call-site (start_observation receives start_time= kwarg); this
+    test closes the loop by reading the projected timestamps back from
+    the REST API and asserting they reflect the back-dated values.
+
+    Catches the failure mode the v0.13.0 Langfuse migration is
+    susceptible to: if the v4 SDK silently drops start_time as an
+    unrecognized kwarg on a particular version, the Langfuse UI shows
+    call-time timestamps instead of the back-dated latency_ms-based
+    ones, with no error to surface the misconfiguration.
+    """
+    from datetime import UTC, datetime, timedelta
+
+    from langfuse import Langfuse
+
+    from openarmature.observability.langfuse.adapter import LangfuseSDKAdapter
+
+    client = Langfuse()
+    adapter = LangfuseSDKAdapter(client)
+
+    invocation_id = str(uuid.uuid4())
+    adapter.trace(id=invocation_id, name="test_sdk_adapter_generation_timestamps")
+    # Back-date by 250 ms — a value far enough above the SDK's own
+    # call-time jitter that a passthrough failure would show up
+    # clearly in the projected start/end timestamps.
+    end_time = datetime.now(UTC)
+    start_time = end_time - timedelta(milliseconds=250)
+    handle = adapter.generation(
+        trace_id=invocation_id,
+        name="openarmature.llm.complete",
+        model="test-model",
+        start_time=start_time,
+    )
+    handle.end(end_time=end_time)
+
+    adapter.force_flush()
+    time.sleep(2)
+
+    hex_id = invocation_id.replace("-", "")
+    try:
+        _poll_trace_with_retry(client, hex_id)
+        # Pull observations directly: the trace.observations list lags
+        # the headline trace fields in the REST projection, so query
+        # the observations endpoint with a retry budget similar to the
+        # trace poll. Filter by name rather than indexing the first
+        # entry so future synthetic observations (Langfuse adds
+        # ``openarmature.trace_io`` carriers for trace input/output
+        # under some flows) don't shadow the target Generation.
+        observation: Any = None
+        last_exc: Exception | None = None
+        for _ in range(12):
+            try:
+                response = client.api.observations.get_many(trace_id=hex_id)
+                observation = next(
+                    (o for o in response.data if o.name == "openarmature.llm.complete"),
+                    None,
+                )
+                if observation is not None:
+                    break
+            except Exception as exc:  # noqa: BLE001
+                last_exc = exc
+            time.sleep(5)
+        assert observation is not None, (
+            f"openarmature.llm.complete observation for trace {hex_id} did not appear via REST "
+            f"after retry budget; last error: {last_exc!r}"
+        )
+
+        # The REST projection's start/end timestamps MUST match the
+        # back-dated values within a small tolerance (the SDK rounds
+        # to microseconds; Langfuse's REST projection may round
+        # further).
+        assert observation.start_time is not None
+        assert observation.end_time is not None
+        start_delta = abs((observation.start_time - start_time).total_seconds())
+        end_delta = abs((observation.end_time - end_time).total_seconds())
+        assert start_delta < 0.01, (
+            f"observation.start_time drift {start_delta * 1000:.3f}ms exceeds 10ms tolerance — "
+            f"sent {start_time.isoformat()}, got {observation.start_time.isoformat()}"
+        )
+        assert end_delta < 0.01, (
+            f"observation.end_time drift {end_delta * 1000:.3f}ms exceeds 10ms tolerance — "
+            f"sent {end_time.isoformat()}, got {observation.end_time.isoformat()}"
+        )
+    finally:
+        # Match the existing module's clean-exit pattern: shutdown
+        # releases the SDK's background OTel exporter + ingestion
+        # queues. Without this, a long-running pytest process could
+        # accumulate background threads across integration tests.
+        client.shutdown()

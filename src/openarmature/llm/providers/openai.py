@@ -441,21 +441,6 @@ class OpenAIProvider:
         serialized_messages = _serialize_messages_for_payload(messages)
         request_params = _request_params_from_config(config)
         request_extras = _request_extras_from_config(config)
-        if dispatch is not None:
-            dispatch(
-                _make_llm_event(
-                    "started",
-                    call_id=call_id,
-                    model=self.model,
-                    genai_system=self._genai_system,
-                    input_messages=serialized_messages,
-                    request_params=request_params,
-                    request_extras=request_extras,
-                    active_prompt=active_prompt,
-                    active_prompt_group=active_prompt_group,
-                )
-            )
-
         # Wall-clock latency measured at the adapter boundary per
         # proposal 0049's LlmCompletionEvent.latency_ms contract. The
         # boundary spans from "just before _do_complete is called" to
@@ -473,13 +458,15 @@ class OpenAIProvider:
             response = await self._do_complete(body, schema_dict, schema_class)
         except Exception as exc:
             if dispatch is not None:
-                # Failure path: only the sentinel NodeEvent pair fires.
-                # Per proposal 0049 §3 (alternative 3): LlmCompletionEvent
-                # is completion-only; failures flow through the
-                # llm-provider §7 exception path. The error continues
-                # to surface through the existing observer chain via
-                # the sentinel NodeEvent's error_type / error_category
-                # fields on LlmEventPayload.
+                # Failure path: the sentinel NodeEvent carries the
+                # error fields per llm-provider §7. LlmCompletionEvent
+                # is success-only per proposal 0049 §3 alternative 3,
+                # so failures continue to surface through the sentinel
+                # pair until the spec extends the typed event with
+                # error semantics. Only ``completed`` is emitted on
+                # failure — no started counterpart, since both bundled
+                # observers' handlers ignore sentinel-started after the
+                # v0.13.0 migration.
                 dispatch(
                     _make_llm_event(
                         "completed",
@@ -498,33 +485,14 @@ class OpenAIProvider:
         latency_ms = (time.perf_counter() - adapter_start) * 1000.0
 
         if dispatch is not None:
-            # Sentinel NodeEvent pair stays during the dual-emit window
-            # per proposal 0049 §5.5.7 SHOULD-emit-both transition. The
-            # window stays open through v0.13.0 with the sentinel
-            # emission removed in v0.15.0 (CHANGELOG callout pinned to
-            # the v0.13.0 release notes).
-            dispatch(
-                _make_llm_event(
-                    "completed",
-                    call_id=call_id,
-                    model=self.model,
-                    genai_system=self._genai_system,
-                    finish_reason=response.finish_reason,
-                    usage=response.usage,
-                    input_messages=serialized_messages,
-                    output_content=response.message.content or None,
-                    request_params=request_params,
-                    request_extras=request_extras,
-                    response_id=response.response_id,
-                    response_model=response.response_model,
-                    active_prompt=active_prompt,
-                    active_prompt_group=active_prompt_group,
-                )
-            )
-            # The new typed LlmCompletionEvent — observers filtering via
-            # isinstance(event, LlmCompletionEvent) receive this; legacy
-            # observers filtering on the sentinel namespace see the
-            # NodeEvent pair above. Failure path doesn't reach here.
+            # Success path: emit only the typed LlmCompletionEvent.
+            # The sentinel NodeEvent pair previously emitted on success
+            # for compatibility with pre-typed-event observers was
+            # dropped in v0.13.0; bundled observers (OTel + Langfuse)
+            # consume the typed event directly, and external custom
+            # observers should migrate to type discrimination via
+            # ``isinstance(event, LlmCompletionEvent)`` if they need
+            # LLM call notifications.
             dispatch(
                 self._build_llm_completion_event(
                     response,

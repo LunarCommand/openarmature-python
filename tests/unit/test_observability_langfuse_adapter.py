@@ -161,6 +161,70 @@ def test_adapter_force_flush_delegates_to_client() -> None:
     assert wrapped.flush.call_count == 2
 
 
+def test_adapter_generation_forwards_start_time_to_sdk(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The typed-event LLM path back-dates the Generation observation
+    # using ``start_time = end_time - timedelta(milliseconds=
+    # latency_ms)``. The adapter MUST flow ``start_time`` through to
+    # the v4 SDK's ``start_observation(start_time=...)`` kwarg.
+    # Without this passthrough, Langfuse would show the call-time
+    # timestamp instead of the back-dated one — the verification gap
+    # the InMemory client can't catch on its own.
+    from datetime import UTC, datetime
+    from unittest.mock import MagicMock
+
+    client = _dummy_client()
+    captured_kwargs: dict[str, Any] = {}
+
+    def _spy(**kwargs: Any) -> MagicMock:
+        captured_kwargs.update(kwargs)
+        return MagicMock(id="obs-spy", end=MagicMock())
+
+    monkeypatch.setattr(client, "start_observation", _spy)
+    adapter = LangfuseSDKAdapter(client)
+    adapter.trace(id="trace-ts", name="t")
+
+    start = datetime(2026, 6, 8, 12, 0, 0, tzinfo=UTC)
+    adapter.generation(trace_id="trace-ts", name="g", model="m", start_time=start)
+
+    assert captured_kwargs.get("start_time") == start
+
+
+def test_adapter_generation_handle_end_forwards_end_time_to_sdk() -> None:
+    # Companion to the start_time test: the handle's end() MUST flow
+    # ``end_time`` through to the underlying v4 obs's ``end(end_time
+    # =...)`` call so the Langfuse UI shows the back-dated duration.
+    from datetime import UTC, datetime
+    from unittest.mock import MagicMock
+
+    from openarmature.observability.langfuse.adapter import _SpanHandle
+
+    sdk_obs = MagicMock(id="obs-e")
+    sdk_obs.end = MagicMock()
+    handle = _SpanHandle(sdk_obs)
+
+    end = datetime(2026, 6, 8, 12, 0, 1, tzinfo=UTC)
+    handle.end(end_time=end)
+
+    sdk_obs.end.assert_called_once_with(end_time=end)
+
+
+def test_adapter_generation_handle_end_omits_end_time_when_unspecified() -> None:
+    # When no end_time is supplied, the handle MUST call the SDK obs's
+    # end() without the kwarg so the SDK uses its default
+    # (call-time). Locks the "default-respecting" branch.
+    from unittest.mock import MagicMock
+
+    from openarmature.observability.langfuse.adapter import _SpanHandle
+
+    sdk_obs = MagicMock(id="obs-e")
+    sdk_obs.end = MagicMock()
+    handle = _SpanHandle(sdk_obs)
+
+    handle.end()
+
+    sdk_obs.end.assert_called_once_with()
+
+
 # ---------------------------------------------------------------------------
 # Integration test against real Langfuse Cloud (opt-in)
 # ---------------------------------------------------------------------------

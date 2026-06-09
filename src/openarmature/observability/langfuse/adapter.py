@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import json
 from contextlib import ExitStack
+from datetime import datetime
 from typing import TYPE_CHECKING, Any, cast
 
 from .client import LangfuseGenerationHandle, LangfuseSpanHandle, LangfuseUsage, ObservationLevel
@@ -129,13 +130,16 @@ class _SpanHandle:
                 kwargs[key] = value
         self._obs.update(**kwargs)
 
-    def end(self, **fields: Any) -> None:
+    def end(self, *, end_time: datetime | None = None, **fields: Any) -> None:
         # Apply any field updates first (so they're set BEFORE the
         # observation closes), then call end(). v4's end() takes only
         # an optional ``end_time``; field mutation happens via update().
         if fields:
             self.update(**fields)
-        self._obs.end()
+        if end_time is not None:
+            self._obs.end(end_time=end_time)
+        else:
+            self._obs.end()
 
 
 class LangfuseSDKAdapter:
@@ -337,6 +341,7 @@ class LangfuseSDKAdapter:
         output: Any = None,
         usage: LangfuseUsage | None = None,
         prompt: Any = None,
+        start_time: datetime | None = None,
     ) -> LangfuseGenerationHandle:
         extra_kwargs: dict[str, Any] = {
             "model": model,
@@ -356,6 +361,8 @@ class LangfuseSDKAdapter:
             if usage.total is not None:
                 usage_details["total"] = usage.total
             extra_kwargs["usage_details"] = usage_details
+        if start_time is not None:
+            extra_kwargs["start_time"] = start_time
         obs = self._start_observation(
             as_type="generation",
             trace_id=trace_id,

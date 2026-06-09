@@ -1205,3 +1205,261 @@ async def test_implementation_attribution_rows_emit_on_every_trace() -> None:
         assert trace.metadata.get("implementation_name") == "openarmature-python"
         assert isinstance(trace.metadata.get("implementation_version"), str)
         assert trace.metadata["implementation_version"]
+
+
+# ---------------------------------------------------------------------------
+# Typed LlmCompletionEvent handling (proposal 0049 + 0057, PR 3c)
+# ---------------------------------------------------------------------------
+
+
+async def test_typed_llm_event_emits_generation_with_expected_fields() -> None:
+    # Happy-path: a single LlmCompletionEvent produces exactly one
+    # Generation observation under the typed event's invocation_id
+    # Trace, with model / usage / metadata sourced from the event.
+    from openarmature.llm.response import Usage
+    from openarmature.observability.correlation import (
+        _reset_invocation_id,
+        _set_invocation_id,
+    )
+    from tests._helpers.typed_event import make_typed_event
+
+    client = InMemoryLangfuseClient()
+    # disable_llm_payload defaults to True per §8.9; flip it off here
+    # so the test can also assert the payload (output) makes it through.
+    observer = LangfuseObserver(client=client, disable_llm_payload=False)
+    token = _set_invocation_id("inv-typed-1")
+    try:
+        await observer(
+            make_typed_event(
+                invocation_id="inv-typed-1",
+                model="m-test",
+                provider="vllm",
+                usage=Usage(prompt_tokens=10, completion_tokens=4, total_tokens=14),
+                finish_reason="stop",
+                response_id="resp-abc",
+                response_model="m-test-001",
+                output_content="hello",
+                request_params={"temperature": 0.7},
+            )
+        )
+    finally:
+        _reset_invocation_id(token)
+
+    assert "inv-typed-1" in client.traces
+    trace = client.traces["inv-typed-1"]
+    generations = [o for o in trace.observations if o.type == "generation"]
+    assert len(generations) == 1
+    obs = generations[0]
+    assert obs.model == "m-test"
+    assert obs.usage == LangfuseUsage(input=10, output=4, total=14)
+    assert obs.model_parameters == {"temperature": 0.7}
+    assert obs.output == "hello"
+    assert obs.metadata.get("system") == "vllm"
+    assert obs.metadata.get("finish_reason") == "stop"
+    assert obs.metadata.get("response_id") == "resp-abc"
+    assert obs.metadata.get("response_model") == "m-test-001"
+    assert obs.ended is True
+
+
+async def test_typed_llm_event_back_dates_generation_using_latency_ms() -> None:
+    # Generation observation's start/end timestamps reflect the
+    # adapter-boundary latency rather than the typed event's arrival
+    # moment. Verify end - start matches latency_ms within tolerance.
+    from openarmature.observability.correlation import (
+        _reset_invocation_id,
+        _set_invocation_id,
+    )
+    from tests._helpers.typed_event import make_typed_event
+
+    client = InMemoryLangfuseClient()
+    observer = LangfuseObserver(client=client)
+    latency_ms = 250.0
+    token = _set_invocation_id("inv-typed-dur")
+    try:
+        await observer(make_typed_event(invocation_id="inv-typed-dur", latency_ms=latency_ms))
+    finally:
+        _reset_invocation_id(token)
+
+    trace = client.traces["inv-typed-dur"]
+    obs = next(o for o in trace.observations if o.type == "generation")
+    assert obs.start_time is not None and obs.end_time is not None
+    duration_ms = (obs.end_time - obs.start_time).total_seconds() * 1000
+    # Float arithmetic tolerance; the back-date should be near-exact
+    # apart from microsecond rounding.
+    assert abs(duration_ms - latency_ms) < 1.0
+
+
+async def test_typed_llm_event_zero_duration_when_latency_missing() -> None:
+    # latency_ms=None falls back to a zero-duration Generation at
+    # end_time. Mirrors the OTel path.
+    from openarmature.observability.correlation import (
+        _reset_invocation_id,
+        _set_invocation_id,
+    )
+    from tests._helpers.typed_event import make_typed_event
+
+    client = InMemoryLangfuseClient()
+    observer = LangfuseObserver(client=client)
+    token = _set_invocation_id("inv-typed-no-latency")
+    try:
+        await observer(make_typed_event(invocation_id="inv-typed-no-latency", latency_ms=None))
+    finally:
+        _reset_invocation_id(token)
+
+    trace = client.traces["inv-typed-no-latency"]
+    obs = next(o for o in trace.observations if o.type == "generation")
+    assert obs.start_time is not None and obs.end_time is not None
+    assert obs.start_time == obs.end_time
+
+
+async def test_typed_llm_event_drops_silently_outside_invocation() -> None:
+    # Without an invocation id ContextVar set, the typed handler
+    # MUST early-return without emitting a Generation. Symmetric with
+    # the OTel observer.
+    from tests._helpers.typed_event import make_typed_event
+
+    client = InMemoryLangfuseClient()
+    observer = LangfuseObserver(client=client)
+    await observer(make_typed_event())
+    assert client.traces == {}
+
+
+async def test_disable_llm_spans_skips_typed_event_path() -> None:
+    # disable_llm_spans MUST gate the typed-event handler.
+    from openarmature.observability.correlation import (
+        _reset_invocation_id,
+        _set_invocation_id,
+    )
+    from tests._helpers.typed_event import make_typed_event
+
+    client = InMemoryLangfuseClient()
+    observer = LangfuseObserver(client=client, disable_llm_spans=True)
+    token = _set_invocation_id("inv-disabled")
+    try:
+        await observer(make_typed_event(invocation_id="inv-disabled"))
+    finally:
+        _reset_invocation_id(token)
+    assert client.traces == {}
+
+
+async def test_llm_error_path_emits_error_generation_from_sentinel_completed() -> None:
+    # Failure-path provider exceptions still flow through the sentinel
+    # NodeEvent(completed, error=...). Verify the observer emits an
+    # ERROR-level Generation with the canonical error_category as
+    # status_message.
+    from openarmature.graph.events import NodeEvent
+    from openarmature.observability.correlation import (
+        _reset_invocation_id,
+        _set_invocation_id,
+    )
+    from openarmature.observability.llm_event import LlmEventPayload
+
+    client = InMemoryLangfuseClient()
+    observer = LangfuseObserver(client=client)
+    token = _set_invocation_id("inv-err")
+    try:
+        completed = NodeEvent(
+            node_name="openarmature.llm.complete",
+            namespace=("openarmature.llm.complete",),
+            step=-1,
+            phase="completed",
+            pre_state=LlmEventPayload(
+                call_id="cc-err",
+                model="m-test",
+                error_type="ProviderRateLimit",
+                error_category="provider_rate_limited",
+                error_message="429 from upstream",
+            ),
+            post_state=None,
+            error=None,
+            parent_states=(),
+        )
+        await observer(completed)
+    finally:
+        _reset_invocation_id(token)
+
+    trace = client.traces["inv-err"]
+    obs = next(o for o in trace.observations if o.type == "generation")
+    assert obs.level == "ERROR"
+    assert obs.status_message == "provider_rate_limited"
+
+
+async def test_llm_error_event_parents_under_branch_calling_node() -> None:
+    # Regression cover for the _resolve_llm_parent_observation_id
+    # keyword-only refactor: when an LLM failure fires inside a
+    # parallel-branches branch, the resulting ERROR Generation MUST
+    # parent under THAT branch's calling node observation, not under
+    # a sibling branch's same-named node. Pre-populates the observer's
+    # internal state with two open node observations that differ only
+    # by branch_name, then dispatches a sentinel-completed-error with
+    # a matching calling_branch_name and asserts the parent_observation
+    # _id points at the right one.
+    #
+    # Note: the same _resolve_llm_parent_observation_id call also
+    # serves the success-path typed event handler (with
+    # calling_branch_name = event.branch_name); error- and success-
+    # paths share the resolver, so this test transitively covers the
+    # success-path branch_name handling.
+    from openarmature.graph.events import NodeEvent
+    from openarmature.observability.correlation import (
+        _reset_invocation_id,
+        _set_invocation_id,
+    )
+    from openarmature.observability.langfuse.observer import (
+        _InvState,
+        _OpenObservation,
+    )
+    from openarmature.observability.llm_event import LlmEventPayload
+
+    client = InMemoryLangfuseClient()
+    observer = LangfuseObserver(client=client)
+    invocation_id = "inv-pb-err"
+    token = _set_invocation_id(invocation_id)
+    try:
+        # Bootstrap the Trace + two branch-distinguished node
+        # observations directly. _InvState's open_observations map is
+        # keyed by (namespace, attempt_index, fan_out_index,
+        # branch_name); the calling node identity on the error payload
+        # is (("dispatcher", "ask"), 0, None, "fast").
+        client.trace(id=invocation_id, name="dispatcher")
+        observer._inv_states[invocation_id] = _InvState(trace_id=invocation_id)  # noqa: SLF001
+        inv_state = observer._inv_states[invocation_id]  # noqa: SLF001
+        # Open two observations under the trace — one per branch.
+        fast_handle = client.generation(trace_id=invocation_id, name="ask", model="m-test")
+        slow_handle = client.generation(trace_id=invocation_id, name="ask", model="m-test")
+        fast_key = (("dispatcher", "ask"), 0, None, "fast")
+        slow_key = (("dispatcher", "ask"), 0, None, "slow")
+        inv_state.open_observations[fast_key] = _OpenObservation(handle=fast_handle)
+        inv_state.open_observations[slow_key] = _OpenObservation(handle=slow_handle)
+        completed = NodeEvent(
+            node_name="openarmature.llm.complete",
+            namespace=("openarmature.llm.complete",),
+            step=-1,
+            phase="completed",
+            pre_state=LlmEventPayload(
+                call_id="cc-pb",
+                model="m-test",
+                error_type="ProviderUnavailable",
+                error_category="provider_unavailable",
+                error_message="503 from upstream",
+                calling_namespace_prefix=("dispatcher", "ask"),
+                calling_attempt_index=0,
+                calling_fan_out_index=None,
+                calling_branch_name="fast",
+            ),
+            post_state=None,
+            error=None,
+            parent_states=(),
+        )
+        await observer(completed)
+    finally:
+        _reset_invocation_id(token)
+
+    trace = client.traces[invocation_id]
+    # Three observations now: two synthetic "ask" + one error
+    # Generation. The error Generation MUST parent under fast_handle,
+    # not slow_handle.
+    error_gens = [o for o in trace.observations if o.type == "generation" and o.level == "ERROR"]
+    assert len(error_gens) == 1
+    assert error_gens[0].parent_observation_id == fast_handle.id
+    assert error_gens[0].parent_observation_id != slow_handle.id
