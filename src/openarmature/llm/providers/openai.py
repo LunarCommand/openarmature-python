@@ -63,7 +63,7 @@ import httpx
 import jsonschema
 from pydantic import BaseModel, ValidationError
 
-from openarmature.graph.events import LlmCompletionEvent, NodeEvent
+from openarmature.graph.events import LlmCompletionEvent, LlmFailedEvent
 from openarmature.observability.correlation import (
     current_attempt_index,
     current_branch_name,
@@ -73,7 +73,6 @@ from openarmature.observability.correlation import (
     current_invocation_id,
     current_namespace_prefix,
 )
-from openarmature.observability.llm_event import LlmEventPayload
 from openarmature.observability.metadata import AttributeValue, current_invocation_metadata
 
 # ``current_prompt_group`` / ``current_prompt_result`` are imported
@@ -372,48 +371,22 @@ class OpenAIProvider:
         supplied list. Violations raise ``provider_invalid_request``
         BEFORE any HTTP request is sent.
         """
-        validate_message_list(messages)
-        validate_tools(tools)
-        # ``validate_tool_choice`` runs after ``validate_tools`` so the
-        # name-membership check sees a structurally valid tools list.
-        validate_tool_choice(tool_choice, tools)
-        schema_dict, schema_class = _normalize_response_schema(response_schema)
-        # On the fallback path, the wire-side messages list is an
-        # augmented COPY of the caller's messages — original messages
-        # MUST NOT be mutated. _augment_messages_with_schema_directive
-        # builds a fresh list and does not modify the reused Message
-        # instances in place; the caller's sequence is untouched.
-        wire_messages: Sequence[Message] = messages
-        if schema_dict is not None and self._force_prompt_augmentation_fallback:
-            wire_messages = _augment_messages_with_schema_directive(messages, schema_dict)
-        body = self._build_request_body(
-            wire_messages,
-            tools,
-            config,
-            schema_dict,
-            # The fallback only governs structured-output calls; free-
-            # form calls (schema_dict is None) must preserve any
-            # caller-supplied response_format from RuntimeConfig extras.
-            include_response_format=(schema_dict is None or not self._force_prompt_augmentation_fallback),
-            tool_choice=tool_choice,
-        )
-
         # Spec observability §5.5 LLM provider span: when an
         # observability backend is active in the current invocation,
-        # emit a started/completed event pair around the wire call so
-        # the backend can build a span. Queue-mediated dispatch
+        # emit a typed LlmCompletionEvent (success) or LlmFailedEvent
+        # (failure) around the wire call so the backend can build a
+        # span / Generation observation. Queue-mediated dispatch
         # preserves spec §6 serial event ordering across all event
         # sources within an invocation. ``current_dispatch()`` returns
-        # ``None`` outside an openarmature invocation (direct
-        # provider use in scripts/tests), in which case the call
-        # proceeds without span emission.
+        # ``None`` outside an openarmature invocation (direct provider
+        # use in scripts/tests), in which case the call proceeds
+        # without typed-event emission.
         #
-        # ``call_id`` is minted once per ``complete()`` call and
-        # threaded through both events of the pair. Backend
-        # observers key their in-flight LLM-span maps by it so
-        # concurrent ``complete()`` calls (e.g., fan-out instances
-        # each calling this provider) don't collide on the
-        # constant ``("openarmature.llm.complete",)`` sentinel.
+        # ``call_id`` is minted once per ``complete()`` call. Per
+        # proposal 0058: a failed call gets its own ``call_id``
+        # distinct from any retry-attempt sibling — the retry
+        # middleware re-enters ``complete()`` for each attempt, so a
+        # fresh mint per call automatically satisfies that contract.
         dispatch = current_dispatch()
         call_id = str(uuid.uuid4())
         # Capture prompt context AT DISPATCH TIME (in the node task's
@@ -431,68 +404,98 @@ class OpenAIProvider:
 
         active_prompt = current_prompt_result()
         active_prompt_group = current_prompt_group()
-        # Payload data the §5.5.1 / §5.5.2 / §5.5.3 attributes are
-        # sourced from. Image redaction (per §5.5.5) happens inside
-        # ``_serialize_messages_for_payload`` — image bytes never
-        # leave the provider in event form. ``input_messages`` mirrors
-        # the messages list the caller supplied; the wire-side body
-        # may be augmented (schema directive on the fallback path),
-        # but the OBSERVED messages are the spec-§3 logical inputs.
-        serialized_messages = _serialize_messages_for_payload(messages)
+        # Resolve request-side fields up-front. These don't raise §7
+        # category exceptions; safe to compute outside the try-block.
+        # The serialized_messages projection runs INSIDE the try-block
+        # below — it can raise on malformed input that would also
+        # trigger a pre-send §7 raise, and we want both raises to
+        # surface through the same LlmFailedEvent path. Default to an
+        # empty list so the failure event always has a populated
+        # ``input_messages`` field even when serialization couldn't
+        # complete.
         request_params = _request_params_from_config(config)
         request_extras = _request_extras_from_config(config)
+        serialized_messages: list[dict[str, Any]] = []
         # Wall-clock latency measured at the adapter boundary per
-        # proposal 0049's LlmCompletionEvent.latency_ms contract. The
-        # boundary spans from "just before _do_complete is called" to
-        # "_do_complete returns with a parsed Response in hand" —
-        # covers HTTP setup, request emission, provider compute,
-        # response receive, AND response parsing into the typed
-        # Response. The spec text "wall-clock latency of the LLM call
-        # measured at the adapter boundary" is silent on whether
-        # parsing is included; including it matches the operator's
-        # mental model of "how long until I had a usable answer"
-        # better than just-the-HTTP-call. perf_counter is the monotonic
-        # high-resolution clock for elapsed-time measurements.
+        # proposal 0049's LlmCompletionEvent.latency_ms contract /
+        # proposal 0058's LlmFailedEvent.latency_ms contract. Window
+        # spans from "just before validation runs" through to either
+        # "parsed Response in hand" (success) or "the §7 exception
+        # was raised" (failure). perf_counter is the monotonic high-
+        # resolution clock for elapsed-time measurements.
         adapter_start = time.perf_counter()
         try:
+            # Per proposal 0058: pre-send validation raises (e.g.,
+            # provider_invalid_request, provider_unsupported_content_
+            # block) MUST dispatch LlmFailedEvent before the exception
+            # propagates. The whole validation + wire-call sequence
+            # runs inside the protected scope so any §7 category
+            # exception (pre-send OR adapter-caught) flows through the
+            # same emission path.
+            validate_message_list(messages)
+            validate_tools(tools)
+            # ``validate_tool_choice`` runs after ``validate_tools``
+            # so the name-membership check sees a structurally valid
+            # tools list.
+            validate_tool_choice(tool_choice, tools)
+            schema_dict, schema_class = _normalize_response_schema(response_schema)
+            # Image redaction (per §5.5.5) happens inside
+            # ``_serialize_messages_for_payload`` — image bytes never
+            # leave the provider in event form. ``input_messages``
+            # mirrors the caller's messages list; the wire-side body
+            # may be augmented (schema directive on the fallback path)
+            # but the OBSERVED messages are the spec-§3 logical inputs.
+            serialized_messages = _serialize_messages_for_payload(messages)
+            # On the fallback path, the wire-side messages list is an
+            # augmented COPY of the caller's messages — original
+            # messages MUST NOT be mutated.
+            wire_messages: Sequence[Message] = messages
+            if schema_dict is not None and self._force_prompt_augmentation_fallback:
+                wire_messages = _augment_messages_with_schema_directive(messages, schema_dict)
+            body = self._build_request_body(
+                wire_messages,
+                tools,
+                config,
+                schema_dict,
+                # The fallback only governs structured-output calls;
+                # free-form calls (schema_dict is None) must preserve
+                # any caller-supplied response_format from RuntimeConfig
+                # extras.
+                include_response_format=(schema_dict is None or not self._force_prompt_augmentation_fallback),
+                tool_choice=tool_choice,
+            )
             response = await self._do_complete(body, schema_dict, schema_class)
-        except Exception as exc:
+        except LlmProviderError as exc:
+            # Failure path: dispatch a typed LlmFailedEvent per
+            # proposal 0058. Only §7 category exceptions
+            # (LlmProviderError subclasses) trigger a typed event —
+            # internal bugs / unexpected exceptions raise without
+            # event emission because they aren't part of the §7
+            # contract. The caller-side exception flow is unchanged:
+            # the exception still raises out of complete().
+            latency_ms_failed = (time.perf_counter() - adapter_start) * 1000.0
             if dispatch is not None:
-                # Failure path: the sentinel NodeEvent carries the
-                # error fields per llm-provider §7. LlmCompletionEvent
-                # is success-only per proposal 0049 §3 alternative 3,
-                # so failures continue to surface through a sentinel
-                # ``completed`` event until the spec extends the typed
-                # event with error semantics. Only ``completed`` fires
-                # — no started counterpart, since both bundled
-                # observers' handlers ignore sentinel-started after
-                # the v0.13.0 migration.
                 dispatch(
-                    _make_llm_event(
-                        "completed",
+                    self._build_llm_failed_event(
+                        exc,
+                        latency_ms_failed,
                         call_id=call_id,
-                        model=self.model,
-                        genai_system=self._genai_system,
-                        error=exc,
                         input_messages=serialized_messages,
                         request_params=request_params,
                         request_extras=request_extras,
                         active_prompt=active_prompt,
                         active_prompt_group=active_prompt_group,
-                    )
+                    ),
                 )
             raise
         latency_ms = (time.perf_counter() - adapter_start) * 1000.0
 
         if dispatch is not None:
-            # Success path: emit only the typed LlmCompletionEvent.
-            # The sentinel NodeEvent pair previously emitted on success
-            # for compatibility with pre-typed-event observers was
-            # dropped in v0.13.0; bundled observers (OTel + Langfuse)
-            # consume the typed event directly, and external custom
-            # observers should migrate to type discrimination via
-            # ``isinstance(event, LlmCompletionEvent)`` if they need
-            # LLM call notifications.
+            # Success path: emit the typed LlmCompletionEvent.
+            # External custom observers consuming LLM events MUST
+            # filter via ``isinstance(event, LlmCompletionEvent)``;
+            # the sentinel namespace pattern is retired in this
+            # release.
             dispatch(
                 self._build_llm_completion_event(
                     response,
@@ -585,6 +588,63 @@ class OpenAIProvider:
             active_prompt=active_prompt,
             active_prompt_group=active_prompt_group,
             call_id=call_id,
+            caller_invocation_metadata=caller_metadata,
+        )
+
+    def _build_llm_failed_event(
+        self,
+        exc: LlmProviderError,
+        latency_ms: float,
+        *,
+        call_id: str,
+        input_messages: list[dict[str, Any]],
+        request_params: dict[str, Any],
+        request_extras: dict[str, Any],
+        active_prompt: Any,
+        active_prompt_group: Any,
+    ) -> LlmFailedEvent:
+        """Construct the typed LlmFailedEvent for the failure path.
+
+        Sources identity / scoping fields from the calling-node
+        ContextVars and failure fields from the raised §7 exception.
+        Field set mirrors LlmCompletionEvent (identity + request-side)
+        plus the three failure-specific fields per proposal 0058.
+
+        ``error_type`` defaults to the exception class name — falls
+        into the "upstream exception class name" style documented in
+        the spec field table. Providers that have a vendor error code
+        available (e.g. ``rate_limit_exceeded`` for OpenAI) can
+        override with vendor-specific detail in a future spec
+        proposal; for now the class name is the safest default since
+        every LlmProviderError subclass carries one.
+        """
+
+        namespace = current_namespace_prefix()
+        node_name = namespace[-1] if namespace else ""
+        invocation_id = current_invocation_id() or ""
+        caller_metadata: Mapping[str, AttributeValue] | None = None
+        if self._populate_caller_metadata:
+            caller_metadata = dict(current_invocation_metadata())
+        return LlmFailedEvent(
+            invocation_id=invocation_id,
+            correlation_id=current_correlation_id(),
+            node_name=node_name,
+            namespace=namespace,
+            attempt_index=current_attempt_index(),
+            fan_out_index=current_fan_out_index(),
+            branch_name=current_branch_name(),
+            provider=self._genai_system,
+            model=self.model,
+            latency_ms=latency_ms,
+            input_messages=input_messages,
+            request_params=request_params,
+            request_extras=request_extras,
+            active_prompt=active_prompt,
+            active_prompt_group=active_prompt_group,
+            call_id=call_id,
+            error_category=exc.category,
+            error_type=type(exc).__name__,
+            error_message=str(exc),
             caller_invocation_metadata=caller_metadata,
         )
 
@@ -1343,7 +1403,8 @@ def _looks_like_model_not_loaded(message: object) -> bool:
 # payload, not just OA's own. URL-form images pass through unchanged.
 def _serialize_messages_for_payload(messages: Sequence[Message]) -> list[dict[str, Any]]:
     """Render a list of typed :class:`Message` instances into the
-    plain-dict shape carried on ``LlmEventPayload.input_messages``."""
+    plain-dict shape carried on the typed LLM events' ``input_messages``
+    field (LlmCompletionEvent / LlmFailedEvent)."""
     out: list[dict[str, Any]] = []
     for msg in messages:
         if isinstance(msg, SystemMessage):
@@ -1424,80 +1485,6 @@ def _request_extras_from_config(config: RuntimeConfig | None) -> dict[str, Any]:
     if config is None:
         return {}
     return dict(config.model_extra or {})
-
-
-# call_id MUST be the same string on the started/completed pair so
-# the observer can match them under concurrency. The OTel observer
-# (or any backend mapping) recognises the sentinel node_name +
-# namespace and emits an LLM-specific span instead of a node span;
-# backend-specific attribute extraction reads payload fields from
-# pre_state directly.
-def _make_llm_event(
-    phase: Literal["started", "completed"],
-    *,
-    call_id: str,
-    model: str,
-    genai_system: str,
-    finish_reason: FinishReason | None = None,
-    usage: Usage | None = None,
-    error: BaseException | None = None,
-    input_messages: list[dict[str, Any]] | None = None,
-    output_content: str | None = None,
-    request_params: dict[str, Any] | None = None,
-    request_extras: dict[str, Any] | None = None,
-    response_id: str | None = None,
-    response_model: str | None = None,
-    active_prompt: Any = None,
-    active_prompt_group: Any = None,
-) -> NodeEvent:
-    """Build a ``NodeEvent``-shaped record for the engine's delivery
-    queue, populated as an ``openarmature.llm.complete`` event."""
-    error_type: str | None = None
-    error_message: str | None = None
-    error_category: str | None = None
-    if error is not None:
-        error_type = type(error).__name__
-        error_message = str(error)
-        category = getattr(error, "category", None)
-        if isinstance(category, str):
-            error_category = category
-    payload = LlmEventPayload(
-        call_id=call_id,
-        model=model,
-        finish_reason=finish_reason,
-        prompt_tokens=usage.prompt_tokens if usage is not None else None,
-        completion_tokens=usage.completion_tokens if usage is not None else None,
-        total_tokens=usage.total_tokens if usage is not None else None,
-        cached_tokens=usage.cached_tokens if usage is not None else None,
-        cache_creation_tokens=usage.cache_creation_tokens if usage is not None else None,
-        error_type=error_type,
-        error_message=error_message,
-        error_category=error_category,
-        calling_namespace_prefix=current_namespace_prefix(),
-        calling_attempt_index=current_attempt_index(),
-        calling_fan_out_index=current_fan_out_index(),
-        calling_branch_name=current_branch_name(),
-        active_prompt=active_prompt,
-        active_prompt_group=active_prompt_group,
-        input_messages=input_messages,
-        output_content=output_content,
-        request_params=request_params,
-        request_extras=request_extras,
-        response_id=response_id,
-        response_model=response_model,
-        genai_system=genai_system,
-        caller_invocation_metadata=dict(current_invocation_metadata()),
-    )
-    return NodeEvent(
-        node_name="openarmature.llm.complete",
-        namespace=("openarmature.llm.complete",),
-        step=-1,
-        phase=phase,
-        pre_state=payload,
-        post_state=None,
-        error=None,
-        parent_states=(),
-    )
 
 
 __all__ = [

@@ -580,11 +580,91 @@ class LlmCompletionEvent:
     caller_invocation_metadata: Mapping[str, AttributeValue] | None = None
 
 
+# Spec: realizes proposal 0058's second spec-normatively-typed event
+# variant on the observer event union (graph-engine §6 +
+# observability §5.5.7), accepted at spec v0.53.0. Dispatched on the
+# observer delivery queue whenever a provider.complete() call raises
+# a §7 category exception — covers BOTH the adapter-caught provider-
+# exception path AND the pre-send validation raise path
+# (provider_invalid_request / provider_unsupported_content_block
+# raise before any provider contact). The event is dispatched
+# ALONGSIDE the exception, not in place of it; caller-side exception
+# flow is unchanged.
+#
+# Mutual exclusion with LlmCompletionEvent on the same
+# provider.complete() call — implementations MUST NOT emit both for
+# the same call. Conformance fixture 072 locks this down.
+#
+# Privacy posture identical to LlmCompletionEvent: input_messages /
+# request_params / request_extras are populated unconditionally per
+# §5.5.7; observer-side privacy gates (OTel disable_llm_payload,
+# Langfuse equivalents) apply at rendering. Inline image bytes are
+# redacted per observability §5.5.5 before population. Custom
+# queryable observers own their own redaction posture.
+@dataclass(frozen=True)
+class LlmFailedEvent:
+    """A typed LLM provider call failure event delivered to observers.
+
+    Carries identity, scoping, and failure-context data for an LLM
+    call that raised a llm-provider §7 category exception. Observer
+    code filters by type discrimination (``isinstance(event,
+    LlmFailedEvent)``) rather than by the impl-current sentinel-
+    namespace string match.
+
+    Identity / scoping / request-side field set mirrors
+    ``LlmCompletionEvent`` 1:1 — same field semantics, same nullability
+    rules. Response-side fields (``response_id``, ``response_model``,
+    ``usage``, ``output_content``, ``finish_reason``) are ABSENT from
+    this variant — no response was received.
+
+    Failure-specific fields:
+
+    - ``error_category``: the llm-provider §7 normative error
+      category the call raised. One of the 9 canonical strings
+      (``provider_authentication``, ``provider_unavailable``,
+      ``provider_invalid_model``, ``provider_model_not_loaded``,
+      ``provider_rate_limit``, ``provider_invalid_response``,
+      ``provider_invalid_request``,
+      ``provider_unsupported_content_block``,
+      ``structured_output_invalid``). Always present.
+    - ``error_type``: OPTIONAL impl-level / vendor-specific error
+      type or code. Two acceptable styles per spec:
+      vendor error code (e.g. ``"rate_limit_exceeded"``) OR
+      upstream exception class name (e.g. ``"RateLimitError"``).
+      ``None`` when no impl-side type is available.
+    - ``error_message``: human-readable message from the raised
+      exception. Always present (empty string when the exception
+      carried no message).
+    """
+
+    invocation_id: str
+    correlation_id: str | None
+    node_name: str
+    namespace: tuple[str, ...]
+    attempt_index: int
+    fan_out_index: int | None
+    branch_name: str | None
+    provider: str
+    model: str
+    latency_ms: float | None
+    input_messages: list[dict[str, Any]]
+    request_params: Mapping[str, Any]
+    request_extras: Mapping[str, Any]
+    active_prompt: Any
+    active_prompt_group: Any
+    call_id: str
+    error_category: str
+    error_message: str
+    error_type: str | None = None
+    caller_invocation_metadata: Mapping[str, AttributeValue] | None = None
+
+
 __all__ = [
     "FanOutEventConfig",
     "InvocationCompletedEvent",
     "InvocationStartedEvent",
     "LlmCompletionEvent",
+    "LlmFailedEvent",
     "MetadataAugmentationEvent",
     "NodeEvent",
     "ParallelBranchesEventConfig",

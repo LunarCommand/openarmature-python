@@ -38,6 +38,7 @@ from .events import (
     InvocationCompletedEvent,
     InvocationStartedEvent,
     LlmCompletionEvent,
+    LlmFailedEvent,
     MetadataAugmentationEvent,
     NodeEvent,
 )
@@ -49,15 +50,18 @@ from .state import State
 # reach every subscribed observer — MetadataAugmentationEvent
 # (proposal 0040 mid-invocation metadata augmentation),
 # InvocationStartedEvent / InvocationCompletedEvent (proposal 0043
-# trace.input/output sourcing), and LlmCompletionEvent (proposal
-# 0049 typed LLM provider call event, dispatched on every successful
-# LLM completion alongside the calling node's NodeEvent pair).
+# trace.input/output sourcing), LlmCompletionEvent (proposal 0049
+# typed LLM provider call event, dispatched on every successful LLM
+# completion), and LlmFailedEvent (proposal 0058 typed LLM failure
+# event, dispatched alongside the §7 exception when provider.complete
+# raises).
 ObserverEvent = (
     NodeEvent
     | MetadataAugmentationEvent
     | InvocationStartedEvent
     | InvocationCompletedEvent
     | LlmCompletionEvent
+    | LlmFailedEvent
 )
 
 
