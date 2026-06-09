@@ -266,11 +266,34 @@ status = "implemented"
 since = "0.11.0"
 
 # Spec v0.39.0 (proposal 0047).  Implicit prefix-cache wire-byte
-# stability.  Cross-provider invariant requiring intra-impl byte
-# equality across calls with equivalent inputs.  Queued for v0.13.0
-# alongside 0049 (LLM provider hardening + typed event batch).
+# stability.  Cross-capability proposal landed in v0.13.0 across
+# three pieces: (1) ``Response.usage`` cache-stat fields
+# (``cached_tokens`` / ``cache_creation_tokens``) sourced from the
+# OpenAI ``prompt_tokens_details`` payload, with conditional emission
+# preserved (absent-vs-zero distinction stays observable) — landed
+# in the v0.12.0 cycle as the proposal's payload-side prerequisite;
+# (2) OTel observer emits ``openarmature.llm.cache_read.input_tokens``
+# (and optional ``openarmature.llm.cache_creation.input_tokens``)
+# when the corresponding usage field is populated — also v0.12.0;
+# (3) §8.1 intra-impl wire-byte canonicalization in the OpenAI
+# adapter — landed here. The canonicalizer recursively sorts dict
+# keys at every nesting level while preserving caller-supplied
+# array order, applied at the four user-input boundaries
+# (``tool.parameters`` / ``tool.function`` record top-level per
+# spec Q5, ``response_format.json_schema.schema``, ``RuntimeConfig``
+# extras, ``tool_call.arguments`` JSON encoding) plus a top-level
+# belt-and-suspenders pass over the assembled request body.  Scope
+# is the Chat Completions endpoint only; the OpenAI Responses API
+# endpoint is deferred to a future cycle (no python consumer
+# today).  Prompt-management §13 cross-variable substring stability
+# is satisfied by the existing Jinja2 ``StrictUndefined`` render
+# path; pinned by ``tests/unit/test_prompts.py::
+# test_cross_variable_substring_stability``.  Anthropic / Gemini
+# wire-byte conformance fixtures stay deferred — neither provider
+# is implemented in python today.
 [proposals."0047"]
-status = "not-yet"
+status = "implemented"
+since = "0.13.0"
 
 # Spec v0.40.0 (proposal 0048).  Read-symmetric invocation metadata.
 # Adds ``get_invocation_metadata()`` symmetric to the existing

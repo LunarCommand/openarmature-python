@@ -729,3 +729,98 @@ class _StubBackend:
 
     async def fetch(self, name: str, label: str = "production") -> Prompt:
         return self._prompt
+
+
+# ---------------------------------------------------------------------------
+# Proposal 0047 §13: cross-variable substring stability
+# ---------------------------------------------------------------------------
+
+
+def test_cross_variable_substring_stability_text_prompt() -> None:
+    # Spec 0047 §13 *Determinism* — *Cross-variable substring stability*
+    # (normative clause): the static substring of a rendered output —
+    # the portion not derived from variable substitution — MUST be
+    # identical across renders that differ ONLY in unrelated variable
+    # bindings. Two renders of the same template with different
+    # user-bound values flanking a common static segment must agree on
+    # that static segment byte-for-byte. Jinja2's StrictUndefined render
+    # path satisfies this naturally; the test pins the contract so a
+    # future render-time mutation (e.g., introducing context-aware
+    # whitespace normalization) would fail loud rather than silently
+    # break APC hit rates.
+    template = "system: classify the input.\nuser: {{ user_text }}\n\ncontext: {{ context }}\n"
+    prompt = _make_prompt(template)
+    manager = PromptManager(_StubBackend(prompt))
+
+    result_a = manager.render(prompt, {"user_text": "alice", "context": "ctx1"})
+    result_b = manager.render(prompt, {"user_text": "bob", "context": "ctx2"})
+
+    rendered_a = result_a.messages[0].content
+    rendered_b = result_b.messages[0].content
+    assert isinstance(rendered_a, str) and isinstance(rendered_b, str)
+
+    # The static prefix (everything before the first substitution) MUST
+    # be byte-identical across renders.
+    static_prefix = "system: classify the input.\nuser: "
+    assert rendered_a.startswith(static_prefix)
+    assert rendered_b.startswith(static_prefix)
+    # The static infix between the two substitutions MUST be byte-
+    # identical too.
+    static_infix = "\n\ncontext: "
+    assert static_infix in rendered_a
+    assert static_infix in rendered_b
+    # Confirm the substitutions actually landed in their slots (so the
+    # test is verifying substring stability, not just unconditional
+    # equality on a degenerate render).
+    assert "alice" in rendered_a and "bob" in rendered_b
+    assert "ctx1" in rendered_a and "ctx2" in rendered_b
+
+
+def test_cross_variable_substring_stability_chat_prompt() -> None:
+    # Spec 0047 §13's substring stability rule applies to the multi-
+    # segment chat-prompt variant too — the proposal's normative text
+    # calls out "system prefix text, few-shot exchange text, segment
+    # role markers" explicitly. Each rendered segment's static portions
+    # (the role marker shape + the inter-segment formatting + the
+    # template's literal substrings) MUST be byte-identical across
+    # renders that differ only in variable bindings.
+    from openarmature.prompts import ChatPrompt, ContentSegment
+
+    chat_prompt = ChatPrompt(
+        name="classifier",
+        version="v1",
+        label="production",
+        chat_template=[
+            ContentSegment(role="system", content="Classify the input as ham or spam."),
+            ContentSegment(role="user", content="Subject: {{ subject }}\n\nBody: {{ body }}"),
+        ],
+        template_hash="sha256:chat-v1",
+        fetched_at=datetime.now(UTC),
+    )
+    manager = PromptManager(_StubBackend(chat_prompt))
+
+    result_a = manager.render(chat_prompt, {"subject": "alice's email", "body": "hello"})
+    result_b = manager.render(chat_prompt, {"subject": "bob's email", "body": "world"})
+
+    # Both renders MUST produce the same segment shape (same number of
+    # messages, same roles in the same order).
+    assert len(result_a.messages) == len(result_b.messages)
+    for msg_a, msg_b in zip(result_a.messages, result_b.messages, strict=True):
+        assert type(msg_a) is type(msg_b)
+    # Static (non-substituted) system segment MUST be byte-identical.
+    sys_a = result_a.messages[0].content
+    sys_b = result_b.messages[0].content
+    assert sys_a == sys_b
+    # User segment's static infix between the two substitutions MUST
+    # be byte-identical.
+    user_a = result_a.messages[1].content
+    user_b = result_b.messages[1].content
+    assert isinstance(user_a, str) and isinstance(user_b, str)
+    static_prefix = "Subject: "
+    static_infix = "\n\nBody: "
+    assert user_a.startswith(static_prefix) and user_b.startswith(static_prefix)
+    assert static_infix in user_a and static_infix in user_b
+    # Confirm the substitutions actually differ — guards against a
+    # degenerate-equality false pass.
+    assert "alice's email" in user_a and "bob's email" in user_b
+    assert user_a.endswith("hello") and user_b.endswith("world")
