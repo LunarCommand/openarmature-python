@@ -134,10 +134,14 @@ class _SpanHandle:
         # Apply any field updates first (so they're set BEFORE the
         # observation closes), then call end(). v4's end() takes only
         # an optional ``end_time``; field mutation happens via update().
+        # The SDK's end_time is typed Optional[int] nanoseconds —
+        # convert from the Protocol's datetime surface before passing
+        # through. Without the conversion the OTel span_processor's
+        # formatter raises TypeError when it tries ``end_time / 1e9``.
         if fields:
             self.update(**fields)
         if end_time is not None:
-            self._obs.end(end_time=end_time)
+            self._obs.end(end_time=int(end_time.timestamp() * 1_000_000_000))
         else:
             self._obs.end()
 
@@ -362,18 +366,96 @@ class LangfuseSDKAdapter:
                 usage_details["total"] = usage.total
             extra_kwargs["usage_details"] = usage_details
         if start_time is not None:
-            extra_kwargs["start_time"] = start_time
-        obs = self._start_observation(
-            as_type="generation",
-            trace_id=trace_id,
-            name=name,
-            metadata=metadata,
-            parent_observation_id=parent_observation_id,
-            level=level,
-            status_message=status_message,
-            **{k: v for k, v in extra_kwargs.items() if v is not None},
-        )
+            # v4's public ``start_observation`` does NOT accept a
+            # ``start_time`` kwarg — only the internal OTel tracer
+            # does. Mirror the SDK's own ``create_event`` precedent
+            # (langfuse/_client/client.py:1518-1551): open the OTel
+            # span directly via the private ``_otel_tracer`` with the
+            # back-dated timestamp, then wrap it in LangfuseGeneration.
+            # This is the only path to a back-dated Generation in
+            # v4.7; the live-account integration test catches a future
+            # SDK break.
+            obs = self._start_back_dated_generation(
+                trace_id=trace_id,
+                name=name,
+                metadata=metadata,
+                parent_observation_id=parent_observation_id,
+                level=level,
+                status_message=status_message,
+                start_time=start_time,
+                **{k: v for k, v in extra_kwargs.items() if v is not None},
+            )
+        else:
+            obs = self._start_observation(
+                as_type="generation",
+                trace_id=trace_id,
+                name=name,
+                metadata=metadata,
+                parent_observation_id=parent_observation_id,
+                level=level,
+                status_message=status_message,
+                **{k: v for k, v in extra_kwargs.items() if v is not None},
+            )
         return _SpanHandle(obs)
+
+    def _start_back_dated_generation(
+        self,
+        *,
+        trace_id: str,
+        name: str | None,
+        metadata: dict[str, Any] | None,
+        parent_observation_id: str | None,
+        level: ObservationLevel,
+        status_message: str | None,
+        start_time: datetime,
+        **extra: Any,
+    ) -> Any:
+        """Open a LangfuseGeneration at a back-dated timestamp by going
+        through the private OTel tracer rather than the public
+        ``start_observation`` API (which doesn't accept ``start_time``
+        in v4.7). Mirrors the SDK's ``create_event`` precedent."""
+        from langfuse._client.span import LangfuseGeneration
+        from opentelemetry import trace as otel_trace_api
+
+        trace_entry = self._trace_info.get(trace_id)
+        trace_context: TraceContext = {"trace_id": _to_otel_trace_id(trace_id)}
+        if parent_observation_id is not None:
+            trace_context["parent_span_id"] = parent_observation_id
+
+        # OTel's ``start_span(start_time=...)`` takes int nanoseconds
+        # since epoch. The SDK uses ``time_ns()`` for its instant
+        # events; for back-dating, convert from the supplied datetime.
+        start_time_ns = int(start_time.timestamp() * 1_000_000_000)
+
+        remote_parent_span = self._client._create_remote_parent_span(  # pyright: ignore[reportPrivateUsage] # noqa: SLF001
+            trace_id=trace_context["trace_id"],
+            parent_span_id=trace_context.get("parent_span_id"),
+        )
+
+        with ExitStack() as stack:
+            if trace_entry is not None:
+                stack.enter_context(
+                    propagate_attributes(
+                        trace_name=trace_entry["name"],
+                        metadata=_stringify_metadata(trace_entry["metadata"]),
+                    )
+                )
+            stack.enter_context(otel_trace_api.use_span(remote_parent_span))
+            otel_span = self._client._otel_tracer.start_span(  # pyright: ignore[reportPrivateUsage] # noqa: SLF001
+                name=name or "observation",
+                start_time=start_time_ns,
+            )
+            generation_kwargs: dict[str, Any] = {
+                "otel_span": otel_span,
+                "langfuse_client": self._client,
+                "metadata": metadata,
+            }
+            if level != "DEFAULT":
+                generation_kwargs["level"] = level
+            if status_message is not None:
+                generation_kwargs["status_message"] = status_message
+            generation_kwargs.update(extra)
+            return LangfuseGeneration(**generation_kwargs)
 
     def force_flush(self, timeout_ms: int = 30_000) -> bool:
         """Best-effort flush of the underlying Langfuse client.

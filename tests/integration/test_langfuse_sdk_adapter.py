@@ -185,30 +185,39 @@ async def test_sdk_adapter_generation_timestamps_round_trip_through_langfuse() -
     hex_id = invocation_id.replace("-", "")
     try:
         _poll_trace_with_retry(client, hex_id)
-        # Pull observations directly: the trace.observations list lags
-        # the headline trace fields in the REST projection, so query
-        # the observations endpoint with a retry budget similar to the
-        # trace poll. Filter by name rather than indexing the first
-        # entry so future synthetic observations (Langfuse adds
-        # ``openarmature.trace_io`` carriers for trace input/output
-        # under some flows) don't shadow the target Generation.
+        # Pull observations via REST. The observations-list endpoint
+        # lags the headline trace fields by an "indeterminate window"
+        # per Langfuse's own caveat (mirrored in the trace_io test
+        # above), so the retry budget here is wider (180s vs the
+        # trace_io test's 60s). Filter server-side by name + type so
+        # the response is small + scoped; track seen names across
+        # polls so a name-mismatch failure surfaces with diagnostics
+        # rather than a generic "not found".
         observation: Any = None
         last_exc: Exception | None = None
-        for _ in range(12):
+        seen_names: set[str] = set()
+        for _ in range(36):
             try:
-                response = client.api.observations.get_many(trace_id=hex_id)
-                observation = next(
-                    (o for o in response.data if o.name == "openarmature.llm.complete"),
-                    None,
+                response = client.api.observations.get_many(
+                    trace_id=hex_id,
+                    name="openarmature.llm.complete",
+                    type="GENERATION",
                 )
-                if observation is not None:
+                if response.data:
+                    observation = response.data[0]
                     break
+                # Fall back to an unfiltered query so we know whether
+                # ANY observations have projected — distinguishes "REST
+                # lag" from "observation projected with unexpected name".
+                fallback = client.api.observations.get_many(trace_id=hex_id)
+                seen_names.update(o.name or "<unnamed>" for o in fallback.data)
             except Exception as exc:  # noqa: BLE001
                 last_exc = exc
             time.sleep(5)
         assert observation is not None, (
-            f"openarmature.llm.complete observation for trace {hex_id} did not appear via REST "
-            f"after retry budget; last error: {last_exc!r}"
+            f"openarmature.llm.complete Generation for trace {hex_id} did not appear via REST "
+            f"after 180s retry budget. Observations seen under trace (any name): {seen_names or 'none'}. "
+            f"Last error: {last_exc!r}"
         )
 
         # The REST projection's start/end timestamps MUST match the

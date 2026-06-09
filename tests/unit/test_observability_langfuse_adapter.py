@@ -161,15 +161,60 @@ def test_adapter_force_flush_delegates_to_client() -> None:
     assert wrapped.flush.call_count == 2
 
 
-def test_adapter_generation_forwards_start_time_to_sdk(monkeypatch: pytest.MonkeyPatch) -> None:
-    # The typed-event LLM path back-dates the Generation observation
-    # using ``start_time = end_time - timedelta(milliseconds=
-    # latency_ms)``. The adapter MUST flow ``start_time`` through to
-    # the v4 SDK's ``start_observation(start_time=...)`` kwarg.
-    # Without this passthrough, Langfuse would show the call-time
-    # timestamp instead of the back-dated one — the verification gap
-    # the InMemory client can't catch on its own.
+def test_adapter_generation_routes_back_dated_calls_via_otel_tracer(monkeypatch: pytest.MonkeyPatch) -> None:
+    # v4.7's public ``Langfuse.start_observation`` does NOT accept
+    # ``start_time`` — only the internal ``_otel_tracer.start_span``
+    # does. The adapter MUST route back-dated generation() calls via
+    # the OTel tracer path (mirroring the SDK's own ``create_event``
+    # precedent). This test spies on BOTH paths: ``start_observation``
+    # is patched to fail loudly if the back-dated path ever falls
+    # through to it (the prior monkeypatch test's gap), and the OTel
+    # tracer's ``start_span`` is spied to assert the back-dated
+    # nanosecond timestamp lands on the right surface.
     from datetime import UTC, datetime
+    from unittest.mock import MagicMock
+
+    client = _dummy_client()
+    captured_otel_kwargs: dict[str, Any] = {}
+
+    def _otel_spy(**kwargs: Any) -> MagicMock:
+        captured_otel_kwargs.update(kwargs)
+        # The SDK calls get_span_context(), set_attribute(), etc. on
+        # the returned span during LangfuseGeneration construction.
+        # Plain MagicMock auto-creates most attrs, but trace_id /
+        # span_id MUST be real ints because the SDK formats them as
+        # 32 / 16-char hex internally.
+        span = MagicMock()
+        span.get_span_context.return_value = MagicMock(
+            trace_id=int("a" * 32, 16),
+            span_id=int("b" * 16, 16),
+        )
+        return span
+
+    def _start_observation_should_not_be_called(**_kwargs: Any) -> None:
+        raise AssertionError(
+            "start_observation MUST NOT be called on the back-dated path; "
+            "v4 SDK rejects start_time= and the adapter should route via _otel_tracer"
+        )
+
+    monkeypatch.setattr(client._otel_tracer, "start_span", _otel_spy)  # noqa: SLF001
+    monkeypatch.setattr(client, "start_observation", _start_observation_should_not_be_called)
+    adapter = LangfuseSDKAdapter(client)
+    adapter.trace(id="trace-ts", name="t")
+
+    start = datetime(2026, 6, 8, 12, 0, 0, tzinfo=UTC)
+    adapter.generation(trace_id="trace-ts", name="g", model="m", start_time=start)
+
+    expected_ns = int(start.timestamp() * 1_000_000_000)
+    assert captured_otel_kwargs.get("start_time") == expected_ns
+    assert captured_otel_kwargs.get("name") == "g"
+
+
+def test_adapter_generation_without_start_time_uses_public_api(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Companion to the back-dated test: when ``start_time`` is NOT
+    # supplied, the adapter falls back to the v4 SDK's public
+    # ``start_observation`` API and does NOT touch the private OTel
+    # tracer.
     from unittest.mock import MagicMock
 
     client = _dummy_client()
@@ -179,20 +224,30 @@ def test_adapter_generation_forwards_start_time_to_sdk(monkeypatch: pytest.Monke
         captured_kwargs.update(kwargs)
         return MagicMock(id="obs-spy", end=MagicMock())
 
+    def _otel_tracer_should_not_be_called(**_kwargs: Any) -> None:
+        raise AssertionError(
+            "_otel_tracer.start_span MUST NOT be called when start_time is None; "
+            "the public start_observation API should handle this path"
+        )
+
     monkeypatch.setattr(client, "start_observation", _spy)
+    monkeypatch.setattr(client._otel_tracer, "start_span", _otel_tracer_should_not_be_called)  # noqa: SLF001
     adapter = LangfuseSDKAdapter(client)
     adapter.trace(id="trace-ts", name="t")
 
-    start = datetime(2026, 6, 8, 12, 0, 0, tzinfo=UTC)
-    adapter.generation(trace_id="trace-ts", name="g", model="m", start_time=start)
+    adapter.generation(trace_id="trace-ts", name="g", model="m")
 
-    assert captured_kwargs.get("start_time") == start
+    assert captured_kwargs.get("name") == "g"
+    assert "start_time" not in captured_kwargs
 
 
-def test_adapter_generation_handle_end_forwards_end_time_to_sdk() -> None:
-    # Companion to the start_time test: the handle's end() MUST flow
-    # ``end_time`` through to the underlying v4 obs's ``end(end_time
-    # =...)`` call so the Langfuse UI shows the back-dated duration.
+def test_adapter_generation_handle_end_converts_end_time_to_nanoseconds() -> None:
+    # Companion to the start_time test: the handle's end() MUST
+    # convert the datetime to int nanoseconds before forwarding to
+    # the underlying v4 obs's end(). LangfuseSpan.end is typed
+    # ``Optional[int]`` (nanoseconds); passing a datetime through
+    # crashes the OTel span_processor's formatter with TypeError on
+    # ``end_time / 1e9`` deep in the SDK.
     from datetime import UTC, datetime
     from unittest.mock import MagicMock
 
@@ -205,7 +260,8 @@ def test_adapter_generation_handle_end_forwards_end_time_to_sdk() -> None:
     end = datetime(2026, 6, 8, 12, 0, 1, tzinfo=UTC)
     handle.end(end_time=end)
 
-    sdk_obs.end.assert_called_once_with(end_time=end)
+    expected_ns = int(end.timestamp() * 1_000_000_000)
+    sdk_obs.end.assert_called_once_with(end_time=expected_ns)
 
 
 def test_adapter_generation_handle_end_omits_end_time_when_unspecified() -> None:
