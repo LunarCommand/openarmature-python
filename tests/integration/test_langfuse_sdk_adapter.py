@@ -138,3 +138,112 @@ async def test_sdk_adapter_handles_invocation_with_no_real_observation() -> None
     assert trace.output == expected_output
     assert len(trace.observations) == 1
     assert trace.observations[0].name == "openarmature.trace_io"
+
+
+@pytest.mark.integration
+async def test_sdk_adapter_generation_timestamps_round_trip_through_langfuse() -> None:
+    """End-to-end verification that explicit start_time / end_time on
+    the adapter's generation(...) / handle.end(...) calls actually
+    land on the Langfuse-side observation. The unit tests cover the
+    SDK call-site shape (the back-dated path bypasses the public
+    start_observation API and routes through the private
+    _otel_tracer.start_span instead, because v4.7's start_observation
+    rejects start_time with TypeError); this test closes the loop by
+    reading the projected timestamps back from the REST API and
+    asserting they reflect the back-dated values.
+
+    Catches the failure mode the v0.13.0 Langfuse migration is
+    susceptible to: if a future SDK release renames _otel_tracer,
+    moves LangfuseGeneration, or otherwise breaks the private-API
+    surface the adapter relies on, the back-dating routing fails
+    silently — the Langfuse UI shows call-time timestamps instead
+    of the back-dated latency_ms-based ones, with no error to
+    surface the misconfiguration.
+    """
+    from datetime import UTC, datetime, timedelta
+
+    from langfuse import Langfuse
+
+    from openarmature.observability.langfuse.adapter import LangfuseSDKAdapter
+
+    client = Langfuse()
+    adapter = LangfuseSDKAdapter(client)
+
+    invocation_id = str(uuid.uuid4())
+    adapter.trace(id=invocation_id, name="test_sdk_adapter_generation_timestamps")
+    # Back-date by 250 ms — a value far enough above the SDK's own
+    # call-time jitter that a passthrough failure would show up
+    # clearly in the projected start/end timestamps.
+    end_time = datetime.now(UTC)
+    start_time = end_time - timedelta(milliseconds=250)
+    handle = adapter.generation(
+        trace_id=invocation_id,
+        name="openarmature.llm.complete",
+        model="test-model",
+        start_time=start_time,
+    )
+    handle.end(end_time=end_time)
+
+    adapter.force_flush()
+    time.sleep(2)
+
+    hex_id = invocation_id.replace("-", "")
+    try:
+        _poll_trace_with_retry(client, hex_id)
+        # Pull observations via REST. The observations-list endpoint
+        # lags the headline trace fields by an "indeterminate window"
+        # per Langfuse's own caveat (mirrored in the trace_io test
+        # above), so the retry budget here is wider (180s vs the
+        # trace_io test's 60s). Filter server-side by name + type so
+        # the response is small + scoped; track seen names across
+        # polls so a name-mismatch failure surfaces with diagnostics
+        # rather than a generic "not found".
+        observation: Any = None
+        last_exc: Exception | None = None
+        seen_names: set[str] = set()
+        for _ in range(36):
+            try:
+                response = client.api.observations.get_many(
+                    trace_id=hex_id,
+                    name="openarmature.llm.complete",
+                    type="GENERATION",
+                )
+                if response.data:
+                    observation = response.data[0]
+                    break
+                # Fall back to an unfiltered query so we know whether
+                # ANY observations have projected — distinguishes "REST
+                # lag" from "observation projected with unexpected name".
+                fallback = client.api.observations.get_many(trace_id=hex_id)
+                seen_names.update(o.name or "<unnamed>" for o in fallback.data)
+            except Exception as exc:  # noqa: BLE001
+                last_exc = exc
+            time.sleep(5)
+        assert observation is not None, (
+            f"openarmature.llm.complete Generation for trace {hex_id} did not appear via REST "
+            f"after 180s retry budget. Observations seen under trace (any name): {seen_names or 'none'}. "
+            f"Last error: {last_exc!r}"
+        )
+
+        # The REST projection's start/end timestamps MUST match the
+        # back-dated values within a small tolerance (the SDK rounds
+        # to microseconds; Langfuse's REST projection may round
+        # further).
+        assert observation.start_time is not None
+        assert observation.end_time is not None
+        start_delta = abs((observation.start_time - start_time).total_seconds())
+        end_delta = abs((observation.end_time - end_time).total_seconds())
+        assert start_delta < 0.01, (
+            f"observation.start_time drift {start_delta * 1000:.3f}ms exceeds 10ms tolerance — "
+            f"sent {start_time.isoformat()}, got {observation.start_time.isoformat()}"
+        )
+        assert end_delta < 0.01, (
+            f"observation.end_time drift {end_delta * 1000:.3f}ms exceeds 10ms tolerance — "
+            f"sent {end_time.isoformat()}, got {observation.end_time.isoformat()}"
+        )
+    finally:
+        # Match the existing module's clean-exit pattern: shutdown
+        # releases the SDK's background OTel exporter + ingestion
+        # queues. Without this, a long-running pytest process could
+        # accumulate background threads across integration tests.
+        client.shutdown()

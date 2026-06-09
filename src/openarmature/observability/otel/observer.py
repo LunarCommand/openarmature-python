@@ -595,11 +595,12 @@ class OTelObserver:
         if isinstance(event, MetadataAugmentationEvent):
             self._handle_metadata_augmentation(event)
             return
-        # LLM provider sentinel events: success-path is a no-op (the
-        # typed event handler above owns the span). Failure-path
-        # completed events open + close an error span; sentinel-started
-        # and successful-completed are no-ops here. Dual-emit window
-        # closes in v0.15.0 per the CHANGELOG note pinned to v0.13.0.
+        # LLM provider sentinel events: the typed event handler above
+        # owns the success-path span. Failure-path ``completed`` events
+        # open + close an error span. v0.13.0 dropped sentinel-pair
+        # emission on the success path entirely; the only remaining
+        # sentinel emission is failure-path ``completed`` (until the
+        # spec extends the typed event with error semantics).
         if event.namespace == _LLM_NAMESPACE:
             if not self.disable_llm_spans:
                 self._handle_llm_error_event(event)
@@ -1086,9 +1087,11 @@ class OTelObserver:
     # shot at typed-event arrival, with start_time back-dated by
     # latency_ms so the span duration matches the adapter-boundary
     # measurement. The error-path span is still driven by the sentinel
-    # NodeEvent pair the provider emits (LlmCompletionEvent is success-
-    # only per proposal 0049 §3 alternative 3). Dual-emit window closes
-    # in v0.15.0 — the sentinel pair will then drop entirely.
+    # NodeEvent (LlmCompletionEvent is success-only per proposal 0049
+    # §3 alternative 3). Success-side sentinel emission was dropped
+    # from the provider in v0.13.0; the failure-side sentinel emission
+    # stays until the spec extends LlmCompletionEvent with error
+    # semantics (coord-thread tracked).
     #
     # v0.17.0 attribute set (proposal 0024) preserved unchanged:
     #   - Baseline openarmature.llm.* attributes

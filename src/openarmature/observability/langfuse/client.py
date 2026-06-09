@@ -30,6 +30,7 @@ reference implementation.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any, Literal, Protocol, runtime_checkable
 
 ObservationType = Literal["span", "generation", "event"]
@@ -65,6 +66,13 @@ class LangfuseObservation:
     level: ObservationLevel = "DEFAULT"
     status_message: str | None = None
     ended: bool = False
+    # Optional caller-supplied timestamps. Populated when a typed-event
+    # consumer (e.g., the LangfuseObserver on the typed LLM completion
+    # path) back-dates the observation using a wall-clock measurement
+    # rather than letting the SDK record open/close moments. ``None``
+    # means "use the SDK's default"; both fields are independent.
+    start_time: datetime | None = None
+    end_time: datetime | None = None
 
     # Generation-specific (None / empty on Span and Event observations)
     model: str | None = None
@@ -125,7 +133,7 @@ class LangfuseSpanHandle(Protocol):
 
     def update(self, **fields: Any) -> None: ...
 
-    def end(self, **fields: Any) -> None: ...
+    def end(self, *, end_time: datetime | None = None, **fields: Any) -> None: ...
 
 
 @runtime_checkable
@@ -138,7 +146,7 @@ class LangfuseGenerationHandle(Protocol):
 
     def update(self, **fields: Any) -> None: ...
 
-    def end(self, **fields: Any) -> None: ...
+    def end(self, *, end_time: datetime | None = None, **fields: Any) -> None: ...
 
 
 @runtime_checkable
@@ -224,6 +232,7 @@ class LangfuseClient(Protocol):
         output: Any = None,
         usage: LangfuseUsage | None = None,
         prompt: Any = None,
+        start_time: datetime | None = None,
     ) -> LangfuseGenerationHandle: ...
 
     def force_flush(self, timeout_ms: int = 30_000) -> bool:
@@ -268,7 +277,9 @@ class _InMemorySpanHandle:
     def update(self, **fields: Any) -> None:
         _apply_fields(self.observation, fields)
 
-    def end(self, **fields: Any) -> None:
+    def end(self, *, end_time: datetime | None = None, **fields: Any) -> None:
+        if end_time is not None:
+            self.observation.end_time = end_time
         _apply_fields(self.observation, fields)
         self.observation.ended = True
 
@@ -286,7 +297,9 @@ class _InMemoryGenerationHandle:
     def update(self, **fields: Any) -> None:
         _apply_fields(self.observation, fields)
 
-    def end(self, **fields: Any) -> None:
+    def end(self, *, end_time: datetime | None = None, **fields: Any) -> None:
+        if end_time is not None:
+            self.observation.end_time = end_time
         _apply_fields(self.observation, fields)
         self.observation.ended = True
 
@@ -428,6 +441,7 @@ class InMemoryLangfuseClient:
         output: Any = None,
         usage: LangfuseUsage | None = None,
         prompt: Any = None,
+        start_time: datetime | None = None,
     ) -> LangfuseGenerationHandle:
         trace = self._get_trace(trace_id)
         observation = LangfuseObservation(
@@ -444,6 +458,7 @@ class InMemoryLangfuseClient:
             output=output,
             usage=usage,
             prompt_entity_link=prompt,
+            start_time=start_time,
         )
         trace.observations.append(observation)
         return _InMemoryGenerationHandle(observation=observation)

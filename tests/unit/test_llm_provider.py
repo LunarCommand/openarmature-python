@@ -768,17 +768,13 @@ async def test_complete_negative_cached_tokens_surfaces_as_invalid_response() ->
         await provider.aclose()
 
 
-async def test_complete_populates_cached_tokens_on_llm_event_payload() -> None:
-    # Proposal 0047: _make_llm_event MUST propagate
-    # Response.usage.cached_tokens onto the sentinel LlmEventPayload
-    # so observers driving §5.5.3.1 cache attribute emission off the
-    # sentinel NodeEvent pair have the cache stat available. The
-    # conformance fixture 040 covers this end-to-end via OTel span
-    # attribute assertion; this test localizes the assertion to the
-    # provider-payload boundary so a regression here surfaces
-    # independently of the observer rendering layer.
-    from openarmature.observability.llm_event import LlmEventPayload
-
+async def test_complete_populates_cached_tokens_on_typed_event() -> None:
+    # Proposal 0047: Response.usage.cached_tokens MUST flow onto the
+    # typed LlmCompletionEvent's usage record so observers driving
+    # §5.5.3.1 cache attribute emission have the cache stat available.
+    # This locks the field at the provider-event boundary; the
+    # conformance fixture 040 covers the end-to-end OTel span
+    # attribute path.
     events, token = _collecting_dispatch()
     transport = _make_openai_response_with_usage(
         {
@@ -795,26 +791,18 @@ async def test_complete_populates_cached_tokens_on_llm_event_payload() -> None:
         await provider.aclose()
         _release_dispatch(token)
 
-    completed_payloads = [
-        e.pre_state
-        for e in events
-        if isinstance(e, NodeEvent) and e.phase == "completed" and isinstance(e.pre_state, LlmEventPayload)
-    ]
-    assert len(completed_payloads) == 1
-    payload = completed_payloads[0]
-    assert payload.cached_tokens == 42
+    typed = next(e for e in events if isinstance(e, LlmCompletionEvent))
+    assert typed.usage is not None
+    assert typed.usage.cached_tokens == 42
     # The OpenAI-compat mapping leaves cache_creation_tokens absent
-    # per spec §8.1.2; verify the field stays None on the payload.
-    assert payload.cache_creation_tokens is None
+    # per spec §8.1.2; verify the field stays None on the typed event.
+    assert typed.usage.cache_creation_tokens is None
 
 
 async def test_complete_leaves_cached_tokens_none_when_provider_silent() -> None:
     # Companion to the populated case: when the wire response omits
     # prompt_tokens_details, Response.usage.cached_tokens stays None
-    # and the LlmEventPayload reflects that. Locks the absent path
-    # at the provider-payload boundary.
-    from openarmature.observability.llm_event import LlmEventPayload
-
+    # and the typed event's Usage record reflects that.
     events, token = _collecting_dispatch()
     transport = _make_openai_response_with_usage(
         {"prompt_tokens": 100, "completion_tokens": 5, "total_tokens": 105}
@@ -826,14 +814,10 @@ async def test_complete_leaves_cached_tokens_none_when_provider_silent() -> None
         await provider.aclose()
         _release_dispatch(token)
 
-    completed_payloads = [
-        e.pre_state
-        for e in events
-        if isinstance(e, NodeEvent) and e.phase == "completed" and isinstance(e.pre_state, LlmEventPayload)
-    ]
-    assert len(completed_payloads) == 1
-    assert completed_payloads[0].cached_tokens is None
-    assert completed_payloads[0].cache_creation_tokens is None
+    typed = next(e for e in events if isinstance(e, LlmCompletionEvent))
+    assert typed.usage is not None
+    assert typed.usage.cached_tokens is None
+    assert typed.usage.cache_creation_tokens is None
 
 
 # RuntimeConfig.from_partial — Python ergonomic introduced alongside
@@ -1290,11 +1274,13 @@ def _release_dispatch(token: _DispatchToken) -> None:
     _reset_active_dispatch(token)
 
 
-async def test_complete_success_emits_both_sentinel_and_typed_event() -> None:
-    # Dual-emit window per proposal 0049 §5.5.7 SHOULD-emit-both
-    # transition: the provider emits BOTH the existing sentinel
-    # NodeEvent pair (started + completed) AND the new typed
-    # LlmCompletionEvent on success.
+async def test_complete_success_emits_only_typed_event() -> None:
+    # v0.13.0 dropped the success-side sentinel emission. The provider
+    # now emits a single typed LlmCompletionEvent on success; no
+    # sentinel NodeEvent pair (started or completed) fires for
+    # successful calls. External observers consuming LLM events on
+    # the success path MUST filter via isinstance(event,
+    # LlmCompletionEvent).
     events, token = _collecting_dispatch()
     transport = _make_openai_response_with_usage(
         {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
@@ -1308,20 +1294,17 @@ async def test_complete_success_emits_both_sentinel_and_typed_event() -> None:
 
     node_events = [e for e in events if isinstance(e, NodeEvent)]
     typed_events = [e for e in events if isinstance(e, LlmCompletionEvent)]
-    # Sentinel pair: started + completed (the existing pattern).
-    assert len(node_events) == 2
-    assert [e.phase for e in node_events] == ["started", "completed"]
-    # One typed event (success-only emission).
+    assert node_events == []
     assert len(typed_events) == 1
 
 
-async def test_complete_failure_emits_only_sentinel_no_typed_event() -> None:
+async def test_complete_failure_emits_only_sentinel_completed_no_typed_event() -> None:
     # Per proposal 0049 §3 alternative 3: LlmCompletionEvent fires on
     # successful structured-response completion only. Provider
-    # exceptions (provider_unavailable etc.) flow through the
-    # existing exception path; the sentinel NodeEvent(completed,
-    # error=...) keeps firing for backwards-compat failure
-    # observability.
+    # exceptions (provider_unavailable etc.) flow through the existing
+    # exception path; the sentinel NodeEvent(completed, error=...)
+    # carries the error fields. v0.13.0 dropped the sentinel ``started``
+    # event entirely — only ``completed`` fires on failure.
     from openarmature.graph.events import LlmCompletionEvent, NodeEvent
 
     def _503(_req: httpx.Request) -> httpx.Response:
@@ -1340,11 +1323,8 @@ async def test_complete_failure_emits_only_sentinel_no_typed_event() -> None:
 
     node_events = [e for e in events if isinstance(e, NodeEvent)]
     typed_events = [e for e in events if isinstance(e, LlmCompletionEvent)]
-    # Sentinel pair fires; the completed event carries error details
-    # on its LlmEventPayload.
-    assert len(node_events) == 2
-    assert [e.phase for e in node_events] == ["started", "completed"]
-    # No typed event on the failure path.
+    assert len(node_events) == 1
+    assert node_events[0].phase == "completed"
     assert typed_events == []
 
 
@@ -1705,16 +1685,14 @@ async def test_llm_completion_event_request_id_none_when_response_omits_id() -> 
     assert typed.response_id is None
 
 
-async def test_llm_completion_event_arrives_after_sentinel_completed_within_provider_emission() -> None:
-    # Within the provider's own emission window (sentinel started →
-    # sentinel completed → typed event), the typed LlmCompletionEvent
-    # MUST arrive after the sentinel NodeEvent(completed). Spec
-    # fixture 056 pins the broader contract (typed event arrives
-    # between the CALLING NODE's started/completed pair); this test
-    # locks down the provider-internal sub-ordering that contract
-    # depends on. The full bracketing (calling-node started → ... →
-    # calling-node completed) is covered by the conformance fixture
-    # which exercises a real CompiledGraph.
+async def test_complete_success_emits_typed_event_as_single_emission() -> None:
+    # v0.13.0 dropped the success-side sentinel emission, so the
+    # provider's success-path emission window is now a single typed
+    # event — no within-emission ordering question remains. This test
+    # locks the single-emission shape so a regression that re-adds a
+    # sentinel NodeEvent on success would surface here. Spec fixture
+    # 056 pins the broader bracketing (typed event arrives between
+    # the CALLING NODE's started/completed pair) end-to-end.
     events, token = _collecting_dispatch()
     transport = _make_openai_response_with_usage(
         {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
@@ -1726,14 +1704,8 @@ async def test_llm_completion_event_arrives_after_sentinel_completed_within_prov
         await provider.aclose()
         _release_dispatch(token)
 
-    # Build a type+phase tag for each event in arrival order.
-    sequence: list[str] = []
-    for ev in events:
-        if isinstance(ev, NodeEvent):
-            sequence.append(f"sentinel:{ev.phase}")
-        elif isinstance(ev, LlmCompletionEvent):
-            sequence.append("typed:completed")
-    assert sequence == ["sentinel:started", "sentinel:completed", "typed:completed"]
+    assert len(events) == 1
+    assert isinstance(events[0], LlmCompletionEvent)
 
 
 async def test_llm_completion_event_sources_node_identity_from_calling_context() -> None:
