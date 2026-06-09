@@ -145,15 +145,20 @@ async def test_sdk_adapter_generation_timestamps_round_trip_through_langfuse() -
     """End-to-end verification that explicit start_time / end_time on
     the adapter's generation(...) / handle.end(...) calls actually
     land on the Langfuse-side observation. The unit tests cover the
-    SDK call-site (start_observation receives start_time= kwarg); this
-    test closes the loop by reading the projected timestamps back from
-    the REST API and asserting they reflect the back-dated values.
+    SDK call-site shape (the back-dated path bypasses the public
+    start_observation API and routes through the private
+    _otel_tracer.start_span instead, because v4.7's start_observation
+    rejects start_time with TypeError); this test closes the loop by
+    reading the projected timestamps back from the REST API and
+    asserting they reflect the back-dated values.
 
     Catches the failure mode the v0.13.0 Langfuse migration is
-    susceptible to: if the v4 SDK silently drops start_time as an
-    unrecognized kwarg on a particular version, the Langfuse UI shows
-    call-time timestamps instead of the back-dated latency_ms-based
-    ones, with no error to surface the misconfiguration.
+    susceptible to: if a future SDK release renames _otel_tracer,
+    moves LangfuseGeneration, or otherwise breaks the private-API
+    surface the adapter relies on, the back-dating routing fails
+    silently — the Langfuse UI shows call-time timestamps instead
+    of the back-dated latency_ms-based ones, with no error to
+    surface the misconfiguration.
     """
     from datetime import UTC, datetime, timedelta
 
