@@ -369,7 +369,8 @@ class LangfuseObserver:
         # Proposal 0049 typed LlmCompletionEvent (success path). Drives
         # the §5.5 Generation observation lifecycle for successful
         # provider calls. Failures don't emit this variant; they flow
-        # through the sentinel-pair error path below.
+        # through the sentinel error path below (a single sentinel
+        # ``completed`` event — no started counterpart in v0.13.0+).
         if isinstance(event, LlmCompletionEvent):
             if not self.disable_llm_spans:
                 self._handle_typed_llm_completion(event)
@@ -1325,11 +1326,13 @@ class LangfuseObserver:
     # one shot at typed-event arrival, with start_time back-dated by
     # latency_ms so the observation's duration reflects the adapter-
     # boundary measurement rather than dispatcher queue delay. Failure
-    # path keeps the sentinel NodeEvent pair (LlmCompletionEvent is
-    # success-only per proposal 0049 §3 alternative 3). The provider
-    # also dropped sentinel-pair emission on the success path in this
-    # release, so on success the typed event is the only signal the
-    # Generation observation has to fire from.
+    # path keeps a single sentinel NodeEvent (``completed`` phase
+    # carrying error fields on its LlmEventPayload — LlmCompletionEvent
+    # is success-only per proposal 0049 §3 alternative 3). The provider
+    # dropped success-path sentinel emission entirely in this release,
+    # so on success the typed event is the only signal the Generation
+    # observation has to fire from; the failure path's sentinel
+    # ``started`` was also dropped, leaving only ``completed``.
     def _handle_typed_llm_completion(self, event: LlmCompletionEvent) -> None:
         """Open + close the Generation observation from the typed
         LlmCompletionEvent (success path)."""

@@ -461,12 +461,12 @@ class OpenAIProvider:
                 # Failure path: the sentinel NodeEvent carries the
                 # error fields per llm-provider §7. LlmCompletionEvent
                 # is success-only per proposal 0049 §3 alternative 3,
-                # so failures continue to surface through the sentinel
-                # pair until the spec extends the typed event with
-                # error semantics. Only ``completed`` is emitted on
-                # failure — no started counterpart, since both bundled
-                # observers' handlers ignore sentinel-started after the
-                # v0.13.0 migration.
+                # so failures continue to surface through a sentinel
+                # ``completed`` event until the spec extends the typed
+                # event with error semantics. Only ``completed`` fires
+                # — no started counterpart, since both bundled
+                # observers' handlers ignore sentinel-started after
+                # the v0.13.0 migration.
                 dispatch(
                     _make_llm_event(
                         "completed",
