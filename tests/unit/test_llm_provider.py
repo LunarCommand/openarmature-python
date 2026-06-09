@@ -13,12 +13,13 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from contextvars import Token
+from typing import cast
 
 import httpx
 import pytest
 from pydantic import ValidationError
 
-from openarmature.graph.events import LlmCompletionEvent, NodeEvent
+from openarmature.graph.events import LlmCompletionEvent, LlmFailedEvent, NodeEvent
 from openarmature.graph.observer import ObserverEvent
 from openarmature.llm import (
     PROVIDER_AUTHENTICATION,
@@ -39,6 +40,8 @@ from openarmature.llm import (
     ProviderModelNotLoaded,
     ProviderRateLimit,
     ProviderUnavailable,
+    ProviderUnsupportedContentBlock,
+    StructuredOutputInvalid,
     SystemMessage,
     Tool,
     ToolCall,
@@ -1298,14 +1301,15 @@ async def test_complete_success_emits_only_typed_event() -> None:
     assert len(typed_events) == 1
 
 
-async def test_complete_failure_emits_only_sentinel_completed_no_typed_event() -> None:
-    # Per proposal 0049 §3 alternative 3: LlmCompletionEvent fires on
-    # successful structured-response completion only. Provider
-    # exceptions (provider_unavailable etc.) flow through the existing
-    # exception path; the sentinel NodeEvent(completed, error=...)
-    # carries the error fields. v0.13.0 dropped the sentinel ``started``
-    # event entirely — only ``completed`` fires on failure.
-    from openarmature.graph.events import LlmCompletionEvent, NodeEvent
+async def test_complete_failure_emits_typed_llm_failed_event_only() -> None:
+    # Per proposal 0058: failures emit a typed LlmFailedEvent on the
+    # observer queue ALONGSIDE the exception (the exception still
+    # raises out of complete() — caller-side flow unchanged). Per
+    # proposal 0049 §3 alternative 3: LlmCompletionEvent stays
+    # success-only — no LlmCompletionEvent fires on failure. v0.13.0
+    # dropped sentinel-namespace NodeEvent emission for LLM events
+    # entirely; no NodeEvent fires on success OR failure.
+    from openarmature.graph.events import LlmCompletionEvent, LlmFailedEvent, NodeEvent
 
     def _503(_req: httpx.Request) -> httpx.Response:
         return httpx.Response(503, json={"error": {"message": "down"}})
@@ -1322,10 +1326,146 @@ async def test_complete_failure_emits_only_sentinel_completed_no_typed_event() -
         _release_dispatch(token)
 
     node_events = [e for e in events if isinstance(e, NodeEvent)]
-    typed_events = [e for e in events if isinstance(e, LlmCompletionEvent)]
-    assert len(node_events) == 1
-    assert node_events[0].phase == "completed"
-    assert typed_events == []
+    completion_events = [e for e in events if isinstance(e, LlmCompletionEvent)]
+    failed_events = [e for e in events if isinstance(e, LlmFailedEvent)]
+    assert node_events == []
+    assert completion_events == []
+    assert len(failed_events) == 1
+    assert failed_events[0].error_category == "provider_unavailable"
+    assert failed_events[0].error_type == "ProviderUnavailable"
+
+
+# ---------------------------------------------------------------------------
+# Proposal 0058: per-category field-mapping + pre-send + mutual exclusion
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("exc_factory", "expected_cls_name", "expected_category"),
+    [
+        (lambda: ProviderAuthentication("boom"), "ProviderAuthentication", "provider_authentication"),
+        (lambda: ProviderUnavailable("boom"), "ProviderUnavailable", "provider_unavailable"),
+        (lambda: ProviderInvalidModel("boom"), "ProviderInvalidModel", "provider_invalid_model"),
+        (lambda: ProviderModelNotLoaded("boom"), "ProviderModelNotLoaded", "provider_model_not_loaded"),
+        (lambda: ProviderRateLimit("boom"), "ProviderRateLimit", "provider_rate_limit"),
+        (lambda: ProviderInvalidResponse("boom"), "ProviderInvalidResponse", "provider_invalid_response"),
+        (lambda: ProviderInvalidRequest("boom"), "ProviderInvalidRequest", "provider_invalid_request"),
+        (
+            lambda: ProviderUnsupportedContentBlock("boom", block_type="image"),
+            "ProviderUnsupportedContentBlock",
+            "provider_unsupported_content_block",
+        ),
+        (
+            lambda: StructuredOutputInvalid(
+                "boom",
+                response_schema={},
+                raw_content="",
+                failure_description="",
+            ),
+            "StructuredOutputInvalid",
+            "structured_output_invalid",
+        ),
+    ],
+)
+def test_build_llm_failed_event_maps_category_and_type_per_exception(
+    exc_factory: Callable[[], LlmProviderError], expected_cls_name: str, expected_category: str
+) -> None:
+    # Proposal 0058 field mapping: every §7 LlmProviderError subclass
+    # populates the typed event's error_category from its ``category``
+    # class attribute and error_type from the class name. Locks down
+    # the mapping for all 9 categories so future additions to the
+    # error hierarchy can't silently drop this.
+    provider = OpenAIProvider(base_url="http://test", model="m", api_key="k")
+    exc = exc_factory()
+    event = provider._build_llm_failed_event(  # noqa: SLF001
+        exc,
+        latency_ms=12.0,
+        call_id="cc-test",
+        input_messages=[],
+        request_params={},
+        request_extras={},
+        active_prompt=None,
+        active_prompt_group=None,
+    )
+    assert event.error_category == expected_category
+    assert event.error_type == expected_cls_name
+    assert event.error_message == "boom"
+    assert event.latency_ms == 12.0
+    assert event.call_id == "cc-test"
+
+
+async def test_complete_pre_send_validation_emits_llm_failed_event_before_propagating() -> None:
+    # Proposal 0058: §7 category exceptions raised from the pre-send
+    # validation layer (before any wire contact) MUST dispatch
+    # LlmFailedEvent on the observer queue alongside the exception.
+    # ProviderInvalidRequest from _normalize_response_schema's non-
+    # BaseModel-class rejection is the cleanest pre-send trigger
+    # because it bypasses every wire concern.
+    class _NotABaseModel:
+        pass
+
+    events, token = _collecting_dispatch()
+    provider = OpenAIProvider(base_url="http://test", model="m", api_key="k")
+    try:
+        with pytest.raises(ProviderInvalidRequest):
+            await provider.complete(
+                [UserMessage(content="hi")],
+                response_schema=cast("type", _NotABaseModel),
+            )
+    finally:
+        await provider.aclose()
+        _release_dispatch(token)
+
+    failed_events = [e for e in events if isinstance(e, LlmFailedEvent)]
+    completion_events = [e for e in events if isinstance(e, LlmCompletionEvent)]
+    assert completion_events == []
+    assert len(failed_events) == 1
+    assert failed_events[0].error_category == "provider_invalid_request"
+    assert failed_events[0].error_type == "ProviderInvalidRequest"
+
+
+async def test_llm_completion_and_failed_events_are_mutually_exclusive() -> None:
+    # Proposal 0058 mutual-exclusion contract: implementations MUST
+    # NOT emit both LlmCompletionEvent and LlmFailedEvent for the same
+    # provider.complete() call. Verify the disjoint-count rule on
+    # both success and failure paths within the same test so a future
+    # restructure that accidentally emits both surfaces here.
+    success_events, success_token = _collecting_dispatch()
+    success_transport = _make_openai_response_with_usage(
+        {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+    )
+    success_provider = OpenAIProvider(
+        base_url="http://test", model="m", api_key="k", transport=success_transport
+    )
+    try:
+        await success_provider.complete([UserMessage(content="hi")])
+    finally:
+        await success_provider.aclose()
+        _release_dispatch(success_token)
+
+    success_completion = [e for e in success_events if isinstance(e, LlmCompletionEvent)]
+    success_failed = [e for e in success_events if isinstance(e, LlmFailedEvent)]
+    assert len(success_completion) == 1
+    assert success_failed == []
+
+    def _503(_req: httpx.Request) -> httpx.Response:
+        return httpx.Response(503, json={"error": {"message": "down"}})
+
+    failure_events, failure_token = _collecting_dispatch()
+    failure_provider = OpenAIProvider(
+        base_url="http://test", model="m", api_key="k", transport=httpx.MockTransport(_503)
+    )
+    try:
+        with pytest.raises(ProviderUnavailable):
+            await failure_provider.complete([UserMessage(content="hi")])
+    finally:
+        await failure_provider.aclose()
+        _release_dispatch(failure_token)
+
+    failure_completion = [e for e in failure_events if isinstance(e, LlmCompletionEvent)]
+    failure_failed = [e for e in failure_events if isinstance(e, LlmFailedEvent)]
+    assert failure_completion == []
+    assert len(failure_failed) == 1
 
 
 async def test_llm_completion_event_carries_typed_outcome_fields() -> None:

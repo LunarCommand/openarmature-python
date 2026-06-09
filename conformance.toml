@@ -32,7 +32,7 @@
 
 [manifest]
 implementation = "openarmature-python"
-spec_pin = "v0.51.0"
+spec_pin = "v0.53.0"
 
 # Status values:
 #   implemented   — shipped behavior matches the proposal's contract
@@ -215,6 +215,15 @@ status = "not-yet"
 # yet shipped a harness binding; v0.13.0 leaves the capability
 # not-yet-implemented.  Composes with 0056 (chat sub-spec).
 [proposals."0022"]
+status = "not-yet"
+
+# Spec v0.52.0 (proposal 0023).  Canonical state reducers — three
+# new factory-style reducers (``bounded_append``, ``dedupe_append``,
+# ``merge_by_key``) extending the graph-engine §2 baseline set.
+# Python has not yet shipped the new reducers; v0.13.0 leaves the
+# capability not-yet-implemented. Conformance fixtures 035-038
+# stay parser-deferred until the implementation lands.
+[proposals."0023"]
 status = "not-yet"
 
 [proposals."0042"]
@@ -507,5 +516,22 @@ status = "not-yet"
 # discrimination is queued for follow-up PRs 3b / 3c against the
 # same v0.13.0 release).
 [proposals."0057"]
+status = "implemented"
+since = "0.13.0"
+
+# Spec v0.53.0 (proposal 0058).  Typed LLM failure event — second
+# spec-normatively-typed event variant on the observer event union
+# alongside LlmCompletionEvent. Field set mirrors LlmCompletionEvent's
+# identity / scoping / request-side surface (17 fields) plus three
+# failure-specific fields (error_category from the §7 normative
+# category enumeration, optional vendor-specific error_type, always-
+# present error_message). Dispatched alongside the §7 exception on
+# the observer queue — caller-side exception flow unchanged.
+# Mutually exclusive with LlmCompletionEvent on the same call. Python
+# lands the typed variant + provider emission + OTel/Langfuse
+# consumer migration in v0.13.0; same PR also drops sentinel-namespace
+# NodeEvent emission for LLM events entirely from the bundled
+# OpenAIProvider.
+[proposals."0058"]
 status = "implemented"
 since = "0.13.0"

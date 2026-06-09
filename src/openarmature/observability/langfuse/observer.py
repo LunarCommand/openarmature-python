@@ -33,11 +33,11 @@ from openarmature.graph.events import (
     InvocationCompletedEvent,
     InvocationStartedEvent,
     LlmCompletionEvent,
+    LlmFailedEvent,
     MetadataAugmentationEvent,
     NodeEvent,
 )
 from openarmature.observability.lineage import is_strict_prefix
-from openarmature.observability.llm_event import LLM_NAMESPACE, LlmEventPayload
 
 from .client import (
     LangfuseClient,
@@ -358,6 +358,7 @@ class LangfuseObserver:
             | InvocationStartedEvent
             | InvocationCompletedEvent
             | LlmCompletionEvent
+            | LlmFailedEvent
         ),
     ) -> None:
         if isinstance(event, InvocationStartedEvent):
@@ -368,22 +369,20 @@ class LangfuseObserver:
             return
         # Proposal 0049 typed LlmCompletionEvent (success path). Drives
         # the §5.5 Generation observation lifecycle for successful
-        # provider calls. Failures don't emit this variant; they flow
-        # through the sentinel error path below (a single sentinel
-        # ``completed`` event — no started counterpart in v0.13.0+).
+        # provider calls.
         if isinstance(event, LlmCompletionEvent):
             if not self.disable_llm_spans:
                 self._handle_typed_llm_completion(event)
             return
+        # Proposal 0058 typed LlmFailedEvent (failure path). Drives
+        # the same Generation observation lifecycle with ERROR level +
+        # error_category as statusMessage.
+        if isinstance(event, LlmFailedEvent):
+            if not self.disable_llm_spans:
+                self._handle_typed_llm_failed(event)
+            return
         if isinstance(event, MetadataAugmentationEvent):
             self._handle_metadata_augmentation(event)
-            return
-        # LLM provider sentinel events: failure-path completed opens +
-        # closes an ERROR-level Generation; everything else is a no-op
-        # (success-path typed handler above owns the Generation).
-        if event.namespace == LLM_NAMESPACE:
-            if not self.disable_llm_spans:
-                self._handle_llm_error_event(event)
             return
         if event.phase == "started":
             self._open_started_observation(event)
@@ -1321,18 +1320,14 @@ class LangfuseObserver:
     # Generation observation lifecycle (LLM provider events)
     # ------------------------------------------------------------------
 
-    # v0.13.0 (proposal 0049 + 0057): success-path Generation lifecycle
-    # is driven by the typed LlmCompletionEvent — opened and closed in
-    # one shot at typed-event arrival, with start_time back-dated by
-    # latency_ms so the observation's duration reflects the adapter-
-    # boundary measurement rather than dispatcher queue delay. Failure
-    # path keeps a single sentinel NodeEvent (``completed`` phase
-    # carrying error fields on its LlmEventPayload — LlmCompletionEvent
-    # is success-only per proposal 0049 §3 alternative 3). The provider
-    # dropped success-path sentinel emission entirely in this release,
-    # so on success the typed event is the only signal the Generation
-    # observation has to fire from; the failure path's sentinel
-    # ``started`` was also dropped, leaving only ``completed``.
+    # v0.13.0 (proposals 0049 + 0057 + 0058): both Generation
+    # observation lifecycles are driven by typed events — success path
+    # from LlmCompletionEvent, failure path from LlmFailedEvent. Both
+    # handlers open + close in one shot at typed-event arrival, with
+    # start_time back-dated by latency_ms so duration reflects the
+    # adapter-boundary measurement rather than dispatcher queue delay.
+    # The provider dropped sentinel-namespace NodeEvent emission for
+    # LLM events entirely in this release.
     def _handle_typed_llm_completion(self, event: LlmCompletionEvent) -> None:
         """Open + close the Generation observation from the typed
         LlmCompletionEvent (success path)."""
@@ -1402,65 +1397,72 @@ class LangfuseObserver:
             end_kwargs["usage"] = usage
         handle.end(end_time=end_time, **end_kwargs)
 
-    def _handle_llm_error_event(self, event: NodeEvent) -> None:
-        """Emit an ERROR-level Generation observation from the sentinel
-        NodeEvent on the failure path. Success-path sentinel completion
-        is no longer emitted by the provider in v0.13.0; this handler
-        only fires for failures."""
+    def _handle_typed_llm_failed(self, event: LlmFailedEvent) -> None:
+        """Open + close an ERROR-level Generation observation from the
+        typed LlmFailedEvent (failure path, proposal 0058). Same shape
+        as the success path with ERROR level + error_category as the
+        Generation observation's statusMessage."""
         from openarmature.observability.correlation import (
             current_correlation_id,
             current_invocation_id,
         )
 
-        if event.phase != "completed":
-            # Sentinel started becomes a no-op once the success-side
-            # emission drops. Failures only emit the completed half.
-            return
-        if not isinstance(event.pre_state, LlmEventPayload):
-            return
-        payload = event.pre_state
-        if payload.error_type is None:
-            # Defensive — success path no longer emits the sentinel
-            # pair; if a non-error sentinel completion slips through
-            # (e.g., legacy custom provider not yet migrated), the
-            # typed event handler owns the Generation.
-            return
         invocation_id = current_invocation_id()
         if invocation_id is None:
             return
         correlation_id = current_correlation_id()
         if invocation_id not in self._inv_states:
-            self._open_trace(invocation_id, correlation_id, event)
+            self._open_trace_for_typed_event(invocation_id, correlation_id, event)
         inv_state = self._inv_states[invocation_id]
+        # Back-date timestamps using latency_ms (mirrors the success
+        # path); for failures the duration reflects time until the §7
+        # exception was raised.
+        end_time = datetime.now(UTC)
+        if event.latency_ms is not None:
+            start_time = end_time - timedelta(milliseconds=event.latency_ms)
+        else:
+            start_time = end_time
         parent_observation_id = self._resolve_llm_parent_observation_id(
             inv_state,
-            calling_namespace_prefix=payload.calling_namespace_prefix,
-            calling_attempt_index=payload.calling_attempt_index,
-            calling_fan_out_index=payload.calling_fan_out_index,
-            calling_branch_name=payload.calling_branch_name,
+            calling_namespace_prefix=event.namespace,
+            calling_attempt_index=event.attempt_index,
+            calling_fan_out_index=event.fan_out_index,
+            calling_branch_name=event.branch_name,
         )
-        metadata, model_parameters, input_value, _ = self._llm_metadata_and_payload(
-            payload, correlation_id, phase="started"
-        )
-        target_trace_id = self._trace_id_for(
-            inv_state, payload.calling_namespace_prefix, payload.calling_fan_out_index
-        )
+        metadata = self._typed_event_metadata(event, correlation_id)
+        # Failure-specific metadata rows: surface error_type + error_
+        # message as well as the category-as-statusMessage on the
+        # observation. error_type is null when no impl-side type was
+        # available; the metadata key is omitted in that case so the
+        # absence-is-meaningful semantic is preserved.
+        if event.error_type is not None:
+            metadata["error_type"] = event.error_type
+        metadata["error_message"] = event.error_message
+        model_parameters: dict[str, Any] = dict(event.request_params or {})
+        input_value: Any = None
+        if not self.disable_llm_payload:
+            if event.input_messages:
+                input_value = self._maybe_truncate_for_input(event.input_messages)
+            if event.request_extras:
+                metadata["request_extras"] = self._maybe_truncate_for_extras(dict(event.request_extras))
+        target_trace_id = self._trace_id_for(inv_state, event.namespace, event.fan_out_index)
         handle = self.client.generation(
             trace_id=target_trace_id,
             name="openarmature.llm.complete",
-            model=payload.model,
+            model=event.model,
             model_parameters=model_parameters,
             input=input_value,
             metadata=metadata,
             parent_observation_id=parent_observation_id,
-            prompt=self._resolve_prompt_link(payload),
+            prompt=self._resolve_prompt_link_from_typed_event(event),
+            start_time=start_time,
         )
         # Error-category mapping: §8.4.2 + §8.4.3.
-        end_kwargs: dict[str, Any] = {
-            "level": "ERROR",
-            "status_message": payload.error_category or payload.error_type,
-        }
-        handle.end(**end_kwargs)
+        handle.end(
+            end_time=end_time,
+            level="ERROR",
+            status_message=event.error_category,
+        )
 
     def _resolve_llm_parent_observation_id(
         self,
@@ -1504,12 +1506,15 @@ class LangfuseObserver:
                 return sg.handle.id
         return None
 
-    def _typed_event_metadata(self, event: LlmCompletionEvent, correlation_id: str | None) -> dict[str, Any]:
-        """Build the Generation observation's metadata dict from the
-        typed event. Mirrors _llm_metadata_and_payload's metadata
-        construction but reads from LlmCompletionEvent fields, and
-        combines started + completed phases into a single populated
-        dict (the typed event carries everything at once)."""
+    def _typed_event_metadata(
+        self, event: LlmCompletionEvent | LlmFailedEvent, correlation_id: str | None
+    ) -> dict[str, Any]:
+        """Build the Generation observation's metadata dict from a
+        typed LLM event. Shared between the success path
+        (LlmCompletionEvent) and the failure path (LlmFailedEvent);
+        response-side metadata (finish_reason / response_model /
+        response_id) lands only on the success variant since those
+        fields don't exist on LlmFailedEvent."""
         metadata: dict[str, Any] = {}
         if correlation_id is not None:
             metadata["correlation_id"] = correlation_id
@@ -1526,19 +1531,20 @@ class LangfuseObserver:
         active_group = event.active_prompt_group
         if active_group is not None:
             metadata["prompt_group_name"] = active_group.group_name
-        # Asymmetric guard with _llm_metadata_and_payload below: the
-        # typed event types caller_invocation_metadata as Mapping | None
-        # while LlmEventPayload defaults to an empty mapping (never
-        # None). Don't "normalize" the two paths without normalizing
-        # the source types.
         if event.caller_invocation_metadata is not None:
             _apply_caller_metadata(metadata, event.caller_invocation_metadata)
-        if event.finish_reason is not None:
-            metadata["finish_reason"] = event.finish_reason
-        if event.response_model is not None:
-            metadata["response_model"] = event.response_model
-        if event.response_id is not None:
-            metadata["response_id"] = event.response_id
+        # Response-side fields are LlmCompletionEvent-only — absent
+        # from LlmFailedEvent. The type guard keeps the success-path
+        # metadata complete while the failure-path metadata stays
+        # focused on the request-side + the failure-specific fields
+        # the caller adds separately.
+        if isinstance(event, LlmCompletionEvent):
+            if event.finish_reason is not None:
+                metadata["finish_reason"] = event.finish_reason
+            if event.response_model is not None:
+                metadata["response_model"] = event.response_model
+            if event.response_id is not None:
+                metadata["response_id"] = event.response_id
         return metadata
 
     def _usage_from_typed_event(self, event: LlmCompletionEvent) -> LangfuseUsage | None:
@@ -1555,10 +1561,9 @@ class LangfuseObserver:
             total=usage.total_tokens,
         )
 
-    def _resolve_prompt_link_from_typed_event(self, event: LlmCompletionEvent) -> Any:
+    def _resolve_prompt_link_from_typed_event(self, event: LlmCompletionEvent | LlmFailedEvent) -> Any:
         """§8.4.4 case discrimination on the typed event's active_prompt
-        snapshot. Same logic as _resolve_prompt_link but reads from
-        LlmCompletionEvent instead of LlmEventPayload."""
+        snapshot."""
         active_prompt = event.active_prompt
         if active_prompt is None:
             return None
@@ -1568,12 +1573,12 @@ class LangfuseObserver:
         return cast("dict[str, Any]", entities).get("langfuse_prompt")
 
     def _open_trace_for_typed_event(
-        self, invocation_id: str, correlation_id: str | None, event: LlmCompletionEvent
+        self, invocation_id: str, correlation_id: str | None, event: LlmCompletionEvent | LlmFailedEvent
     ) -> None:
-        """Trace open path for a typed LlmCompletionEvent arriving
-        before any node-started event reached this observer.
-        Synthesizes the minimal trace shape from the typed event's
-        scoping fields."""
+        """Trace open path for a typed LLM event (LlmCompletionEvent or
+        LlmFailedEvent) arriving before any node-started event reached
+        this observer. Synthesizes the minimal trace shape from the
+        typed event's scoping fields."""
         if event.namespace:
             entry_node = event.namespace[0]
         else:
@@ -1590,113 +1595,6 @@ class LangfuseObserver:
             _apply_caller_metadata(metadata, event.caller_invocation_metadata)
         self.client.trace(id=invocation_id, name=entry_node, metadata=metadata)
         self._inv_states[invocation_id] = _InvState(trace_id=invocation_id)
-
-    def _llm_metadata_and_payload(
-        self,
-        payload: LlmEventPayload,
-        correlation_id: str | None,
-        *,
-        phase: str,
-    ) -> tuple[dict[str, Any], dict[str, Any], Any, Any]:
-        # Returns (metadata, model_parameters, input, output) for the
-        # generation(...) / .end(...) call. Phase-specific filtering
-        # keeps the started call lean (input only) and the completed
-        # call focused on the output + usage + response metadata.
-        metadata: dict[str, Any] = {}
-        if correlation_id is not None:
-            metadata["correlation_id"] = correlation_id
-        # gen_ai.system → metadata.system per §8.4.3
-        metadata["system"] = payload.genai_system
-        # Prompt-identity metadata (§8.4.4 always-on, independent of
-        # whether a Langfuse Prompt entity link is established).
-        active_prompt = payload.active_prompt
-        if active_prompt is not None:
-            metadata["prompt"] = {
-                "name": active_prompt.name,
-                "version": active_prompt.version,
-                "label": active_prompt.label,
-                "template_hash": active_prompt.template_hash,
-                "rendered_hash": active_prompt.rendered_hash,
-            }
-        active_group = payload.active_prompt_group
-        if active_group is not None:
-            metadata["prompt_group_name"] = active_group.group_name
-        _apply_caller_metadata(metadata, payload.caller_invocation_metadata)
-
-        model_parameters: dict[str, Any] = {}
-        request_params = payload.request_params or {}
-        # Per §8.4.3: every gen_ai.request.<suffix> attribute lifts to
-        # generation.modelParameters.<suffix> by inclusion. The §5.5.2
-        # source set keys this on (temperature, max_tokens, top_p,
-        # seed, frequency_penalty, presence_penalty, stop_sequences as
-        # of v0.24.0); new request-param attrs added in future spec
-        # versions flow through automatically.
-        for key, value in request_params.items():
-            model_parameters[key] = value
-
-        # Input/output payload gated by disable_llm_payload (§8.7).
-        input_value: Any = None
-        output_value: Any = None
-        if not self.disable_llm_payload:
-            if phase == "started" and payload.input_messages is not None:
-                # The payload's input_messages is already image-
-                # redacted at the provider per §5.5.5 (inline image
-                # bytes never reach the observer). Serialize and
-                # compare against the configured cap; under cap the
-                # native shape is fine, over cap §8.7 says preserve
-                # the raw truncated string with the marker.
-                input_value = self._maybe_truncate_for_input(payload.input_messages)
-            if phase == "completed" and payload.output_content is not None:
-                output_value = self._maybe_truncate_for_output(payload.output_content)
-            if phase == "started" and payload.request_extras:
-                # request_extras renders into metadata, not the input
-                # field, per §8.4.3 (`metadata.request_extras`).
-                metadata["request_extras"] = self._maybe_truncate_for_extras(dict(payload.request_extras))
-
-        # Response metadata fields land on the completed call (§8.4.3).
-        if phase == "completed":
-            if payload.finish_reason is not None:
-                metadata["finish_reason"] = payload.finish_reason
-            if payload.response_model is not None:
-                metadata["response_model"] = payload.response_model
-            if payload.response_id is not None:
-                metadata["response_id"] = payload.response_id
-
-        return metadata, model_parameters, input_value, output_value
-
-    def _usage_from_payload(self, payload: LlmEventPayload) -> LangfuseUsage | None:
-        # Map OA usage fields onto the Langfuse Usage record per
-        # §8.4.3. Returns None when no usage was reported (all three
-        # token fields None) so the Generation observation reflects
-        # absence rather than zeroed counts.
-        if (
-            payload.prompt_tokens is None
-            and payload.completion_tokens is None
-            and payload.total_tokens is None
-        ):
-            return None
-        return LangfuseUsage(
-            input=payload.prompt_tokens,
-            output=payload.completion_tokens,
-            total=payload.total_tokens,
-        )
-
-    def _resolve_prompt_link(self, payload: LlmEventPayload) -> Any:
-        # §8.4.4 case discrimination: the trigger is whether the
-        # prompt's source exposes a Langfuse Prompt reference, not
-        # which specific backend produced it. PromptResult has
-        # observability_entities['langfuse_prompt'] populated when
-        # case 1 applies; absent otherwise.
-        active_prompt = payload.active_prompt
-        if active_prompt is None:
-            return None
-        # PromptResult is typed Any on LlmEventPayload to avoid a
-        # cross-package import (see llm_event.py for the rationale);
-        # read defensively.
-        entities = getattr(active_prompt, "observability_entities", None)
-        if not isinstance(entities, dict):
-            return None
-        return cast("dict[str, Any]", entities).get("langfuse_prompt")
 
     def _maybe_truncate_for_input(self, value: Any) -> Any:
         # Returns the native value (list of message dicts) when it

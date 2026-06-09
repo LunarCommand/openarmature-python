@@ -74,6 +74,17 @@ _STANDARD_RUNTIME_FIXTURES = [
 _DEFERRED_FIXTURES: dict[str, str] = {
     # proposal 0011 — parallel branches; fixture 021 (``branch_name``
     # field on NodeEvent) runs through this driver as of PR-5.
+    # Proposal 0023 (canonical state reducers, spec v0.52.0) — runtime
+    # execution requires the new factory reducers (``bounded_append``,
+    # ``dedupe_append``, ``merge_by_key``). Python ships these in a
+    # future PR; the manifest entry is ``not-yet``.
+    "034-reducer-bounded-append": "Proposal 0023 canonical state reducers; impl not yet shipped",
+    "035-reducer-dedupe-append": "Proposal 0023 canonical state reducers; impl not yet shipped",
+    "036-reducer-merge-by-key": "Proposal 0023 canonical state reducers; impl not yet shipped",
+    "037-reducer-configuration-invalid-max-len": (
+        "Proposal 0023 canonical state reducers; impl not yet shipped"
+    ),
+    "038-reducer-error-non-list-update": ("Proposal 0023 canonical state reducers; impl not yet shipped"),
 }
 
 

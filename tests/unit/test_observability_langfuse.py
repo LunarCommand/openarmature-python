@@ -1342,65 +1342,56 @@ async def test_disable_llm_spans_skips_typed_event_path() -> None:
     assert client.traces == {}
 
 
-async def test_llm_error_path_emits_error_generation_from_sentinel_completed() -> None:
-    # Failure-path provider exceptions still flow through the sentinel
-    # NodeEvent(completed, error=...). Verify the observer emits an
-    # ERROR-level Generation with the canonical error_category as
-    # status_message.
-    from openarmature.graph.events import NodeEvent
+async def test_llm_error_path_emits_error_generation_from_typed_failed_event() -> None:
+    # Per proposal 0058: failures emit a typed LlmFailedEvent. The
+    # Langfuse observer drives the Generation observation with ERROR
+    # level + error_category as statusMessage.
     from openarmature.observability.correlation import (
         _reset_invocation_id,
         _set_invocation_id,
     )
-    from openarmature.observability.llm_event import LlmEventPayload
+    from tests._helpers.typed_event import make_failed_event
 
     client = InMemoryLangfuseClient()
     observer = LangfuseObserver(client=client)
     token = _set_invocation_id("inv-err")
     try:
-        completed = NodeEvent(
-            node_name="openarmature.llm.complete",
-            namespace=("openarmature.llm.complete",),
-            step=-1,
-            phase="completed",
-            pre_state=LlmEventPayload(
-                call_id="cc-err",
+        await observer(
+            make_failed_event(
+                invocation_id="inv-err",
                 model="m-test",
+                error_category="provider_rate_limit",
                 error_type="ProviderRateLimit",
-                error_category="provider_rate_limited",
                 error_message="429 from upstream",
-            ),
-            post_state=None,
-            error=None,
-            parent_states=(),
+                call_id="cc-err",
+            )
         )
-        await observer(completed)
     finally:
         _reset_invocation_id(token)
 
     trace = client.traces["inv-err"]
     obs = next(o for o in trace.observations if o.type == "generation")
     assert obs.level == "ERROR"
-    assert obs.status_message == "provider_rate_limited"
+    assert obs.status_message == "provider_rate_limit"
 
 
-async def test_llm_error_event_parents_under_branch_calling_node() -> None:
+async def test_typed_failed_event_parents_under_branch_calling_node() -> None:
     # Regression cover for the _resolve_llm_parent_observation_id
-    # keyword-only refactor: when an LLM failure fires inside a
-    # parallel-branches branch, the resulting ERROR Generation MUST
-    # parent under THAT branch's calling node observation, not under
-    # a sibling branch's same-named node. Pre-populates the observer's
-    # internal state with two open node observations that differ only
-    # by branch_name, then dispatches a sentinel-completed-error with
-    # a matching calling_branch_name and asserts the parent_observation
-    # _id points at the right one.
+    # keyword-only signature: when a typed LlmFailedEvent fires
+    # inside a parallel-branches branch, the resulting ERROR
+    # Generation MUST parent under THAT branch's calling node
+    # observation, not under a sibling branch's same-named node.
+    # Pre-populates the observer's internal state with two open
+    # node observations that differ only by branch_name, then
+    # dispatches a typed LlmFailedEvent with the matching
+    # branch_name and asserts the parent_observation_id points at
+    # the right one.
     #
     # Note: the same _resolve_llm_parent_observation_id call also
-    # serves the success-path typed event handler (with
-    # calling_branch_name = event.branch_name); error- and success-
-    # paths share the resolver, so this test transitively covers the
-    # success-path branch_name handling.
-    from openarmature.graph.events import NodeEvent
+    # serves the success-path handler with calling_branch_name =
+    # event.branch_name; failure- and success-paths share the
+    # resolver so this test transitively covers the success-path
+    # branch_name handling.
     from openarmature.observability.correlation import (
         _reset_invocation_id,
         _set_invocation_id,
@@ -1409,7 +1400,7 @@ async def test_llm_error_event_parents_under_branch_calling_node() -> None:
         _InvState,
         _OpenObservation,
     )
-    from openarmature.observability.llm_event import LlmEventPayload
+    from tests._helpers.typed_event import make_failed_event
 
     client = InMemoryLangfuseClient()
     observer = LangfuseObserver(client=client)
@@ -1419,7 +1410,7 @@ async def test_llm_error_event_parents_under_branch_calling_node() -> None:
         # Bootstrap the Trace + two branch-distinguished node
         # observations directly. _InvState's open_observations map is
         # keyed by (namespace, attempt_index, fan_out_index,
-        # branch_name); the calling node identity on the error payload
+        # branch_name); the calling node identity on the typed event
         # is (("dispatcher", "ask"), 0, None, "fast").
         client.trace(id=invocation_id, name="dispatcher")
         observer._inv_states[invocation_id] = _InvState(trace_id=invocation_id)  # noqa: SLF001
@@ -1431,27 +1422,21 @@ async def test_llm_error_event_parents_under_branch_calling_node() -> None:
         slow_key = (("dispatcher", "ask"), 0, None, "slow")
         inv_state.open_observations[fast_key] = _OpenObservation(handle=fast_handle)
         inv_state.open_observations[slow_key] = _OpenObservation(handle=slow_handle)
-        completed = NodeEvent(
-            node_name="openarmature.llm.complete",
-            namespace=("openarmature.llm.complete",),
-            step=-1,
-            phase="completed",
-            pre_state=LlmEventPayload(
-                call_id="cc-pb",
+        await observer(
+            make_failed_event(
+                invocation_id=invocation_id,
+                node_name="ask",
+                namespace=("dispatcher", "ask"),
+                attempt_index=0,
+                fan_out_index=None,
+                branch_name="fast",
                 model="m-test",
-                error_type="ProviderUnavailable",
                 error_category="provider_unavailable",
+                error_type="ProviderUnavailable",
                 error_message="503 from upstream",
-                calling_namespace_prefix=("dispatcher", "ask"),
-                calling_attempt_index=0,
-                calling_fan_out_index=None,
-                calling_branch_name="fast",
-            ),
-            post_state=None,
-            error=None,
-            parent_states=(),
+                call_id="cc-pb",
+            )
         )
-        await observer(completed)
     finally:
         _reset_invocation_id(token)
 

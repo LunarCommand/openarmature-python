@@ -365,6 +365,48 @@ _DEFERRED_FIXTURES: dict[str, str] = {
     "observability/068-llm-completion-event-response-model-distinct-from-request": (
         "Proposal 0057 typed event request-side fields; queued for v0.13.0"
     ),
+    # Proposal 0058 (LlmFailedEvent typed variant, v0.53.0) — fixtures
+    # 069-073 share the same typed_observers / typed_event_collector
+    # directive shape as 050-068 and inherit the same parser-deferral
+    # status pending the harness model's typed-event-collector schema.
+    # The behavior is pinned by unit tests in
+    # ``tests/unit/test_llm_provider.py`` (provider emission) plus
+    # ``tests/unit/test_observability_otel.py`` and
+    # ``test_observability_langfuse.py`` (observer rendering).
+    "observability/069-llm-failure-event-dispatch-on-provider-unavailable": (
+        "Proposal 0058 typed LLM failure event; harness typed_event_collector schema pending"
+    ),
+    "observability/070-llm-failure-event-dispatch-on-provider-invalid-request": (
+        "Proposal 0058 typed LLM failure event; harness typed_event_collector schema pending"
+    ),
+    "observability/071-llm-failure-event-call-id-distinct-from-completion-event": (
+        "Proposal 0058 typed LLM failure event; harness typed_event_collector schema pending"
+    ),
+    "observability/072-llm-failure-event-mutual-exclusion-with-completion-event": (
+        "Proposal 0058 typed LLM failure event; harness typed_event_collector schema pending"
+    ),
+    "observability/073-llm-failure-event-error-type-vendor-specific": (
+        "Proposal 0058 typed LLM failure event; harness typed_event_collector schema pending"
+    ),
+    # Proposal 0023 (canonical state reducers, accepted before v0.53.0
+    # but not implemented by this release) — fixtures 035-038 introduce
+    # the new dict-form reducer directive (``dedupe_append: {}``,
+    # ``merge_by_key: {key: 'id'}``); the harness's reducer field still
+    # expects a string. Queued for the canonical-state-reducers impl
+    # batch alongside its conformance manifest entry.
+    "graph-engine/034-reducer-bounded-append": (
+        "Proposal 0023 canonical state reducers; impl not yet shipped"
+    ),
+    "graph-engine/035-reducer-dedupe-append": (
+        "Proposal 0023 canonical state reducers; impl not yet shipped"
+    ),
+    "graph-engine/036-reducer-merge-by-key": ("Proposal 0023 canonical state reducers; impl not yet shipped"),
+    "graph-engine/037-reducer-configuration-invalid-max-len": (
+        "Proposal 0023 canonical state reducers; impl not yet shipped"
+    ),
+    "graph-engine/038-reducer-error-non-list-update": (
+        "Proposal 0023 canonical state reducers; impl not yet shipped"
+    ),
     # Proposal 0050 (failure-isolation middleware + call-level retry,
     # v0.42.0) — llm-provider fixtures 056-058 (call-level retry) and
     # pipeline-utilities fixtures 058-063 (failure-isolation

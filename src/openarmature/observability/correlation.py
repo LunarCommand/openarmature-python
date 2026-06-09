@@ -40,6 +40,7 @@ if TYPE_CHECKING:
         InvocationCompletedEvent,
         InvocationStartedEvent,
         LlmCompletionEvent,
+        LlmFailedEvent,
         MetadataAugmentationEvent,
         NodeEvent,
     )
@@ -222,6 +223,7 @@ _active_dispatch_var: ContextVar[
             | InvocationStartedEvent
             | InvocationCompletedEvent
             | LlmCompletionEvent
+            | LlmFailedEvent
         ],
         None,
     ]
@@ -237,6 +239,7 @@ def current_dispatch() -> (
             | InvocationStartedEvent
             | InvocationCompletedEvent
             | LlmCompletionEvent
+            | LlmFailedEvent
         ],
         None,
     ]
@@ -263,6 +266,7 @@ def _set_active_dispatch(
             | InvocationStartedEvent
             | InvocationCompletedEvent
             | LlmCompletionEvent
+            | LlmFailedEvent
         ],
         None,
     ],
@@ -274,6 +278,7 @@ def _set_active_dispatch(
             | InvocationStartedEvent
             | InvocationCompletedEvent
             | LlmCompletionEvent
+            | LlmFailedEvent
         ],
         None,
     ]
@@ -293,6 +298,7 @@ def _reset_active_dispatch(
                 | InvocationStartedEvent
                 | InvocationCompletedEvent
                 | LlmCompletionEvent
+                | LlmFailedEvent
             ],
             None,
         ]

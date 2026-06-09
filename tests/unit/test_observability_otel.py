@@ -803,53 +803,31 @@ async def test_disable_llm_spans_skips_typed_event_path() -> None:
     assert llm_spans == []
 
 
-async def test_llm_error_path_emits_error_span_from_sentinel_completed() -> None:
-    # Failure-path LLM calls don't emit the typed LlmCompletionEvent
-    # (per proposal 0049 §3 alternative 3). The OTel observer keeps
-    # the sentinel-pair error path alive so error-status spans still
-    # fire. Sentinel started + non-error completed are no-ops; only
-    # completed-with-error_type produces a span.
+async def test_llm_error_path_emits_error_span_from_typed_failed_event() -> None:
+    # Per proposal 0058: failures emit a typed LlmFailedEvent. The
+    # OTel observer drives the same openarmature.llm.complete span
+    # shape with ERROR status + openarmature.error.category attribute.
     from opentelemetry.trace import StatusCode
 
-    from openarmature.graph.events import NodeEvent
     from openarmature.observability.correlation import (
         _reset_invocation_id,
         _set_invocation_id,
     )
-    from openarmature.observability.llm_event import LlmEventPayload
+    from tests._helpers.typed_event import make_failed_event
 
     exporter = InMemorySpanExporter()
     observer = OTelObserver(span_processor=SimpleSpanProcessor(exporter))
     token = _set_invocation_id("inv-err")
     try:
-        started = NodeEvent(
-            node_name="openarmature.llm.complete",
-            namespace=("openarmature.llm.complete",),
-            step=-1,
-            phase="started",
-            pre_state=LlmEventPayload(call_id="cc-err", model="test-m"),
-            post_state=None,
-            error=None,
-            parent_states=(),
-        )
-        completed = NodeEvent(
-            node_name="openarmature.llm.complete",
-            namespace=("openarmature.llm.complete",),
-            step=-1,
-            phase="completed",
-            pre_state=LlmEventPayload(
-                call_id="cc-err",
-                model="test-m",
+        await observer(
+            make_failed_event(
+                invocation_id="inv-err",
+                error_category="provider_rate_limit",
                 error_type="ProviderRateLimit",
-                error_category="provider_rate_limited",
                 error_message="429 from upstream",
-            ),
-            post_state=None,
-            error=None,
-            parent_states=(),
+                call_id="cc-err",
+            )
         )
-        await observer(started)
-        await observer(completed)
     finally:
         _reset_invocation_id(token)
     observer.shutdown()
@@ -858,7 +836,7 @@ async def test_llm_error_path_emits_error_span_from_sentinel_completed() -> None
     span = llm_spans[0]
     assert span.status.status_code == StatusCode.ERROR
     attrs = dict(span.attributes or {})
-    assert attrs.get("openarmature.error.category") == "provider_rate_limited"
+    assert attrs.get("openarmature.error.category") == "provider_rate_limit"
 
 
 # ---------------------------------------------------------------------------
