@@ -714,18 +714,24 @@ class OpenAIProvider:
                 body["stop"] = config.stop_sequences
             # Pass-through any provider-specific extras (extra="allow"
             # on RuntimeConfig); spec §6 mandates implementations MUST
-            # accept and forward undeclared fields untouched.
+            # accept and forward undeclared fields untouched. Spec 0047
+            # §8: canonicalize each extra value at the user-input
+            # boundary so dict-typed extras (vLLM ``guided_decoding``,
+            # etc.) render with stable key ordering.
             extras = config.model_extra or {}
             for k, v in extras.items():
-                body.setdefault(k, v)
+                body.setdefault(k, _canonicalize_dict_keys(v))
         # response_format is omitted entirely on the fallback path —
         # the schema travels in the augmented system message instead.
         if schema_dict is not None and include_response_format:
+            # Spec 0047 §8.1.5 / Q5 ack: response_format.json_schema.schema
+            # is a user-supplied JSON Schema and flows through the same
+            # canonicalization path as tool.parameters.
             body["response_format"] = {
                 "type": "json_schema",
                 "json_schema": {
                     "name": _derive_schema_name(schema_dict),
-                    "schema": schema_dict,
+                    "schema": _canonicalize_dict_keys(schema_dict),
                     "strict": strict_mode_supported(schema_dict),
                 },
             }
@@ -752,7 +758,12 @@ class OpenAIProvider:
                 }
             else:
                 body["tool_choice"] = tool_choice
-        return body
+        # Spec 0047 §8 belt-and-suspenders: walk the assembled body
+        # once more sorting any dict at every nesting level, in case
+        # a future code path introduces a user-input boundary the
+        # per-field canonicalization above doesn't cover. Cheap (the
+        # body is small) and explicit.
+        return _canonicalize_dict_keys(body)
 
     # ------------------------------------------------------------------
     # Response parsing (spec §8.1.2)
@@ -1132,8 +1143,11 @@ def _message_to_wire(msg: Message) -> dict[str, Any]:
                         "name": tc.name,
                         # Canonical compact form (no inter-token spaces). Matches
                         # the spec's wire-mapping fixture (005, cases shape) and
-                        # the form OpenAI itself emits.
-                        "arguments": json.dumps(tc.arguments or {}, separators=(",", ":")),
+                        # the form OpenAI itself emits. ``sort_keys=True`` per
+                        # spec 0047 §8 — tool-call arguments are a
+                        # caller-supplied dict and the JSON-encoded string
+                        # MUST be byte-stable across equivalent inputs.
+                        "arguments": json.dumps(tc.arguments or {}, separators=(",", ":"), sort_keys=True),
                     },
                 }
                 for tc in msg.tool_calls
@@ -1169,14 +1183,55 @@ def _block_to_wire(block: ContentBlock) -> dict[str, Any]:
     return {"type": "image_url", "image_url": image_url}
 
 
+# Spec 0047 §8 *Intra-impl wire-byte stability* canonicalizer.
+# Recursively sorts dict keys at every nesting level; preserves list
+# ordering (per Q5 ack on the proposal-0047 coord thread — array
+# ORDER is caller-supplied and stays as-is; object KEYS inside
+# arrays get sorted via the dict-recursion branch). Applied at every
+# user-supplied-dict boundary in the wire body so equivalent OA
+# inputs produce byte-identical wire output for APC hit reliability.
+#
+# Recursion depth: bounded by the depth of the input dict, not by
+# any internal accumulator. Python's default recursion limit (1000)
+# is two orders of magnitude above realistic JSON Schema depths
+# (typical schemas top out at 5-10 nesting levels — OpenAI's API
+# rejects deeper ones at the wire layer before the cache prefix
+# matters). We don't impose our own cap; if a caller hands us a
+# 1000-deep nested dict, RecursionError surfaces immediately at
+# canonicalization time rather than producing silently-broken wire
+# bytes downstream.
+#
+# Byte-stability requires Python's dict insertion-order preservation
+# guarantee (PEP 468, 3.7+) AND httpx serializing the body via the
+# stdlib ``json.dumps`` default (which respects dict iteration
+# order). Both are stable contracts on the supported Python versions
+# + httpx 0.27+. If a future httpx release internalizes ordering
+# (e.g., switches to alphabetical key emission), the canonicalizer
+# becomes redundant but tests would continue to pass; if it
+# randomizes ordering, the wire-byte tests in
+# ``tests/unit/test_llm_provider.py`` would fail loudly.
+def _canonicalize_dict_keys(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {k: _canonicalize_dict_keys(value[k]) for k in sorted(cast("dict[str, Any]", value))}
+    if isinstance(value, list):
+        return [_canonicalize_dict_keys(v) for v in cast("list[Any]", value)]
+    return value
+
+
 def _tool_to_wire(tool: Tool) -> dict[str, Any]:
+    # Per spec 0047 §8 ack (coord Q5): the byte-stability rule covers
+    # tool DEFINITIONS broadly — not just the parameters subtree.
+    # Sort the function record's top-level keys + recursively
+    # canonicalize the parameters JSON Schema.
     return {
         "type": "function",
-        "function": {
-            "name": tool.name,
-            "description": tool.description,
-            "parameters": tool.parameters,
-        },
+        "function": _canonicalize_dict_keys(
+            {
+                "name": tool.name,
+                "description": tool.description,
+                "parameters": tool.parameters,
+            }
+        ),
     }
 
 

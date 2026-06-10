@@ -11,9 +11,10 @@ the canonical category-string contract, and the
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable
 from contextvars import Token
-from typing import cast
+from typing import Any, cast
 
 import httpx
 import pytest
@@ -1902,3 +1903,426 @@ async def test_llm_completion_event_sources_node_identity_from_calling_context()
     assert typed.attempt_index == 2
     assert typed.fan_out_index == 3
     assert typed.branch_name == "fast"
+
+
+# ---------------------------------------------------------------------------
+# Proposal 0047: intra-impl wire-byte stability
+# ---------------------------------------------------------------------------
+
+
+async def test_wire_byte_equality_across_dict_key_insertion_order_on_tool_parameters() -> None:
+    # Spec 0047 §8 intra-impl wire-byte stability: two structurally-
+    # equivalent calls whose tool.parameters dicts differ only in
+    # key insertion order MUST produce byte-identical wire bytes.
+    # Caller-supplied JSON Schemas are the primary source of byte
+    # drift under APC; locking them down here pins the contract.
+    from openarmature.llm import Tool
+
+    captured: list[bytes] = []
+
+    def _handler(req: httpx.Request) -> httpx.Response:
+        captured.append(bytes(req.content))
+        return httpx.Response(
+            200,
+            json={
+                "id": "x",
+                "object": "chat.completion",
+                "created": 0,
+                "model": "m",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "ok"},
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+            },
+        )
+
+    # Tool A: parameters dict built with one key order.
+    tool_a = Tool(
+        name="lookup",
+        description="Look something up.",
+        parameters={
+            "type": "object",
+            "properties": {
+                "query": {"type": "string"},
+                "limit": {"type": "integer"},
+            },
+            "required": ["query"],
+        },
+    )
+    # Tool B: SAME schema, but ``properties`` keys + top-level keys
+    # in a different insertion order.
+    tool_b = Tool(
+        name="lookup",
+        description="Look something up.",
+        parameters={
+            "required": ["query"],
+            "properties": {
+                "limit": {"type": "integer"},
+                "query": {"type": "string"},
+            },
+            "type": "object",
+        },
+    )
+    provider = OpenAIProvider(
+        base_url="http://test", model="m", api_key="k", transport=httpx.MockTransport(_handler)
+    )
+    try:
+        await provider.complete([UserMessage(content="hi")], tools=[tool_a])
+        await provider.complete([UserMessage(content="hi")], tools=[tool_b])
+    finally:
+        await provider.aclose()
+
+    assert len(captured) == 2
+    assert captured[0] == captured[1], (
+        f"wire bytes differ under permuted dict keys:\n  A: {captured[0]!r}\n  B: {captured[1]!r}"
+    )
+
+
+async def test_wire_byte_equality_across_runtime_config_extras_dict_order() -> None:
+    # Spec 0047 §8: RuntimeConfig.extras keys flow through with sorted
+    # ordering even when the caller supplied them in a different
+    # insertion order. Catches the vLLM ``guided_decoding={"choice":
+    # ["a", "b"]}``-style extras where dict-typed values are the
+    # primary cache-stability hit.
+    from openarmature.llm import RuntimeConfig
+
+    captured: list[bytes] = []
+
+    def _handler(req: httpx.Request) -> httpx.Response:
+        captured.append(bytes(req.content))
+        return httpx.Response(
+            200,
+            json={
+                "id": "x",
+                "object": "chat.completion",
+                "created": 0,
+                "model": "m",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "ok"},
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+            },
+        )
+
+    config_a = RuntimeConfig.model_validate(
+        {"guided_decoding": {"choice": ["a", "b"], "backend": "outlines"}}
+    )
+    config_b = RuntimeConfig.model_validate(
+        {"guided_decoding": {"backend": "outlines", "choice": ["a", "b"]}}
+    )
+    provider = OpenAIProvider(
+        base_url="http://test", model="m", api_key="k", transport=httpx.MockTransport(_handler)
+    )
+    try:
+        await provider.complete([UserMessage(content="hi")], config=config_a)
+        await provider.complete([UserMessage(content="hi")], config=config_b)
+    finally:
+        await provider.aclose()
+
+    assert len(captured) == 2
+    assert captured[0] == captured[1]
+
+
+async def test_wire_byte_array_ordering_preserved() -> None:
+    # Spec 0047 §8 / Q5: array ORDER is caller-supplied and MUST be
+    # preserved — only dict KEYS get sorted. Verify that swapping
+    # the order of items in ``stop_sequences`` produces DIFFERENT
+    # wire bytes (the canonicalizer must not silently sort the list).
+    from openarmature.llm import RuntimeConfig
+
+    captured: list[bytes] = []
+
+    def _handler(req: httpx.Request) -> httpx.Response:
+        captured.append(bytes(req.content))
+        return httpx.Response(
+            200,
+            json={
+                "id": "x",
+                "object": "chat.completion",
+                "created": 0,
+                "model": "m",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "ok"},
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+            },
+        )
+
+    config_a = RuntimeConfig(stop_sequences=["foo", "bar"])
+    config_b = RuntimeConfig(stop_sequences=["bar", "foo"])
+    provider = OpenAIProvider(
+        base_url="http://test", model="m", api_key="k", transport=httpx.MockTransport(_handler)
+    )
+    try:
+        await provider.complete([UserMessage(content="hi")], config=config_a)
+        await provider.complete([UserMessage(content="hi")], config=config_b)
+    finally:
+        await provider.aclose()
+
+    assert len(captured) == 2
+    assert captured[0] != captured[1], (
+        "caller-supplied list order MUST be preserved on the wire; "
+        f"got identical bytes for [foo,bar] and [bar,foo]: {captured[0]!r}"
+    )
+
+
+async def test_wire_byte_equality_across_tool_call_arguments_dict_order() -> None:
+    # Spec 0047 §8: tool_call.arguments is a caller-supplied dict
+    # JSON-encoded into a string field. The encoded string MUST be
+    # byte-stable across equivalent dicts with different key orders.
+    captured: list[bytes] = []
+
+    def _handler(req: httpx.Request) -> httpx.Response:
+        captured.append(bytes(req.content))
+        return httpx.Response(
+            200,
+            json={
+                "id": "x",
+                "object": "chat.completion",
+                "created": 0,
+                "model": "m",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "ok"},
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+            },
+        )
+
+    assistant_a = AssistantMessage(
+        content="",
+        tool_calls=[ToolCall(id="c1", name="lookup", arguments={"query": "x", "limit": 5})],
+    )
+    assistant_b = AssistantMessage(
+        content="",
+        tool_calls=[ToolCall(id="c1", name="lookup", arguments={"limit": 5, "query": "x"})],
+    )
+    provider = OpenAIProvider(
+        base_url="http://test", model="m", api_key="k", transport=httpx.MockTransport(_handler)
+    )
+    try:
+        await provider.complete(
+            [
+                UserMessage(content="hi"),
+                assistant_a,
+                ToolMessage(content="result", tool_call_id="c1"),
+            ]
+        )
+        await provider.complete(
+            [
+                UserMessage(content="hi"),
+                assistant_b,
+                ToolMessage(content="result", tool_call_id="c1"),
+            ]
+        )
+    finally:
+        await provider.aclose()
+
+    assert len(captured) == 2
+    assert captured[0] == captured[1]
+
+
+async def test_wire_byte_equality_response_format_schema_under_key_permutation() -> None:
+    # Spec 0047 §8 / Q5: response_format.json_schema.schema is a
+    # caller-supplied JSON Schema that flows through the same
+    # canonicalization path as tool.parameters. Verify byte-equality
+    # under recursive key permutation including nested ``properties``.
+    captured: list[bytes] = []
+
+    def _handler(req: httpx.Request) -> httpx.Response:
+        captured.append(bytes(req.content))
+        return httpx.Response(
+            200,
+            json={
+                "id": "x",
+                "object": "chat.completion",
+                "created": 0,
+                "model": "m",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": '{"answer": "ok"}'},
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+            },
+        )
+
+    schema_a: dict[str, Any] = {
+        "type": "object",
+        "properties": {
+            "answer": {"type": "string"},
+            "score": {"type": "number"},
+        },
+        "required": ["answer"],
+        "additionalProperties": False,
+    }
+    schema_b: dict[str, Any] = {
+        "additionalProperties": False,
+        "required": ["answer"],
+        "properties": {
+            "score": {"type": "number"},
+            "answer": {"type": "string"},
+        },
+        "type": "object",
+    }
+    provider = OpenAIProvider(
+        base_url="http://test", model="m", api_key="k", transport=httpx.MockTransport(_handler)
+    )
+    try:
+        await provider.complete([UserMessage(content="hi")], response_schema=schema_a)
+        await provider.complete([UserMessage(content="hi")], response_schema=schema_b)
+    finally:
+        await provider.aclose()
+
+    assert len(captured) == 2
+    assert captured[0] == captured[1]
+
+
+def test_canonicalize_dict_keys_sorts_recursively_and_preserves_lists() -> None:
+    # Locks down the helper's contract directly — defensive in case
+    # the wire-byte tests above ever miss a regression that surfaces
+    # only in deeply nested or list-of-objects shapes.
+    from openarmature.llm.providers.openai import _canonicalize_dict_keys
+
+    src: dict[str, Any] = {
+        "z": 1,
+        "a": {
+            "y": [{"d": 4, "c": 3}, {"b": 2, "a": 1}],
+            "x": "v",
+        },
+    }
+    result = _canonicalize_dict_keys(src)
+    # Top-level keys sorted.
+    assert list(result.keys()) == ["a", "z"]
+    # Nested dict keys sorted.
+    assert list(result["a"].keys()) == ["x", "y"]
+    # List ordering preserved (the two objects stay in source order).
+    assert result["a"]["y"][0] == {"c": 3, "d": 4}
+    assert result["a"]["y"][1] == {"a": 1, "b": 2}
+    # Inside-list dicts have sorted keys.
+    assert list(result["a"]["y"][0].keys()) == ["c", "d"]
+    assert list(result["a"]["y"][1].keys()) == ["a", "b"]
+
+
+async def test_wire_body_top_level_keys_arrive_sorted() -> None:
+    # Direct assertion on the belt-and-suspenders pass at the end of
+    # _build_request_body — independent of any single apply site. Walks
+    # the captured JSON body and confirms every dict at every nesting
+    # level has lexicographically-sorted keys. Catches a regression
+    # where a future code path adds a key after the belt-and-suspenders
+    # pass would have run, or where the pass itself gets removed.
+    captured: list[bytes] = []
+
+    def _handler(req: httpx.Request) -> httpx.Response:
+        captured.append(bytes(req.content))
+        return httpx.Response(
+            200,
+            json={
+                "id": "x",
+                "object": "chat.completion",
+                "created": 0,
+                "model": "m",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "ok"},
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+            },
+        )
+
+    provider = OpenAIProvider(
+        base_url="http://test", model="m", api_key="k", transport=httpx.MockTransport(_handler)
+    )
+    try:
+        await provider.complete([UserMessage(content="hi")])
+    finally:
+        await provider.aclose()
+
+    assert len(captured) == 1
+    body = json.loads(captured[0])
+
+    def _assert_sorted(node: Any, path: str) -> None:
+        if isinstance(node, dict):
+            keys = list(cast("dict[str, Any]", node).keys())
+            assert keys == sorted(keys), f"keys at {path} not sorted: {keys}"
+            for k, v in cast("dict[str, Any]", node).items():
+                _assert_sorted(v, f"{path}.{k}")
+        elif isinstance(node, list):
+            for i, v in enumerate(cast("list[Any]", node)):
+                _assert_sorted(v, f"{path}[{i}]")
+
+    _assert_sorted(body, "<root>")
+
+
+async def test_wire_byte_equality_across_image_content_blocks() -> None:
+    # The image content-block wire shape (``_block_to_wire``) is
+    # fully OA-controlled — no caller-supplied dict passes through.
+    # But the canonicalization pass at the body root walks through
+    # it, and we want byte-equality across equivalent calls to be
+    # observably stable (a future refactor that introduces a caller-
+    # supplied source dict at this boundary would need to keep this
+    # test passing). Two calls with the same image + same surrounding
+    # text produce identical wire bytes.
+    from openarmature.llm.messages import ImageBlock, ImageSourceURL, TextBlock
+
+    captured: list[bytes] = []
+
+    def _handler(req: httpx.Request) -> httpx.Response:
+        captured.append(bytes(req.content))
+        return httpx.Response(
+            200,
+            json={
+                "id": "x",
+                "object": "chat.completion",
+                "created": 0,
+                "model": "m",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "ok"},
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+            },
+        )
+
+    def _msg() -> UserMessage:
+        return UserMessage(
+            content=[
+                TextBlock(text="what is this?"),
+                ImageBlock(source=ImageSourceURL(url="https://example.com/img.png"), detail="auto"),
+            ]
+        )
+
+    provider = OpenAIProvider(
+        base_url="http://test", model="m", api_key="k", transport=httpx.MockTransport(_handler)
+    )
+    try:
+        await provider.complete([_msg()])
+        await provider.complete([_msg()])
+    finally:
+        await provider.aclose()
+
+    assert len(captured) == 2
+    assert captured[0] == captured[1]

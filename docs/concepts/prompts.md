@@ -365,6 +365,73 @@ The filesystem backend layout is
 `<root>/<label>/<name>.j2`; for the example above,
 `./prompts/production/greeting.j2`.
 
+## Prefix-cache friendly authoring (APC)
+
+Inference engines that implement Automatic Prefix Caching
+(vLLM with `--enable-prefix-caching`, OpenAI's hosted prompt
+caching, llama.cpp's prefix reuse, others) skip recomputing
+attention for token prefixes they have already processed in
+a recent request. The cache hit is decided by **byte equality**
+of the prefix. A single reordered key, a shuffled tool
+definition, or a timestamp embedded in the system prompt
+invalidates the cache and re-runs full attention from the
+first changed byte.
+
+OpenArmature handles the wire-byte half of this contract for
+you. The OpenAI provider canonicalizes every user-supplied dict
+on the wire — tool parameter schemas, response-format schemas,
+`RuntimeConfig` extras, tool-call arguments — so equivalent OA
+inputs produce byte-identical wire output regardless of dict
+insertion order. Prompt rendering is deterministic by
+construction: same `Prompt` plus same variables produces
+byte-identical `PromptResult.messages` (spec
+[prompt-management §13](https://github.com/LunarCommand/openarmature-spec/blob/main/spec/prompt-management/spec.md#13-determinism)).
+
+Authoring discipline that maximizes APC hit rates is
+out of OA's hands — it's about how you structure the prompts.
+The spec's [llm-provider §14 *APC-friendly authoring
+guidance*](https://github.com/LunarCommand/openarmature-spec/blob/main/spec/llm-provider/spec.md#14-apc-friendly-authoring-guidance-informative)
+lists five informative patterns; the headline:
+
+1. **Place variables and chat history at the end of templates.**
+   Stable static prefix at the front maximizes cacheable bytes.
+2. **No timestamps, UUIDs, or other nondeterministic values
+   in static segments.** They poison the cache prefix on every
+   request.
+3. **Stable few-shot ordering.** Pick once, reuse across
+   requests; don't shuffle.
+4. **Sort retrieval results before injecting** when the
+   downstream consumer doesn't care about order.
+5. **Cache-friendly tool ordering.** Define tools in a stable
+   order across calls.
+
+### Debugging "the cache attribute isn't showing up"
+
+When the OTel observer is running but
+`openarmature.llm.cache_read.input_tokens` doesn't appear on
+your `openarmature.llm.complete` spans, the cause is almost
+always server-side: the inference engine either isn't
+configured to surface cache stats, or isn't running with prefix
+caching enabled at all.
+
+- **vLLM**: launch with `--enable-prefix-caching` AND
+  `--enable-prompt-tokens-details`. The first turns APC on;
+  the second tells vLLM to populate
+  `usage.prompt_tokens_details.cached_tokens` on the wire
+  response. Both flags are required for the attribute to
+  surface.
+- **OpenAI hosted (Chat Completions)**: prompt caching is
+  on automatically for prompts ≥1024 tokens; the
+  `prompt_tokens_details.cached_tokens` field appears on
+  qualifying responses without configuration.
+
+OA's role is to source the field when present (provider-side)
+and emit the attribute when populated (observer-side); without
+the upstream signal, neither happens — and that's the right
+behavior (per the spec's absent-vs-zero distinction, an absent
+attribute means "the provider didn't report," not "zero
+hits").
+
 ## What's out of scope (for now)
 
 - **Specific vendor backends**: Langfuse, PromptLayer, etc.,
