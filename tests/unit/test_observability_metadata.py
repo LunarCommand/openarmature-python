@@ -619,7 +619,7 @@ class _RetryTransient(Exception):
 
 
 async def test_per_attempt_scoping_under_retry_discards_failed_attempt_writes() -> None:
-    from openarmature.graph.middleware import RetryMiddleware
+    from openarmature.graph.middleware import RetryConfig, RetryMiddleware
 
     captured_attempt_1_read: dict[str, Any] = {}
     captured_downstream_read: dict[str, Any] = {}
@@ -647,7 +647,7 @@ async def test_per_attempt_scoping_under_retry_discards_failed_attempt_writes() 
         .add_node(
             "retried",
             _retried,
-            middleware=[RetryMiddleware(max_attempts=2, backoff=lambda _i: 0.0)],
+            middleware=[RetryMiddleware(RetryConfig(max_attempts=2, backoff=lambda _i: 0.0))],
         )
         .add_node("downstream", _downstream)
         .add_edge("retried", "downstream")
@@ -675,7 +675,7 @@ async def test_terminal_failure_discards_final_failed_attempt_writes() -> None:
     # AFTER the retry middleware re-raises a terminal failure, the
     # metadata ContextVar is back at the pre-attempt baseline — no
     # leak of the final failed attempt's writes.
-    from openarmature.graph.middleware import RetryMiddleware, compose_chain
+    from openarmature.graph.middleware import RetryConfig, RetryMiddleware, compose_chain
     from openarmature.observability.metadata import (
         _reset_invocation_metadata,
         _set_invocation_metadata,
@@ -689,7 +689,7 @@ async def test_terminal_failure_discards_final_failed_attempt_writes() -> None:
         set_invocation_metadata(attempt_marker=f"attempt_{len(attempts) - 1}")
         raise _RetryTransient()
 
-    retry = RetryMiddleware(max_attempts=2, backoff=lambda _i: 0.0)
+    retry = RetryMiddleware(RetryConfig(max_attempts=2, backoff=lambda _i: 0.0))
     chain = compose_chain([retry], _always_fails)
 
     # Establish a baseline outside the middleware so we can read it
@@ -716,7 +716,7 @@ async def test_cancellation_discards_in_flight_attempt_writes() -> None:
     # metadata-scoping perspective. Spec §6.1: cancellation MUST
     # propagate (no retry, no swallow), so the reset must happen IN
     # ADDITION to, not instead of, propagating ``CancelledError``.
-    from openarmature.graph.middleware import RetryMiddleware, compose_chain
+    from openarmature.graph.middleware import RetryConfig, RetryMiddleware, compose_chain
     from openarmature.observability.metadata import (
         _reset_invocation_metadata,
         _set_invocation_metadata,
@@ -730,7 +730,7 @@ async def test_cancellation_discards_in_flight_attempt_writes() -> None:
         set_invocation_metadata(attempt_marker="leaked")
         raise asyncio.CancelledError("aborted")
 
-    retry = RetryMiddleware(max_attempts=3, backoff=lambda _i: 0.0)
+    retry = RetryMiddleware(RetryConfig(max_attempts=3, backoff=lambda _i: 0.0))
     chain = compose_chain([retry], _writes_then_cancels)
 
     baseline_token = _set_invocation_metadata(validate_invocation_metadata({"tenantId": "T1"}))

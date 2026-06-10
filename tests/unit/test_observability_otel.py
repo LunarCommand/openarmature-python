@@ -1370,7 +1370,7 @@ async def test_llm_call_inside_retried_node_parents_per_attempt() -> None:
     ``innermost`` scope) is what makes this work."""
     import httpx
 
-    from openarmature.graph.middleware import RetryMiddleware
+    from openarmature.graph.middleware import RetryConfig, RetryMiddleware
     from openarmature.llm.errors import ProviderRateLimit
     from openarmature.llm.messages import UserMessage
     from openarmature.llm.providers.openai import OpenAIProvider
@@ -1419,7 +1419,11 @@ async def test_llm_call_inside_retried_node_parents_per_attempt() -> None:
 
     g = (
         GraphBuilder(_S)
-        .add_node("flaky", _flaky, middleware=[RetryMiddleware(max_attempts=3, backoff=lambda _i: 0.0)])
+        .add_node(
+            "flaky",
+            _flaky,
+            middleware=[RetryMiddleware(RetryConfig(max_attempts=3, backoff=lambda _i: 0.0))],
+        )
         .add_edge("flaky", END)
         .set_entry("flaky")
         .compile()
@@ -2241,7 +2245,7 @@ async def test_parallel_branches_node_under_retry_middleware_emits_per_attempt_d
     #   - two per-branch dispatch spans per branch (one per attempt)
     #   - each attempt's dispatch span parented under THAT attempt's
     #     NODE span (not the wrong attempt's)
-    from openarmature.graph import BranchSpec, RetryMiddleware
+    from openarmature.graph import BranchSpec, RetryConfig, RetryMiddleware
 
     class _S(State):
         result: str = ""
@@ -2271,7 +2275,7 @@ async def test_parallel_branches_node_under_retry_middleware_emits_per_attempt_d
         .add_parallel_branches_node(
             "dispatcher",
             branches={"only_branch": BranchSpec(subgraph=inner)},
-            middleware=[RetryMiddleware(max_attempts=2, classifier=lambda _exc, _state: True)],
+            middleware=[RetryMiddleware(RetryConfig(max_attempts=2, classifier=lambda _exc, _state: True))],
         )
         .add_edge("dispatcher", END)
         .set_entry("dispatcher")

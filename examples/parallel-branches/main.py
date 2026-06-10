@@ -76,6 +76,7 @@ from openarmature.graph import (
     append,
 )
 from openarmature.graph.middleware import (
+    RetryConfig,
     RetryMiddleware,
     deterministic_backoff,
 )
@@ -268,8 +269,10 @@ def build_graph() -> CompiledGraph[ArticleState]:
     # the same policy on a longer summarize call (where a retry doubles
     # cost) or on a topic-extract that has different transient profile.
     sentiment_retry = RetryMiddleware(
-        max_attempts=3,
-        backoff=deterministic_backoff(0.2),
+        RetryConfig(
+            max_attempts=3,
+            backoff=deterministic_backoff(0.2),
+        )
     )
 
     return (

@@ -126,7 +126,7 @@ hand a transformed state down the chain, pass a new state instance to
 ## Built-in: RetryMiddleware
 
 ```python
-from openarmature.graph import RetryMiddleware, exponential_jitter_backoff
+from openarmature.graph import RetryConfig, RetryMiddleware, exponential_jitter_backoff
 
 
 async def on_retry(exc: Exception, attempt: int) -> None:
@@ -134,13 +134,15 @@ async def on_retry(exc: Exception, attempt: int) -> None:
 
 
 retry = RetryMiddleware(
-    max_attempts=3,
-    backoff=exponential_jitter_backoff,
-    on_retry=on_retry,
+    RetryConfig(
+        max_attempts=3,
+        backoff=exponential_jitter_backoff,
+        on_retry=on_retry,
+    )
 )
 ```
 
-Four plug points, all optional:
+Configured with a `RetryConfig`; four fields, all optional:
 
 - **`max_attempts`** is the total attempt count including the first
   call. `1` disables retry. Default `3`.
@@ -277,7 +279,7 @@ builder.add_node(
             degraded_update={"summary": ""},
             event_name="summary_degraded",
         ),
-        RetryMiddleware(max_attempts=3),
+        RetryMiddleware(RetryConfig(max_attempts=3)),
     ],
 )
 ```

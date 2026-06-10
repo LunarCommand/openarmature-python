@@ -84,6 +84,7 @@ from openarmature.graph import (
     append,
 )
 from openarmature.graph.middleware import (
+    RetryConfig,
     RetryMiddleware,
     TimingMiddleware,
     TimingRecord,
@@ -261,10 +262,12 @@ def build_graph(error_policy: str = "fail_fast") -> CompiledGraph[BatchState]:
     headline_subgraph = build_headline_subgraph()
 
     retry = RetryMiddleware(
-        max_attempts=3,
-        # Short fixed delay so the demo isn't slow. A production app would
-        # use exponential_jitter_backoff (the default).
-        backoff=deterministic_backoff(0.2),
+        RetryConfig(
+            max_attempts=3,
+            # Short fixed delay so the demo isn't slow. A production app would
+            # use exponential_jitter_backoff (the default).
+            backoff=deterministic_backoff(0.2),
+        )
     )
     timing = TimingMiddleware(
         node_name="headline_run",
