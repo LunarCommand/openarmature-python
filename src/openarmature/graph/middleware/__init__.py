@@ -18,6 +18,7 @@ imports at the package boundary.
 """
 
 from ._core import ChainCall, Middleware, NextCall, compose_chain
+from .failure_isolation import DegradedUpdate, FailureIsolationMiddleware
 from .retry import (
     TRANSIENT_CATEGORIES,
     BackoffStrategy,
@@ -34,6 +35,8 @@ __all__ = [
     "BackoffStrategy",
     "ChainCall",
     "Classifier",
+    "DegradedUpdate",
+    "FailureIsolationMiddleware",
     "Middleware",
     "NextCall",
     "OnCompleteCallback",
