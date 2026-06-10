@@ -288,7 +288,9 @@ since = "0.11.0"
 # today).  Prompt-management §13 cross-variable substring stability
 # is satisfied by the existing Jinja2 ``StrictUndefined`` render
 # path; pinned by ``tests/unit/test_prompts.py::
-# test_cross_variable_substring_stability``.  Anthropic / Gemini
+# test_cross_variable_substring_stability_text_prompt`` and
+# ``test_cross_variable_substring_stability_chat_prompt``.
+# Anthropic / Gemini
 # wire-byte conformance fixtures stay deferred — neither provider
 # is implemented in python today.
 [proposals."0047"]
