@@ -98,6 +98,7 @@ from opentelemetry.trace import (
 from opentelemetry.trace.propagation import set_span_in_context
 
 from openarmature.graph.events import (
+    FailureIsolatedEvent,
     InvocationCompletedEvent,
     InvocationStartedEvent,
     LlmCompletionEvent,
@@ -572,6 +573,7 @@ class OTelObserver:
             | InvocationCompletedEvent
             | LlmCompletionEvent
             | LlmFailedEvent
+            | FailureIsolatedEvent
         ),
     ) -> None:
         # Proposal 0043 invocation-boundary events: OTel has no
@@ -595,6 +597,10 @@ class OTelObserver:
         if isinstance(event, LlmFailedEvent):
             if not self.disable_llm_spans:
                 self._handle_typed_llm_failed(event)
+            return
+        # Proposal 0050 §6.3 framework-emitted failure-isolation event.
+        if isinstance(event, FailureIsolatedEvent):
+            self._handle_failure_isolated(event)
             return
         if isinstance(event, MetadataAugmentationEvent):
             self._handle_metadata_augmentation(event)
@@ -1324,6 +1330,61 @@ class OTelObserver:
         span.set_attribute("openarmature.error.category", event.error_category)
         self._run_enrichers(span, event)
         span.end(end_time=end_time_ns)
+
+    def _handle_failure_isolated(self, event: FailureIsolatedEvent) -> None:
+        """Emit a zero-duration ``openarmature.failure_isolated`` span for
+        a FailureIsolationMiddleware catch.
+
+        Parented under the calling node when its span is still open;
+        ``_resolve_llm_parent`` falls back to the invocation span
+        otherwise. The wrapped node's span is typically already
+        closed-with-error by the time this event is delivered — the
+        node-body raise dispatches the node's completed event before the
+        middleware recovers — so the marker most often parents directly
+        under the invocation span. The wrapped node's name rides on the
+        ``openarmature.failure_isolation.node`` attribute for
+        correlation regardless of parenting."""
+        from openarmature.observability.correlation import (
+            current_correlation_id,
+            current_invocation_id,
+        )
+
+        invocation_id = current_invocation_id()
+        if invocation_id is None:
+            return
+        inv_state = self._inv_state_for(invocation_id)
+        parent_ctx = self._resolve_llm_parent(
+            inv_state,
+            invocation_id,
+            calling_namespace_prefix=event.namespace,
+            calling_attempt_index=event.attempt_index,
+            calling_fan_out_index=event.fan_out_index,
+            calling_branch_name=event.branch_name,
+        )
+        attrs: dict[str, Any] = {
+            "openarmature.failure_isolation.event_name": event.event_name,
+            "openarmature.failure_isolation.message": event.caught_exception.message,
+        }
+        if event.namespace:
+            attrs["openarmature.failure_isolation.node"] = event.namespace[-1]
+        if event.caught_exception.category is not None:
+            attrs["openarmature.error.category"] = event.caught_exception.category
+        cid = current_correlation_id()
+        if cid is not None:
+            attrs["openarmature.correlation_id"] = cid
+        span = self._tracer.start_span(
+            name="openarmature.failure_isolated",
+            context=cast("Any", parent_ctx),
+            kind=SpanKind.INTERNAL,
+            attributes=attrs,
+        )
+        # The failure was caught and the node degraded gracefully, so the
+        # marker span itself is OK; the caught failure surfaces via the
+        # attributes (event_name / category / message), queryable without
+        # painting the span red.
+        span.set_status(Status(StatusCode.OK))
+        self._run_enrichers(span, None)
+        span.end()
 
     def _resolve_llm_parent(
         self,

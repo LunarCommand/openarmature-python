@@ -35,6 +35,7 @@ from dataclasses import dataclass, field
 from typing import Any, Literal, Protocol
 
 from .events import (
+    FailureIsolatedEvent,
     InvocationCompletedEvent,
     InvocationStartedEvent,
     LlmCompletionEvent,
@@ -52,9 +53,11 @@ from .state import State
 # InvocationStartedEvent / InvocationCompletedEvent (proposal 0043
 # trace.input/output sourcing), LlmCompletionEvent (proposal 0049
 # typed LLM provider call event, dispatched on every successful LLM
-# completion), and LlmFailedEvent (proposal 0058 typed LLM failure
-# event, dispatched alongside the §7 exception when provider.complete
-# raises).
+# completion), LlmFailedEvent (proposal 0058 typed LLM failure event,
+# dispatched alongside the §7 exception when provider.complete raises),
+# and FailureIsolatedEvent (proposal 0050 §6.3 framework-emitted event,
+# dispatched by FailureIsolationMiddleware when it catches an exception
+# escaping the inner chain and substitutes a degraded partial update).
 ObserverEvent = (
     NodeEvent
     | MetadataAugmentationEvent
@@ -62,6 +65,7 @@ ObserverEvent = (
     | InvocationCompletedEvent
     | LlmCompletionEvent
     | LlmFailedEvent
+    | FailureIsolatedEvent
 )
 
 
@@ -91,9 +95,9 @@ class Observer(Protocol):
     conformance doesn't pin you to that name; any of `event`, `_event`,
     `e`, etc. matches.
 
-    Four event variants reach observers (graph-engine §6 + proposals
-    0040, 0043). The signature is the union; observers ``isinstance``-
-    narrow on the first line and choose which variants they handle.
+    Seven event variants reach observers. The signature is the union;
+    observers ``isinstance``-narrow on the first line and choose which
+    variants they handle.
 
     - :class:`NodeEvent` — the started/completed/checkpoint phase
       events. Subject to the ``phases`` filter on
@@ -124,6 +128,17 @@ class Observer(Protocol):
       backends can populate ``trace.output``. NOT subject to the
       ``phases`` filter; OTel-only observers ignore it via the
       isinstance gate.
+    - :class:`LlmCompletionEvent` — dispatched on every successful LLM
+      provider call. Carries the typed identity / request / response
+      field set for LLM-aware backends. NOT subject to the ``phases``
+      filter; non-LLM observers ignore it via the isinstance gate.
+    - :class:`LlmFailedEvent` — the failure-side counterpart,
+      dispatched alongside the provider exception when an LLM call
+      raises. NOT subject to the ``phases`` filter.
+    - :class:`FailureIsolatedEvent` — dispatched by
+      ``FailureIsolationMiddleware`` when it catches an exception and
+      substitutes a degraded partial update. NOT subject to the
+      ``phases`` filter.
 
     Optional ``prepare_sync`` extension
     -----------------------------------

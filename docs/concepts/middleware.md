@@ -199,6 +199,96 @@ Two implementation details worth knowing:
   globally patching `time.monotonic` (which would also distort
   asyncio's scheduling).
 
+## Built-in: FailureIsolationMiddleware
+
+```python
+from openarmature.graph import FailureIsolationMiddleware
+
+builder.add_node(
+    "extract_segments",
+    extract_fn,
+    middleware=[
+        FailureIsolationMiddleware(
+            degraded_update={"segments": []},
+            event_name="segment_extraction_degraded",
+        ),
+    ],
+)
+```
+
+`FailureIsolationMiddleware` catches an exception escaping the wrapped
+chain and returns a degraded partial update instead of letting it abort
+the invocation. Reach for it when a node is not load-bearing enough to
+kill the whole run: a failed enrichment step degrades to an empty list,
+the graph continues, and the failure is still visible in your traces.
+It is the named, observable form of the "catch and recover" pattern
+from [Error semantics](#error-semantics) above.
+
+Configuration:
+
+- **`degraded_update`** (required) is the partial update returned on a
+  caught exception. It may be a static mapping, or a callable
+  `state -> partial_update` when the fallback shape depends on the input
+  state. The callable is resolved once, at catch time.
+- **`event_name`** (required, no default) is a stable identifier for
+  this catch site. It rides on the emitted event (below) and any
+  downstream logging. There is no default on purpose: a generic name
+  like `"failure_isolated"` collapses every degraded path into one
+  indistinguishable bucket in a dashboard, so the name is forced at the
+  construction site, where the context to name it well is available.
+- **`predicate`** is an optional `Exception -> bool`. When supplied,
+  only exceptions where it returns true are caught; everything else
+  propagates. The default catches every `Exception`.
+- **`on_caught`** is an optional async hook `Exception -> None`, fired
+  when the middleware catches. Use it to pump the caught exception to
+  caller-specific telemetry beyond the framework event. It fires inline
+  before the degraded update returns, and an exception it raises is
+  isolated (logged, not propagated) so a buggy hook cannot defeat the
+  recovery.
+
+Like `RetryMiddleware`, it catches `Exception` only; `BaseException`
+(cancellation, keyboard interrupt) propagates so aborts still work.
+
+### The failure-isolated event
+
+On a catch, the middleware dispatches a `FailureIsolatedEvent` onto the
+observer stream. It is a distinct event variant, not a node event: it
+carries the `event_name`, the wrapped node's lineage identity, the input
+and degraded states, and a `CaughtException` record holding the
+exception's `category` (when it has one) and message. Observers narrow
+on it with `isinstance(event, FailureIsolatedEvent)`. The bundled OTel
+and Langfuse observers render it as a marker span / observation so the
+catch shows up alongside the node's own span. The default emission path
+is the observer stream only, with no logging-library dependency;
+`on_caught` is the escape hatch for anything else.
+
+### Composing with RetryMiddleware
+
+The two compose into the canonical "retry transients, then give up
+gracefully" pattern. The order is load-bearing: failure isolation is the
+**outer** layer, retry is **inner**.
+
+```python
+builder.add_node(
+    "summarize",
+    summarize_fn,
+    middleware=[
+        FailureIsolationMiddleware(
+            degraded_update={"summary": ""},
+            event_name="summary_degraded",
+        ),
+        RetryMiddleware(max_attempts=3),
+    ],
+)
+```
+
+Retry sits closest to the node, so it sees raw transient failures first
+and retries them. Only what escapes retry (an exhausted budget, or a
+non-transient exception retry's classifier declines) reaches the outer
+failure isolation, which degrades. Reverse the order and the inner
+isolation would swallow transients before retry ever saw them, defeating
+the retry entirely.
+
 ## Related
 
 - [Parallel branches](parallel-branches.md): per-branch middleware

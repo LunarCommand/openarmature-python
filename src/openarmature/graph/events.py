@@ -659,7 +659,69 @@ class LlmFailedEvent:
     caller_invocation_metadata: Mapping[str, AttributeValue] | None = None
 
 
+@dataclass(frozen=True)
+class CaughtException:
+    """Structured record of an exception caught by
+    ``FailureIsolationMiddleware``.
+
+    - ``category``: the exception's failure category when it carries
+      one (e.g. an llm-provider error's ``category`` attribute), else
+      ``None`` for a bare exception that carries no category.
+    - ``message``: the human-readable exception message (``str(exc)``);
+      the empty string when the exception carried no message.
+    """
+
+    category: str | None
+    message: str
+
+
+# Spec: realizes pipeline-utilities §6.3 failure-isolation middleware
+# (proposal 0050). Emitted by FailureIsolationMiddleware when it
+# catches an exception escaping the inner chain and substitutes a
+# degraded partial update. A distinct framework-emitted event kind
+# (NOT a NodeEvent — does not reuse node_name / namespace / error),
+# mirroring the proposal 0040 MetadataAugmentationEvent mechanism:
+# enqueued on the engine's serial observer-delivery queue via
+# ``current_dispatch()`` and NOT subject to the observer ``phases``
+# filter (matches MetadataAugmentationEvent / InvocationStartedEvent /
+# InvocationCompletedEvent / LlmCompletionEvent / LlmFailedEvent
+# treatment).
+@dataclass(frozen=True)
+class FailureIsolatedEvent:
+    """A failure-isolation event delivered to observers.
+
+    Reports that ``FailureIsolationMiddleware`` caught an exception at
+    a node and substituted a degraded partial update for the node's
+    output. Observer code filters by type discrimination
+    (``isinstance(event, FailureIsolatedEvent)``).
+
+    Field set:
+
+    - ``event_name``: the caller-supplied identifier for this catch
+      site, from the middleware's configuration.
+    - ``namespace`` / ``attempt_index`` / ``fan_out_index`` /
+      ``branch_name``: the wrapped node's lineage identity, surfaced
+      for correlation with the node's other events.
+    - ``pre_state``: the state the wrapped node received.
+    - ``post_state``: the degraded partial update the middleware
+      returned in place of the node's output.
+    - ``caught_exception``: a :class:`CaughtException` record of the
+      caught exception (category + message).
+    """
+
+    event_name: str
+    namespace: tuple[str, ...]
+    attempt_index: int
+    fan_out_index: int | None
+    branch_name: str | None
+    pre_state: Any
+    post_state: Mapping[str, Any]
+    caught_exception: CaughtException
+
+
 __all__ = [
+    "CaughtException",
+    "FailureIsolatedEvent",
     "FanOutEventConfig",
     "InvocationCompletedEvent",
     "InvocationStartedEvent",

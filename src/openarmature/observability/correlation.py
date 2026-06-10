@@ -37,6 +37,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from openarmature.graph.events import (
+        FailureIsolatedEvent,
         InvocationCompletedEvent,
         InvocationStartedEvent,
         LlmCompletionEvent,
@@ -224,6 +225,7 @@ _active_dispatch_var: ContextVar[
             | InvocationCompletedEvent
             | LlmCompletionEvent
             | LlmFailedEvent
+            | FailureIsolatedEvent
         ],
         None,
     ]
@@ -240,6 +242,7 @@ def current_dispatch() -> (
             | InvocationCompletedEvent
             | LlmCompletionEvent
             | LlmFailedEvent
+            | FailureIsolatedEvent
         ],
         None,
     ]
@@ -267,6 +270,7 @@ def _set_active_dispatch(
             | InvocationCompletedEvent
             | LlmCompletionEvent
             | LlmFailedEvent
+            | FailureIsolatedEvent
         ],
         None,
     ],
@@ -279,6 +283,7 @@ def _set_active_dispatch(
             | InvocationCompletedEvent
             | LlmCompletionEvent
             | LlmFailedEvent
+            | FailureIsolatedEvent
         ],
         None,
     ]
@@ -299,6 +304,7 @@ def _reset_active_dispatch(
                 | InvocationCompletedEvent
                 | LlmCompletionEvent
                 | LlmFailedEvent
+                | FailureIsolatedEvent
             ],
             None,
         ]

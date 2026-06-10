@@ -30,6 +30,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 
 from openarmature.graph.events import (
+    FailureIsolatedEvent,
     InvocationCompletedEvent,
     InvocationStartedEvent,
     LlmCompletionEvent,
@@ -359,6 +360,7 @@ class LangfuseObserver:
             | InvocationCompletedEvent
             | LlmCompletionEvent
             | LlmFailedEvent
+            | FailureIsolatedEvent
         ),
     ) -> None:
         if isinstance(event, InvocationStartedEvent):
@@ -380,6 +382,10 @@ class LangfuseObserver:
         if isinstance(event, LlmFailedEvent):
             if not self.disable_llm_spans:
                 self._handle_typed_llm_failed(event)
+            return
+        # Proposal 0050 §6.3 framework-emitted failure-isolation event.
+        if isinstance(event, FailureIsolatedEvent):
+            self._handle_failure_isolated(event)
             return
         if isinstance(event, MetadataAugmentationEvent):
             self._handle_metadata_augmentation(event)
@@ -614,6 +620,51 @@ class LangfuseObserver:
                 continue
             if _observation_chain_on_path(observation, aug_fi_chain, aug_bn_chain):
                 observation.handle.update(metadata=metadata_delta)
+
+    # ------------------------------------------------------------------
+    # Failure-isolation event (proposal 0050 §6.3)
+    # ------------------------------------------------------------------
+
+    def _handle_failure_isolated(self, event: FailureIsolatedEvent) -> None:
+        # Render the FailureIsolationMiddleware catch as a marker
+        # observation. Parented under the wrapped node's observation when
+        # it is still open; otherwise trace-level (the node observation
+        # is typically already closed-with-error by delivery time, since
+        # the node-body raise fires the node's completed event before the
+        # middleware recovers). The wrapped node's name rides on
+        # ``metadata.failure_isolation_node`` for correlation regardless.
+        from openarmature.observability.correlation import (
+            current_correlation_id,
+            current_invocation_id,
+        )
+
+        invocation_id = current_invocation_id()
+        if invocation_id is None:
+            return
+        inv_state = self._inv_states.get(invocation_id)
+        if inv_state is None:
+            return
+        key: _StackKey = (event.namespace, event.attempt_index, event.fan_out_index, event.branch_name)
+        parent = inv_state.open_observations.get(key)
+        parent_observation_id = parent.handle.id if parent is not None else None
+        metadata: dict[str, Any] = {
+            "failure_isolation_event_name": event.event_name,
+            "error_message": event.caught_exception.message,
+        }
+        if event.namespace:
+            metadata["failure_isolation_node"] = event.namespace[-1]
+        if event.caught_exception.category is not None:
+            metadata["error_category"] = event.caught_exception.category
+        correlation_id = current_correlation_id()
+        if correlation_id is not None:
+            metadata["correlation_id"] = correlation_id
+        handle = self.client.span(
+            trace_id=inv_state.trace_id,
+            name="openarmature.failure_isolated",
+            metadata=metadata,
+            parent_observation_id=parent_observation_id,
+        )
+        handle.end()
 
     # ------------------------------------------------------------------
     # Invocation-boundary events (proposal 0043 §8.4.1 sourcing)

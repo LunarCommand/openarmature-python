@@ -36,6 +36,8 @@ from .errors import (
     UnreachableNode,
 )
 from .events import (
+    CaughtException,
+    FailureIsolatedEvent,
     InvocationCompletedEvent,
     InvocationStartedEvent,
     LlmCompletionEvent,
@@ -45,6 +47,8 @@ from .events import (
 )
 from .fan_out import FanOutConfig, FanOutNode
 from .middleware import (
+    DegradedUpdate,
+    FailureIsolationMiddleware,
     Middleware,
     NextCall,
     RetryMiddleware,
@@ -64,15 +68,19 @@ from .subgraph import SubgraphNode
 
 __all__ = [
     "END",
+    "CaughtException",
     "CompileError",
     "CompiledGraph",
     "ConditionalEdge",
     "ConflictingReducers",
     "DanglingEdge",
+    "DegradedUpdate",
     "DrainSummary",
     "EdgeException",
     "EndSentinel",
     "ExplicitMapping",
+    "FailureIsolatedEvent",
+    "FailureIsolationMiddleware",
     "FanOutConfig",
     "FanOutCountModeAmbiguous",
     "FanOutEmpty",
