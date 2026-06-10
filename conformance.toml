@@ -266,33 +266,38 @@ status = "implemented"
 since = "0.11.0"
 
 # Spec v0.39.0 (proposal 0047).  Implicit prefix-cache wire-byte
-# stability.  Cross-capability proposal landed in v0.13.0 across
-# three pieces: (1) ``Response.usage`` cache-stat fields
-# (``cached_tokens`` / ``cache_creation_tokens``) sourced from the
-# OpenAI ``prompt_tokens_details`` payload, with conditional emission
+# stability.  Cross-capability proposal landed end-to-end in the
+# v0.13.0 cycle across three pieces, all post-v0.12.0:
+# (1) ``Response.usage`` cache-stat fields (``cached_tokens`` /
+# ``cache_creation_tokens``) sourced from the OpenAI
+# ``prompt_tokens_details`` payload, with conditional emission
 # preserved (absent-vs-zero distinction stays observable) — landed
-# in the v0.12.0 cycle as the proposal's payload-side prerequisite;
+# in PR #136 as the proposal's payload-side prerequisite;
 # (2) OTel observer emits ``openarmature.llm.cache_read.input_tokens``
 # (and optional ``openarmature.llm.cache_creation.input_tokens``)
-# when the corresponding usage field is populated — also v0.12.0;
-# (3) §8.1 intra-impl wire-byte canonicalization in the OpenAI
-# adapter — landed here. The canonicalizer recursively sorts dict
-# keys at every nesting level while preserving caller-supplied
-# array order, applied at the four user-input boundaries
+# when the corresponding usage field is populated — landed in
+# PR #140; (3) §8.1 intra-impl wire-byte canonicalization in the
+# OpenAI adapter — landed in PR #145. The canonicalizer recursively
+# sorts dict keys at every nesting level while preserving caller-
+# supplied array order, applied at the four user-input boundaries
 # (``tool.parameters`` / ``tool.function`` record top-level per
 # spec Q5, ``response_format.json_schema.schema``, ``RuntimeConfig``
 # extras, ``tool_call.arguments`` JSON encoding) plus a top-level
-# belt-and-suspenders pass over the assembled request body.  Scope
-# is the Chat Completions endpoint only; the OpenAI Responses API
-# endpoint is deferred to a future cycle (no python consumer
-# today).  Prompt-management §13 cross-variable substring stability
-# is satisfied by the existing Jinja2 ``StrictUndefined`` render
-# path; pinned by ``tests/unit/test_prompts.py::
+# belt-and-suspenders pass over the assembled request body.
+# Downstream-observable wire-byte shift on
+# ``tool_call.arguments``: the encoded string now uses
+# ``sort_keys=True`` (functionally equivalent — parses to the same
+# dict — but byte-different for golden-file / audit-snapshot
+# consumers).  Scope is the Chat Completions endpoint only; the
+# OpenAI Responses API endpoint is deferred to a future cycle (no
+# python consumer today).  Prompt-management §13 cross-variable
+# substring stability is satisfied by the existing Jinja2
+# ``StrictUndefined`` render path; pinned by
+# ``tests/unit/test_prompts.py::
 # test_cross_variable_substring_stability_text_prompt`` and
 # ``test_cross_variable_substring_stability_chat_prompt``.
-# Anthropic / Gemini
-# wire-byte conformance fixtures stay deferred — neither provider
-# is implemented in python today.
+# Anthropic / Gemini wire-byte conformance fixtures stay deferred
+# — neither provider is implemented in python today.
 [proposals."0047"]
 status = "implemented"
 since = "0.13.0"
@@ -344,16 +349,24 @@ status = "implemented"
 since = "0.12.0"
 
 # Spec v0.41.0 (proposal 0049).  Typed LLM Completion Event — first
-# typed event variant on the observer event union.  Shipped in
-# v0.13.0: provider dual-emits the typed event alongside the sentinel
-# NodeEvent pair (success-only per spec scope); LlmCompletionEvent
-# carries identity/scoping/outcome fields per the spec field table.
-# Conformance fixtures 050-056 activated by the typed_event_collector
-# harness directive.  The OTel + Langfuse observers continue to drive
-# their §5.5 / §8.4.4 surface off the sentinel NodeEvent pair during
-# the dual-emit transition window; type-discrimination migration
-# lands once the follow-on request-side-fields extension (proposal
-# 0057) ships.
+# typed event variant on the observer event union.  Shipped fully in
+# v0.13.0 across PRs #141 (typed-event definition + provider
+# emission + 0057 field-set extension), #142 (OTel observer migration
+# to type discrimination), #143 (Langfuse observer migration +
+# success-side sentinel emission dropped), and #144 (0058 typed
+# LlmFailedEvent + sentinel-namespace NodeEvent emission for LLM
+# events retired entirely from the bundled OpenAIProvider).
+# LlmCompletionEvent carries identity/scoping/outcome fields per
+# the spec field table.  Both bundled observers (OTel + Langfuse)
+# consume the typed events via isinstance discrimination on both
+# outcome paths.  Conformance fixtures 050-056 activated by the
+# typed_event_collector harness directive.  Fixtures 057-068
+# (proposal 0057 request-side fields) and 069-073 (proposal 0058
+# typed failure event) stay parser-deferred pending the harness's
+# typed_event_collector directive schema catch-up + the event_counts
+# list directive introduced by fixture 071; behavior pinned by
+# unit tests in tests/unit/test_llm_provider.py +
+# test_observability_otel.py + test_observability_langfuse.py.
 [proposals."0049"]
 status = "implemented"
 since = "0.13.0"

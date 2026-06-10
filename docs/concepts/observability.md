@@ -767,7 +767,7 @@ informative for trace readers.
 Redaction is **not** gated by `disable_llm_payload` and is **not**
 configurable. Inline image bytes never leave the provider in event
 form, so custom observers consuming
-[`LlmEventPayload`](#publishing-llm-events-for-custom-observers)
+[`LlmCompletionEvent` / `LlmFailedEvent`](#consuming-llm-events-in-custom-observers)
 cannot accidentally leak raw bytes regardless of how they're
 written.
 
@@ -834,33 +834,77 @@ OTel SDK silently drops `set_attribute` on ended spans.
 Exceptions raised by an enricher are caught and warned, never
 propagated.
 
-### Publishing LLM events for custom observers
+### Consuming LLM events in custom observers
 
-`openarmature.observability.LLM_NAMESPACE` and
-`openarmature.observability.LlmEventPayload` are part of the public
-API. A custom observer subscribing to the dispatch stream can
-recognize the LLM-event sentinel namespace and read the typed
-payload directly:
+`openarmature.graph.events.LlmCompletionEvent` and
+`openarmature.graph.events.LlmFailedEvent` are the two typed event
+variants any `Provider` implementation emits around a `complete()`
+call. Custom observers consume them via type discrimination:
 
 ```python
-from openarmature.observability import LLM_NAMESPACE, LlmEventPayload
+from openarmature.graph.events import LlmCompletionEvent, LlmFailedEvent
 
 async def my_llm_observer(event):
+    if isinstance(event, LlmCompletionEvent):
+        # Successful call. Read identity / scoping / outcome
+        # directly off the typed fields:
+        # event.model, event.input_messages (already image-redacted),
+        # event.output_content, event.request_params, event.response_id,
+        # event.active_prompt, event.usage, event.latency_ms, …
+        return
+    if isinstance(event, LlmFailedEvent):
+        # §7 category exception was raised. Same identity / scoping
+        # surface as the completion variant, plus three failure-
+        # specific fields:
+        # event.error_category — one of the 9 normative §7 categories
+        # event.error_type     — vendor code or upstream class name
+        # event.error_message  — human-readable, may be empty
+        return
+```
+
+The two variants are **mutually exclusive on a single `complete()`
+call** — implementations MUST NOT emit both for the same call.
+Conformance fixture 072 locks this down. The failure variant carries
+the same identity + request-side fields as the completion variant,
+minus the response-side fields (`response_id`, `response_model`,
+`usage`, `output_content`, `finish_reason`) — there was no response
+to record.
+
+A custom `Provider` that wants observers to see the same events
+dispatches `LlmCompletionEvent(...)` on success and
+`LlmFailedEvent(...)` alongside the §7 category exception on failure
+via `current_dispatch()`. See
+[Authoring providers](../model-providers/authoring.md) for the full
+pattern.
+
+#### Legacy sentinel-namespace pattern (compatibility surface)
+
+`openarmature.observability.LLM_NAMESPACE` and
+`openarmature.observability.LlmEventPayload` remain in the public
+API as a documented compatibility surface for custom providers and
+observers that haven't migrated to typed events. The bundled
+`OpenAIProvider` no longer emits the sentinel `NodeEvent` pair; the
+bundled OTel and Langfuse observers no longer recognize it. If
+you're writing a downstream observer that needs to interoperate
+with custom providers still using the sentinel pattern, the legacy
+shape is:
+
+```python
+from openarmature.graph.events import NodeEvent
+from openarmature.observability import LLM_NAMESPACE, LlmEventPayload
+
+async def legacy_llm_observer(event):
+    if not isinstance(event, NodeEvent):
+        return
     if event.namespace != LLM_NAMESPACE:
         return
     payload = event.pre_state
     if not isinstance(payload, LlmEventPayload):
         return
-    # payload.model, payload.input_messages (already image-redacted),
-    # payload.output_content, payload.request_params,
-    # payload.response_id, payload.active_prompt, ...
+    # payload.model, payload.input_messages, …
 ```
 
-A custom `Provider` that wants to participate in the same span
-emission protocol dispatches `NodeEvent(namespace=LLM_NAMESPACE,
-pre_state=LlmEventPayload(...))` via `current_dispatch()`. See
-[Authoring providers](../model-providers/authoring.md) for the
-full pattern.
+New code should prefer the typed-event path above.
 
 ### Flushing under fast teardown
 

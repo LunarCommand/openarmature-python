@@ -9,17 +9,18 @@ graph, caller hooks deriving domain-shaped `trace.input` /
 `trace.output` from State, the built-in `TimingMiddleware`
 recording per-node duration, multi-tenant caller-supplied
 metadata propagating to both observers in one `invoke()` call, AND
-a third queryable-accumulator observer that a terminal `persist`
-node reads at request scope after synchronizing on the deliver
-loop with `drain_events_for`.
+two queryable-accumulator observers (one for successful-call token
+usage incl. cache hits, one for failure-category attribution) that
+a terminal `persist` node reads at request scope after
+synchronizing on the deliver loop with `drain_events_for`.
 
 ## Overview
 
-Two nodes (`respond` then `persist`), one LLM call, three observers
+Two nodes (`respond` then `persist`), one LLM call, four observers
 attached before invoke. The pipeline takes a question, calls the
 LLM, returns the answer, then synchronizes on the observer queue
-and rolls up token cost. The interesting part is the observability
-wiring:
+and rolls up token cost + failure attribution. The interesting
+part is the observability wiring:
 
 - `OTelObserver` attached with an `InMemorySpanExporter`
   (production swaps this for `BatchSpanProcessor` +
@@ -84,7 +85,7 @@ sees the same logical events represented two ways.
   observer call surface doesn't change.
 - **Queryable accumulator + `drain_events_for`**
   ([queryable observer pattern](../concepts/observability.md)).
-  A third observer — `LlmUsageAccumulator` — subscribes to the
+  A third observer (`LlmUsageAccumulator`) subscribes to the
   same event stream but only records the typed
   `LlmCompletionEvent` variant (one event per successful LLM call;
   outcome fields read directly off the event). It accumulates
@@ -102,28 +103,44 @@ sees the same logical events represented two ways.
   count through State (a workaround that pollutes the state
   schema with non-pipeline data).
 
-  The filter shape is `isinstance(event, LlmCompletionEvent)` —
+  The filter shape is `isinstance(event, LlmCompletionEvent)`,
   one isinstance check against the typed event variant on the
-  observer event union. The provider also dual-emits a sentinel
-  `NodeEvent` pair during the transition period for backwards
-  compatibility with older accumulators; this example's
-  accumulator ignores the sentinel pair because the typed event
-  carries the same outcome data without the pair-join logic. New
-  accumulators should follow the isinstance-based filter shape
-  here; the CHANGELOG tracks when the sentinel emission is
-  removed.
+  observer event union. New accumulators should follow this
+  shape; the typed event carries every outcome field directly,
+  no namespace-string-match + payload-narrow dance against the
+  older sentinel-event family.
 
-  `LlmCompletionEvent` is success-only by spec design. Failed LLM
-  calls flow through the exception path and do not emit the typed
-  event, so `bucket.call_count` reflects successful calls only.
-  This is the right semantic for a usage accumulator (failed
-  calls produce no tokens). A pipeline tracking attempt-level
-  failure rates needs a separate listener — either a custom
-  observer on the sentinel `NodeEvent` pair or a future
-  failure-event typed variant if and when that proposal lands.
-  Production code migrating an existing accumulator from the
-  sentinel pattern should expect this counting shift if it was
-  previously counting failure-path events.
+  `LlmCompletionEvent` is a success-only event. Failed LLM
+  calls flow through the exception path and emit the parallel
+  `LlmFailedEvent` variant, so `bucket.call_count` reflects
+  successful calls only. This is the right semantic for a usage
+  accumulator (failed calls produce no tokens); the
+  `LlmFailureTracker` (below) is the listener that owns
+  attempt-level failure rates.
+
+  The bucket also tracks `usage.cached_tokens` so the persist
+  node can print a cache-hit ratio. Backends with prefix caching
+  (vLLM `--enable-prefix-caching`, Anthropic prompt caching,
+  OpenAI's `prompt_token_usage` cache report when enabled)
+  populate the field; backends without cache visibility leave it
+  `None` and the ratio degrades to 0% gracefully. The cache-stat
+  fields surface both on the typed event's `Usage` and on the OTel
+  LLM span's `openarmature.llm.cache_read.input_tokens` attribute.
+- **Failure-category tracker**
+  ([typed failure event](../concepts/observability.md)).
+  A fourth observer (`LlmFailureTracker`) subscribes to
+  `LlmFailedEvent`, the typed failure-side counterpart to
+  `LlmCompletionEvent`. The provider emits exactly one of
+  (`LlmCompletionEvent`, `LlmFailedEvent`) per LLM call, never
+  both. The tracker maintains a per-invocation
+  `{error_category: count}` bucket keyed by the nine canonical
+  category strings (`provider_rate_limit`, `provider_unavailable`,
+  `provider_invalid_model`, etc.), and the persist node prints
+  the per-category breakdown alongside the usage rollup. This
+  closes the symmetric-attribution gap: operators see "this tenant
+  had 4 successful calls (cost X) plus 1 rate-limit failure" at
+  request scope, without having to cross-join the OTel exception
+  spans or wait for a metrics backend to roll up.
 
 ## How to run
 
@@ -152,12 +169,13 @@ request id:  <uuid>
 feature flag:v2-canary
 
 [timing] respond: 1234.5ms (success)
-[persist] LLM usage: prompt=42, completion=38, total=80 across 1 call(s)
+[persist] LLM usage: prompt=42 (cached=0, 0.0% hit), completion=38, total=80 across 1 call(s)
+[persist] LLM failures: none
 answer:      The primary objective of Apollo 11 was ...
 model:       gpt-4o-mini-2024-07-18
 
 --- captured OTel spans ---
-  [openarmature.invocation] 1240.0ms  openarmature.graph.entry_node='respond', openarmature.graph.spec_version='0.46.0', openarmature.implementation.name='openarmature-python', openarmature.implementation.version='0.12.0'
+  [openarmature.invocation] 1240.0ms  openarmature.graph.entry_node='respond', openarmature.graph.spec_version='0.53.0', openarmature.implementation.name='openarmature-python', openarmature.implementation.version='0.13.0'
   [respond] 1235.0ms  openarmature.node.name='respond', openarmature.user.tenantId='demo-acme', ...
   [openarmature.llm.complete] 1200.0ms  openarmature.user.tenantId='demo-acme', gen_ai.system='openai', gen_ai.usage.input_tokens=42, ...
   [persist] 2.0ms  openarmature.node.name='persist', openarmature.user.tenantId='demo-acme', ...
@@ -184,28 +202,40 @@ Trace id=<uuid>
   as `outcome="exception"` with `exception_category="provider_rate_limit"`.
 - **`[persist] LLM usage: ...`**: emitted by the `persist` node
   after it drains the deliver loop and reads the
-  `LlmUsageAccumulator`'s bucket for this invocation. If the drain
-  times out (slow / hung observer), the persist line is prefixed by
-  a `[persist] drain incomplete: N events still pending after 2.0s`
-  surface — the production version of that log would also flip an
-  SLO-breach metric.
+  `LlmUsageAccumulator`'s bucket for this invocation. The
+  `cached=N, X.X% hit` segment is the ratio of cache-read input
+  tokens to total prompt tokens for the invocation, sourced from
+  `usage.cached_tokens`. OpenAI's `gpt-4o-mini` (the default
+  model) reports zero cache hits unless `prompt_token_usage` cache
+  reporting is explicitly enabled; vLLM with
+  `--enable-prefix-caching` or Anthropic with prompt caching will
+  show real cache attribution against repeated prefixes. If the
+  drain times out (slow / hung observer), the persist line is
+  prefixed by a `[persist] drain incomplete: N events still
+  pending after 2.0s` surface, and the production version of that
+  log would also flip an SLO-breach metric.
+- **`[persist] LLM failures: ...`**: emitted by the `persist`
+  node after reading the `LlmFailureTracker`'s bucket. On a
+  success-only invocation the line reads `none`; on a run with
+  retried provider errors it reads e.g. `provider_rate_limit=2,
+  provider_unavailable=1` with categories ordered noisiest-first.
+  Because every LLM call emits exactly one of `LlmCompletionEvent`
+  or `LlmFailedEvent` and never both, the bucket counts attempts
+  the success-side accumulator did NOT see, which is the right
+  shape for retry-rate dashboards.
 - **OTel spans block**: one line per captured span, sorted by
   start time. The relevant attributes shown are a curated subset
   for readability; the full attribute set is on each `Span` object
-  for any reader inspecting them programmatically. The
-  `openarmature.llm.complete` span name + the `gen_ai.usage.*`
-  attribute family come from the OTel observer's current
-  sentinel-`NodeEvent` handler — the OTel and Langfuse observers
-  have not yet migrated to consuming the typed `LlmCompletionEvent`
-  variant. Span names and attribute paths may shift when the
-  observer migration lands; the example's emitted span structure
-  tracks the current observer behavior. Note three attribute
-  families worth telling apart:
+  for any reader inspecting them programmatically. On runs against
+  a cache-reporting backend the LLM span also carries
+  `openarmature.llm.cache_read.input_tokens` (the OA-namespace
+  cache attribute). Note three attribute families worth telling
+  apart:
     - The root `openarmature.invocation` span carries
       `openarmature.graph.spec_version` plus the
       `openarmature.implementation.name` / `.version` attribution
-      attributes. These are invocation-span-only (per spec §5.1) —
-      operators filtering by library version use these.
+      attributes. These are invocation-span-only; operators
+      filtering by library version use these.
     - The `openarmature.user.*` attributes appear on every span,
       reflecting the cross-cutting propagation from
       `invoke(metadata=...)`.

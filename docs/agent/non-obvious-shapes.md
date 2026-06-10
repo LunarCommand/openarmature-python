@@ -127,7 +127,7 @@ Catching `Exception` works but is too broad; catching one hierarchy misses the o
 
 ### Filter `openarmature.*`-namespaced events when your observer only cares about user nodes
 
-OA emits observer events under sentinel node-names for its own internal dispatch: `openarmature.llm.complete` for LLM provider calls (proposal 0024), `openarmature.checkpoint.migrate` for state-migration runs (proposal 0014), `openarmature.checkpoint.save` for checkpoint saves (proposal 0010). These events let the OTel / Langfuse observers emit LLM-provider spans, checkpoint-migrate spans, etc., but a custom observer that only cares about user-defined node activity sees them as noise:
+OA emits observer events under sentinel node-names for some internal dispatch: `openarmature.checkpoint.migrate` for state-migration runs (proposal 0014) and `openarmature.checkpoint.save` for checkpoint saves (proposal 0010) ride on `NodeEvent` with a sentinel namespace. (LLM provider calls used to follow the same pattern but moved to typed `LlmCompletionEvent` / `LlmFailedEvent` variants in v0.13.0 per proposals 0049 + 0058 — those are filtered by `isinstance` instead.) The sentinel-namespace events let the OTel / Langfuse observers emit checkpoint-migrate spans, etc., but a custom observer that only cares about user-defined node activity sees them as noise:
 
 ```python
 async def __call__(self, event: NodeEvent) -> None:
@@ -137,7 +137,7 @@ async def __call__(self, event: NodeEvent) -> None:
     # … user-node handling
 ```
 
-`event.namespace[0]` is the safest discriminator (the leaf `event.node_name` would also work for LLM events but won't match the checkpoint sentinels since those repurpose `node_name` differently). Don't try to filter on `current_invocation_id() is None`: OA-internal events are dispatched within the same invocation context as user-node events, so `invocation_id` is set for both; the namespace-prefix check is the stable contract.
+`event.namespace[0]` is the safest discriminator. Don't try to filter on `current_invocation_id() is None`: OA-internal events are dispatched within the same invocation context as user-node events, so `invocation_id` is set for both; the namespace-prefix check is the stable contract.
 
 ### Fan-out subgraphs that emit `list[X]` per instance produce `list[list[X]]` at `target_field`
 
