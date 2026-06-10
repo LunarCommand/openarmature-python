@@ -8,8 +8,8 @@ agent processes the multimodal turn naturally without changing the
 chat-history shape. Turns 1, 2, 4 are text-only.
 
 **Demonstrates:** ChatPrompt + ContentSegment (system + user) +
-PlaceholderSegment for chat-history injection (proposal 0046,
-spec v0.38.0). PromptManager.render with the `placeholders` kwarg.
+PlaceholderSegment for chat-history injection. PromptManager.render
+with the `placeholders` kwarg.
 Multi-turn message threading through state with the `append`
 reducer; the conversation history grows over turns and feeds back
 into render() on each turn. The same chat template carries an

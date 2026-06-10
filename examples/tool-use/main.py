@@ -29,9 +29,9 @@ requesting tools) or after a hard turn cap.
   schema (or ``None`` only under ``finish_reason="error"``).
 - The dispatcher node parses each ``ToolCall``, runs the matching
   local Python function, and appends one
-  ``ToolMessage(content=..., tool_call_id=...)`` per call. Spec
-  requires the ``tool_call_id`` round-trip exactly so the model can
-  pair its requests with the responses.
+  ``ToolMessage(content=..., tool_call_id=...)`` per call. The
+  ``tool_call_id`` must round-trip exactly so the model can pair
+  its requests with the responses.
 - The loop is just a conditional edge on the graph: ``call_llm`` →
   ``dispatch_tools`` → back to ``call_llm`` when the model wants
   more tools, or → ``present`` when it's done. No special "agent
