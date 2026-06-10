@@ -13,15 +13,15 @@ requestId / featureFlag) propagating to both observers in one
 
 **Demonstrates (mapped to shipped features):**
 
-- Dual observers on one graph (proposal 0031 + the no-double-export
-  posture from the README pitch). Both consume the same NodeEvent
-  stream independently; nothing in node code knows there are two.
+- Dual observers on one graph, with no double-export between them.
+  Both consume the same NodeEvent stream independently; nothing in
+  node code knows there are two.
 - ``trace_input_from_state`` / ``trace_output_from_state`` caller
-  hooks on ``LangfuseObserver`` (proposal 0043 §8.4.1). The hooks
-  derive domain dicts (``{"question": ...}`` / ``{"answer": ...,
-  "model": ...}``) instead of letting the observer dump the raw
-  State.  Production teams use this to keep PII out of trace
-  payloads while still surfacing operational signal.
+  hooks on ``LangfuseObserver``. The hooks derive domain dicts
+  (``{"question": ...}`` / ``{"answer": ..., "model": ...}``)
+  instead of letting the observer dump the raw State.  Production
+  teams use this to keep PII out of trace payloads while still
+  surfacing operational signal.
 - Built-in ``TimingMiddleware`` from ``openarmature.graph``
   wrapping the respond node.  An ``on_complete`` callback receives
   a ``TimingRecord(node_name, duration_ms, outcome,
@@ -43,7 +43,9 @@ requestId / featureFlag) propagating to both observers in one
   observer call surface doesn't change.
 - **Queryable accumulator observer + per-invocation drain.** A
   third observer (``LlmUsageAccumulator``) rolls up LLM token
-  totals per invocation. A terminal ``persist`` node calls
+  totals per invocation, including a cache-hit ratio from
+  ``usage.cached_tokens`` for backends with prefix caching (vLLM,
+  Anthropic, etc.). A terminal ``persist`` node calls
   ``await graph.drain_events_for(current_invocation_id(), timeout=2.0)``
   to synchronize on the deliver loop, then reads the accumulator's
   bucket and drops it. Without the drain, the bucket would be
@@ -56,6 +58,18 @@ requestId / featureFlag) propagating to both observers in one
   ``Observer`` itself stays a single-callable protocol; the
   queryable accumulator just exposes its own read methods
   (``get_bucket`` / ``drop``) that the persist node knows about.
+- **Failure-category tracker observer.** A fourth observer
+  (``LlmFailureTracker``) subscribes to ``LlmFailedEvent``, the
+  typed failure-side counterpart to ``LlmCompletionEvent``, fired
+  once per LLM call that fails with a provider error category. The
+  tracker maintains a per-invocation ``{category: count}`` bucket;
+  the persist node reads + reports it alongside the usage rollup.
+  Together the two observers give operators success/failure
+  attribution at request scope without joining against external
+  trace storage. The provider emits exactly one of
+  (``LlmCompletionEvent``, ``LlmFailedEvent``) per LLM call, never
+  both, so attempt counts derive cleanly as
+  ``usage.call_count + sum(failure.by_category.values())``.
 
 Complementary to the observer-hooks example (three observers
 side-by-side) and the langfuse-observability example (Langfuse
@@ -101,6 +115,7 @@ from openarmature.graph import (
     GraphBuilder,
     InvocationCompletedEvent,
     LlmCompletionEvent,
+    LlmFailedEvent,
     NodeException,
     ObserverEvent,
     State,
@@ -164,30 +179,30 @@ class BriefingState(State):
 # for accumulators.
 #
 # The accumulator subscribes to every event but only records the
-# typed ``LlmCompletionEvent`` variant — one event per successful LLM
-# call, structured outcome fields read directly off the event without
-# the namespace-string-match + payload-narrow dance the legacy
-# sentinel pattern needed. The provider also dual-emits a sentinel
-# ``NodeEvent`` pair during the transition period for backwards
-# compatibility with older accumulators; this accumulator ignores
-# the sentinel pair because the typed event carries the same outcome
-# data without the pair-join logic. New accumulators should follow
-# the isinstance-based filter shape here; the CHANGELOG tracks when
-# the sentinel emission is removed.
+# typed ``LlmCompletionEvent`` variant (one event per successful LLM
+# call), structured outcome fields read directly off the event without
+# the namespace-string-match + payload-narrow dance older sentinel-
+# based filters needed.
 #
-# Per-invocation isolation is by ``LlmCompletionEvent.invocation_id``
-# — read directly off the event, no ContextVar lookup needed.
+# Per-invocation isolation is by ``LlmCompletionEvent.invocation_id``,
+# read directly off the event, no ContextVar lookup needed.
 # Concurrent invocations on one observer each get their own bucket.
 #
-# ``LlmCompletionEvent`` is success-only by spec design. Failed LLM
-# calls flow through the exception path and do NOT emit the typed
-# event, so ``bucket.call_count`` here reflects successful calls
-# only. This is the right semantic for a usage accumulator (failed
-# calls produce no tokens / cost). A pipeline tracking attempt-level
-# failure rates needs a separate listener — either a custom observer
-# on the sentinel ``NodeEvent`` pair, or a future
-# ``LlmCallFailedEvent`` typed variant if and when that proposal
-# lands.
+# Cache-stat tracking: the bucket also rolls up ``usage.cached_tokens``
+# when the provider reports it.  Backends with prefix caching (vLLM
+# ``--enable-prefix-caching``, Anthropic prompt caching, OpenAI's
+# ``prompt_token_usage`` cache report when enabled) populate the
+# field; backends without cache visibility leave it ``None`` and the
+# accumulator records zero.  The persist node prints a cache-hit
+# ratio so operators see whether prefix caching is paying off at
+# request scope without having to cross-join Langfuse rows.
+#
+# ``LlmCompletionEvent`` is a success-only event.  Failed LLM calls
+# flow through the exception path and emit the parallel
+# ``LlmFailedEvent`` variant (see ``LlmFailureTracker`` below), so
+# ``bucket.call_count`` here reflects successful calls only.  This is
+# the right semantic for a usage accumulator (failed calls produce
+# no tokens / cost).
 
 
 @dataclass
@@ -195,6 +210,7 @@ class _UsageBucket:
     prompt_tokens: int = 0
     completion_tokens: int = 0
     total_tokens: int = 0
+    cached_tokens: int = 0
     call_count: int = 0
 
 
@@ -220,21 +236,21 @@ class LlmUsageAccumulator:
         if not isinstance(event, LlmCompletionEvent):
             return
         # call_count tracks successful LLM calls (the typed event is
-        # success-only by spec design). Spec contract has "call
-        # happened" and "usage reported" as INDEPENDENT — a provider
-        # may legitimately omit usage on a successful call. Create the
-        # bucket and increment call_count unconditionally so the
-        # counter reflects all successful calls; gate only the
-        # token-counting math on usage being populated.
+        # emitted on success only). "Call happened" and "usage
+        # reported" are independent; a provider may legitimately omit
+        # usage on a successful call. Create the bucket and increment
+        # call_count unconditionally so the counter reflects all
+        # successful calls; gate only the token-counting math on usage
+        # being populated.
         bucket = self._by_invocation.setdefault(event.invocation_id, _UsageBucket())
         bucket.call_count += 1
-        # The typed event's usage field is nullable per the spec
-        # contract ("may be null when the provider does not report
-        # usage"). Python's provider always passes a Usage instance
-        # (with all-None fields when not reported), but the defensive
-        # guard keeps the accumulator robust against future providers
-        # that exercise the null option. Calls without reported usage
-        # contribute zero tokens (the only honest value we can record).
+        # The typed event's usage field is nullable (it may be ``None``
+        # when the provider does not report usage). Python's provider
+        # always passes a Usage instance (with all-None fields when not
+        # reported), but the defensive guard keeps the accumulator
+        # robust against future providers that exercise the null
+        # option. Calls without reported usage contribute zero tokens
+        # (the only honest value we can record).
         usage = event.usage
         if usage is None:
             return
@@ -251,9 +267,16 @@ class LlmUsageAccumulator:
             bucket.total_tokens += usage.total_tokens
         elif usage.prompt_tokens is not None or usage.completion_tokens is not None:
             bucket.total_tokens += (usage.prompt_tokens or 0) + (usage.completion_tokens or 0)
+        # Cache-stat fields are populated only when the provider
+        # reports them.  Backends without prefix-cache visibility
+        # leave ``cached_tokens`` ``None`` and the bucket records
+        # zero; the persist node's cache-hit ratio degrades to 0%
+        # gracefully in that case.
+        if usage.cached_tokens is not None:
+            bucket.cached_tokens += usage.cached_tokens
 
     # Consumers MUST synchronize on ``drain_events_for`` before
-    # calling ``get_bucket`` if completeness matters — without the
+    # calling ``get_bucket`` if completeness matters; without the
     # drain the deliver loop may still hold pending events whose
     # tokens have not been added yet. ``None`` is returned when
     # nothing has been recorded yet (e.g., an invocation with no
@@ -263,7 +286,7 @@ class LlmUsageAccumulator:
         return self._by_invocation.get(invocation_id)
 
     # Bucket lifecycle is two-step. Fast path: a terminal node calls
-    # ``drop()`` immediately after reading via ``get_bucket()`` —
+    # ``drop()`` immediately after reading via ``get_bucket()``;
     # that's the normal case and runs while the invocation is still
     # active. Backstop: the accumulator's ``__call__`` also drops
     # any bucket still present when ``InvocationCompletedEvent``
@@ -276,21 +299,91 @@ class LlmUsageAccumulator:
         self._by_invocation.pop(invocation_id, None)
 
 
+# ---------------------------------------------------------------------------
+# Failure tracker (per-invocation LLM error-category rollup)
+# ---------------------------------------------------------------------------
+# Parallel queryable observer for the failure path.  Subscribes to
+# ``LlmFailedEvent``, the typed counterpart to ``LlmCompletionEvent``,
+# fired exactly once for every LLM call that fails with a provider
+# error category.  Every LLM call emits either one
+# ``LlmCompletionEvent`` (success) or one ``LlmFailedEvent``
+# (failure), never both, so the tracker can count attempt-level
+# failures by category without joining against the success-side
+# accumulator.
+#
+# This is the listener the success-side accumulator delegates to:
+# ``LlmUsageAccumulator.bucket.call_count`` counts successful calls
+# only.  Operators wanting attempt-level failure rates (e.g. ``how
+# often did this tenant's calls land on a rate-limited provider this
+# hour?``) read the failure tracker's bucket alongside the usage
+# accumulator's bucket and compute the ratio at request scope.
+#
+# Bucket shape is a per-category counter: ``{"provider_rate_limit": 2,
+# "provider_unavailable": 1, ...}``.  ``error_category`` is one of the
+# nine canonical category strings, so the dict keys form a stable,
+# greppable vocabulary across providers.  ``error_type`` (vendor-
+# specific code) and ``error_message`` are NOT recorded here; the
+# tracker's job is rate / category attribution at request scope, not
+# vendor-error forensics; that lives in the OTel + Langfuse spans
+# where the full exception detail is captured.
+
+
+@dataclass
+class _FailureBucket:
+    # ``dict[category, count]`` keyed by the canonical
+    # ``error_category`` strings.  Total attempts can be derived as
+    # ``sum(by_category.values())``; the tracker doesn't carry a
+    # separate counter for it.
+    by_category: dict[str, int]
+
+    @classmethod
+    def empty(cls) -> _FailureBucket:
+        return cls(by_category={})
+
+
+class LlmFailureTracker:
+    """Per-invocation LLM failure-category rollup."""
+
+    def __init__(self) -> None:
+        self._by_invocation: dict[str, _FailureBucket] = {}
+
+    async def __call__(self, event: ObserverEvent) -> None:
+        # Backstop cleanup mirrors LlmUsageAccumulator's pattern so
+        # late-delivered failure events after a partial drain
+        # cannot leak a bucket.
+        if isinstance(event, InvocationCompletedEvent):
+            self._by_invocation.pop(event.invocation_id, None)
+            return
+        if not isinstance(event, LlmFailedEvent):
+            return
+        bucket = self._by_invocation.setdefault(event.invocation_id, _FailureBucket.empty())
+        bucket.by_category[event.error_category] = bucket.by_category.get(event.error_category, 0) + 1
+
+    def get_bucket(self, invocation_id: str) -> _FailureBucket | None:
+        """Read the accumulated failure bucket for an invocation."""
+        return self._by_invocation.get(invocation_id)
+
+    def drop(self, invocation_id: str) -> None:
+        """Release the failure bucket for an invocation."""
+        self._by_invocation.pop(invocation_id, None)
+
+
 # Module-level singletons make the persist node closure-free and
 # match how ``_provider_instance`` is handled.  In an application
 # server, these would live on a request-scoped or app-scoped
 # container instead.
 _accumulator: LlmUsageAccumulator | None = None
+_failure_tracker: LlmFailureTracker | None = None
 _compiled_graph: CompiledGraph[BriefingState] | None = None
 
 
 # ---------------------------------------------------------------------------
 # Caller hooks for Langfuse trace.input / trace.output
 # ---------------------------------------------------------------------------
-# Per proposal 0043 §8.4.1, the LangfuseObserver lets callers derive
-# domain-shaped trace.input and trace.output from State rather than
-# letting the framework dump the raw State object.  The hooks fire
-# once per invocation: trace_input_from_state on InvocationStartedEvent,
+# The LangfuseObserver lets callers derive domain-shaped trace.input
+# and trace.output from State rather than letting the framework dump
+# the raw State object.  The hooks fire once per invocation:
+# trace_input_from_state on InvocationStartedEvent,
 # trace_output_from_state on InvocationCompletedEvent.  Production
 # teams use this to keep PII out of trace payloads while still
 # surfacing the operational signal a Langfuse UI viewer needs.
@@ -354,19 +447,19 @@ async def respond(state: BriefingState) -> dict[str, Any]:
     }
 
 
-# Terminal node. State is intentionally unused — this node's job is
+# Terminal node. State is intentionally unused: this node's job is
 # to synchronize on the observer deliver loop and report a derived
 # rollup, not to read or modify pipeline state.
 #
 # ``drain_events_for`` blocks until every event dispatched up to this
 # point has reached every attached observer. Without it the
 # accumulator's bucket may still be missing the most-recent LLM
-# event's tokens — the deliver loop hasn't processed them yet when
-# the node body runs. Snapshot semantic: the drain awaits only
+# event's tokens, since the deliver loop hasn't processed them yet
+# when the node body runs. Snapshot semantic: the drain awaits only
 # events dispatched BEFORE the call (this node's own ``started``
 # event included), not events that fire after the call begins
 # (notably this node's own ``completed`` event, which only fires
-# after the body returns — that's how the call avoids deadlocking
+# after the body returns; that's how the call avoids deadlocking
 # on itself).
 #
 # Default timeout is 5.0s; the demo tightens to 2.0s so a stuck
@@ -375,15 +468,15 @@ async def respond(state: BriefingState) -> dict[str, Any]:
 # lets the caller record an SLO breach and proceed with whatever
 # data is available, rather than failing the whole invocation.
 async def persist(_state: BriefingState) -> dict[str, Any]:
-    """Drain the deliver loop, read the LLM-usage rollup, drop the bucket."""
+    """Drain the deliver loop, read the LLM-usage + failure rollups, drop the buckets."""
     # Use explicit RuntimeError rather than ``assert`` so the failure
     # mode stays informative under ``python -O`` (which strips asserts
     # and would otherwise turn these into silent ``None`` dereferences
     # at the next attribute access).
-    if _compiled_graph is None or _accumulator is None:
+    if _compiled_graph is None or _accumulator is None or _failure_tracker is None:
         raise RuntimeError(
-            "persist node requires _compiled_graph and _accumulator to be set "
-            "before invoke() — see build_graph() for the initialization pattern"
+            "persist node requires _compiled_graph, _accumulator, and _failure_tracker "
+            "to be set before invoke(); see build_graph() for the initialization pattern"
         )
     invocation_id = current_invocation_id()
     if invocation_id is None:
@@ -394,21 +487,42 @@ async def persist(_state: BriefingState) -> dict[str, Any]:
         # gap inline so a reader sees what an incomplete drain looks
         # like.
         print(f"[persist] drain incomplete: {summary.undelivered_count} events still pending after 2.0s")
-    bucket = _accumulator.get_bucket(invocation_id)
+    # Read both buckets up front so the drop calls run in pairs and
+    # neither bucket leaks if a later print raises.
+    usage_bucket = _accumulator.get_bucket(invocation_id)
+    failure_bucket = _failure_tracker.get_bucket(invocation_id)
     _accumulator.drop(invocation_id)
-    if bucket is None:
-        print("[persist] no LLM usage recorded for this invocation")
-        return {}
+    _failure_tracker.drop(invocation_id)
     # In production, this is where you'd write the canonical
     # invocation artifact to durable storage: a JSON record with the
-    # answer + per-invocation token cost + caller metadata + trace
-    # IDs for cross-system join.  The demo prints the rollup so the
-    # pattern is legible.
-    print(
-        f"[persist] LLM usage: prompt={bucket.prompt_tokens}, "
-        f"completion={bucket.completion_tokens}, total={bucket.total_tokens} "
-        f"across {bucket.call_count} call(s)"
-    )
+    # answer + per-invocation token cost + cache-hit ratio + failure
+    # category counts + caller metadata + trace IDs for cross-system
+    # join.  The demo prints the rollups so the pattern is legible.
+    if usage_bucket is None:
+        print("[persist] no LLM usage recorded for this invocation")
+    else:
+        # Cache-hit ratio is ``cached_tokens / prompt_tokens`` when the
+        # provider reports cache stats.  Backends without cache
+        # visibility report ``cached_tokens=0``; the ratio degrades
+        # to 0% gracefully without special-casing.
+        if usage_bucket.prompt_tokens > 0:
+            cache_hit_pct = (usage_bucket.cached_tokens / usage_bucket.prompt_tokens) * 100
+        else:
+            cache_hit_pct = 0.0
+        print(
+            f"[persist] LLM usage: prompt={usage_bucket.prompt_tokens} "
+            f"(cached={usage_bucket.cached_tokens}, {cache_hit_pct:.1f}% hit), "
+            f"completion={usage_bucket.completion_tokens}, "
+            f"total={usage_bucket.total_tokens} "
+            f"across {usage_bucket.call_count} call(s)"
+        )
+    if failure_bucket is None or not failure_bucket.by_category:
+        print("[persist] LLM failures: none")
+    else:
+        # Sort by count descending so the noisiest category leads.
+        ordered = sorted(failure_bucket.by_category.items(), key=lambda kv: (-kv[1], kv[0]))
+        summary_str = ", ".join(f"{cat}={n}" for cat, n in ordered)
+        print(f"[persist] LLM failures: {summary_str}")
     return {}
 
 
@@ -428,18 +542,20 @@ def build_graph() -> CompiledGraph[BriefingState]:
     (RetryMiddleware lives in the fan-out-with-retry / parallel-
     branches examples; this one's scope is observability).
 
-    The ``LlmUsageAccumulator`` is constructed, attached to the
-    compiled graph, and registered to the module-level singletons
-    so the persist node (which reads from globals to stay closure-
-    free) can reach it without help from the caller. The factory
-    is self-contained — ``graph = build_graph(); await graph.invoke(...)``
-    works on its own. OTel + Langfuse observers are NOT attached
-    here; those are observability-stack choices made at the call
-    site, and ``main()`` attaches them after build_graph() returns.
+    The ``LlmUsageAccumulator`` and ``LlmFailureTracker`` are
+    constructed, attached to the compiled graph, and registered to
+    the module-level singletons so the persist node (which reads
+    from globals to stay closure-free) can reach them without help
+    from the caller. The factory is self-contained: ``graph =
+    build_graph(); await graph.invoke(...)`` works on its own. OTel
+    + Langfuse observers are NOT attached here; those are
+    observability-stack choices made at the call site, and
+    ``main()`` attaches them after build_graph() returns.
     """
-    global _accumulator, _compiled_graph
+    global _accumulator, _failure_tracker, _compiled_graph
     timing = TimingMiddleware(node_name="respond", on_complete=_emit_timing)
     _accumulator = LlmUsageAccumulator()
+    _failure_tracker = LlmFailureTracker()
     _compiled_graph = (
         GraphBuilder(BriefingState)
         .add_node("respond", respond, middleware=[timing])
@@ -450,6 +566,7 @@ def build_graph() -> CompiledGraph[BriefingState]:
         .compile()
     )
     _compiled_graph.attach_observer(_accumulator)
+    _compiled_graph.attach_observer(_failure_tracker)
     return _compiled_graph
 
 
@@ -467,7 +584,8 @@ def build_graph() -> CompiledGraph[BriefingState]:
 # Caller hooks attach to LangfuseObserver via constructor kwargs.
 # ``disable_llm_payload=False`` opts in to capturing the input
 # messages + output content on Generation observations so the demo
-# output is meaningful; default-True is the spec privacy posture.
+# output is meaningful; the default-True is the privacy-preserving
+# setting.
 
 
 def _build_otel_observer(exporter: InMemorySpanExporter) -> OTelObserver:
@@ -505,10 +623,10 @@ def _build_langfuse_observer(client: InMemoryLangfuseClient) -> LangfuseObserver
 # have ingested.
 
 
-# Invocation-span-only attributes (spec 5.1).  Surface these only on
-# the root ``openarmature.invocation`` span line; inner spans don't
-# carry them (they're invocation-level constants, not cross-cutting
-# 5.6 attributes).
+# Invocation-level attributes.  Surface these only on the root
+# ``openarmature.invocation`` span line; inner spans don't carry them
+# (they're invocation-level constants, not cross-cutting per-node
+# attributes).
 _INVOCATION_SPAN_KEYS = (
     "openarmature.graph.entry_node",
     "openarmature.graph.spec_version",
@@ -516,10 +634,21 @@ _INVOCATION_SPAN_KEYS = (
     "openarmature.implementation.version",
 )
 
-# Per-node + cross-cutting attributes (5.6 + GenAI semconv).  Surface
+# Per-node + cross-cutting attributes.  The ``gen_ai.*`` family
+# follows the OpenTelemetry GenAI semantic conventions.  Surface
 # these on inner-node spans only; they propagate to the invocation
 # span too but showing them there is redundant once they appear on
 # every node line below.
+#
+# ``openarmature.llm.cache_read.input_tokens`` is the OA-namespace
+# cache-stat attribute.  Lands on the LLM span only and only when the
+# provider reports cache hits.  Backends with prefix caching (vLLM
+# ``--enable-prefix-caching``, Anthropic prompt caching, OpenAI's
+# ``prompt_token_usage`` cache report when enabled) populate it;
+# OpenAI's default ``gpt-4o-mini`` configuration leaves it absent.
+# The formatter omits the entry when absent rather than showing
+# ``None`` so a reader instantly sees whether prefix caching is
+# paying off in the observed run.
 _INNER_SPAN_KEYS = (
     "openarmature.node.name",
     "openarmature.user.tenantId",
@@ -528,6 +657,7 @@ _INNER_SPAN_KEYS = (
     "gen_ai.system",
     "gen_ai.usage.input_tokens",
     "gen_ai.usage.output_tokens",
+    "openarmature.llm.cache_read.input_tokens",
 )
 
 
@@ -536,11 +666,11 @@ def _format_otel_spans(spans: list[ReadableSpan]) -> str:
 
     The ``openarmature.invocation`` root span closes on observer
     ``shutdown()`` and surfaces only its invocation-level
-    attributes (spec 5.1 — entry_node, spec_version, implementation
-    name + version).  Inner-node spans surface the cross-cutting
-    caller metadata + GenAI semconv attributes; printing them on
-    the invocation line too would just repeat data shown three
-    more times below.
+    attributes (entry_node, spec_version, implementation name +
+    version).  Inner-node spans surface the cross-cutting caller
+    metadata + ``gen_ai.*`` attributes; printing them on the
+    invocation line too would just repeat data shown three more
+    times below.
     """
     if not spans:
         return "  (no spans captured)"
@@ -564,8 +694,8 @@ def _format_langfuse_trace(trace: LangfuseTrace) -> str:
 
     Mirrors what the Langfuse production UI renders for the same
     invocation: trace.input / trace.output (sourced via the caller
-    hooks), top-level metadata (caller-supplied + spec keys), and
-    the Observation tree underneath.
+    hooks), top-level metadata (caller-supplied + framework-reserved
+    keys), and the Observation tree underneath.
     """
     lines: list[str] = []
     lines.append(f"Trace id={trace.id}")
@@ -615,7 +745,7 @@ async def main() -> None:
     # observability-stack observers on top.
     graph = build_graph()
     # Keep the OTel observer reachable so we can ``shutdown()`` it
-    # after drain — the root ``openarmature.invocation`` span only
+    # after drain; the root ``openarmature.invocation`` span only
     # closes on shutdown, and the in-memory exporter only surfaces
     # closed spans through ``get_finished_spans()``. Production
     # deployments do the same dance at process exit.
