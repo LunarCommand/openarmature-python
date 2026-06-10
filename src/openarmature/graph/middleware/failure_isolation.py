@@ -14,15 +14,17 @@ Catches ``Exception`` by default; ``BaseException``
 (``asyncio.CancelledError``, ``KeyboardInterrupt``) propagates so
 cancellation works as expected — the same rule as ``RetryMiddleware``.
 
-On a caught exception the middleware:
+On a caught exception the middleware first resolves ``degraded_update``
+(a static mapping, or a callable taking the pre-call state; invoked
+once, at catch time, which is also what populates the dispatched
+event's ``post_state``), then in order:
 
 1. Dispatches a ``FailureIsolatedEvent`` onto the engine's serial
    observer-delivery queue (a framework-emitted event; the bundled
    OTel and Langfuse observers render the catch). The default emission
    path is the observer event, with no logging-library dependency.
 2. Awaits the optional ``on_caught`` hook.
-3. Resolves ``degraded_update`` (static mapping or callable taking the
-   pre-call state) and returns it as the node's partial update.
+3. Returns the resolved degraded update as the node's partial update.
 
 Composition with ``RetryMiddleware``: failure isolation MUST be the
 OUTER middleware (it only sees what escapes retry); retry MUST be INNER
@@ -154,6 +156,17 @@ class FailureIsolationMiddleware:
             cause = getattr(exc, "__cause__", None)
             cause_category = getattr(cause, "category", None) if cause is not None else None
             category = cause_category if isinstance(cause_category, str) else None
+        # ``attempt_index`` here is deliberately the NODE-level baseline,
+        # not a per-attempt wire index: failure isolation is a node-level
+        # concern ("the node, across its retries, was isolated"). When
+        # this middleware is OUTER of RetryMiddleware, retry has already
+        # reset the attempt ContextVar to that baseline (0) in its
+        # ``finally`` by the time the terminal exception reaches this
+        # catch, which is the frame we want (spec-confirmed). Parenting is
+        # unaffected: the node's attempt spans are already closed by
+        # delivery time (their completed event precedes this one on the
+        # serial queue), so observers parent the marker under the
+        # invocation span and correlate by ``namespace`` + node name.
         dispatch(
             FailureIsolatedEvent(
                 event_name=self.event_name,
