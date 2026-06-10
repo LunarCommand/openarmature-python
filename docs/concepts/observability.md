@@ -890,9 +890,12 @@ with custom providers still using the sentinel pattern, the legacy
 shape is:
 
 ```python
+from openarmature.graph.events import NodeEvent
 from openarmature.observability import LLM_NAMESPACE, LlmEventPayload
 
 async def legacy_llm_observer(event):
+    if not isinstance(event, NodeEvent):
+        return
     if event.namespace != LLM_NAMESPACE:
         return
     payload = event.pre_state
