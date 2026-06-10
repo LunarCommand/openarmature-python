@@ -138,7 +138,19 @@ class RetryMiddleware:
     """
 
     def __init__(self, config: RetryConfig | None = None) -> None:
-        self.config = config if config is not None else RetryConfig()
+        if config is None:
+            config = RetryConfig()
+        # Defensive guard for untyped callers: the static type already
+        # rules a non-RetryConfig out (pyright flags this as redundant),
+        # but an eager TypeError beats a cryptic AttributeError when a
+        # mistyped value (e.g. ``RetryMiddleware(3)``) reaches ``.config``.
+        if not isinstance(config, RetryConfig):  # pyright: ignore[reportUnnecessaryIsInstance]
+            raise TypeError(
+                f"RetryMiddleware expects a RetryConfig (or None); got "
+                f"{type(config).__name__}. Construct as "
+                f"RetryMiddleware(RetryConfig(max_attempts=...))."
+            )
+        self.config = config
 
     async def __call__(self, state: Any, next_: NextCall) -> Mapping[str, Any]:
         attempt = 0

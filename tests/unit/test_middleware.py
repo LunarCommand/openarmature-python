@@ -230,6 +230,11 @@ def test_retry_config_defaults_resolve_at_use() -> None:
     assert RetryMiddleware().config == RetryConfig()
 
 
+def test_retry_middleware_rejects_non_config() -> None:
+    with pytest.raises(TypeError, match="expects a RetryConfig"):
+        RetryMiddleware(3)  # pyright: ignore[reportArgumentType]
+
+
 # ===== 6. General error recovery =====
 
 
