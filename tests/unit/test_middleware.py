@@ -25,6 +25,7 @@ from openarmature.graph import (
     END,
     GraphBuilder,
     Middleware,
+    RetryConfig,
     RetryMiddleware,
     State,
     TimingMiddleware,
@@ -148,7 +149,7 @@ async def test_retry_succeeds_on_second_attempt() -> None:
             raise _CategorizedTransient()
         return {"trace": ["ok"]}
 
-    retry = RetryMiddleware(max_attempts=3, backoff=deterministic_backoff(0))
+    retry = RetryMiddleware(RetryConfig(max_attempts=3, backoff=deterministic_backoff(0)))
     chain = compose_chain([retry], innermost)
 
     result = await chain(TraceState())
@@ -163,7 +164,7 @@ async def test_retry_exhausted_re_raises_last_exception() -> None:
         attempts[0] += 1
         raise _CategorizedTransient()
 
-    retry = RetryMiddleware(max_attempts=3, backoff=deterministic_backoff(0))
+    retry = RetryMiddleware(RetryConfig(max_attempts=3, backoff=deterministic_backoff(0)))
     chain = compose_chain([retry], innermost)
 
     with pytest.raises(_CategorizedTransient):
@@ -180,7 +181,7 @@ async def test_retry_skips_non_retryable() -> None:
         attempts[0] += 1
         raise _CategorizedFatal()
 
-    retry = RetryMiddleware(max_attempts=5, backoff=deterministic_backoff(0))
+    retry = RetryMiddleware(RetryConfig(max_attempts=5, backoff=deterministic_backoff(0)))
     chain = compose_chain([retry], innermost)
 
     with pytest.raises(_CategorizedFatal):
@@ -201,13 +202,37 @@ async def test_retry_propagates_cancelled_error() -> None:
         attempts[0] += 1
         raise asyncio.CancelledError("aborted by host")
 
-    retry = RetryMiddleware(max_attempts=5, backoff=deterministic_backoff(0))
+    retry = RetryMiddleware(RetryConfig(max_attempts=5, backoff=deterministic_backoff(0)))
     chain = compose_chain([retry], innermost)
 
     with pytest.raises(asyncio.CancelledError):
         await chain(TraceState())
     # Retry MUST NOT swallow CancelledError — exactly one attempt.
     assert attempts[0] == 1
+
+
+# ===== RetryConfig record =====
+
+
+def test_retry_config_validates_max_attempts() -> None:
+    with pytest.raises(ValueError, match="max_attempts must be >= 1"):
+        RetryConfig(max_attempts=0)
+
+
+def test_retry_config_defaults_resolve_at_use() -> None:
+    # Optional fields default to None; the consumer (RetryMiddleware, and
+    # the upcoming call-level retry) resolves None to the canonical
+    # defaults. A bare RetryMiddleware() uses the default RetryConfig().
+    cfg = RetryConfig()
+    assert cfg.max_attempts == 3
+    assert cfg.classifier is None
+    assert cfg.backoff is None
+    assert RetryMiddleware().config == RetryConfig()
+
+
+def test_retry_middleware_rejects_non_config() -> None:
+    with pytest.raises(TypeError, match="expects a RetryConfig"):
+        RetryMiddleware(3)  # pyright: ignore[reportArgumentType]
 
 
 # ===== 6. General error recovery =====

@@ -20,6 +20,7 @@ from __future__ import annotations
 import asyncio
 import random
 from collections.abc import Awaitable, Callable, Mapping
+from dataclasses import dataclass
 from typing import Any
 
 from openarmature.llm.errors import TRANSIENT_CATEGORIES
@@ -100,39 +101,63 @@ BackoffStrategy = Callable[[int], float]
 OnRetryCallback = Callable[[Exception, int], Awaitable[None]]
 
 
-class RetryMiddleware:
-    """Canonical retry middleware.
-
-    Configuration:
+@dataclass(frozen=True)
+class RetryConfig:
+    """Canonical retry configuration record consumed by
+    :class:`RetryMiddleware`.
 
     - ``max_attempts``: total attempts including the first call. ``1``
       disables retry. Default ``3``.
-    - ``classifier``: predicate ``(exception, state) -> bool``. Default
-      :func:`default_classifier` (matches ``category`` against
+    - ``classifier``: predicate ``(exception, state) -> bool`` deciding
+      whether a failure is retry-eligible. ``None`` (the default)
+      selects :func:`default_classifier` (matches ``category`` against
       ``TRANSIENT_CATEGORIES``).
-    - ``backoff``: callable ``(attempt_index) -> seconds``. Default
-      :func:`exponential_jitter_backoff` (base 1s, cap 30s, full jitter).
+    - ``backoff``: callable ``(attempt_index) -> seconds``. ``None``
+      (the default) selects :func:`exponential_jitter_backoff` (base
+      1s, cap 30s, full jitter).
     - ``on_retry``: optional async callback ``(exception, attempt_index)
-      -> None``. Fires before each sleep.
+      -> None`` fired before each backoff sleep.
     """
 
-    def __init__(
-        self,
-        *,
-        max_attempts: int = 3,
-        classifier: Classifier | None = None,
-        backoff: BackoffStrategy | None = None,
-        on_retry: OnRetryCallback | None = None,
-    ) -> None:
-        if max_attempts < 1:
+    max_attempts: int = 3
+    classifier: Classifier | None = None
+    backoff: BackoffStrategy | None = None
+    on_retry: OnRetryCallback | None = None
+
+    def __post_init__(self) -> None:
+        if self.max_attempts < 1:
             raise ValueError("max_attempts must be >= 1")
-        self.max_attempts = max_attempts
-        self.classifier: Classifier = classifier or default_classifier
-        self.backoff: BackoffStrategy = backoff or exponential_jitter_backoff
-        self.on_retry: OnRetryCallback | None = on_retry
+
+
+class RetryMiddleware:
+    """Canonical retry middleware.
+
+    Configured with a :class:`RetryConfig` (or the default
+    ``RetryConfig()`` when omitted). Construct as
+    ``RetryMiddleware(RetryConfig(max_attempts=...))``.
+    """
+
+    def __init__(self, config: RetryConfig | None = None) -> None:
+        if config is None:
+            config = RetryConfig()
+        # Defensive guard for untyped callers: the static type already
+        # rules a non-RetryConfig out (pyright flags this as redundant),
+        # but an eager TypeError beats a cryptic AttributeError when a
+        # mistyped value (e.g. ``RetryMiddleware(3)``) reaches ``.config``.
+        if not isinstance(config, RetryConfig):  # pyright: ignore[reportUnnecessaryIsInstance]
+            raise TypeError(
+                f"RetryMiddleware expects a RetryConfig (or None); got "
+                f"{type(config).__name__}. Construct as "
+                f"RetryMiddleware(RetryConfig(max_attempts=...))."
+            )
+        self.config = config
 
     async def __call__(self, state: Any, next_: NextCall) -> Mapping[str, Any]:
         attempt = 0
+        # ``None`` config fields select the canonical defaults; resolve
+        # once here so the loop works against concrete callables.
+        classifier = self.config.classifier or default_classifier
+        backoff = self.config.backoff or exponential_jitter_backoff
         # Spec observability §3.4 per-attempt scoping: each retry
         # attempt sees only the metadata in scope at retry-loop entry
         # ("pre-attempt baseline") plus that attempt's own writes;
@@ -176,11 +201,11 @@ class RetryMiddleware:
                     # metadata for the error span) sees the baseline,
                     # not the failed attempt's transient state.
                     _reset_invocation_metadata(metadata_token)
-                    if attempt + 1 >= self.max_attempts or not self.classifier(exc, state):
+                    if attempt + 1 >= self.config.max_attempts or not classifier(exc, state):
                         raise
-                    if self.on_retry is not None:
-                        await self.on_retry(exc, attempt)
-                    await asyncio.sleep(self.backoff(attempt))
+                    if self.config.on_retry is not None:
+                        await self.config.on_retry(exc, attempt)
+                    await asyncio.sleep(backoff(attempt))
                     attempt += 1
                 except BaseException:
                     # Cancellation path. `CancelledError` (or other
@@ -202,6 +227,7 @@ __all__ = [
     "BackoffStrategy",
     "Classifier",
     "OnRetryCallback",
+    "RetryConfig",
     "RetryMiddleware",
     "TRANSIENT_CATEGORIES",
     "default_classifier",

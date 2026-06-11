@@ -37,6 +37,7 @@ from openarmature.graph import (
     FanOutFieldNotList,
     GraphBuilder,
     NodeException,
+    RetryConfig,
     RetryMiddleware,
     State,
     append,
@@ -578,7 +579,7 @@ async def test_instance_middleware_retry_recovers_per_instance() -> None:
     inner_builder.add_edge("compute", END)
     inner = inner_builder.compile()
 
-    retry = RetryMiddleware(max_attempts=3, backoff=deterministic_backoff(0))
+    retry = RetryMiddleware(RetryConfig(max_attempts=3, backoff=deterministic_backoff(0)))
 
     builder: GraphBuilder[InstanceMwParentState] = GraphBuilder(InstanceMwParentState)
     builder.set_entry("process")

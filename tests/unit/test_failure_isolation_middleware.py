@@ -22,6 +22,7 @@ from openarmature.graph import (
     FailureIsolationMiddleware,
     GraphBuilder,
     ObserverEvent,
+    RetryConfig,
     RetryMiddleware,
     State,
     append,
@@ -290,7 +291,7 @@ async def test_three_piece_composition_with_retry() -> None:
                     degraded_update={"note": "gave_up"},
                     event_name="flaky_failed",
                 ),
-                RetryMiddleware(max_attempts=3, backoff=deterministic_backoff(0.0)),
+                RetryMiddleware(RetryConfig(max_attempts=3, backoff=deterministic_backoff(0.0))),
             ],
         )
         .add_edge("flaky", END)

@@ -678,7 +678,7 @@ async def _run_fixture_007_case(case: Mapping[str, Any]) -> None:
     from opentelemetry.trace import StatusCode
 
     from openarmature.graph import RuntimeGraphError
-    from openarmature.graph.middleware import RetryMiddleware
+    from openarmature.graph.middleware import RetryConfig, RetryMiddleware
     from openarmature.graph.middleware.retry import deterministic_backoff
 
     observer, exporter = _build_observer()
@@ -725,9 +725,11 @@ async def _run_fixture_007_case(case: Mapping[str, Any]) -> None:
             classifier_fn = None
         node_middleware.setdefault(flaky_node_name, []).append(
             RetryMiddleware(
-                max_attempts=int(mw_spec.get("max_attempts", 3)),
-                backoff=backoff,
-                classifier=classifier_fn,
+                RetryConfig(
+                    max_attempts=int(mw_spec.get("max_attempts", 3)),
+                    backoff=backoff,
+                    classifier=classifier_fn,
+                )
             )
         )
 

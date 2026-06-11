@@ -30,6 +30,7 @@ from openarmature.graph import (
 from openarmature.graph.middleware import (
     Middleware,
     OnCompleteCallback,
+    RetryConfig,
     RetryMiddleware,
     TimingMiddleware,
     TimingRecord,
@@ -234,9 +235,11 @@ def _build_middleware(
         classifier_cfg = config.get("classifier")
         classifier = _build_classifier(classifier_cfg) if classifier_cfg is not None else None
         return RetryMiddleware(
-            max_attempts=int(config.get("max_attempts", 3)),
-            backoff=backoff,
-            classifier=classifier,
+            RetryConfig(
+                max_attempts=int(config.get("max_attempts", 3)),
+                backoff=backoff,
+                classifier=classifier,
+            )
         )
     if mw_type == "timing":
         on_complete_cfg = cast("dict[str, Any]", config.get("on_complete") or {})
