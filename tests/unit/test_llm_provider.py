@@ -21,6 +21,7 @@ import pytest
 from pydantic import ValidationError
 
 from openarmature.graph.events import LlmCompletionEvent, LlmFailedEvent, NodeEvent
+from openarmature.graph.middleware import RetryConfig, deterministic_backoff
 from openarmature.graph.observer import ObserverEvent
 from openarmature.llm import (
     PROVIDER_AUTHENTICATION,
@@ -1334,6 +1335,138 @@ async def test_complete_failure_emits_typed_llm_failed_event_only() -> None:
     assert len(failed_events) == 1
     assert failed_events[0].error_category == "provider_unavailable"
     assert failed_events[0].error_type == "ProviderUnavailable"
+
+
+# ---------------------------------------------------------------------------
+# Call-level retry (proposal 0050)
+# ---------------------------------------------------------------------------
+
+
+def _ok_chat_completion() -> dict[str, object]:
+    return {
+        "id": "x",
+        "object": "chat.completion",
+        "created": 0,
+        "model": "m",
+        "choices": [{"index": 0, "message": {"role": "assistant", "content": "ok"}, "finish_reason": "stop"}],
+        "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+    }
+
+
+def _fail_n_then_ok(calls: list[int], fail_count: int) -> Callable[[httpx.Request], httpx.Response]:
+    def handler(_req: httpx.Request) -> httpx.Response:
+        calls[0] += 1
+        if calls[0] <= fail_count:
+            return httpx.Response(503, json={"error": {"message": "down"}})
+        return httpx.Response(200, json=_ok_chat_completion())
+
+    return handler
+
+
+async def test_call_level_retry_succeeds_after_transient() -> None:
+    calls = [0]
+    events, token = _collecting_dispatch()
+    provider = OpenAIProvider(
+        base_url="http://test",
+        model="m",
+        api_key="k",
+        transport=httpx.MockTransport(_fail_n_then_ok(calls, fail_count=1)),
+    )
+    try:
+        response = await provider.complete(
+            [UserMessage(content="hi")],
+            retry=RetryConfig(max_attempts=2, backoff=deterministic_backoff(0)),
+        )
+    finally:
+        await provider.aclose()
+        _release_dispatch(token)
+
+    # One transient failure then success: the wire call was retried.
+    assert calls[0] == 2
+    assert response.message.content == "ok"
+    # Terminal-only: one LlmCompletionEvent, no LlmFailedEvent for the
+    # intermediate transient attempt.
+    assert len([e for e in events if isinstance(e, LlmCompletionEvent)]) == 1
+    assert [e for e in events if isinstance(e, LlmFailedEvent)] == []
+
+
+async def test_call_level_retry_exhaustion_emits_one_failed_event() -> None:
+    calls = [0]
+    events, token = _collecting_dispatch()
+    provider = OpenAIProvider(
+        base_url="http://test",
+        model="m",
+        api_key="k",
+        transport=httpx.MockTransport(_fail_n_then_ok(calls, fail_count=99)),
+    )
+    try:
+        with pytest.raises(ProviderUnavailable):
+            await provider.complete(
+                [UserMessage(content="hi")],
+                retry=RetryConfig(max_attempts=3, backoff=deterministic_backoff(0)),
+            )
+    finally:
+        await provider.aclose()
+        _release_dispatch(token)
+
+    # Exhausted all 3 attempts, then propagated. Terminal-only: one
+    # LlmFailedEvent (not one per attempt), no LlmCompletionEvent.
+    assert calls[0] == 3
+    assert [e for e in events if isinstance(e, LlmCompletionEvent)] == []
+    assert len([e for e in events if isinstance(e, LlmFailedEvent)]) == 1
+
+
+async def test_call_level_retry_skips_non_transient() -> None:
+    calls = [0]
+    events, token = _collecting_dispatch()
+
+    def _400(_req: httpx.Request) -> httpx.Response:
+        calls[0] += 1
+        return httpx.Response(400, json={"error": {"message": "bad"}})
+
+    provider = OpenAIProvider(
+        base_url="http://test", model="m", api_key="k", transport=httpx.MockTransport(_400)
+    )
+    try:
+        with pytest.raises(ProviderInvalidRequest):
+            await provider.complete(
+                [UserMessage(content="hi")],
+                retry=RetryConfig(max_attempts=5, backoff=deterministic_backoff(0)),
+            )
+    finally:
+        await provider.aclose()
+        _release_dispatch(token)
+
+    # provider_invalid_request is non-transient: no retry, single attempt.
+    assert calls[0] == 1
+    assert len([e for e in events if isinstance(e, LlmFailedEvent)]) == 1
+
+
+async def test_call_level_retry_invokes_on_retry_per_attempt() -> None:
+    calls = [0]
+    retries: list[tuple[str, int]] = []
+
+    async def _on_retry(exc: Exception, attempt: int) -> None:
+        retries.append((type(exc).__name__, attempt))
+
+    provider = OpenAIProvider(
+        base_url="http://test",
+        model="m",
+        api_key="k",
+        transport=httpx.MockTransport(_fail_n_then_ok(calls, fail_count=2)),
+    )
+    try:
+        await provider.complete(
+            [UserMessage(content="hi")],
+            retry=RetryConfig(max_attempts=3, backoff=deterministic_backoff(0), on_retry=_on_retry),
+        )
+    finally:
+        await provider.aclose()
+
+    # Two transient failures then success: on_retry fires once per
+    # retried attempt (before each backoff), with the 0-based index.
+    assert calls[0] == 3
+    assert retries == [("ProviderUnavailable", 0), ("ProviderUnavailable", 1)]
 
 
 # ---------------------------------------------------------------------------

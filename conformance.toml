@@ -372,10 +372,23 @@ status = "implemented"
 since = "0.13.0"
 
 # Spec v0.42.0 (proposal 0050).  Retry & degradation primitives —
-# failure-isolation middleware + call-level retry.  Queued for
-# v0.14.0 (largest single piece in the roadmap).
+# failure-isolation middleware (§6.3) + call-level retry (§7).  Both
+# primitives implemented across the v0.14.0 cycle:
+# FailureIsolationMiddleware (distinct FailureIsolatedEvent +
+# CaughtException) and the call-level ``retry`` parameter on
+# ``Provider.complete()`` — an in-call loop over transient §7 errors
+# reusing the §6.1 RetryConfig record.  ``partial`` because §7.1's
+# per-attempt span surface — N ``openarmature.llm.complete`` spans +
+# the ``openarmature.llm.attempt_index`` attribute — is DEFERRED: the
+# python LLM span is rendered from the typed event, which is
+# terminal-only per the graph-engine §6 mutual-exclusion contract, so
+# per-attempt spans require a dedicated within-call sub-event
+# (LlmRetryAttemptEvent) scoped to a future cycle.  Call-level retry
+# ships terminal-only: exactly one LlmCompletionEvent / LlmFailedEvent
+# per ``complete()`` call.
 [proposals."0050"]
-status = "not-yet"
+status = "partial"
+since = "0.14.0"
 
 # Spec v0.43.0 (proposal 0051).  Langfuse trace.input/trace.output
 # implementation-surface caveat.  Purely textual: documents that the

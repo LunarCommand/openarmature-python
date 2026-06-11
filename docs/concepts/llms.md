@@ -85,6 +85,51 @@ stateless calls. Conversational memory (if you want it) is the
 caller's responsibility: thread it through state and pass the
 accumulated message list into each call.
 
+## Retrying transient failures
+
+LLM endpoints fail in transient ways (rate limits, 503s, brief
+outages). Pass a `RetryConfig` to `complete(retry=...)` to retry the
+call in-place on those transient categories, without re-running any
+surrounding work:
+
+```python
+from openarmature.graph import RetryConfig
+
+response = await provider.complete(
+    messages,
+    retry=RetryConfig(max_attempts=3),
+)
+```
+
+When `retry` is omitted the call is a single attempt (the default).
+With a config, the request is built and validated once, then the wire
+call is retried on transient errors per the config's classifier and
+backoff; a non-transient error (a bad request, an auth failure)
+propagates immediately without retrying. From observability's point of
+view the call stays a single unit: exactly one completion-or-failure
+event fires for the terminal outcome, regardless of how many attempts
+it took.
+
+### Call-level vs node-level retry
+
+There are two retry layers, for different jobs:
+
+- **Call-level** (`complete(retry=...)`) retries one LLM call. Reach
+  for it when a node issues several LLM calls in a loop (chunked
+  processing, multi-step) and you do not want a transient failure on
+  the fifth call to re-run the four that already succeeded.
+- **Node-level** (`RetryMiddleware`, see [Middleware](middleware.md))
+  retries a whole node. Reach for it when the node does LLM work plus
+  other work (a DB write, a parse) and you want to re-run the entire
+  body on failure.
+
+They use the same `RetryConfig` shape and compose: a node-level retry
+re-runs the node, and each fresh run gets its own call-level budget.
+The thing to avoid is stacking both with overlapping budgets without
+meaning to: a 3-attempt node retry wrapping a 5-call node with
+3-attempt call-level retry can issue up to 45 calls in the worst case.
+Pick intentional budgets per layer.
+
 ## Pre-flight readiness check
 
 `Provider.ready()` is the optional pre-flight call you make before
