@@ -276,6 +276,8 @@ def build_graph(mode: str = "fail_fast") -> CompiledGraph[BatchState]:
     The smoke test calls this with no argument, exercising the default
     path; main() lets the MODE env var pick the posture.
     """
+    if mode not in ("fail_fast", "collect", "degrade"):
+        raise ValueError(f"mode must be one of fail_fast / collect / degrade; got {mode!r}")
     headline_subgraph = build_headline_subgraph()
 
     retry = RetryMiddleware(
