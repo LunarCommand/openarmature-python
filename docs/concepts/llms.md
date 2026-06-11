@@ -643,3 +643,6 @@ classifier won't do this for them.
   agent-loop pattern with two local tools.
 - [Examples: Multimodal prompt](../examples/multimodal-prompt.md)
   for content blocks alongside versioned prompts.
+- [Examples: Chat with multimodal](../examples/chat-with-multimodal.md)
+  for call-level `complete(retry=...)` on a multi-turn chat node,
+  alongside the other LLM-failure-handling placements.

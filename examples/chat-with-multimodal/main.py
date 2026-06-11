@@ -51,11 +51,13 @@ which exercises a different LLM-side primitive entirely.
   (`provider_rate_limit`, `provider_invalid_request`, etc.) in the
   error message. The image URL failure mode (OpenAI's
   fetcher hitting a CDN that blocks it) lands here as
-  `provider_invalid_request`. Three legitimate places to handle
+  `provider_invalid_request`. Four legitimate places to handle
   this in production: caller-side `try / except NodeException`
-  (shown here), `RetryMiddleware` wrapping the respond node for
-  transient categories, or a `try / except LlmProviderError`
-  inside the node body returning a fallback response.
+  (shown here), call-level retry via `complete(retry=...)` for
+  transient categories (also shown here, on the respond node),
+  `RetryMiddleware` wrapping the whole respond node, or a
+  `try / except LlmProviderError` inside the node body returning a
+  fallback response.
 
 **Configuration** (env vars; OpenAI defaults shown):
 
@@ -118,6 +120,7 @@ from openarmature.graph import (
     State,
     append,
 )
+from openarmature.graph.middleware import RetryConfig
 from openarmature.llm import (
     AssistantMessage,
     LlmProviderError,
@@ -330,9 +333,17 @@ async def respond(state: ChatState) -> dict[str, Any]:
         placeholders={"history": state.history},
     )
 
+    # Call-level retry: retry only the provider wire call on transient
+    # categories (provider_unavailable, provider_rate_limit, ...), using
+    # the default classifier and backoff. It is terminal-only, so the
+    # node still sees exactly one completion (or one final failure) even
+    # when an attempt was retried underneath. Contrast with a
+    # RetryMiddleware on the node, which re-runs the whole node body
+    # (re-render + re-send) on each retry.
     response = await _get_provider().complete(
         rendered.messages,
         config=RuntimeConfig(temperature=0.0, max_tokens=400),
+        retry=RetryConfig(max_attempts=3),
     )
 
     # The rendered messages include [system, *history, current_user]
@@ -496,10 +507,10 @@ async def main() -> None:
     # it's an ``LlmProviderError`` we surface the canonical
     # ``.category`` string (``provider_rate_limit``,
     # ``provider_invalid_request``, etc.) so the failure mode is
-    # immediately greppable.  This is one of three legitimate places
-    # to handle the error; see the docstring for the other two
-    # (``RetryMiddleware`` wrapping the node, ``try/except`` inside
-    # the node body).
+    # immediately greppable.  This is one of four legitimate places
+    # to handle the error; see the docstring for the others
+    # (call-level ``complete(retry=...)``, ``RetryMiddleware`` wrapping
+    # the node, ``try/except`` inside the node body).
     final: ChatState | None = None
     try:
         final = await graph.invoke(initial)
@@ -512,8 +523,9 @@ async def main() -> None:
         print()
         print(f"*** node {exc.node_name!r} failed ({category}): {cause} ***")
         print()
-        print("Three places to handle this in production code:")
+        print("Four places to handle this in production code:")
         print("  - Caller-side try/except NodeException (this example).")
+        print("  - Call-level complete(retry=...) on the wire call (this example).")
         print("  - RetryMiddleware on the node for transient categories.")
         print("  - try/except inside the node body returning a fallback.")
     finally:
