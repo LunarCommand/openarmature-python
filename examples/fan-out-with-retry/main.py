@@ -25,19 +25,23 @@ its own right; it would also work standalone against a single headline.
 - ``instance_middleware=(RetryMiddleware(...), TimingMiddleware(...))``
   wraps EACH instance's whole subgraph invocation. Retries are
   per-instance: a failure on headline 3 doesn't restart headlines 0-2.
+  In ``degrade`` mode a ``FailureIsolationMiddleware`` is prepended as
+  the outermost layer (retry stays inner, so it still sees raw
+  transients first).
 - ``concurrency=3`` caps how many instances run in flight at once. Use
   this to be polite to the upstream API.
-- ``error_policy`` defaults to ``"fail_fast"``; the first instance
-  failure (after retries exhaust) raises and cancels siblings. Set
-  the ``COLLECT_MODE`` env var to switch to ``"collect"``: each
-  instance runs independently and per-instance failures land in
-  ``state.instance_errors`` instead of aborting the batch. The
-  ``errors_field="instance_errors"`` knob names where the records go.
-  Under COLLECT_MODE, the demo prepends a sentinel headline
-  (``[FORCE_FAIL] ...``) that ``summarize`` raises
-  ``ProviderUnavailable`` on; retry exhausts, the error lands in
-  ``instance_errors``, and the rest of the batch completes. Without
-  the sentinel, ``COLLECT_MODE`` would have nothing to capture.
+- The ``MODE`` env var selects the per-instance failure posture.
+  ``"fail_fast"`` (default) raises on the first instance whose retries
+  exhaust and cancels its siblings. ``"collect"`` lets each instance
+  run independently and lands per-instance failures in
+  ``state.instance_errors`` (named by ``errors_field``) instead of
+  aborting. ``"degrade"`` wraps each instance in
+  ``FailureIsolationMiddleware`` (outermost) so an exhausted instance
+  is caught and returns a placeholder partial, leaving the batch intact
+  with a degraded entry in place. ``collect`` and ``degrade`` both
+  prepend a sentinel headline (``[FORCE_FAIL] ...``) that ``summarize``
+  raises ``ProviderUnavailable`` on, so there is a failure to handle;
+  ``fail_fast`` keeps the list clean for the happy path.
 - A ``TimingRecord`` is captured per instance via an ``on_complete``
   callback. ``TimingRecord`` carries the per-call duration but not the
   ``fan_out_index``; that index lives on observer NodeEvents instead.
@@ -56,6 +60,8 @@ its own right; it would also work standalone against a single headline.
 - ``LLM_BASE_URL`` defaults to ``https://api.openai.com``. **Host root only.**
 - ``LLM_MODEL`` defaults to ``gpt-4o-mini``.
 - ``LLM_API_KEY`` required (empty for local servers that don't authenticate).
+- ``MODE`` defaults to ``fail_fast``. One of ``fail_fast`` / ``collect`` /
+  ``degrade`` (see the failure-posture bullet above).
 
 Run with:
 
@@ -84,6 +90,8 @@ from openarmature.graph import (
     append,
 )
 from openarmature.graph.middleware import (
+    FailureIsolationMiddleware,
+    Middleware,
     RetryConfig,
     RetryMiddleware,
     TimingMiddleware,
@@ -160,16 +168,17 @@ class HeadlineState(State):
 
 
 async def summarize(s: HeadlineState) -> Mapping[str, Any]:
-    # Sentinel for the COLLECT_MODE demo. Raising a transient error
-    # (ProviderUnavailable carries the ``provider_unavailable``
-    # category, which retry's default classifier recognizes as
-    # retryable) lets the retry middleware exhaust its 3 attempts;
-    # the final failure then surfaces according to the fan-out's
-    # error_policy. Under fail_fast (default), the batch aborts.
-    # Under collect, the failure lands in instance_errors and the
-    # batch produces partial results.
+    # Sentinel for the collect / degrade failure-path demos (those modes
+    # prepend a [FORCE_FAIL] headline). Raising a transient error
+    # (ProviderUnavailable carries the ``provider_unavailable`` category,
+    # which retry's default classifier recognizes as retryable) lets the
+    # retry middleware exhaust its 3 attempts; the final failure then
+    # surfaces according to MODE: under collect it lands in
+    # instance_errors and the batch produces partial results; under
+    # degrade FailureIsolationMiddleware catches it and substitutes a
+    # placeholder so the batch finishes intact.
     if "[FORCE_FAIL]" in s.headline:
-        raise ProviderUnavailable("synthetic failure: provider unavailable (COLLECT_MODE demo)")
+        raise ProviderUnavailable("synthetic failure: provider unavailable (failure-path demo)")
     content = await _chat(
         system=(
             "Rewrite the headline as one short sentence (~15 words) that would work as a lead. No preamble."
@@ -249,15 +258,23 @@ async def present(s: BatchState) -> Mapping[str, Any]:
     return {"trace": ["present"]}
 
 
-def build_graph(error_policy: str = "fail_fast") -> CompiledGraph[BatchState]:
+def build_graph(mode: str = "fail_fast") -> CompiledGraph[BatchState]:
     """Build the fan-out demo graph.
 
-    ``error_policy`` switches between ``"fail_fast"`` (default; first
-    exhausted-retry failure raises and cancels the rest) and
-    ``"collect"`` (each instance runs independently; failures land in
-    ``state.instance_errors`` and the batch produces partial results).
+    ``mode`` selects the per-instance failure posture:
+
+    - ``"fail_fast"`` (default): the first instance whose retries
+      exhaust raises and cancels the rest.
+    - ``"collect"``: each instance runs independently; failures land in
+      ``state.instance_errors`` and the batch produces partial results.
+    - ``"degrade"``: each instance is additionally wrapped (outermost)
+      in ``FailureIsolationMiddleware``; an instance whose retries
+      exhaust is caught and returns a placeholder partial, so the batch
+      completes with a degraded entry in place rather than aborting or
+      dropping it.
+
     The smoke test calls this with no argument, exercising the default
-    path; main() lets the COLLECT_MODE env var flip to collect.
+    path; main() lets the MODE env var pick the posture.
     """
     headline_subgraph = build_headline_subgraph()
 
@@ -275,6 +292,25 @@ def build_graph(error_policy: str = "fail_fast") -> CompiledGraph[BatchState]:
         clock=time.monotonic,
     )
 
+    instance_middleware: tuple[Middleware, ...] = (retry, timing)
+    error_policy = "fail_fast"
+    if mode == "collect":
+        error_policy = "collect"
+    elif mode == "degrade":
+        # Outermost instance middleware: catches the exception retry
+        # re-raises once its attempts exhaust and returns a degraded
+        # partial in place of the instance result, so the batch finishes
+        # instead of aborting (fail_fast) or dropping the instance
+        # (collect). Retry stays inner so it still sees raw transients
+        # first. The degraded mapping is keyed the way the fan-out
+        # projects an instance: the collect_field (``summary``) plus
+        # each parent extra_outputs key (``topics``).
+        degrade = FailureIsolationMiddleware(
+            degraded_update={"summary": "(unavailable)", "topics": "other"},
+            event_name="headline_degraded",
+        )
+        instance_middleware = (degrade, retry, timing)
+
     return (
         GraphBuilder(BatchState)
         .add_node("announce", announce)
@@ -287,7 +323,7 @@ def build_graph(error_policy: str = "fail_fast") -> CompiledGraph[BatchState]:
             target_field="summaries",
             extra_outputs={"topics": "topic"},
             concurrency=3,
-            instance_middleware=(retry, timing),
+            instance_middleware=instance_middleware,
             error_policy=error_policy,
             errors_field="instance_errors",
         )
@@ -336,23 +372,23 @@ async def main() -> None:
     # doesn't accumulate timings across invocations.
     _timings.clear()
 
-    # Set COLLECT_MODE=1 to switch the fan-out error policy from the
-    # default fail_fast to collect. Under collect, each instance runs
-    # independently and per-instance failures (after retries exhaust)
-    # land in state.instance_errors instead of aborting the batch.
-    error_policy = "collect" if os.environ.get("COLLECT_MODE") else "fail_fast"
-    graph = build_graph(error_policy=error_policy)
+    # MODE selects the per-instance failure posture: fail_fast (default,
+    # abort on the first exhausted-retry failure), collect (record
+    # failures in state.instance_errors and finish the batch), or
+    # degrade (FailureIsolationMiddleware catches an exhausted instance
+    # and substitutes a placeholder so the batch finishes intact).
+    mode = os.environ.get("MODE", "fail_fast")
+    graph = build_graph(mode=mode)
     graph.attach_observer(fan_out_config_observer)
 
-    # Under COLLECT_MODE, prepend a deliberately-failing headline so
-    # the collect path is exercised end-to-end: retry middleware
-    # exhausts on the sentinel, the failure lands in
-    # state.instance_errors, and the rest of the batch completes.
-    # Default (fail_fast) keeps the headline list clean so the demo's
+    # collect and degrade both need a failure to demonstrate, so prepend
+    # a deliberately-failing headline that summarize() always raises on.
+    # collect lands it in state.instance_errors; degrade catches it and
+    # substitutes a placeholder. fail_fast keeps the list clean so the
     # happy path runs to completion.
-    if error_policy == "collect":
+    if mode in ("collect", "degrade"):
         headlines = [
-            "[FORCE_FAIL] Synthetic failing headline for the COLLECT_MODE demo",
+            "[FORCE_FAIL] Synthetic failing headline for the failure-path demo",
             *HEADLINES,
         ]
     else:
@@ -361,7 +397,7 @@ async def main() -> None:
 
     print("=" * 72)
     print(f"Summarizing {len(headlines)} headlines in parallel (concurrency=3)")
-    print(f"error_policy={error_policy!r}")
+    print(f"mode={mode!r}")
     print("=" * 72)
     print()
 

@@ -19,11 +19,15 @@ The per-instance subgraph is small (`summarize → classify`) and
 would also run standalone against a single headline. Fan-out
 multiplies it out across the batch.
 
-A second mode, controlled by the `COLLECT_MODE` env var, exercises
-the failure path. With `COLLECT_MODE=1` the demo prepends a
-sentinel headline that always raises `ProviderUnavailable`; under
-`error_policy="collect"` the failure lands in
-`state.instance_errors` and the rest of the batch completes.
+The `MODE` env var selects the per-instance failure posture. The
+default `fail_fast` aborts the batch on the first instance whose
+retries exhaust. `collect` and `degrade` both prepend a sentinel
+headline that always raises `ProviderUnavailable`, then handle it
+differently: `collect` lands the failure in `state.instance_errors`
+and finishes the rest of the batch, while `degrade` wraps each
+instance in `FailureIsolationMiddleware` so an exhausted instance is
+caught and replaced with a placeholder summary, leaving the batch
+intact.
 
 ## What it teaches
 
@@ -42,7 +46,11 @@ sentinel headline that always raises `ProviderUnavailable`; under
 - `concurrency=3` capping how many instances run in flight at once.
 - `error_policy="fail_fast"` (default, first exhausted-retry
   failure aborts the batch) vs `"collect"` (failures land in
-  `errors_field` and the batch produces partial results).
+  `errors_field` and the batch produces partial results). The
+  `degrade` mode keeps `fail_fast` but adds
+  `FailureIsolationMiddleware` as the outermost instance middleware,
+  so an exhausted instance is caught and degraded to a placeholder
+  before the fan-out ever sees the failure.
 - A `fan_out_config_observer` reads
   `NodeEvent.fan_out_config` on the fan-out node's dispatch event,
   recording the resolved `item_count` / `concurrency` /
@@ -77,10 +85,15 @@ uv sync --group examples
 LLM_API_KEY=sk-... uv run python examples/fan-out-with-retry/main.py
 ```
 
-To exercise the collect path with a synthetic failure:
+To exercise a failure posture with a synthetic failure:
 
 ```bash
-COLLECT_MODE=1 LLM_API_KEY=sk-... \
+# record the failure and finish the batch
+MODE=collect LLM_API_KEY=sk-... \
+  uv run python examples/fan-out-with-retry/main.py
+
+# degrade the failed instance to a placeholder and finish the batch
+MODE=degrade LLM_API_KEY=sk-... \
   uv run python examples/fan-out-with-retry/main.py
 ```
 
@@ -103,7 +116,9 @@ flowchart TD
 
 `headline_runs` is the fan-out node. At dispatch time it expands
 into N copies of the per-instance subgraph, one per headline.
-`RetryMiddleware` and `TimingMiddleware` wrap each instance.
+`RetryMiddleware` and `TimingMiddleware` wrap each instance (plus
+`FailureIsolationMiddleware` as the outermost layer in `degrade`
+mode).
 
 ## Reading the output
 
@@ -112,7 +127,7 @@ A clean default-mode run (`fail_fast`, all instances succeed):
 ```
 ========================================================================
 Summarizing 5 headlines in parallel (concurrency=3)
-error_policy='fail_fast'
+mode='fail_fast'
 ========================================================================
 
   [observer] fan-out node 'headline_runs' dispatching: item_count=5 concurrency=3 error_policy='fail_fast'
@@ -154,8 +169,16 @@ Per-instance timings (in completion order):
   a value near 1.0 indicates concurrency didn't help (the upstream
   serialized you, or instances themselves are short).
 
-With `COLLECT_MODE=1`, the output includes the sentinel headline
-at index 0 with a `(failed after retries; ...)` marker, plus a
+With `MODE=collect`, the output includes the sentinel headline at
+index 0 with a `(failed after retries; ...)` marker, plus a
 `Captured 1 per-instance error(s):` block listing the failed
-`fan_out_index` and error category. The other instances complete
-as usual.
+`fan_out_index` and error category. The other instances complete as
+usual.
+
+With `MODE=degrade`, the sentinel at index 0 instead shows a
+placeholder result (`summary: (unavailable)`, `topic: other`) and
+there is no error block: `FailureIsolationMiddleware` caught the
+exhausted-retry failure and returned the degraded partial, so the
+fan-out recorded the instance as a (degraded) success. The
+per-instance timings still show the sentinel's failed attempts, so
+you can see the retries happened before the instance was degraded.

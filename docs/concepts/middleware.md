@@ -291,6 +291,12 @@ failure isolation, which degrades. Reverse the order and the inner
 isolation would swallow transients before retry ever saw them, defeating
 the retry entirely.
 
+The [fan-out with retry example](../examples/fan-out-with-retry.md)
+applies this composition as `instance_middleware` in its `degrade`
+mode: each fan-out instance is wrapped isolation-outer / retry-inner,
+so an instance whose retries exhaust degrades to a placeholder result
+and the batch finishes instead of aborting.
+
 ## Related
 
 - [Parallel branches](parallel-branches.md): per-branch middleware
