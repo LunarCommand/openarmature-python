@@ -65,6 +65,12 @@ turn's `render()` injects the grown history into the placeholder.
   framework dispatching them; this example shows how the
   prompt-management layer composes a multi-turn conversation. A
   production chat agent often combines both.
+- Handling transient LLM failures. The `respond` node passes
+  [`complete(retry=...)`](../concepts/llms.md) for call-level retry
+  (retrying just the provider call, not the whole node), and `main()`
+  catches `NodeException` at the `invoke()` boundary to surface the
+  failure category. The module docstring enumerates the full set of
+  placement options.
 
 ## How to run
 
