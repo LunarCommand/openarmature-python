@@ -50,13 +50,14 @@ format mismatch) in field use.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import re
 import time
 import uuid
 from collections.abc import Mapping, Sequence
-from typing import Any, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 from urllib.parse import urlparse
 
 import httpx
@@ -115,6 +116,9 @@ from ..provider import (
     validate_tools,
 )
 from ..response import FinishReason, ParsedValue, Response, RuntimeConfig, Usage
+
+if TYPE_CHECKING:
+    from openarmature.graph.middleware import RetryConfig
 
 # Runtime guard for ``OpenAIProvider(..., readiness_probe=...)``. The
 # Literal type narrows callers under static checkers but is not enforced
@@ -348,6 +352,7 @@ class OpenAIProvider:
         config: RuntimeConfig | None = None,
         response_schema: dict[str, Any] | type[BaseModel] | None = None,
         tool_choice: ToolChoice | None = None,
+        retry: RetryConfig | None = None,
     ) -> Response:
         """Single completion call.
 
@@ -370,6 +375,18 @@ class OpenAIProvider:
         non-empty ``tools``, and ``ForceTool.name`` must appear in the
         supplied list. Violations raise ``provider_invalid_request``
         BEFORE any HTTP request is sent.
+
+        When ``retry`` is supplied, the wire call is retried on
+        transient provider errors per the config's classifier and
+        backoff (defaulting to the canonical transient categories with
+        exponential jittered backoff). The request is built and
+        validated once; pre-send validation errors are never retried.
+        Exactly one observability event fires for the call's terminal
+        outcome regardless of attempt count, and its ``latency_ms``
+        covers the whole call, retries and backoff included. The
+        ``on_retry`` hook is not exception-isolated (mirroring
+        ``RetryMiddleware``); an exception raised by it propagates out
+        of the call.
         """
         # Spec observability §5.5 LLM provider span: when an
         # observability backend is active in the current invocation,
@@ -464,7 +481,7 @@ class OpenAIProvider:
                 include_response_format=(schema_dict is None or not self._force_prompt_augmentation_fallback),
                 tool_choice=tool_choice,
             )
-            response = await self._do_complete(body, schema_dict, schema_class)
+            response = await self._do_complete_with_retry(body, schema_dict, schema_class, retry)
         except LlmProviderError as exc:
             # Failure path: dispatch a typed LlmFailedEvent per
             # proposal 0058. Only §7 category exceptions
@@ -509,6 +526,52 @@ class OpenAIProvider:
                 ),
             )
         return response
+
+    async def _do_complete_with_retry(
+        self,
+        body: dict[str, Any],
+        schema_dict: dict[str, Any] | None,
+        schema_class: type[BaseModel] | None,
+        retry: RetryConfig | None,
+    ) -> Response:
+        """Run the wire call with optional call-level retry.
+
+        Loops the underlying wire call on transient provider errors per
+        the retry config. Intermediate transient attempts are caught
+        here and emit no observability event; only the terminal outcome
+        (success, retry exhaustion, or a non-transient error) reaches
+        ``complete()``'s typed-event dispatch, so exactly one event
+        fires per ``complete()`` call.
+        """
+        if retry is None:
+            return await self._do_complete(body, schema_dict, schema_class)
+        # Lazy import avoids a module-load cycle: graph.middleware.retry
+        # imports llm.errors. Resolve None config fields to the canonical
+        # defaults, mirroring RetryMiddleware.
+        from openarmature.graph.middleware.retry import (
+            default_classifier,
+            exponential_jitter_backoff,
+        )
+
+        classifier = retry.classifier or default_classifier
+        backoff = retry.backoff or exponential_jitter_backoff
+        attempt = 0
+        while True:
+            try:
+                return await self._do_complete(body, schema_dict, schema_class)
+            except LlmProviderError as exc:
+                # No graph state at the call boundary; pass None (the
+                # default classifier ignores it). Re-raise on exhaustion
+                # or a non-transient category so complete() emits the
+                # single terminal LlmFailedEvent.
+                if attempt + 1 >= retry.max_attempts or not classifier(exc, None):
+                    raise
+                # on_retry is not exception-isolated (matches
+                # RetryMiddleware); a raise propagates out of the call.
+                if retry.on_retry is not None:
+                    await retry.on_retry(exc, attempt)
+                await asyncio.sleep(backoff(attempt))
+                attempt += 1
 
     def _build_llm_completion_event(
         self,

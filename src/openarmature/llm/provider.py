@@ -38,7 +38,7 @@ Violations raise ``provider_invalid_request``.
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import Any, Protocol, cast
+from typing import TYPE_CHECKING, Any, Protocol, cast
 from urllib.parse import unquote
 
 import jsonschema
@@ -57,6 +57,9 @@ from .messages import (
     UserMessage,
 )
 from .response import Response, RuntimeConfig
+
+if TYPE_CHECKING:
+    from openarmature.graph.middleware import RetryConfig
 
 
 class Provider(Protocol):
@@ -78,6 +81,7 @@ class Provider(Protocol):
         config: RuntimeConfig | None = None,
         response_schema: dict[str, Any] | type[BaseModel] | None = None,
         tool_choice: ToolChoice | None = None,
+        retry: RetryConfig | None = None,
     ) -> Response:
         """Perform a single completion call.
 
@@ -102,6 +106,12 @@ class Provider(Protocol):
                 the wire ``tool_choice`` field is omitted and the
                 provider's own default applies. Pre-send validation
                 routes through ``provider_invalid_request``.
+            retry: Optional call-level retry configuration. When
+                supplied, transient provider errors are retried in-call
+                per the config; the request is built and validated once,
+                and exactly one observability event fires for the
+                terminal outcome. ``None`` (the default) performs a
+                single attempt.
         """
         ...
 
