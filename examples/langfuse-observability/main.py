@@ -262,13 +262,13 @@ async def main() -> None:
     # ``LangfuseClient`` Protocol; the observer code doesn't change.
     client = InMemoryLangfuseClient()
 
-    # disable_llm_payload=False opts in to capturing the input messages
+    # disable_provider_payload=False opts in to capturing the input messages
     # and output content on Generation observations. Default is True
     # for the same privacy reason the OTel observer's flag exists:
     # payloads may contain PII the operator hasn't audited. Flip it
     # deliberately here because the demo's whole point is showing what
     # the model saw and returned.
-    observer = LangfuseObserver(client=client, disable_llm_payload=False)
+    observer = LangfuseObserver(client=client, disable_provider_payload=False)
 
     graph = build_graph()
     graph.attach_observer(observer)

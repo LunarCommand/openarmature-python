@@ -478,6 +478,33 @@ _DEFERRED_FIXTURES: dict[str, str] = {
     "graph-engine/033-drain-events-for-parallel-branches-coverage": (
         "Proposal 0054 fixture-shape models pending; contract pinned by unit tests"
     ),
+    # Proposal 0059 (retrieval-provider / embedding, v0.54.0): the
+    # observability embedding-event fixtures (074-083) model the
+    # EmbeddingEvent / EmbeddingFailedEvent + embedding span / Langfuse
+    # observation surface, which python does not implement (0059 is
+    # not-yet in the manifest; only its cross-spec disable_provider_payload
+    # rename is adopted). The retrieval-provider fixtures are a new
+    # capability dir this runner does not parse.
+    "observability/074-embedding-event-dispatch": "Proposal 0059 embedding events; not implemented",
+    "observability/075-embedding-failure-event-dispatch-on-provider-unavailable": (
+        "Proposal 0059 embedding events; not implemented"
+    ),
+    "observability/076-embedding-event-mutual-exclusion": "Proposal 0059 embedding events; not implemented",
+    "observability/077-embedding-event-call-id-distinct": "Proposal 0059 embedding events; not implemented",
+    "observability/078-embedding-event-input-strings-populated": (
+        "Proposal 0059 embedding events; not implemented"
+    ),
+    "observability/079-embedding-event-request-params-populated": (
+        "Proposal 0059 embedding events; not implemented"
+    ),
+    "observability/080-embedding-event-input-count-and-dimensions-populated": (
+        "Proposal 0059 embedding events; not implemented"
+    ),
+    "observability/081-embedding-event-active-prompt-populated": (
+        "Proposal 0059 embedding events; not implemented"
+    ),
+    "observability/082-otel-embedding-span-attributes": "Proposal 0059 embedding events; not implemented",
+    "observability/083-langfuse-embedding-observation": "Proposal 0059 embedding events; not implemented",
 }
 
 

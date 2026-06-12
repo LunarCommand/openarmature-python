@@ -2469,8 +2469,8 @@ async def _run_llm_payload_case(case: Mapping[str, Any]) -> None:
     # ---- Observer
     exporter = InMemorySpanExporter()
     observer_kwargs: dict[str, Any] = {"span_processor": SimpleSpanProcessor(exporter)}
-    if "disable_llm_payload" in case:
-        observer_kwargs["disable_llm_payload"] = bool(case["disable_llm_payload"])
+    if "disable_provider_payload" in case:
+        observer_kwargs["disable_provider_payload"] = bool(case["disable_provider_payload"])
     if "disable_genai_semconv" in case:
         observer_kwargs["disable_genai_semconv"] = bool(case["disable_genai_semconv"])
     if "disable_llm_spans" in case:

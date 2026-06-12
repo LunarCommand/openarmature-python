@@ -48,9 +48,9 @@ else:
 
 The discriminator is one branch; missing it gives you empty data on tool-call responses and silently wrong behavior on truncations.
 
-### `disable_llm_payload` defaults to `True`: flip it for LLM-aware observability backends
+### `disable_provider_payload` defaults to `True`: flip it for LLM-aware observability backends
 
-The `OTelObserver` (and any spec-conformant observer reading LLM events) defaults `disable_llm_payload: bool = True` per spec §5.5's "default-off by privacy" framing. Without flipping the flag, LLM spans carry GenAI semconv attributes (token counts, model name, finish reason) but NOT the message payload (input messages, response content, request extras).
+The `OTelObserver` (and any spec-conformant observer reading LLM events) defaults `disable_provider_payload: bool = True` per spec §5.5's "default-off by privacy" framing. Without flipping the flag, LLM spans carry GenAI semconv attributes (token counts, model name, finish reason) but NOT the message payload (input messages, response content, request extras).
 
 That's the right default for general OpenArmature use: payloads may contain PII the user hasn't audited, and storage cost grows with prompt size. But it's the WRONG default if you're wiring up an LLM-aware observability backend (Langfuse, Phoenix, Honeycomb's LLM lens) that renders the message stream as part of its generation view. Backends will show "empty" generations and you'll wonder why.
 
@@ -61,7 +61,7 @@ from openarmature.observability import OTelObserver
 
 observer = OTelObserver(
     span_processor=your_exporter,
-    disable_llm_payload=False,   # opt in to message-payload attributes
+    disable_provider_payload=False,   # opt in to message-payload attributes
 )
 graph.attach_observer(observer)
 ```

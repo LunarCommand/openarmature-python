@@ -720,8 +720,8 @@ async def _run_case(case: Mapping[str, Any]) -> None:
     # ---- Observer
     observer_cfg = cast("dict[str, Any]", case.get("langfuse_observer") or {})
     observer_kwargs: dict[str, Any] = {}
-    if "disable_llm_payload" in observer_cfg:
-        observer_kwargs["disable_llm_payload"] = bool(observer_cfg["disable_llm_payload"])
+    if "disable_provider_payload" in observer_cfg:
+        observer_kwargs["disable_provider_payload"] = bool(observer_cfg["disable_provider_payload"])
     if "disable_llm_spans" in observer_cfg:
         observer_kwargs["disable_llm_spans"] = bool(observer_cfg["disable_llm_spans"])
     if "payload_byte_cap" in observer_cfg:

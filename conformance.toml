@@ -32,7 +32,7 @@
 
 [manifest]
 implementation = "openarmature-python"
-spec_pin = "v0.53.0"
+spec_pin = "v0.54.0"
 
 # Status values:
 #   implemented   — shipped behavior matches the proposal's contract
@@ -454,9 +454,9 @@ since = "0.12.0"
 #     not:
 #     ``tests/unit/test_observability_otel.py::
 #     test_invocation_span_carries_implementation_attribution_attributes``;
-#   - OTel always-emit invariant under ``disable_llm_payload``,
+#   - OTel always-emit invariant under ``disable_provider_payload``,
 #     ``disable_genai_semconv``, ``disable_llm_spans``:
-#     ``::test_invocation_span_attribution_emits_under_disable_llm_payload``;
+#     ``::test_invocation_span_attribution_emits_under_disable_provider_payload``;
 #   - OTel attributes emit on every invocation span across a
 #     reused observer (3 sequential invocations):
 #     ``::test_invocation_span_attribution_emits_on_every_invocation``;
@@ -593,3 +593,15 @@ since = "0.13.0"
 [proposals."0058"]
 status = "implemented"
 since = "0.13.0"
+
+# Spec v0.54.0 (proposal 0059).  Retrieval-provider capability —
+# the ``EmbeddingProvider`` protocol + ``EmbeddingEvent`` /
+# ``EmbeddingFailedEvent`` typed variants + OTel/Langfuse embedding
+# mapping.  Python has not yet shipped the embedding surface, so the
+# capability is not-yet.  The one piece adopted at this pin is the
+# proposal's cross-spec consequence: the observer-level privacy flag
+# ``disable_llm_payload`` is renamed ``disable_provider_payload`` (the
+# §5.5.4 rename touches existing LLM-payload gating, so it lands with
+# the pin even though the embedding capability does not).
+[proposals."0059"]
+status = "not-yet"

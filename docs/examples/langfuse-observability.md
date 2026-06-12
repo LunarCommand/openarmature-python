@@ -39,7 +39,7 @@ manual wiring at the call site.
   surfaces it on every Generation that renders from that prompt.
   Filesystem / in-memory backends without that reference work too,
   they just produce metadata-only linkage.
-- `disable_llm_payload=False` opt-in for capturing input messages +
+- `disable_provider_payload=False` opt-in for capturing input messages +
   output content on Generation observations. Default-off is the
   privacy posture; the demo deliberately flips it.
 - `correlation_id` cross-cutting metadata on the Trace and every
@@ -140,7 +140,7 @@ langfuse_client = Langfuse(
 )
 observer = LangfuseObserver(
     client=LangfuseSDKAdapter(langfuse_client),
-    disable_llm_payload=False,
+    disable_provider_payload=False,
 )
 ```
 
@@ -174,7 +174,7 @@ graph.attach_observer(OTelObserver(span_processor=batch))
 graph.attach_observer(LangfuseObserver(client=langfuse_client))
 ```
 
-Their `disable_llm_spans` / `disable_llm_payload` flags are
+Their `disable_llm_spans` / `disable_provider_payload` flags are
 independent. The `correlation_id` cross-cutting attribute is the join
 key: find a slow Generation in Langfuse, search for the
 `correlation_id` in OTel logs to see the surrounding infrastructure

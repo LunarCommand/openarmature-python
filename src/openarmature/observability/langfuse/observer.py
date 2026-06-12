@@ -11,7 +11,7 @@
 #   caller-supplied invocation-label path lands in proposal 0034 (PR 4
 #   of the v0.10.0 batch).
 # - Generation rendering follows §8.7: input/output/request_extras
-#   appear only when `disable_llm_payload=False`; the truncation
+#   appear only when `disable_provider_payload=False`; the truncation
 #   marker is preserved verbatim as a raw string when the §5.5.5
 #   truncation makes the JSON unparseable.
 # - Prompt linkage follows §8.4.4: reads
@@ -267,10 +267,11 @@ class LangfuseObserver:
     - ``client``: the Langfuse sink (Protocol-typed).
     - ``disable_llm_spans``: when ``True`` the observer skips
       Generation observations on LLM provider events.
-    - ``disable_llm_payload``: default ``True`` per §8.9's "symmetric
+    - ``disable_provider_payload``: default ``True`` per §8.9's "symmetric
       privacy posture" with the OTel observer. Gates
       ``generation.input`` / ``output`` / ``metadata.request_extras``
-      emission.
+      emission. The name carries the broadened provider-payload scope;
+      LLM completion is OA's only provider-call payload today.
     - ``payload_byte_cap``: per-attribute byte cap on the source
       payload string before parse-back. Mirrors the OTel observer's
       ``payload_max_bytes`` semantic — emission preserves the raw
@@ -292,7 +293,7 @@ class LangfuseObserver:
       ``trace_output_from_state`` overrides. When ``False`` the raw
       state object is serialized to the Trace fields, subject to
       ``payload_byte_cap`` truncation. Independent of
-      ``disable_llm_payload`` — the two payloads carry distinct
+      ``disable_provider_payload`` — the two payloads carry distinct
       threat models (LLM-call transcript vs. application state).
     - ``trace_input_from_state``: optional caller hook returning the
       value to use as ``trace.input``. Called once per invocation at
@@ -310,7 +311,7 @@ class LangfuseObserver:
       ``trace.metadata.implementation_version`` on every Trace.
       Defaults to ``openarmature.__version__``. Always-emit invariant
       inherited from §5.1 — not gated by ``disable_state_payload``,
-      ``disable_llm_payload``, or any other privacy knob.
+      ``disable_provider_payload``, or any other privacy knob.
 
     The observer reads the spec version from the package at
     construction time. Safe to share across concurrent invocations
@@ -320,7 +321,7 @@ class LangfuseObserver:
 
     client: LangfuseClient
     disable_llm_spans: bool = False
-    disable_llm_payload: bool = True
+    disable_provider_payload: bool = True
     payload_byte_cap: int = 65536
     detached_subgraphs: frozenset[str] = field(default_factory=_empty_str_frozenset)
     detached_fan_outs: frozenset[str] = field(default_factory=_empty_str_frozenset)
@@ -1422,7 +1423,7 @@ class LangfuseObserver:
         model_parameters: dict[str, Any] = dict(event.request_params or {})
         input_value: Any = None
         output_value: Any = None
-        if not self.disable_llm_payload:
+        if not self.disable_provider_payload:
             if event.input_messages:
                 input_value = self._maybe_truncate_for_input(event.input_messages)
             if event.output_content is not None:
@@ -1491,7 +1492,7 @@ class LangfuseObserver:
         metadata["error_message"] = event.error_message
         model_parameters: dict[str, Any] = dict(event.request_params or {})
         input_value: Any = None
-        if not self.disable_llm_payload:
+        if not self.disable_provider_payload:
             if event.input_messages:
                 input_value = self._maybe_truncate_for_input(event.input_messages)
             if event.request_extras:

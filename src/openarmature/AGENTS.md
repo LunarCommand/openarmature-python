@@ -1,6 +1,6 @@
 # OpenArmature — Agent documentation
 
-*This is the agent guide bundled with the openarmature Python package, version 0.13.0 (spec v0.53.0). For the full docs site see [openarmature.ai](https://openarmature.ai). For the canonical spec text see [openarmature.org/capabilities](https://openarmature.org/capabilities/). For project-specific conventions for the code you're editing, see the host project's `AGENTS.md` or `CLAUDE.md`.*
+*This is the agent guide bundled with the openarmature Python package, version 0.13.0 (spec v0.54.0). For the full docs site see [openarmature.ai](https://openarmature.ai). For the canonical spec text see [openarmature.org/capabilities](https://openarmature.org/capabilities/). For project-specific conventions for the code you're editing, see the host project's `AGENTS.md` or `CLAUDE.md`.*
 
 ## TL;DR
 
@@ -10,7 +10,7 @@ OpenArmature is a workflow framework for LLM pipelines and tool-calling agents: 
 
 ## Capability contracts
 
-_Sourced from openarmature-spec v0.53.0. Each entry below reproduces §1 (Purpose) and §2 (Concepts) of the capability's `spec.md` verbatim — including additions from accepted proposals that this Python implementation may not yet ship. For per-proposal implementation status (implemented / partial / textual-only / not-yet), see the `conformance.toml` manifest at the repo root. For the full spec text (execution model, error semantics, determinism, observer hooks, etc.) see the linked docs site._
+_Sourced from openarmature-spec v0.54.0. Each entry below reproduces §1 (Purpose) and §2 (Concepts) of the capability's `spec.md` verbatim — including additions from accepted proposals that this Python implementation may not yet ship. For per-proposal implementation status (implemented / partial / textual-only / not-yet), see the `conformance.toml` manifest at the repo root. For the full spec text (execution model, error semantics, determinism, observer hooks, etc.) see the linked docs site._
 
 ### Capability: `graph-engine`
 
@@ -1377,9 +1377,9 @@ else:
 
 The discriminator is one branch; missing it gives you empty data on tool-call responses and silently wrong behavior on truncations.
 
-### `disable_llm_payload` defaults to `True`: flip it for LLM-aware observability backends
+### `disable_provider_payload` defaults to `True`: flip it for LLM-aware observability backends
 
-The `OTelObserver` (and any spec-conformant observer reading LLM events) defaults `disable_llm_payload: bool = True` per spec §5.5's "default-off by privacy" framing. Without flipping the flag, LLM spans carry GenAI semconv attributes (token counts, model name, finish reason) but NOT the message payload (input messages, response content, request extras).
+The `OTelObserver` (and any spec-conformant observer reading LLM events) defaults `disable_provider_payload: bool = True` per spec §5.5's "default-off by privacy" framing. Without flipping the flag, LLM spans carry GenAI semconv attributes (token counts, model name, finish reason) but NOT the message payload (input messages, response content, request extras).
 
 That's the right default for general OpenArmature use: payloads may contain PII the user hasn't audited, and storage cost grows with prompt size. But it's the WRONG default if you're wiring up an LLM-aware observability backend (Langfuse, Phoenix, Honeycomb's LLM lens) that renders the message stream as part of its generation view. Backends will show "empty" generations and you'll wonder why.
 
@@ -1390,7 +1390,7 @@ from openarmature.observability import OTelObserver
 
 observer = OTelObserver(
     span_processor=your_exporter,
-    disable_llm_payload=False,   # opt in to message-payload attributes
+    disable_provider_payload=False,   # opt in to message-payload attributes
 )
 graph.attach_observer(observer)
 ```
