@@ -415,7 +415,7 @@ class NodeSpec(_ForbidExtras):
     update_pure: dict[str, Any] | None = None
     update_pure_from_state: dict[str, Any] | None = None
     update_from_field: UpdateFromFieldSpec | None = None
-    raises: str | None = None
+    raises: str | dict[str, Any] | None = None
     subgraph: str | None = None
     fan_out: FanOutSpec | None = None
     parallel_branches: ParallelBranchesSpec | None = None
@@ -516,12 +516,31 @@ class TraceRecorderMiddleware(_AllowExtras):
     type: Literal["trace_recorder"]
 
 
+class FailureIsolationMiddleware(_AllowExtras):
+    """Canonical failure-isolation middleware (proposal 0050 §6.3,
+    fixtures 058-063). Catches an exception escaping the inner chain and
+    returns a configured degraded partial update, emitting a distinct
+    ``FailureIsolatedEvent``."""
+
+    type: Literal["failure_isolation"]
+    # Static partial-update mapping, or the callable encoding
+    # ``{callable: state_derived, template, target_field}`` (fixture 059).
+    degraded_update: dict[str, Any]
+    event_name: str
+    # Optional ``{matches_category: <category>}`` predicate (fixture 060).
+    predicate: dict[str, Any] | None = None
+    # Optional on_caught hook
+    # ``{kind, increment_field, capture_message_field}`` (fixture 062).
+    on_caught: dict[str, Any] | None = None
+
+
 MiddlewareSpec = Annotated[
     RetryMiddleware
     | TimingMiddleware
     | ErrorRecoveryMiddleware
     | ShortCircuitMiddleware
-    | TraceRecorderMiddleware,
+    | TraceRecorderMiddleware
+    | FailureIsolationMiddleware,
     Field(discriminator="type"),
 ]
 
@@ -642,6 +661,7 @@ __all__ = [
     "EdgeSpec",
     "EmitsLogSpec",
     "ErrorRecoveryMiddleware",
+    "FailureIsolationMiddleware",
     "FailureSpec",
     "FanOutSpec",
     "FlakyByIndexSpec",
