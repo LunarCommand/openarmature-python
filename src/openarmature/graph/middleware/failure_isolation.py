@@ -40,6 +40,7 @@ from collections.abc import Awaitable, Callable, Mapping
 from typing import Any
 
 from openarmature.observability.correlation import (
+    _current_terminal_attempt_index,
     _reset_terminal_attempt_index,
     _set_terminal_attempt_index,
     current_attempt_index,
@@ -47,7 +48,6 @@ from openarmature.observability.correlation import (
     current_dispatch,
     current_fan_out_index,
     current_namespace_prefix,
-    current_terminal_attempt_index,
 )
 
 from ._core import NextCall
@@ -137,8 +137,9 @@ class FailureIsolationMiddleware:
         # Establish a clean terminal-attempt scope: an inner
         # RetryMiddleware records its final / exhausting attempt here on
         # give-up, and _emit_event reports it (proposal 0050 §6.3). The
-        # ``None`` on entry shadows any stale value from a prior node; the
-        # finally cleans up so it never leaks to a sibling / next node.
+        # ``None`` on entry shadows any stale ambient value so this call
+        # reads correctly; the finally restores the prior value (token
+        # semantics), and the next isolation call shadows again on entry.
         terminal_token = _set_terminal_attempt_index(None)
         try:
             try:
@@ -218,7 +219,7 @@ class FailureIsolationMiddleware:
         # already closed by delivery time (their completed event precedes
         # this one on the serial queue), so observers parent the marker
         # under the invocation span and correlate by ``namespace`` + name.
-        terminal_attempt = current_terminal_attempt_index()
+        terminal_attempt = _current_terminal_attempt_index()
         attempt_index = terminal_attempt if terminal_attempt is not None else current_attempt_index()
         dispatch(
             FailureIsolatedEvent(

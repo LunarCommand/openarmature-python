@@ -492,9 +492,10 @@ def _reset_attempt_index(token: Token[int]) -> None:
 # rule mandates. On give-up, retry records the final attempt here; the
 # enclosing FailureIsolationMiddleware establishes the scope (None on
 # entry, reset on exit) and reads it, falling back to ``attempt_index``
-# when no retry exhausted. Scoped by the isolation middleware so it never
-# leaks across nodes; the sole reader is FailureIsolationMiddleware, which
-# always shadows any stale value with its own ``None`` on entry.
+# when no retry exhausted. A retry that records without an enclosing
+# isolation scope leaves a non-None value in the ambient context, but it
+# is never OBSERVED: the sole reader (FailureIsolationMiddleware) shadows
+# any such stale value with its own ``None`` on entry before reading.
 #
 # Two setters by design: ``_set`` / ``_reset`` bracket the isolation SCOPE
 # (token-based, mirroring ``_attempt_index``); ``_record`` is retry's
@@ -513,7 +514,7 @@ _terminal_attempt_index_var: ContextVar[int | None] = ContextVar(
 )
 
 
-def current_terminal_attempt_index() -> int | None:
+def _current_terminal_attempt_index() -> int | None:
     """Return the final / exhausting attempt index recorded by a retry
     that gave up within the current FailureIsolationMiddleware scope, or
     ``None`` when no retry exhausted. Internal."""
@@ -616,12 +617,12 @@ __all__ = [
     "current_fan_out_index_chain",
     "current_invocation_id",
     "current_namespace_prefix",
-    "current_terminal_attempt_index",
     "validate_invocation_id",
     # Engine-internal lifecycle helpers — exported so the engine in
     # ``openarmature.graph.compiled`` can drive set/reset without
     # pyright's strict ``reportUnusedFunction`` flagging them as
     # dead. Underscore-prefixed; not part of the user-facing API.
+    "_current_terminal_attempt_index",
     "_record_terminal_attempt_index",
     "_reset_active_dispatch",
     "_reset_active_observer_span",
