@@ -55,6 +55,43 @@ from ._core import NextCall
 DegradedUpdate = Mapping[str, Any] | Callable[[Any], Mapping[str, Any]]
 
 
+def _resolve_cause(exc: Exception) -> BaseException:
+    # Cause fidelity (proposal 0065 / §6.3, plus the python "nearest
+    # categorized" refinement). Walk the ``__cause__`` chain to the most
+    # actionable cause, skipping graph-engine §4 ``node_exception`` carrier
+    # wrappers (``NodeException`` and subtypes such as
+    # ``ParallelBranchesBranchFailed``) the engine applies at a non-node
+    # placement (§9.7 instance, §11.7 branch, §9.6 / §11.6 parent-node
+    # middleware). Returns the FIRST non-carrier exception that carries a
+    # string ``category`` — so a deliberately re-categorized surface error
+    # wins, while an uncategorized surface error resolves to the categorized
+    # cause beneath it (the same chain §6.1's default classifier consults
+    # for retryability, so the reported category agrees with what retry
+    # acted on). When nothing in the chain carries a category, returns the
+    # originating non-carrier raise (its own message, null category).
+    # Node-level placement has no carrier, so ``exc`` itself is the
+    # originating raise. The local import keeps ``errors`` off the
+    # middleware module-load path, matching the deferred ``events`` import
+    # in ``_emit_event``.
+    from openarmature.graph.errors import NodeException
+
+    origin: BaseException | None = None
+    current: BaseException | None = exc
+    seen: set[int] = set()
+    # Traverse only BaseException instances (a non-exception ``__cause__``
+    # ends the walk) and guard against a cyclic ``__cause__`` chain so a
+    # malformed chain can't hang or crash the degrade path.
+    while isinstance(current, BaseException) and id(current) not in seen:
+        seen.add(id(current))
+        if not isinstance(current, NodeException):
+            if origin is None:
+                origin = current
+            if isinstance(getattr(current, "category", None), str):
+                return current
+        current = current.__cause__
+    return origin if origin is not None else exc
+
+
 class FailureIsolationMiddleware:
     """Catch exceptions escaping the inner chain; return a degraded
     partial update.
@@ -145,17 +182,16 @@ class FailureIsolationMiddleware:
         # path and defers it until the first catch.
         from openarmature.graph.events import CaughtException, FailureIsolatedEvent
 
-        # A categorized exception (e.g. an llm-provider error) carries a
-        # string ``category``. When the engine has wrapped the original
-        # in a graph-engine error before it reached the middleware, the
-        # category rides on ``__cause__`` — walk it the same way the
-        # default retry classifier does so the caught failure's category
-        # survives the wrapping. A bare exception yields ``None``.
-        category = getattr(exc, "category", None)
-        if not isinstance(category, str):
-            cause = getattr(exc, "__cause__", None)
-            cause_category = getattr(cause, "category", None) if cause is not None else None
-            category = cause_category if isinstance(cause_category, str) else None
+        # Cause fidelity (proposal 0065 / §6.3). ``_resolve_cause`` walks
+        # past graph-engine ``node_exception`` carrier wrappers to the
+        # nearest categorized originating cause (see its comment); the
+        # reported ``category`` and ``message`` both come from it so they
+        # describe one exception — NOT the masking ``node_exception``. A
+        # bare / uncategorized cause yields a null category. Node-level
+        # placement has no carrier, so this is the caught exception itself.
+        cause = _resolve_cause(exc)
+        cause_category = getattr(cause, "category", None)
+        category = cause_category if isinstance(cause_category, str) else None
         # ``attempt_index`` here is deliberately the NODE-level baseline,
         # not a per-attempt wire index: failure isolation is a node-level
         # concern ("the node, across its retries, was isolated"). When
@@ -176,7 +212,9 @@ class FailureIsolationMiddleware:
                 branch_name=current_branch_name(),
                 pre_state=state,
                 post_state=degraded,
-                caught_exception=CaughtException(category=category, message=str(exc)),
+                # ``message`` tracks the resolved cause (§6.3 SHOULD) so
+                # the reported category and message describe one exception.
+                caught_exception=CaughtException(category=category, message=str(cause)),
             )
         )
 
