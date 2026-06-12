@@ -386,12 +386,13 @@ since = "0.13.0"
 # (LlmRetryAttemptEvent) scoped to a future cycle.  Call-level retry
 # ships terminal-only: exactly one LlmCompletionEvent / LlmFailedEvent
 # per ``complete()`` call.  Failure-isolation conformance fixtures
-# (058-063) are wired + passing this cycle EXCEPT 061 (three-piece
-# composition): the FailureIsolatedEvent's attempt_index there is the
-# node-level baseline (0) while the fixture asserts the final retry
-# attempt (1) per §6.3's lineage-correlation rule — RetryMiddleware
-# resets the attempt ContextVar before the outer isolation middleware
-# catches.  That attempt_index reconciliation is pending.
+# (058-063) are all wired + passing: the FailureIsolatedEvent's
+# attempt_index reports the final / exhausting attempt per §6.3's
+# lineage-correlation rule (spec ruled this in the attempt-index coord
+# thread; RetryMiddleware now records the final attempt in a
+# terminal-attempt scope the outer isolation reads, rather than the
+# post-reset baseline).  ``partial`` is now solely about the
+# call-level-retry per-attempt span surface above.
 [proposals."0050"]
 status = "partial"
 since = "0.14.0"
