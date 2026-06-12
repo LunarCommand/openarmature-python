@@ -142,14 +142,36 @@ def _make_update_fn(
     return fn
 
 
+_RAISES_EXCEPTION_KINDS: dict[str, type[Exception]] = {
+    "ValueError": ValueError,
+    "RuntimeError": RuntimeError,
+    "TypeError": TypeError,
+    "KeyError": KeyError,
+}
+
+
 def _make_raising_fn(
     node_name: str,
-    message: str,
+    raises_spec: str | Mapping[str, Any],
     trace: list[str],
 ) -> Callable[[Any], Awaitable[Mapping[str, Any]]]:
+    # Two shapes: a bare message string (fixture 006) raises RuntimeError;
+    # a ``{message, exception_kind}`` dict (fixture 063) raises the named
+    # exception type with that message (an uncategorized error, so a
+    # wrapping failure-isolation event reports a null category).
+    if isinstance(raises_spec, Mapping):
+        message = str(raises_spec.get("message", ""))
+        kind = str(raises_spec.get("exception_kind", "RuntimeError"))
+        if kind not in _RAISES_EXCEPTION_KINDS:
+            raise ValueError(f"unsupported raises exception_kind: {kind}")
+        exc_type = _RAISES_EXCEPTION_KINDS[kind]
+    else:
+        message = raises_spec
+        exc_type = RuntimeError
+
     async def fn(_state: Any) -> Mapping[str, Any]:
         trace.append(node_name)
-        raise RuntimeError(message)
+        raise exc_type(message)
 
     return fn
 

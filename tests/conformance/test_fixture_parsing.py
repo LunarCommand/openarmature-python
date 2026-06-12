@@ -407,33 +407,22 @@ _DEFERRED_FIXTURES: dict[str, str] = {
     "graph-engine/038-reducer-error-non-list-update": (
         "Proposal 0023 canonical state reducers; impl not yet shipped"
     ),
-    # Proposal 0050 (failure-isolation middleware + call-level retry,
-    # v0.42.0) — llm-provider fixtures 056-058 (call-level retry) and
-    # pipeline-utilities fixtures 058-063 (failure-isolation
-    # middleware) require new directive shapes. Queued for v0.14.0
-    # retry & reliability primitives batch.
-    "llm-provider/056-call-level-retry-transient": ("Proposal 0050 call-level retry; queued for v0.14.0"),
-    "llm-provider/057-call-level-retry-exhaustion": ("Proposal 0050 call-level retry; queued for v0.14.0"),
+    # Proposal 0050 call-level retry — llm-provider fixtures 056-058
+    # assert the per-attempt LLM span surface (N spans +
+    # ``openarmature.llm.attempt_index``) that python deferred under
+    # decision (b); 0050 is marked ``partial`` accordingly. They stay
+    # deferred until a future LlmRetryAttemptEvent cycle implements
+    # per-attempt spans. (pipeline-utilities failure-isolation fixtures
+    # 058-063 now parse + run via test_pipeline_utilities.py; 061 is
+    # execution-deferred there for the attempt_index reconciliation.)
+    "llm-provider/056-call-level-retry-transient": (
+        "Proposal 0050 call-level retry asserts the deferred per-attempt span surface (0050 partial)"
+    ),
+    "llm-provider/057-call-level-retry-exhaustion": (
+        "Proposal 0050 call-level retry asserts the deferred per-attempt span surface (0050 partial)"
+    ),
     "llm-provider/058-call-level-retry-non-transient-no-retry": (
-        "Proposal 0050 call-level retry; queued for v0.14.0"
-    ),
-    "pipeline-utilities/058-failure-isolation-static-degraded": (
-        "Proposal 0050 failure-isolation middleware; queued for v0.14.0"
-    ),
-    "pipeline-utilities/059-failure-isolation-callable-degraded": (
-        "Proposal 0050 failure-isolation middleware; queued for v0.14.0"
-    ),
-    "pipeline-utilities/060-failure-isolation-predicate-filtering": (
-        "Proposal 0050 failure-isolation middleware; queued for v0.14.0"
-    ),
-    "pipeline-utilities/061-failure-isolation-retry-three-piece-composition": (
-        "Proposal 0050 failure-isolation middleware; queued for v0.14.0"
-    ),
-    "pipeline-utilities/062-failure-isolation-on-caught-callback": (
-        "Proposal 0050 failure-isolation middleware; queued for v0.14.0"
-    ),
-    "pipeline-utilities/063-failure-isolation-default-predicate-bare-exception": (
-        "Proposal 0050 failure-isolation middleware; queued for v0.14.0"
+        "Proposal 0050 call-level retry asserts the deferred per-attempt span surface (0050 partial)"
     ),
     # Proposal 0052 (implementation attribution attributes, v0.44.0):
     # observability/059 is the Langfuse-side mapping fixture; uses the

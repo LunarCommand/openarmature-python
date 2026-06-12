@@ -15,6 +15,7 @@ build_graph adapter the graph-engine fixtures use.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any, cast
@@ -23,11 +24,15 @@ import pytest
 import yaml
 
 from openarmature.graph import (
+    FailureIsolatedEvent,
     NodeException,
+    ObserverEvent,
     ParallelBranchesBranchFailed,
     RuntimeGraphError,
 )
 from openarmature.graph.middleware import (
+    DegradedUpdate,
+    FailureIsolationMiddleware,
     Middleware,
     OnCompleteCallback,
     RetryConfig,
@@ -78,6 +83,14 @@ def _load(path: Path) -> dict[str, Any]:
 # the `cases:` shape carries seeded-record + migrations + resume blocks.
 _LAST_DRIVEN_FIXTURE = 38
 
+# Failure-isolation fixtures (058-063, proposal 0050 §6.3) are middleware
+# fixtures this runner handles. They sit past _LAST_DRIVEN_FIXTURE only
+# because the 039-057 range (state migration / checkpoint fan-out) is owned
+# by dedicated runners (test_state_migration.py / test_checkpoint.py), not
+# because this runner can't drive them. Fixture 064 (cause fidelity) joins
+# when the spec pin advances to v0.55.0.
+_FAILURE_ISOLATION_FIXTURES = frozenset(range(58, 64))
+
 
 def _fixture_paths() -> list[Path]:
     paths = sorted(CONFORMANCE_DIR.glob("[0-9][0-9][0-9]-*.yaml"))
@@ -87,7 +100,7 @@ def _fixture_paths() -> list[Path]:
             number = int(p.stem.split("-", 1)[0])
         except ValueError:
             continue
-        if number <= _LAST_DRIVEN_FIXTURE:
+        if number <= _LAST_DRIVEN_FIXTURE or number in _FAILURE_ISOLATION_FIXTURES:
             out.append(p)
     return out
 
@@ -120,6 +133,18 @@ _DEFERRED_FIXTURES: dict[str, str] = {
     "029-checkpoint-subgraph-resume": "checkpointing (test_checkpoint.py)",
     "030-checkpoint-not-found": "checkpointing (test_checkpoint.py)",
     "031-checkpoint-correlation-id-preserved-across-resume": "checkpointing (test_checkpoint.py)",
+    # Failure-isolation three-piece composition (proposal 0050 §6.3). The
+    # FailureIsolatedEvent's attempt_index should reflect the final retry
+    # attempt (1) per §6.3's "same lineage tuple NodeEvent carries"
+    # correlation rule, but python emits the node-level baseline (0):
+    # RetryMiddleware resets the attempt ContextVar in its finally before
+    # the outer isolation middleware catches. The 0050 impl claimed 0 was
+    # spec-confirmed via the design thread; the fixture asserts 1.
+    # Reconcile with spec and fix attempt_index, then un-defer.
+    "061-failure-isolation-retry-three-piece-composition": (
+        "FailureIsolatedEvent.attempt_index baseline (0) vs final-attempt (1) "
+        "discrepancy; reconcile with spec + fix"
+    ),
 }
 
 
@@ -162,6 +187,7 @@ def _unsupported_middleware(spec: dict[str, Any]) -> str | None:
             "state_inspector",
             "retry",
             "timing",
+            "failure_isolation",
         }
     )
     per_graph = cast("list[dict[str, Any]]", middleware_block.get("per_graph") or [])
@@ -193,6 +219,10 @@ class CaptureSinks:
         self.trace_records: dict[str, list[TraceRecord]] = {}
         self.timing_records: dict[str, list[TimingRecord]] = {}
         self.state_inspector: dict[str, list[bool]] = {}
+        # Failure-isolation on_caught side channel (fixture 062): each
+        # entry records {increment_field, capture_message_field, count,
+        # message}; the harness overlays count/message onto final_state.
+        self.on_caught: list[dict[str, Any]] = []
 
 
 # ---------------------------------------------------------------------------
@@ -255,6 +285,8 @@ def _build_middleware(
             on_complete=cb,
             clock=clock,
         )
+    if mw_type == "failure_isolation":
+        return _build_failure_isolation(config, sinks)
     raise ValueError(f"unknown middleware type: {mw_type}")
 
 
@@ -352,6 +384,88 @@ def _build_classifier(config: Mapping[str, Any]) -> Callable[[Exception, Any], b
     raise ValueError(f"unknown classifier type: {cls_type}")
 
 
+def _render_state_template(template: str, state: Any) -> str:
+    """Render a ``{{ state.<field> }}`` template against a State instance
+    (fixture 059's callable degraded_update). Minimal substitution: the
+    only template shape the failure-isolation fixtures use."""
+    return re.sub(
+        r"\{\{\s*state\.(\w+)\s*\}\}",
+        lambda m: str(getattr(state, m.group(1))),
+        template,
+    )
+
+
+def _build_isolation_predicate(
+    config: Mapping[str, Any] | None,
+) -> Callable[[Exception], bool] | None:
+    """Build a FailureIsolationMiddleware predicate from a fixture
+    ``predicate`` block. Supports ``{matches_category: <category>}``
+    (fixture 060): catch only exceptions carrying that category."""
+    if config is None:
+        return None
+    if "matches_category" in config:
+        target = cast("str", config["matches_category"])
+
+        def predicate(exc: Exception) -> bool:
+            return getattr(exc, "category", None) == target
+
+        return predicate
+    raise ValueError(f"unsupported failure_isolation predicate: {dict(config)}")
+
+
+def _build_failure_isolation(config: Mapping[str, Any], sinks: CaptureSinks) -> Middleware:
+    """Build the canonical FailureIsolationMiddleware from a fixture
+    ``failure_isolation`` config (fixtures 058-063)."""
+    degraded_raw = config["degraded_update"]
+    degraded: DegradedUpdate
+    if isinstance(degraded_raw, dict):
+        degraded_dict = cast("dict[str, Any]", degraded_raw)
+        if degraded_dict.get("callable") == "state_derived":
+            # Callable form (059): the callable receives the pre-merge
+            # state and renders the template into the target field.
+            template = cast("str", degraded_dict["template"])
+            target = cast("str", degraded_dict["target_field"])
+
+            def degraded_from_state(state: Any) -> Mapping[str, Any]:
+                return {target: _render_state_template(template, state)}
+
+            degraded = degraded_from_state
+        else:
+            degraded = dict(degraded_dict)
+    else:
+        degraded = dict(cast("Mapping[str, Any]", degraded_raw))
+
+    on_caught = None
+    on_caught_cfg = cast("Mapping[str, Any] | None", config.get("on_caught"))
+    if on_caught_cfg is not None:
+        kind = on_caught_cfg.get("kind")
+        if kind != "record_to_state_side_channel":
+            raise ValueError(f"unsupported on_caught kind: {kind}")
+        # The callback only receives the exception, so it records the
+        # invocation count + message into a side channel the harness
+        # overlays onto final_state after the run (fixture 062).
+        record: dict[str, Any] = {
+            "increment_field": cast("str", on_caught_cfg["increment_field"]),
+            "capture_message_field": cast("str", on_caught_cfg["capture_message_field"]),
+            "count": 0,
+            "message": "",
+        }
+        sinks.on_caught.append(record)
+
+        async def on_caught_cb(_exc: Exception) -> None:
+            record["count"] += 1
+            record["message"] = str(_exc)
+
+        on_caught = on_caught_cb
+
+    return FailureIsolationMiddleware(
+        degraded_update=degraded,
+        event_name=cast("str", config["event_name"]),
+        predicate=_build_isolation_predicate(cast("Mapping[str, Any] | None", config.get("predicate"))),
+        on_caught=on_caught,
+    )
+
+
 def _build_clock_stub(config: Mapping[str, Any]) -> Callable[[], float]:
     """Return a deterministic-monotonic clock function per the fixture's
     ``clock_stub`` config. Each call advances the counter by a fixed
@@ -417,6 +531,17 @@ async def _run_one(spec: Mapping[str, Any], monkeypatch: pytest.MonkeyPatch) -> 
 
     sinks = CaptureSinks()
     clock = _build_clock_stub(spec["clock_stub"]) if "clock_stub" in spec else None
+
+    # Capture failure-isolation events (proposal 0050 §6.3, fixtures
+    # 058-063) for the expected_failure_isolation_event /
+    # no_failure_isolation_event assertions. Attached to every graph the
+    # fixture runs below; only FailureIsolatedEvents are collected.
+    captured_isolation: list[FailureIsolatedEvent] = []
+
+    async def _capture_isolation(event: ObserverEvent) -> None:
+        if isinstance(event, FailureIsolatedEvent):
+            captured_isolation.append(event)
+
     graph_mw, node_mw = _translate_middleware_block(spec.get("middleware"), sinks, clock)
     fan_out_inst_mw = _translate_fan_out_instance_middleware(spec, sinks, clock)
     del monkeypatch  # retained in signature for future stubs that need it
@@ -478,6 +603,7 @@ async def _run_one(spec: Mapping[str, Any], monkeypatch: pytest.MonkeyPatch) -> 
             parallel_branches_branch_middleware=branch_middleware,
         )
         compiled = built.builder.compile()
+        compiled.attach_observer(_capture_isolation)
         initial = built.initial_state(spec.get("initial_state", {}))
         with pytest.raises(RuntimeGraphError) as excinfo:
             await compiled.invoke(initial)
@@ -512,6 +638,8 @@ async def _run_one(spec: Mapping[str, Any], monkeypatch: pytest.MonkeyPatch) -> 
             cast("Mapping[str, list[Mapping[str, Any]]] | None", expected.get("trace_records")),
             sinks,
         )
+        if expected.get("no_failure_isolation_event"):
+            assert captured_isolation == [], f"expected no FailureIsolatedEvent, got {captured_isolation}"
         return
 
     # Per-run state: each run uses its own freshly built middleware so
@@ -561,12 +689,21 @@ async def _run_one(spec: Mapping[str, Any], monkeypatch: pytest.MonkeyPatch) -> 
             obs = make_observer_fn(ofx, run_delivery)
             if ofx.attach == "graph" and ofx.target == "outer":
                 run_compiled.attach_observer(obs, phases=phases)
+        if run_idx == 0:
+            run_compiled.attach_observer(_capture_isolation)
         run_final = await run_compiled.invoke(run_initial)
         await run_compiled.drain()
         final_states.append(run_final.model_dump())
         traces.append(list(run_built.trace))
         if run_idx == 0:
             observer_fixtures = run_observer_fixtures
+
+    # Overlay the on_caught side channel (fixture 062) onto the final
+    # state: the callback can't write graph state directly, so the harness
+    # reflects its recorded count + message into the fields the fixture names.
+    for rec in sinks.on_caught:
+        final_states[0][rec["increment_field"]] = rec["count"]
+        final_states[0][rec["capture_message_field"]] = rec["message"]
 
     if "final_state" in expected:
         _assert_final_state(final_states[0], expected["final_state"], spec)
@@ -585,6 +722,14 @@ async def _run_one(spec: Mapping[str, Any], monkeypatch: pytest.MonkeyPatch) -> 
         cast("Mapping[str, list[Mapping[str, Any]]] | None", expected.get("trace_records")),
         sinks,
     )
+
+    if "expected_failure_isolation_event" in expected:
+        _assert_failure_isolation_event(
+            captured_isolation,
+            cast("Mapping[str, Any]", expected["expected_failure_isolation_event"]),
+        )
+    if expected.get("no_failure_isolation_event"):
+        assert captured_isolation == [], f"expected no FailureIsolatedEvent, got {captured_isolation}"
 
     if "observer_event_invariants" in expected:
         _check_parallel_branches_invariants(
@@ -638,6 +783,47 @@ def _collect_parallel_branches_errors_fields(spec: Mapping[str, Any]) -> set[str
         if isinstance(field_name, str):
             out.add(field_name)
     return out
+
+
+def _state_to_dict(state: Any) -> dict[str, Any]:
+    """Dump a State (or mapping) to a plain dict for comparison."""
+    if hasattr(state, "model_dump"):
+        return cast("dict[str, Any]", state.model_dump())
+    return dict(cast("Mapping[str, Any]", state))
+
+
+def _assert_failure_isolation_event(
+    captured: list[FailureIsolatedEvent],
+    expected: Mapping[str, Any],
+) -> None:
+    """Assert the single captured FailureIsolatedEvent against the
+    fixture's ``expected_failure_isolation_event`` block. Only the keys
+    the fixture supplies are checked (some fixtures assert just
+    event_name + caught_exception)."""
+    assert len(captured) == 1, f"expected exactly one FailureIsolatedEvent, got {len(captured)}"
+    ev = captured[0]
+    if "event_name" in expected:
+        assert ev.event_name == expected["event_name"]
+    lineage = cast("Mapping[str, Any] | None", expected.get("wrapped_node_lineage"))
+    if lineage is not None:
+        if "namespace" in lineage:
+            assert list(ev.namespace) == lineage["namespace"]
+        if "attempt_index" in lineage:
+            assert ev.attempt_index == lineage["attempt_index"]
+        if "fan_out_index" in lineage:
+            assert ev.fan_out_index == lineage["fan_out_index"]
+        if "branch_name" in lineage:
+            assert ev.branch_name == lineage["branch_name"]
+    if "pre_state" in expected:
+        assert _state_to_dict(ev.pre_state) == expected["pre_state"]
+    if "post_state" in expected:
+        assert dict(ev.post_state) == expected["post_state"]
+    ce = cast("Mapping[str, Any] | None", expected.get("caught_exception"))
+    if ce is not None:
+        if "category" in ce:
+            assert ev.caught_exception.category == ce["category"]
+        if "message" in ce:
+            assert ev.caught_exception.message == ce["message"]
 
 
 def _assert_final_state(

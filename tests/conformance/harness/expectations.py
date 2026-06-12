@@ -135,6 +135,13 @@ class PipelineUtilitiesExpected(_ForbidExtras):
     observer_event_invariants: dict[str, Any] | None = None
     # Singular form used by 015 — assert one specific event shape.
     expected_observer_event: dict[str, Any] | None = None
+    # Failure-isolation event (proposal 0050 §6.3, fixtures 058-063).
+    expected_failure_isolation_event: dict[str, Any] | None = None
+    # 060 negative case: assert NO failure-isolation event fired.
+    no_failure_isolation_event: bool | None = None
+    # 061 three-piece: per-attempt NodeEvent assertions (driven by the
+    # retry path; modeled here so the fixture parses).
+    expected_attempt_events: list[dict[str, Any]] | None = None
     # Checkpointing fixtures (024–031).
     checkpoint_saves: list[dict[str, Any]] | None = None
     latest_record_assertions: dict[str, Any] | None = None
@@ -213,6 +220,9 @@ _PIPELINE_UTILITIES_KEYS = frozenset(
         "timing_records",
         "trace_records",
         "expected_observer_event",
+        "expected_failure_isolation_event",
+        "no_failure_isolation_event",
+        "expected_attempt_events",
         "recoverable_state",
     }
 )
