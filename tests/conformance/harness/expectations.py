@@ -222,6 +222,7 @@ _PIPELINE_UTILITIES_KEYS = frozenset(
         "expected_observer_event",
         "expected_failure_isolation_event",
         "no_failure_isolation_event",
+        "expected_attempt_events",
         "recoverable_state",
     }
 )
