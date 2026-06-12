@@ -461,7 +461,7 @@ class InvocationCompletedEvent:
 # which already enforces the redaction. The three payload-bearing
 # fields (input_messages, output_content, request_extras) are
 # populated unconditionally on the typed event per §5.5.7; observer-
-# side privacy gates (OTel disable_llm_payload, Langfuse equivalents)
+# side privacy gates (OTel disable_provider_payload, Langfuse equivalents)
 # apply at rendering, symmetric with the §5.5.1 span attribute path.
 # Custom queryable observers (per observability §9) own their own
 # redaction posture — gating belongs at rendering with the consumer's
@@ -597,7 +597,7 @@ class LlmCompletionEvent:
 #
 # Privacy posture identical to LlmCompletionEvent: input_messages /
 # request_params / request_extras are populated unconditionally per
-# §5.5.7; observer-side privacy gates (OTel disable_llm_payload,
+# §5.5.7; observer-side privacy gates (OTel disable_provider_payload,
 # Langfuse equivalents) apply at rendering. Inline image bytes are
 # redacted per observability §5.5.5 before population. Custom
 # queryable observers own their own redaction posture.

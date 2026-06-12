@@ -1224,9 +1224,9 @@ async def test_typed_llm_event_emits_generation_with_expected_fields() -> None:
     from tests._helpers.typed_event import make_typed_event
 
     client = InMemoryLangfuseClient()
-    # disable_llm_payload defaults to True per §8.9; flip it off here
+    # disable_provider_payload defaults to True per §8.9; flip it off here
     # so the test can also assert the payload (output) makes it through.
-    observer = LangfuseObserver(client=client, disable_llm_payload=False)
+    observer = LangfuseObserver(client=client, disable_provider_payload=False)
     token = _set_invocation_id("inv-typed-1")
     try:
         await observer(

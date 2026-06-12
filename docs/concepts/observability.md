@@ -702,12 +702,12 @@ source on your stack.
 ### LLM payload attributes
 
 By default, LLM spans do **not** carry the messages sent or the
-response content. Opt in with `disable_llm_payload=False`:
+response content. Opt in with `disable_provider_payload=False`:
 
 ```python
 observer = OTelObserver(
     span_processor=SimpleSpanProcessor(exporter),
-    disable_llm_payload=False,
+    disable_provider_payload=False,
 )
 ```
 
@@ -764,7 +764,7 @@ level (per llm-provider §3.1.2); only `source` is replaced. URL-form
 images pass through unchanged: the URL is a short string and is
 informative for trace readers.
 
-Redaction is **not** gated by `disable_llm_payload` and is **not**
+Redaction is **not** gated by `disable_provider_payload` and is **not**
 configurable. Inline image bytes never leave the provider in event
 form, so custom observers consuming
 [`LlmCompletionEvent` / `LlmFailedEvent`](#consuming-llm-events-in-custom-observers)
@@ -967,7 +967,7 @@ langfuse_client = Langfuse(
 )
 observer = LangfuseObserver(
     client=LangfuseSDKAdapter(langfuse_client),
-    disable_llm_payload=False,
+    disable_provider_payload=False,
 )
 ```
 
@@ -1014,7 +1014,7 @@ for a runnable demo.
 
 ### Payload + truncation
 
-`disable_llm_payload` mirrors the OTel observer's flag and defaults
+`disable_provider_payload` mirrors the OTel observer's flag and defaults
 to `True` for the same privacy reason. Flip to `False` to populate
 `generation.input` / `output` / `metadata.request_extras` from the
 LLM event payload.
@@ -1022,7 +1022,7 @@ LLM event payload.
 ```python
 observer = LangfuseObserver(
     client=client,
-    disable_llm_payload=False,
+    disable_provider_payload=False,
     payload_byte_cap=65536,
 )
 ```
@@ -1057,5 +1057,5 @@ graph.attach_observer(otel_observer)
 graph.attach_observer(langfuse_observer)
 ```
 
-Each observer's `disable_llm_spans` / `disable_llm_payload` flag is
+Each observer's `disable_llm_spans` / `disable_provider_payload` flag is
 independent; one MAY emit while the other suppresses.

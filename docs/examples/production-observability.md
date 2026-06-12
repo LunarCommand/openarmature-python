@@ -175,7 +175,7 @@ answer:      The primary objective of Apollo 11 was ...
 model:       gpt-4o-mini-2024-07-18
 
 --- captured OTel spans ---
-  [openarmature.invocation] 1240.0ms  openarmature.graph.entry_node='respond', openarmature.graph.spec_version='0.53.0', openarmature.implementation.name='openarmature-python', openarmature.implementation.version='0.13.0'
+  [openarmature.invocation] 1240.0ms  openarmature.graph.entry_node='respond', openarmature.graph.spec_version='0.54.0', openarmature.implementation.name='openarmature-python', openarmature.implementation.version='0.13.0'
   [respond] 1235.0ms  openarmature.node.name='respond', openarmature.user.tenantId='demo-acme', ...
   [openarmature.llm.complete] 1200.0ms  openarmature.user.tenantId='demo-acme', gen_ai.system='openai', gen_ai.usage.input_tokens=42, ...
   [persist] 2.0ms  openarmature.node.name='persist', openarmature.user.tenantId='demo-acme', ...
@@ -289,7 +289,7 @@ langfuse_observer = LangfuseObserver(
     ),
     trace_input_from_state=_trace_input,
     trace_output_from_state=_trace_output,
-    disable_llm_payload=False,
+    disable_provider_payload=False,
 )
 ```
 

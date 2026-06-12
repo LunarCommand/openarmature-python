@@ -390,10 +390,12 @@ class OTelObserver:
       each get their own trace. One detached trace per instance.
     - ``disable_llm_spans``: when ``True`` the observer skips the LLM
       provider span; all other spans emit normally.
-    - ``disable_llm_payload``: default ``True``. Gates the LLM input/
+    - ``disable_provider_payload``: default ``True``. Gates the LLM input/
       output payload attributes (``openarmature.llm.input.messages``,
       ``openarmature.llm.output.content``,
-      ``openarmature.llm.request.extras``).
+      ``openarmature.llm.request.extras``). The name carries the broadened
+      provider-payload scope; LLM completion is the only provider-call
+      payload OA emits today.
     - ``disable_genai_semconv``: default ``False``. Gates the
       ``gen_ai.*`` attribute set on the LLM span.
     - ``payload_max_bytes``: per-attribute byte cap for the LLM payload
@@ -435,12 +437,12 @@ class OTelObserver:
     detached_subgraphs: frozenset[str] = field(default_factory=_empty_str_frozenset)
     detached_fan_outs: frozenset[str] = field(default_factory=_empty_str_frozenset)
     disable_llm_spans: bool = False
-    # disable_llm_payload defaults to True per observability §5.5.4.
+    # disable_provider_payload defaults to True per observability §5.5.4.
     # Default-off because the payload may contain PII the user hasn't
     # audited — opting in is a deliberate second choice. Naming inverts
     # the natural reading ("default-off via True") to keep symmetry
     # with the existing disable_llm_spans parameter family.
-    disable_llm_payload: bool = True
+    disable_provider_payload: bool = True
     # disable_genai_semconv defaults to False (emit) per §5.5.4. The
     # value proposition of installing the OTel observer is that
     # LLM-aware backends (Langfuse, Phoenix, Honeycomb's LLM lens)
@@ -467,7 +469,7 @@ class OTelObserver:
     # ``implementation_version`` is ``openarmature.__version__``.
     # Configurable for test parameterization but defaults to the
     # package-pinned values; the always-emit invariant means neither
-    # ``disable_state_payload``, ``disable_llm_payload``, nor any
+    # ``disable_state_payload``, ``disable_provider_payload``, nor any
     # other privacy knob gates them.
     implementation_name: str = field(default_factory=_read_implementation_name)
     implementation_version: str = field(default_factory=_read_implementation_version)
@@ -1096,7 +1098,7 @@ class OTelObserver:
     # v0.17.0 attribute set (proposal 0024) preserved unchanged:
     #   - Baseline openarmature.llm.* attributes
     #   - §5.5.1 payload (input.messages, output.content,
-    #     request.extras) gated by disable_llm_payload
+    #     request.extras) gated by disable_provider_payload
     #   - §5.5.2 gen_ai.request.* request params
     #   - §5.5.3 gen_ai.* response semconv set
     #   - §5.5.4 opt-out flags
@@ -1176,7 +1178,7 @@ class OTelObserver:
                 attrs["gen_ai.request.presence_penalty"] = request_params["presence_penalty"]
             if "stop_sequences" in request_params:
                 attrs["gen_ai.request.stop_sequences"] = request_params["stop_sequences"]
-        if not self.disable_llm_payload:
+        if not self.disable_provider_payload:
             if event.input_messages:
                 serialized = _serialize_for_attribute(event.input_messages)
                 attrs["openarmature.llm.input.messages"] = _truncate_for_attribute(
@@ -1230,7 +1232,7 @@ class OTelObserver:
         # (tool-call-only responses) MUST NOT emit this attribute per
         # spec — ``output_content`` is already None in that case (see
         # provider.py).
-        if not self.disable_llm_payload and event.output_content:
+        if not self.disable_provider_payload and event.output_content:
             attrs_out = _truncate_for_attribute(event.output_content, self.payload_max_bytes)
             span.set_attribute("openarmature.llm.output.content", attrs_out)
         span.set_status(Status(StatusCode.OK))
@@ -1303,7 +1305,7 @@ class OTelObserver:
                 attrs["gen_ai.request.presence_penalty"] = request_params["presence_penalty"]
             if "stop_sequences" in request_params:
                 attrs["gen_ai.request.stop_sequences"] = request_params["stop_sequences"]
-        if not self.disable_llm_payload:
+        if not self.disable_provider_payload:
             if event.input_messages:
                 serialized = _serialize_for_attribute(event.input_messages)
                 attrs["openarmature.llm.input.messages"] = _truncate_for_attribute(

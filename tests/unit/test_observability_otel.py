@@ -244,11 +244,11 @@ async def test_invocation_span_carries_implementation_attribution_attributes() -
 # pins the OTel side of the contract; the Langfuse-side equivalent
 # lives in test_observability_langfuse.py against
 # disable_state_payload=True.
-async def test_invocation_span_attribution_emits_under_disable_llm_payload() -> None:
+async def test_invocation_span_attribution_emits_under_disable_provider_payload() -> None:
     exporter = InMemorySpanExporter()
     observer = OTelObserver(
         span_processor=SimpleSpanProcessor(exporter),
-        disable_llm_payload=True,
+        disable_provider_payload=True,
         disable_genai_semconv=True,
         disable_llm_spans=True,
     )

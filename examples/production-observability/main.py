@@ -582,14 +582,14 @@ def build_graph() -> CompiledGraph[BriefingState]:
 # any OTLP-compatible backend.
 #
 # Caller hooks attach to LangfuseObserver via constructor kwargs.
-# ``disable_llm_payload=False`` opts in to capturing the input
+# ``disable_provider_payload=False`` opts in to capturing the input
 # messages + output content on Generation observations so the demo
 # output is meaningful; the default-True is the privacy-preserving
 # setting.
 
 
 def _build_otel_observer(exporter: InMemorySpanExporter) -> OTelObserver:
-    # ``disable_llm_payload=False`` opts in to capturing input messages
+    # ``disable_provider_payload=False`` opts in to capturing input messages
     # + output content on the LLM-call span (same flag the Langfuse
     # observer below flips for the same reason).  The example's whole
     # point is showing both backends seeing the same logical events;
@@ -600,14 +600,14 @@ def _build_otel_observer(exporter: InMemorySpanExporter) -> OTelObserver:
     return OTelObserver(
         span_processor=SimpleSpanProcessor(exporter),
         resource=Resource.create({"service.name": "openarmature-production-observability"}),
-        disable_llm_payload=False,
+        disable_provider_payload=False,
     )
 
 
 def _build_langfuse_observer(client: InMemoryLangfuseClient) -> LangfuseObserver:
     return LangfuseObserver(
         client=client,
-        disable_llm_payload=False,
+        disable_provider_payload=False,
         trace_input_from_state=_trace_input,
         trace_output_from_state=_trace_output,
     )
