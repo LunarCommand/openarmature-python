@@ -77,7 +77,12 @@ def _resolve_cause(exc: Exception) -> BaseException:
 
     origin: BaseException | None = None
     current: BaseException | None = exc
-    while current is not None:
+    seen: set[int] = set()
+    # Traverse only BaseException instances (a non-exception ``__cause__``
+    # ends the walk) and guard against a cyclic ``__cause__`` chain so a
+    # malformed chain can't hang or crash the degrade path.
+    while isinstance(current, BaseException) and id(current) not in seen:
+        seen.add(id(current))
         if not isinstance(current, NodeException):
             if origin is None:
                 origin = current

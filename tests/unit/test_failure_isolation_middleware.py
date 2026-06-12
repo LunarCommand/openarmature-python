@@ -330,6 +330,24 @@ async def test_categorized_surface_wins_over_deeper_cause() -> None:
     assert events[0].caught_exception.message == "misconfigured"
 
 
+async def test_cyclic_cause_chain_terminates() -> None:
+    # Defensive: a self-referential __cause__ chain must not hang the
+    # degrade path. Resolution terminates and the node still degrades.
+    events: list[Any] = []
+    disp_token = _set_active_dispatch(lambda e: events.append(e))
+    a = NodeException(node_name="a", cause=ValueError("seed"), recoverable_state={})
+    b = NodeException(node_name="b", cause=a, recoverable_state={})
+    a.__cause__ = b  # cycle: a -> b -> a
+    try:
+        mw = FailureIsolationMiddleware(degraded_update={"result": []}, event_name="iso")
+        out = await mw("s", _raises(a))
+    finally:
+        _reset_active_dispatch(disp_token)
+
+    assert out == {"result": []}
+    assert len(events) == 1
+
+
 async def test_no_event_outside_invocation() -> None:
     # current_dispatch() is None outside an invocation; the degrade still
     # happens, no event is emitted, and nothing raises.
