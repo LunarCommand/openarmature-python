@@ -24,7 +24,11 @@ from dataclasses import dataclass
 from typing import Any
 
 from openarmature.llm.errors import TRANSIENT_CATEGORIES
-from openarmature.observability.correlation import _reset_attempt_index, _set_attempt_index
+from openarmature.observability.correlation import (
+    _record_terminal_attempt_index,
+    _reset_attempt_index,
+    _set_attempt_index,
+)
 from openarmature.observability.metadata import (
     _invocation_metadata_var,
     _reset_invocation_metadata,
@@ -202,6 +206,11 @@ class RetryMiddleware:
                     # not the failed attempt's transient state.
                     _reset_invocation_metadata(metadata_token)
                     if attempt + 1 >= self.config.max_attempts or not classifier(exc, state):
+                        # Record the final / exhausting attempt so an OUTER
+                        # FailureIsolationMiddleware reports it rather than
+                        # the post-reset baseline (proposal 0050 §6.3). The
+                        # enclosing isolation scope owns the cleanup.
+                        _record_terminal_attempt_index(attempt)
                         raise
                     if self.config.on_retry is not None:
                         await self.config.on_retry(exc, attempt)

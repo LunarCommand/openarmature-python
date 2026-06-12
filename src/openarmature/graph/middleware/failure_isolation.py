@@ -40,6 +40,9 @@ from collections.abc import Awaitable, Callable, Mapping
 from typing import Any
 
 from openarmature.observability.correlation import (
+    _current_terminal_attempt_index,
+    _reset_terminal_attempt_index,
+    _set_terminal_attempt_index,
     current_attempt_index,
     current_branch_name,
     current_dispatch,
@@ -131,38 +134,49 @@ class FailureIsolationMiddleware:
         self.on_caught = on_caught
 
     async def __call__(self, state: Any, next_: NextCall) -> Mapping[str, Any]:
+        # Establish a clean terminal-attempt scope: an inner
+        # RetryMiddleware records its final / exhausting attempt here on
+        # give-up, and _emit_event reports it (proposal 0050 §6.3). The
+        # ``None`` on entry shadows any stale ambient value so this call
+        # reads correctly; the finally restores the prior value (token
+        # semantics), and the next isolation call shadows again on entry.
+        terminal_token = _set_terminal_attempt_index(None)
         try:
-            return await next_(state)
-        except Exception as exc:
-            # BaseException (cancellation) never enters here — it
-            # extends BaseException, not Exception. Same rule as
-            # RetryMiddleware: cancellation MUST propagate.
-            if self.predicate is not None and not self.predicate(exc):
-                raise
-            # Resolve the degraded update once, at catch time, and reuse
-            # it for the event's post_state and the node return so a
-            # callable degraded_update is invoked exactly once. The
-            # observable order the spec prescribes — emit the event, then
-            # on_caught, then return the update — is preserved below;
-            # resolving here first only populates post_state.
-            degraded = self._resolve_degraded(state)
-            self._emit_event(state, exc, degraded)
-            if self.on_caught is not None:
-                try:
-                    await self.on_caught(exc)
-                except Exception as hook_error:  # noqa: BLE001
-                    # on_caught is caller telemetry; a bug in it MUST NOT
-                    # turn a recovered node back into a crash. Isolate it
-                    # the way the observer-delivery contract isolates
-                    # observer exceptions (warn, don't propagate).
-                    # BaseException (cancellation) still propagates by not
-                    # being caught here.
-                    warnings.warn(
-                        f"FailureIsolationMiddleware on_caught raised "
-                        f"{type(hook_error).__name__}: {hook_error}",
-                        stacklevel=2,
-                    )
-            return degraded
+            try:
+                return await next_(state)
+            except Exception as exc:
+                # BaseException (cancellation) never enters here — it
+                # extends BaseException, not Exception. Same rule as
+                # RetryMiddleware: cancellation MUST propagate.
+                if self.predicate is not None and not self.predicate(exc):
+                    raise
+                # Resolve the degraded update once, at catch time, and
+                # reuse it for the event's post_state and the node return
+                # so a callable degraded_update is invoked exactly once.
+                # The observable order the spec prescribes — emit the
+                # event, then on_caught, then return the update — is
+                # preserved below; resolving here first only populates
+                # post_state.
+                degraded = self._resolve_degraded(state)
+                self._emit_event(state, exc, degraded)
+                if self.on_caught is not None:
+                    try:
+                        await self.on_caught(exc)
+                    except Exception as hook_error:  # noqa: BLE001
+                        # on_caught is caller telemetry; a bug in it MUST
+                        # NOT turn a recovered node back into a crash.
+                        # Isolate it the way the observer-delivery contract
+                        # isolates observer exceptions (warn, don't
+                        # propagate). BaseException (cancellation) still
+                        # propagates by not being caught here.
+                        warnings.warn(
+                            f"FailureIsolationMiddleware on_caught raised "
+                            f"{type(hook_error).__name__}: {hook_error}",
+                            stacklevel=2,
+                        )
+                return degraded
+        finally:
+            _reset_terminal_attempt_index(terminal_token)
 
     def _resolve_degraded(self, state: Any) -> Mapping[str, Any]:
         if callable(self.degraded_update):
@@ -192,22 +206,26 @@ class FailureIsolationMiddleware:
         cause = _resolve_cause(exc)
         cause_category = getattr(cause, "category", None)
         category = cause_category if isinstance(cause_category, str) else None
-        # ``attempt_index`` here is deliberately the NODE-level baseline,
-        # not a per-attempt wire index: failure isolation is a node-level
-        # concern ("the node, across its retries, was isolated"). When
-        # this middleware is OUTER of RetryMiddleware, retry has already
-        # reset the attempt ContextVar to that baseline (0) in its
-        # ``finally`` by the time the terminal exception reaches this
-        # catch, which is the frame we want (spec-confirmed). Parenting is
-        # unaffected: the node's attempt spans are already closed by
-        # delivery time (their completed event precedes this one on the
-        # serial queue), so observers parent the marker under the
-        # invocation span and correlate by ``namespace`` + node name.
+        # ``attempt_index`` is the wrapped node's final / exhausting
+        # attempt (proposal 0050 §6.3: "the same lineage tuple NodeEvent
+        # carries, for correlation with the wrapped node's other events").
+        # When this middleware is OUTER of RetryMiddleware, retry records
+        # that index in the terminal-attempt scope on give-up — its own
+        # ``finally`` has reset the live attempt-index var to the baseline
+        # by the time the exception reaches this catch, so we read the
+        # recorded terminal index instead. With no retry, nothing is
+        # recorded and we fall back to the live attempt index (0 at a node
+        # body). Parenting is unaffected: the node's attempt spans are
+        # already closed by delivery time (their completed event precedes
+        # this one on the serial queue), so observers parent the marker
+        # under the invocation span and correlate by ``namespace`` + name.
+        terminal_attempt = _current_terminal_attempt_index()
+        attempt_index = terminal_attempt if terminal_attempt is not None else current_attempt_index()
         dispatch(
             FailureIsolatedEvent(
                 event_name=self.event_name,
                 namespace=current_namespace_prefix(),
-                attempt_index=current_attempt_index(),
+                attempt_index=attempt_index,
                 fan_out_index=current_fan_out_index(),
                 branch_name=current_branch_name(),
                 pre_state=state,

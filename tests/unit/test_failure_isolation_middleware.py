@@ -437,6 +437,13 @@ async def test_three_piece_composition_with_retry() -> None:
         .compile()
     )
 
+    isolated: list[FailureIsolatedEvent] = []
+
+    async def _capture(event: ObserverEvent) -> None:
+        if isinstance(event, FailureIsolatedEvent):
+            isolated.append(event)
+
+    graph.attach_observer(_capture)
     final = await graph.invoke(_DocState())
     await graph.drain()
 
@@ -444,6 +451,11 @@ async def test_three_piece_composition_with_retry() -> None:
     # propagated exhaustion exception and substituted the degraded value.
     assert attempts["n"] == 3
     assert final.note == "gave_up"
+    # The event's attempt_index is the final / exhausting attempt (2 after
+    # attempts 0/1/2), not the post-reset baseline (proposal 0050 §6.3
+    # lineage correlation).
+    assert len(isolated) == 1
+    assert isolated[0].attempt_index == 2
 
 
 # ---------------------------------------------------------------------------

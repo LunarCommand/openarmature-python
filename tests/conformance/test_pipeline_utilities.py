@@ -133,18 +133,6 @@ _DEFERRED_FIXTURES: dict[str, str] = {
     "029-checkpoint-subgraph-resume": "checkpointing (test_checkpoint.py)",
     "030-checkpoint-not-found": "checkpointing (test_checkpoint.py)",
     "031-checkpoint-correlation-id-preserved-across-resume": "checkpointing (test_checkpoint.py)",
-    # Failure-isolation three-piece composition (proposal 0050 §6.3). The
-    # FailureIsolatedEvent's attempt_index should reflect the final retry
-    # attempt (1) per §6.3's "same lineage tuple NodeEvent carries"
-    # correlation rule, but python emits the node-level baseline (0):
-    # RetryMiddleware resets the attempt ContextVar in its finally before
-    # the outer isolation middleware catches. The 0050 impl claimed 0 was
-    # spec-confirmed via the design thread; the fixture asserts 1.
-    # Reconcile with spec and fix attempt_index, then un-defer.
-    "061-failure-isolation-retry-three-piece-composition": (
-        "FailureIsolatedEvent.attempt_index baseline (0) vs final-attempt (1) "
-        "discrepancy; reconcile with spec + fix"
-    ),
 }
 
 

@@ -484,6 +484,61 @@ def _reset_attempt_index(token: Token[int]) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Terminal attempt index — for FailureIsolationMiddleware (proposal 0050
+# §6.3). RetryMiddleware resets ``attempt_index`` in its per-iteration
+# ``finally`` as the exhausted exception unwinds, so an OUTER
+# FailureIsolationMiddleware would otherwise read the post-reset baseline
+# rather than the final / exhausting attempt the §6.3 lineage-correlation
+# rule mandates. On give-up, retry records the final attempt here; the
+# enclosing FailureIsolationMiddleware establishes the scope (None on
+# entry, reset on exit) and reads it, falling back to ``attempt_index``
+# when no retry exhausted. A retry that records without an enclosing
+# isolation scope leaves a non-None value in the ambient context, but it
+# is never OBSERVED: the sole reader (FailureIsolationMiddleware) shadows
+# any such stale value with its own ``None`` on entry before reading.
+#
+# Two setters by design: ``_set`` / ``_reset`` bracket the isolation SCOPE
+# (token-based, mirroring ``_attempt_index``); ``_record`` is retry's
+# fire-and-forget write WITHIN that scope (no token, since the scope owner
+# does the reset), keeping retry off ContextVar bookkeeping it doesn't own.
+#
+# Known limitation: the INNERMOST isolation consumes the record (its reset
+# discards it), so a nested OUTER isolation catching an inner-isolation-
+# rejected exception after a retry exhaustion reads the live baseline. That
+# nesting is contrived and intentionally unguarded.
+# ---------------------------------------------------------------------------
+
+
+_terminal_attempt_index_var: ContextVar[int | None] = ContextVar(
+    "openarmature.terminal_attempt_index", default=None
+)
+
+
+def _current_terminal_attempt_index() -> int | None:
+    """Return the final / exhausting attempt index recorded by a retry
+    that gave up within the current FailureIsolationMiddleware scope, or
+    ``None`` when no retry exhausted. Internal."""
+    return _terminal_attempt_index_var.get()
+
+
+def _set_terminal_attempt_index(value: int | None) -> Token[int | None]:
+    """Establish a terminal-attempt scope (FailureIsolationMiddleware sets
+    ``None`` on entry). Internal."""
+    return _terminal_attempt_index_var.set(value)
+
+
+def _reset_terminal_attempt_index(token: Token[int | None]) -> None:
+    _terminal_attempt_index_var.reset(token)
+
+
+def _record_terminal_attempt_index(value: int) -> None:
+    """Record the final / exhausting attempt within the current scope
+    (RetryMiddleware on give-up). The enclosing FailureIsolationMiddleware
+    scope owns the cleanup, so no token is returned. Internal."""
+    _terminal_attempt_index_var.set(value)
+
+
+# ---------------------------------------------------------------------------
 # Active observer span — for engine-side OTel context attach inside
 # ``innermost``. Populated synchronously by an observer's ``prepare_sync``
 # hook BEFORE the engine queues the started event; read by ``innermost``
@@ -567,6 +622,8 @@ __all__ = [
     # ``openarmature.graph.compiled`` can drive set/reset without
     # pyright's strict ``reportUnusedFunction`` flagging them as
     # dead. Underscore-prefixed; not part of the user-facing API.
+    "_current_terminal_attempt_index",
+    "_record_terminal_attempt_index",
     "_reset_active_dispatch",
     "_reset_active_observer_span",
     "_reset_active_observers",
@@ -578,6 +635,7 @@ __all__ = [
     "_reset_fan_out_index_chain",
     "_reset_invocation_id",
     "_reset_namespace_prefix",
+    "_reset_terminal_attempt_index",
     "_set_active_dispatch",
     "_set_active_observer_span",
     "_set_active_observers",
@@ -589,4 +647,5 @@ __all__ = [
     "_set_fan_out_index_chain",
     "_set_invocation_id",
     "_set_namespace_prefix",
+    "_set_terminal_attempt_index",
 ]
