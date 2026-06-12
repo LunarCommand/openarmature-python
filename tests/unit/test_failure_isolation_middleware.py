@@ -28,6 +28,7 @@ from openarmature.graph import (
     append,
     deterministic_backoff,
 )
+from openarmature.graph.errors import NodeException, ParallelBranchesBranchFailed
 from openarmature.graph.middleware import NextCall
 from openarmature.observability.correlation import (
     _reset_active_dispatch,
@@ -39,6 +40,10 @@ from openarmature.observability.correlation import (
 
 class _TransientError(Exception):
     category = "provider_rate_limit"
+
+
+class _NonTransientError(Exception):
+    category = "provider_invalid_request"
 
 
 def _raises(exc: BaseException) -> NextCall:
@@ -208,6 +213,121 @@ async def test_bare_exception_has_null_category() -> None:
     assert len(events) == 1
     assert events[0].caught_exception.category is None
     assert events[0].caught_exception.message == "plain"
+
+
+# ---------------------------------------------------------------------------
+# Cause fidelity at carrier-wrapper sites (proposal 0065)
+# ---------------------------------------------------------------------------
+
+
+async def test_node_exception_carrier_resolves_to_originating_category() -> None:
+    # At a non-node placement the engine wraps the originating error as a
+    # node_exception carrier before the middleware catches it; the event
+    # reports the originating category, NOT the masking node_exception.
+    events: list[Any] = []
+    disp_token = _set_active_dispatch(lambda e: events.append(e))
+    carrier = NodeException(node_name="work", cause=_TransientError("rate limited"), recoverable_state={})
+    try:
+        mw = FailureIsolationMiddleware(degraded_update={"result": []}, event_name="iso")
+        out = await mw("s", _raises(carrier))
+    finally:
+        _reset_active_dispatch(disp_token)
+
+    assert out == {"result": []}
+    assert isinstance(events[0], FailureIsolatedEvent)
+    assert events[0].caught_exception.category == "provider_rate_limit"
+    assert events[0].caught_exception.message == "rate limited"
+
+
+async def test_nested_carriers_resolve_to_originating_category() -> None:
+    # Nested subgraph boundaries stack node_exception carriers; resolution
+    # walks all of them to the originating cause.
+    events: list[Any] = []
+    disp_token = _set_active_dispatch(lambda e: events.append(e))
+    inner = NodeException(node_name="inner", cause=_TransientError("rate limited"), recoverable_state={})
+    outer = NodeException(node_name="outer", cause=inner, recoverable_state={})
+    try:
+        mw = FailureIsolationMiddleware(degraded_update={"result": []}, event_name="iso")
+        await mw("s", _raises(outer))
+    finally:
+        _reset_active_dispatch(disp_token)
+
+    assert events[0].caught_exception.category == "provider_rate_limit"
+
+
+async def test_branch_carrier_subtype_resolves_to_originating_category() -> None:
+    # The §11.7 branch site catches a ParallelBranchesBranchFailed (a
+    # NodeException subtype); resolution still reaches the originating cause.
+    events: list[Any] = []
+    disp_token = _set_active_dispatch(lambda e: events.append(e))
+    carrier = ParallelBranchesBranchFailed(
+        node_name="dispatcher",
+        cause=_TransientError("rate limited"),
+        recoverable_state={},
+        branch_name="only",
+    )
+    try:
+        mw = FailureIsolationMiddleware(degraded_update={"result": []}, event_name="iso")
+        await mw("s", _raises(carrier))
+    finally:
+        _reset_active_dispatch(disp_token)
+
+    assert events[0].caught_exception.category == "provider_rate_limit"
+
+
+async def test_carrier_over_uncategorized_cause_is_null() -> None:
+    # Resolving through the carrier reaches a cause with no category, so the
+    # reported category is null (the existing bare-exception rule).
+    events: list[Any] = []
+    disp_token = _set_active_dispatch(lambda e: events.append(e))
+    carrier = NodeException(node_name="work", cause=ValueError("boom"), recoverable_state={})
+    try:
+        mw = FailureIsolationMiddleware(degraded_update={"result": []}, event_name="iso")
+        await mw("s", _raises(carrier))
+    finally:
+        _reset_active_dispatch(disp_token)
+
+    assert events[0].caught_exception.category is None
+    assert events[0].caught_exception.message == "boom"
+
+
+async def test_uncategorized_surface_resolves_to_categorized_cause() -> None:
+    # A node that wraps a categorized provider error in an uncategorized
+    # domain error: the event surfaces the underlying provider category
+    # (agreeing with what §6.1's classifier retries on), and the message
+    # tracks that same cause for coherence.
+    events: list[Any] = []
+    disp_token = _set_active_dispatch(lambda e: events.append(e))
+    surface = ValueError("wrapped")
+    surface.__cause__ = _TransientError("rate limited")
+    carrier = NodeException(node_name="work", cause=surface, recoverable_state={})
+    try:
+        mw = FailureIsolationMiddleware(degraded_update={"result": []}, event_name="iso")
+        await mw("s", _raises(carrier))
+    finally:
+        _reset_active_dispatch(disp_token)
+
+    assert events[0].caught_exception.category == "provider_rate_limit"
+    assert events[0].caught_exception.message == "rate limited"
+
+
+async def test_categorized_surface_wins_over_deeper_cause() -> None:
+    # A node that deliberately re-categorizes (raises a categorized error
+    # FROM a categorized cause): the nearest category wins, so the node's
+    # re-categorization is respected rather than the deeper cause.
+    events: list[Any] = []
+    disp_token = _set_active_dispatch(lambda e: events.append(e))
+    surface = _NonTransientError("misconfigured")
+    surface.__cause__ = _TransientError("rate limited")
+    carrier = NodeException(node_name="work", cause=surface, recoverable_state={})
+    try:
+        mw = FailureIsolationMiddleware(degraded_update={"result": []}, event_name="iso")
+        await mw("s", _raises(carrier))
+    finally:
+        _reset_active_dispatch(disp_token)
+
+    assert events[0].caught_exception.category == "provider_invalid_request"
+    assert events[0].caught_exception.message == "misconfigured"
 
 
 async def test_no_event_outside_invocation() -> None:
