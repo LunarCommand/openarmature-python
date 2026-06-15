@@ -166,16 +166,42 @@ class ParallelBranchesNode[ParentT: State]:
 
                 async def innermost(s: Any) -> Mapping[str, Any]:
                     final_branch_state = await spec.subgraph._invoke(s, child_context)  # noqa: SLF001
-                    # Per §11.4 projection out: only fields named
-                    # in ``outputs`` contribute back to parent
-                    # state; unnamed subgraph fields are discarded.
+                    # Branch middleware wraps the subgraph invocation
+                    # (§11.7), so the chain operates in the branch
+                    # subgraph's state space. Surface the ``outputs``
+                    # source fields keyed by their subgraph names (via
+                    # getattr, preserving field-value identity) so a
+                    # middleware that short-circuits with a subgraph-space
+                    # partial update — FailureIsolation's degraded_update —
+                    # composes in the same space. The §11.4 projection to
+                    # parent fields runs below, OUTSIDE the chain.
                     return {
-                        parent_field: getattr(final_branch_state, sub_field)
-                        for parent_field, sub_field in spec.outputs.items()
+                        sub_field: getattr(final_branch_state, sub_field)
+                        for sub_field in spec.outputs.values()
                     }
 
                 chain: ChainCall = compose_chain(spec.middleware, innermost)
-                return await chain(initial)
+                branch_partial = await chain(initial)
+                # Per §11.4 projection out: map each ``outputs`` sub-field
+                # (read from the subgraph-space partial the chain produced
+                # — the real subgraph result on success, or a
+                # degraded_update on isolation) to its parent field.
+                # Unnamed subgraph fields are discarded.
+                #
+                # Skip a sub-field the partial doesn't carry: a branch
+                # contributes only the parent fields it supplies and the
+                # §11.4 buffer-then-merge model already merges heterogeneous
+                # partial contributions, so an omitted field leaves the
+                # parent to its prior / sibling-branch value. On the success
+                # path ``innermost`` always supplies every sub-field; the
+                # subset case is a degraded_update that doesn't cover a
+                # projected field, where a hard miss would defeat the point
+                # of failure isolation.
+                return {
+                    parent_field: branch_partial[sub_field]
+                    for parent_field, sub_field in spec.outputs.items()
+                    if sub_field in branch_partial
+                }
             finally:
                 _reset_branch_name(token)
 

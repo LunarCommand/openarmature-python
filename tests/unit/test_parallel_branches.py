@@ -39,6 +39,12 @@ from openarmature.graph import (
     append,
     merge,
 )
+from openarmature.graph.middleware import (
+    FailureIsolationMiddleware,
+    RetryConfig,
+    RetryMiddleware,
+    deterministic_backoff,
+)
 
 # ---------------------------------------------------------------------------
 # Shared schemas + helpers
@@ -215,6 +221,151 @@ async def test_three_heterogeneous_branches_merge_to_parent() -> None:
     assert final.alpha_result == 1
     assert final.beta_result == 2
     assert final.gamma_result == 3
+
+
+# ---------------------------------------------------------------------------
+# Branch middleware — state space (§11.7)
+# ---------------------------------------------------------------------------
+
+
+async def test_branch_middleware_degraded_update_projects_through_outputs() -> None:
+    # Regression: branch middleware wraps the subgraph invocation (§11.7),
+    # so the chain operates in the branch subgraph's state space. A
+    # middleware that short-circuits with a subgraph-space partial update —
+    # here FailureIsolation's degraded_update writing the subgraph field
+    # ``b_out`` — MUST project to the parent through the branch's
+    # ``outputs`` mapping, exactly like a real subgraph result. Before the
+    # fix the ``outputs`` projection ran INSIDE the middleware chain, so the
+    # degraded_update reached the parent as ``b_out`` and tripped
+    # extra-field validation (ParentState has no ``b_out``).
+    isolation = FailureIsolationMiddleware(
+        degraded_update={"b_out": 99},
+        event_name="beta_isolated",
+    )
+    compiled = (
+        GraphBuilder(ParentState)
+        .set_entry("dispatcher")
+        .add_parallel_branches_node(
+            "dispatcher",
+            branches={
+                "beta": BranchSpec(
+                    subgraph=_build_beta_raises("boom"),
+                    outputs={"beta_result": "b_out"},
+                    middleware=(isolation,),
+                ),
+            },
+        )
+        .add_edge("dispatcher", END)
+        .compile()
+    )
+    final = await compiled.invoke(ParentState())
+    await compiled.drain()
+    # The branch failed; FailureIsolation degraded it in subgraph space
+    # (b_out=99); ``outputs`` projected b_out -> parent beta_result.
+    assert final.beta_result == 99
+
+
+async def test_branch_middleware_success_path_projects_subgraph_output() -> None:
+    # Guards the other side of the fix: with branch middleware present but
+    # the branch SUCCEEDING, the real subgraph output (not the degraded
+    # value) must still project through ``outputs``. Confirms moving the
+    # projection outside the middleware chain left the success path intact.
+    isolation = FailureIsolationMiddleware(
+        degraded_update={"a_out": 99},
+        event_name="alpha_isolated",
+    )
+    compiled = (
+        GraphBuilder(ParentState)
+        .set_entry("dispatcher")
+        .add_parallel_branches_node(
+            "dispatcher",
+            branches={
+                "alpha": BranchSpec(
+                    subgraph=_build_alpha_succeeds(),  # returns a_out=1
+                    outputs={"alpha_result": "a_out"},
+                    middleware=(isolation,),
+                ),
+            },
+        )
+        .add_edge("dispatcher", END)
+        .compile()
+    )
+    final = await compiled.invoke(ParentState())
+    await compiled.drain()
+    assert final.alpha_result == 1  # real subgraph output, not the degraded 99
+
+
+async def test_branch_middleware_degraded_update_omitting_field_skips_contribution() -> None:
+    # Leniency: a degraded_update that does not cover a projected
+    # ``outputs`` sub-field contributes nothing for that field rather than
+    # raising. The §11.4 buffer-then-merge model already merges partial
+    # contributions, so the parent field keeps its prior value. Here the
+    # branch degrades with an EMPTY update, so ``beta_result`` is never
+    # contributed and stays at its ParentState default (0). A hard miss
+    # would defeat the point of failure isolation (the resilience primitive
+    # would itself crash the invocation).
+    isolation = FailureIsolationMiddleware(
+        degraded_update={},
+        event_name="beta_isolated",
+    )
+    compiled = (
+        GraphBuilder(ParentState)
+        .set_entry("dispatcher")
+        .add_parallel_branches_node(
+            "dispatcher",
+            branches={
+                "beta": BranchSpec(
+                    subgraph=_build_beta_raises("boom"),
+                    outputs={"beta_result": "b_out"},
+                    middleware=(isolation,),
+                ),
+            },
+        )
+        .add_edge("dispatcher", END)
+        .compile()
+    )
+    final = await compiled.invoke(ParentState())
+    await compiled.drain()
+    assert final.beta_result == 0  # never contributed; parent default retained
+
+
+async def test_branch_middleware_isolation_wraps_retry_degrades_after_exhaustion() -> None:
+    # Fixture-064-Case-1-shaped at a branch: middleware [failure_isolation,
+    # retry] (outer-to-inner). The branch's node fails on every attempt;
+    # retry exhausts its two attempts and re-raises; failure_isolation
+    # catches the exhausted exception and degrades in subgraph space, which
+    # projects to the parent. Exercises the state-space fix through a real
+    # multi-middleware chain rather than a single frame.
+    isolation = FailureIsolationMiddleware(
+        degraded_update={"b_out": 99},
+        event_name="beta_isolated",
+    )
+    retry = RetryMiddleware(
+        RetryConfig(
+            max_attempts=2,
+            classifier=lambda _exc, _state: True,
+            backoff=deterministic_backoff(0),
+        )
+    )
+    compiled = (
+        GraphBuilder(ParentState)
+        .set_entry("dispatcher")
+        .add_parallel_branches_node(
+            "dispatcher",
+            branches={
+                "beta": BranchSpec(
+                    subgraph=_build_beta_raises("boom"),
+                    outputs={"beta_result": "b_out"},
+                    middleware=(isolation, retry),
+                ),
+            },
+        )
+        .add_edge("dispatcher", END)
+        .compile()
+    )
+    final = await compiled.invoke(ParentState())
+    await compiled.drain()
+    assert final.beta_result == 99
 
 
 # ---------------------------------------------------------------------------
