@@ -54,6 +54,11 @@ its own right; it would also work standalone against a single headline.
   the fan-out node's own started / completed pair and gives observers
   a record of the resolved item_count, concurrency, and error_policy
   at dispatch time.
+- In ``degrade`` mode a ``failure_isolation_observer`` captures each
+  ``FailureIsolatedEvent``; the demo prints its ``event_name``, the
+  resolved ``caught_exception.category`` (the originating cause, e.g.
+  ``provider_unavailable``, not the masking ``node_exception``), and the
+  exhausting ``attempt_index``.
 
 **Configuration** (env vars; OpenAI defaults shown):
 
@@ -68,6 +73,10 @@ Run with:
     uv sync --group examples
     cd examples/fan-out-with-retry
     LLM_API_KEY=sk-... uv run python main.py
+
+    # exercise the degrade failure-path: prepends a synthetic failing
+    # headline and prints the Failure-isolation events block
+    MODE=degrade LLM_API_KEY=sk-... uv run python main.py
 """
 
 from __future__ import annotations
@@ -83,6 +92,7 @@ from pydantic import Field
 from openarmature.graph import (
     END,
     CompiledGraph,
+    FailureIsolatedEvent,
     GraphBuilder,
     NodeEvent,
     ObserverEvent,
@@ -238,6 +248,28 @@ async def _record_timing(record: TimingRecord) -> None:
     _timings.append(record)
 
 
+# Captured failure-isolation events, populated by the observer below.
+# Only fires in ``degrade`` mode, where FailureIsolationMiddleware catches
+# an exhausted instance and emits one FailureIsolatedEvent per degraded
+# instance.
+_isolated: list[FailureIsolatedEvent] = []
+
+
+async def failure_isolation_observer(event: ObserverEvent) -> None:
+    """Capture each FailureIsolatedEvent so the demo can surface the
+    resolved failure cause.
+
+    When FailureIsolation wraps Retry at a fan-out instance, the engine
+    has already wrapped the originating error as a node_exception carrier
+    by the time isolation catches it. ``caught_exception.category``
+    resolves through that carrier to the originating cause, so a degraded
+    instance reports ``provider_unavailable`` (what actually failed)
+    rather than the masking ``node_exception``.
+    """
+    if isinstance(event, FailureIsolatedEvent):
+        _isolated.append(event)
+
+
 # ---------------------------------------------------------------------------
 # Outer graph
 # ---------------------------------------------------------------------------
@@ -371,8 +403,9 @@ async def fan_out_config_observer(event: ObserverEvent) -> None:
 
 async def main() -> None:
     # Reset module-level capture so a REPL or repeated-main() driver
-    # doesn't accumulate timings across invocations.
+    # doesn't accumulate timings / isolation events across invocations.
     _timings.clear()
+    _isolated.clear()
 
     # MODE selects the per-instance failure posture: fail_fast (default,
     # abort on the first exhausted-retry failure), collect (record
@@ -382,6 +415,7 @@ async def main() -> None:
     mode = os.environ.get("MODE", "fail_fast")
     graph = build_graph(mode=mode)
     graph.attach_observer(fan_out_config_observer)
+    graph.attach_observer(failure_isolation_observer)
 
     # collect and degrade both need a failure to demonstrate, so prepend
     # a deliberately-failing headline that summarize() always raises on.
@@ -429,6 +463,14 @@ async def main() -> None:
             print(f"Captured {len(final.instance_errors)} per-instance error(s):")
             for err in final.instance_errors:
                 print(f"  {err}")
+            print()
+        if _isolated:
+            print(f"Failure-isolation events ({len(_isolated)}):")
+            for ev in _isolated:
+                print(
+                    f"  event={ev.event_name!r}  cause={ev.caught_exception.category}  "
+                    f"attempt_index={ev.attempt_index}"
+                )
             print()
         print("Per-instance timings (in completion order):")
         for nth, record in enumerate(_timings):
