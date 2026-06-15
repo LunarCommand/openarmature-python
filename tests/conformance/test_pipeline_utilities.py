@@ -24,6 +24,7 @@ import pytest
 import yaml
 
 from openarmature.graph import (
+    CompileError,
     FailureIsolatedEvent,
     NodeException,
     ObserverEvent,
@@ -83,14 +84,14 @@ def _load(path: Path) -> dict[str, Any]:
 # the `cases:` shape carries seeded-record + migrations + resume blocks.
 _LAST_DRIVEN_FIXTURE = 38
 
-# Failure-isolation fixtures (058-064, proposals 0050 §6.3 + 0065) are
-# middleware fixtures this runner handles. They sit past _LAST_DRIVEN_FIXTURE
-# only because the 039-057 range (state migration / checkpoint fan-out) is
-# owned by dedicated runners (test_state_migration.py / test_checkpoint.py),
-# not because this runner can't drive them. Fixture 064 (cause fidelity at
-# non-node placements, proposal 0065) joined when the spec pin advanced to
-# v0.55.1.
-_FAILURE_ISOLATION_FIXTURES = frozenset(range(58, 65))
+# Failure-isolation fixtures (058-065, proposals 0050 §6.3 + 0065 + 0066)
+# are middleware fixtures this runner handles. They sit past
+# _LAST_DRIVEN_FIXTURE only because the 039-057 range (state migration /
+# checkpoint fan-out) is owned by dedicated runners (test_state_migration.py
+# / test_checkpoint.py), not because this runner can't drive them. Fixture
+# 065 (fan-out degrade contribution, proposal 0066) joined when the spec pin
+# advanced to v0.56.0.
+_FAILURE_ISOLATION_FIXTURES = frozenset(range(58, 66))
 
 
 def _fixture_paths() -> list[Path]:
@@ -504,6 +505,13 @@ async def test_pipeline_utility_fixture(
         for case in spec["cases"]:
             case_name = case.get("name", "<unnamed>")
             merged: dict[str, Any] = dict(case)
+            # Compile-error cases (065 Case 2) nest the graph under ``graph:``
+            # (the graph-engine fixture 007 convention) so it sits beside
+            # ``expected_compile_error``. Flatten it to the top level the rest
+            # of this runner reads from.
+            if "graph" in merged:
+                graph_block = cast("dict[str, Any]", merged.pop("graph"))
+                merged = {**graph_block, **merged}
             for k, v in shared_subgraph_blocks.items():
                 merged.setdefault(k, v)
             try:
@@ -578,6 +586,25 @@ async def _run_one(spec: Mapping[str, Any], monkeypatch: pytest.MonkeyPatch) -> 
         subgraphs[sub_name] = sub_built.builder.compile()
 
     branch_middleware = _translate_parallel_branches_branch_middleware(spec, sinks, clock)
+
+    # Compile-error case (065 Case 2): building the graph MUST raise a
+    # CompileError whose ``category`` matches. The fan-out degraded_update
+    # coverage check fires in add_fan_out_node during build_graph.
+    expected_compile_error = spec.get("expected_compile_error")
+    if expected_compile_error is not None:
+        with pytest.raises(CompileError) as excinfo:
+            build_graph(
+                spec,
+                subgraphs=subgraphs,
+                graph_middleware=graph_mw,
+                node_middleware=node_mw,
+                fan_out_instance_middleware=fan_out_inst_mw,
+                parallel_branches_branch_middleware=branch_middleware,
+            )
+        assert excinfo.value.category == expected_compile_error, (
+            f"expected compile error {expected_compile_error!r}, got {excinfo.value.category!r}"
+        )
+        return
 
     expected = cast("dict[str, Any]", spec.get("expected") or {})
     run_count = cast("int", spec.get("run_count", 1))

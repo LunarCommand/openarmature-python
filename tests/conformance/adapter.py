@@ -64,6 +64,11 @@ def _parse_type(s: str) -> Any:
         return float
     if s == "bool":
         return bool
+    # ``any`` admits the callable-degrade null slot (proposal 0066 fixture
+    # 065 Case 3): a fan-out collection whose degraded instance omits
+    # collect_field gets a null entry, so the element type must permit None.
+    if s == "any":
+        return Any
     # Unparameterized container types — parallel-branches fixtures
     # 034/035/037 use ``dict`` and ``list<dict>`` as state-field types
     # for accumulator slots (branch_errors, merged_dict, collected_labels)

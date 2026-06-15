@@ -24,6 +24,7 @@ from .errors import (
     ConflictingReducers,
     DanglingEdge,
     FanOutCountModeAmbiguous,
+    FanOutDegradedUpdateMissingCollectField,
     FanOutFieldNotList,
     MappingReferencesUndeclaredField,
     MultipleOutgoingEdges,
@@ -32,7 +33,7 @@ from .errors import (
     UnreachableNode,
 )
 from .fan_out import ConcurrencyResolver, CountResolver, FanOutConfig, FanOutNode
-from .middleware import Middleware
+from .middleware import FailureIsolationMiddleware, Middleware
 from .nodes import FunctionNode, Node
 from .parallel_branches import BranchSpec, ParallelBranchesNode
 from .projection import FieldNameMatching, ProjectionStrategy
@@ -247,6 +248,22 @@ class GraphBuilder[StateT: State]:
                 raise MappingReferencesUndeclaredField(
                     direction="fan_out.extra_outputs", side="subgraph", field_name=sub_f
                 )
+
+        # Materialize instance_middleware once so the degraded_update check
+        # below and the FanOutConfig build don't both consume a one-shot
+        # iterable.
+        instance_middleware = tuple(instance_middleware or ())
+        # §9.8: a degraded fan-out instance contributes its degraded_update
+        # as the instance result, so a static (mapping) degraded_update on an
+        # instance FailureIsolationMiddleware must cover collect_field. A
+        # callable degraded_update is exempt — its output isn't knowable at
+        # construction; an omitted collect_field yields a runtime null slot.
+        for mw in instance_middleware:
+            if not isinstance(mw, FailureIsolationMiddleware):
+                continue
+            degraded = mw.degraded_update
+            if isinstance(degraded, Mapping) and collect_field not in cast("Mapping[str, Any]", degraded):
+                raise FanOutDegradedUpdateMissingCollectField(node_name=name, collect_field=collect_field)
 
         cfg = FanOutConfig(
             subgraph=subgraph,

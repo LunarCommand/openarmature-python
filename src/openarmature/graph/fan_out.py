@@ -336,10 +336,13 @@ class FanOutNode[ParentT: State, ChildT: State]:
             # (§10.11.1) depends on this ordering.
             tracked.result = partial.get(cfg.collect_field)
             tracked.result_is_error = False
+            # ``partial`` is subgraph-space (success or degrade); read each
+            # extra_outputs value by its subgraph field name and store the
+            # accumulator entry under the parent field name.
             tracked.extra_outputs = {
-                parent_field: partial[parent_field]
-                for parent_field in cfg.extra_outputs
-                if parent_field in partial
+                parent_field: partial[sub_field]
+                for parent_field, sub_field in cfg.extra_outputs.items()
+                if sub_field in partial
             }
             tracked.state = "completed"
 
@@ -576,11 +579,16 @@ def _extract_instance_partial(cfg: FanOutConfig, final_state: Any) -> Mapping[st
     """Extract collect_field + extra_outputs values from a finished
     instance's state. Returned as the per-instance partial that flows
     up the instance_middleware chain."""
+    # Per §9.3 the per-instance partial is subgraph-space: collect_field
+    # and every extra_outputs SOURCE field are keyed by their subgraph
+    # field name (the same shape a degrade's degraded_update carries), so
+    # the success and degrade paths compose through one fan-in. The §9.4
+    # projection to parent field names happens in the fan-in.
     partial: dict[str, Any] = {
         cfg.collect_field: getattr(final_state, cfg.collect_field),
     }
-    for parent_field, sub_field in cfg.extra_outputs.items():
-        partial[parent_field] = getattr(final_state, sub_field)
+    for sub_field in cfg.extra_outputs.values():
+        partial[sub_field] = getattr(final_state, sub_field)
     return partial
 
 
@@ -617,10 +625,13 @@ def _rolled_forward_partial(cfg: FanOutConfig, tracked: _FanOutInstanceState) ->
     verbatim — same shape as :func:`_extract_instance_partial` would
     have produced on the original run, sourced from the per-instance
     tracked state instead of a freshly-computed inner state."""
+    # Reconstruct the subgraph-space partial: collect_field plus each
+    # extra_outputs SOURCE field keyed by its subgraph name, sourced from
+    # the parent-keyed accumulator entry.
     partial: dict[str, Any] = {cfg.collect_field: tracked.result}
-    for parent_field in cfg.extra_outputs:
+    for parent_field, sub_field in cfg.extra_outputs.items():
         if parent_field in tracked.extra_outputs:
-            partial[parent_field] = tracked.extra_outputs[parent_field]
+            partial[sub_field] = tracked.extra_outputs[parent_field]
     return partial
 
 
@@ -764,11 +775,15 @@ def _fan_in_fail_fast(
     the fail_fast policy. All ``results`` succeeded (otherwise gather
     would have raised), so the count is just ``len(results)``. Spec
     §9.3 + §9.4: instance-index order."""
+    # §9.4 projection: read each instance's subgraph-space partial by
+    # subgraph field name and collect into the parent field. ``.get`` keeps
+    # an omitted collect_field (a callable degrade that doesn't set it, §9.3)
+    # a graceful null slot rather than a raise.
     partial: dict[str, Any] = {
-        cfg.target_field: [r[cfg.collect_field] for r in results],
+        cfg.target_field: [r.get(cfg.collect_field) for r in results],
     }
-    for parent_field in cfg.extra_outputs:
-        partial[parent_field] = [r[parent_field] for r in results]
+    for parent_field, sub_field in cfg.extra_outputs.items():
+        partial[parent_field] = [r.get(sub_field) for r in results]
     if cfg.count_field is not None:
         partial[cfg.count_field] = len(results)
     return partial
@@ -806,10 +821,10 @@ def _fan_in_collect(
             successes.append(r)
 
     partial: dict[str, Any] = {
-        cfg.target_field: [s[cfg.collect_field] for s in successes],
+        cfg.target_field: [s.get(cfg.collect_field) for s in successes],
     }
-    for parent_field in cfg.extra_outputs:
-        partial[parent_field] = [s[parent_field] for s in successes]
+    for parent_field, sub_field in cfg.extra_outputs.items():
+        partial[parent_field] = [s.get(sub_field) for s in successes]
     if cfg.errors_field is not None:
         partial[cfg.errors_field] = error_records
     if cfg.count_field is not None:
