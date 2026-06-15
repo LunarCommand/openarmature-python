@@ -123,6 +123,26 @@ class FanOutFieldNotList(CompileError):
         self.field_name = field_name
 
 
+class FanOutDegradedUpdateMissingCollectField(CompileError):
+    """Raised when a fan-out instance ``FailureIsolationMiddleware`` has a
+    static (mapping) ``degraded_update`` that omits the node's
+    ``collect_field``. A degraded instance contributes its degraded_update
+    as the instance result, so the collected field has to be present. A
+    callable ``degraded_update`` is exempt: its output is not known at
+    construction time, and an omitted collect_field yields a null slot at
+    runtime instead of a failure."""
+
+    category = "fan_out_degraded_update_missing_collect_field"
+
+    def __init__(self, node_name: str, collect_field: str) -> None:
+        super().__init__(
+            f"fan-out node {node_name!r}: a static degraded_update on an instance "
+            f"FailureIsolationMiddleware must include collect_field {collect_field!r}"
+        )
+        self.node_name = node_name
+        self.collect_field = collect_field
+
+
 class ParallelBranchesNoBranches(CompileError):
     """Raised at registration when a parallel-branches node's
     ``branches`` mapping is empty. Per pipeline-utilities §11.9

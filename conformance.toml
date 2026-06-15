@@ -32,7 +32,7 @@
 
 [manifest]
 implementation = "openarmature-python"
-spec_pin = "v0.55.1"
+spec_pin = "v0.56.0"
 
 # Status values:
 #   implemented   — shipped behavior matches the proposal's contract
@@ -619,5 +619,19 @@ status = "not-yet"
 # span-links text reconciliation (no proposal, no python-observable
 # change).
 [proposals."0065"]
+status = "implemented"
+since = "0.14.0"
+
+# Spec v0.56.0 (proposal 0066).  Fan-out failure-isolation degrade
+# contribution (pipeline-utilities §9.3 / §9.8 / §11.7).  A degraded
+# fan-out instance is a success whose contribution IS its degraded_update
+# (subgraph-space, read by subgraph field name; ``extra_outputs`` keyed by
+# subgraph field too, fixing a latent drop).  A static degraded_update
+# omitting collect_field is a compile error
+# (``fan_out_degraded_update_missing_collect_field``); a callable that omits
+# it yields a graceful null slot (no raise).  The §11.7 parallel-branches
+# counterpart skips an uncovered projected field.  Fixture 065 (four
+# cases) passes.
+[proposals."0066"]
 status = "implemented"
 since = "0.14.0"
