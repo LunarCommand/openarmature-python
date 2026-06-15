@@ -86,7 +86,7 @@ prompt:   mission-briefing v7
 ─── captured Langfuse trace ─────────────────────────────────
 Trace id=01234567-89ab-...
       name='answer_briefing'
-      metadata={correlation_id='...', entry_node='answer_briefing', spec_version='0.38.0'}
+      metadata={correlation_id='...', entry_node='answer_briefing', spec_version='<spec-version>'}
   [span] 'answer_briefing' level=DEFAULT
     metadata={attempt_index=0, correlation_id='...', namespace=['answer_briefing'], step=0}
     [generation] 'openarmature.llm.complete' level=DEFAULT
