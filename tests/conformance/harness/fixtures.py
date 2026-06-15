@@ -165,17 +165,21 @@ class CasesFixture(_ForbidExtras):
 
     Used by ``007-compile-errors``, the checkpointing fixtures (024–031),
     and the determinism / multi-run observability fixtures. Optional shared
-    ``subgraph`` / ``subgraph_with_idx`` at the top level apply across all
-    cases. Any other top-level key not listed here is rejected.
+    ``subgraph`` / ``subgraph_with_idx`` / ``subgraphs`` at the top level
+    apply across all cases. Any other top-level key not listed here is
+    rejected.
     """
 
     cases: list[CaseSpec]
-    # Shared graph-shape blocks that apply across every case. Empirically
-    # only `subgraph` and `subgraph_with_idx` appear at the top level of
-    # cases-fixtures; the plural `subgraphs` form has not been seen at
-    # the cases-fixture top level.
+    # Shared graph-shape blocks that apply across every case. The singular
+    # `subgraph` / `subgraph_with_idx` and the plural `subgraphs` map
+    # (name -> graph-spec, as the parallel-branches fixtures use) may all
+    # appear at the cases-fixture top level. Fixture 064 (failure-isolation
+    # cause fidelity) is the first to share a plural `subgraphs:` across
+    # cases.
     subgraph: SubgraphDefinition | None = None
     subgraph_with_idx: SubgraphDefinition | None = None
+    subgraphs: dict[str, SubgraphDefinition] | None = None
 
 
 # ---------------------------------------------------------------------------

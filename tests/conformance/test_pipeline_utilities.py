@@ -83,13 +83,14 @@ def _load(path: Path) -> dict[str, Any]:
 # the `cases:` shape carries seeded-record + migrations + resume blocks.
 _LAST_DRIVEN_FIXTURE = 38
 
-# Failure-isolation fixtures (058-063, proposal 0050 §6.3) are middleware
-# fixtures this runner handles. They sit past _LAST_DRIVEN_FIXTURE only
-# because the 039-057 range (state migration / checkpoint fan-out) is owned
-# by dedicated runners (test_state_migration.py / test_checkpoint.py), not
-# because this runner can't drive them. Fixture 064 (cause fidelity) joins
-# when the spec pin advances to v0.55.0.
-_FAILURE_ISOLATION_FIXTURES = frozenset(range(58, 64))
+# Failure-isolation fixtures (058-064, proposals 0050 §6.3 + 0065) are
+# middleware fixtures this runner handles. They sit past _LAST_DRIVEN_FIXTURE
+# only because the 039-057 range (state migration / checkpoint fan-out) is
+# owned by dedicated runners (test_state_migration.py / test_checkpoint.py),
+# not because this runner can't drive them. Fixture 064 (cause fidelity at
+# non-node placements, proposal 0065) joined when the spec pin advanced to
+# v0.55.1.
+_FAILURE_ISOLATION_FIXTURES = frozenset(range(58, 65))
 
 
 def _fixture_paths() -> list[Path]:
@@ -488,13 +489,18 @@ async def test_pipeline_utility_fixture(
         pytest.skip(f"{fixture_id}: {_DEFERRED_FIXTURES[fixture_id]}")
     spec = _load(fixture_path)
 
-    # Cases-shape fixtures (014, 016, 018-019, 021-023): each case is
-    # a self-contained graph + middleware + expected block. The outer
+    # Cases-shape fixtures (014, 016, 018-019, 021-023, 064): each case
+    # is a self-contained graph + middleware + expected block. The outer
     # fixture may define shared ``subgraph:`` / ``subgraph_with_idx:``
-    # blocks that every case references; merge them into each case
-    # before dispatching so the case sees them as if they were its own.
+    # (singular) or ``subgraphs:`` (plural, name -> graph-spec, as the
+    # parallel-branches fixtures use) blocks that every case references;
+    # merge them into each case before dispatching so the case sees them
+    # as if they were its own. ``setdefault`` below preserves any block a
+    # case defines for itself.
     if "cases" in spec:
-        shared_subgraph_blocks = {k: spec[k] for k in ("subgraph", "subgraph_with_idx") if k in spec}
+        shared_subgraph_blocks = {
+            k: spec[k] for k in ("subgraph", "subgraph_with_idx", "subgraphs") if k in spec
+        }
         for case in spec["cases"]:
             case_name = case.get("name", "<unnamed>")
             merged: dict[str, Any] = dict(case)

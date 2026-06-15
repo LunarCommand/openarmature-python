@@ -32,7 +32,7 @@
 
 [manifest]
 implementation = "openarmature-python"
-spec_pin = "v0.54.0"
+spec_pin = "v0.55.1"
 
 # Status values:
 #   implemented   — shipped behavior matches the proposal's contract
@@ -605,3 +605,19 @@ since = "0.13.0"
 # the pin even though the embedding capability does not).
 [proposals."0059"]
 status = "not-yet"
+
+# Spec v0.55.0 (proposal 0065; repo pins v0.55.1).  Failure-isolation
+# cause fidelity at non-node placements (pipeline-utilities §6.3 /
+# §11.7).  At instance (§9.7), branch (§11.7), and parent-node
+# middleware sites the engine wraps the originating error as a §4
+# ``node_exception`` carrier before isolation catches it;
+# ``FailureIsolatedEvent.caught_exception.category`` now resolves
+# THROUGH that carrier to the originating cause instead of reporting the
+# masking ``node_exception``.  Fixture 064 (three cases) passes;
+# node-level placement (fixture 061) was already faithful.  The pin is
+# v0.55.1 rather than v0.55.0 because v0.55.1 adds an observability §11
+# span-links text reconciliation (no proposal, no python-observable
+# change).
+[proposals."0065"]
+status = "implemented"
+since = "0.14.0"
