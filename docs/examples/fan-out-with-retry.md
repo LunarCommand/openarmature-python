@@ -56,6 +56,12 @@ intact.
   recording the resolved `item_count` / `concurrency` /
   `error_policy` at runtime. Inner-instance events carry
   `fan_out_index` but not the config.
+- In `degrade` mode, a `failure_isolation_observer` captures each
+  `FailureIsolatedEvent` and the demo prints its
+  `caught_exception.category`. At a fan-out instance placement the
+  category resolves to the originating cause (`provider_unavailable`)
+  rather than the masking `node_exception`, so the telemetry names what
+  actually failed.
 
 ## Composing with checkpointing
 
@@ -182,3 +188,16 @@ exhausted-retry failure and returned the degraded partial, so the
 fan-out recorded the instance as a (degraded) success. The
 per-instance timings still show the sentinel's failed attempts, so
 you can see the retries happened before the instance was degraded.
+
+The degrade run also prints a `Failure-isolation events` block from the
+`failure_isolation_observer`:
+
+```
+Failure-isolation events (1):
+  event='headline_degraded'  cause=provider_unavailable  attempt_index=2
+```
+
+`cause` is the resolved originating category, `provider_unavailable`,
+not the masking `node_exception` the engine wraps the failure in before
+isolation catches it. `attempt_index` is the final, exhausting attempt
+of the three the retry middleware made.
