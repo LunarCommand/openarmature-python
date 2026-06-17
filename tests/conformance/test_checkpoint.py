@@ -46,6 +46,7 @@ from openarmature.checkpoint import (
     FanOutInternalSaveBatching,
     FanOutProgress,
     InMemoryCheckpointer,
+    NodePosition,
 )
 from openarmature.graph import (
     RuntimeGraphError,
@@ -65,8 +66,11 @@ CONFORMANCE_DIR = (
 # atomic-restart) was REMOVED in spec v0.18.0 when proposal 0009
 # superseded its contract, so it is explicitly excluded from the set
 # rather than relying on the test runner's file-glob to filter the
-# missing fixture out.
-_CHECKPOINT_FIXTURE_NUMBERS: frozenset[int] = frozenset((set(range(24, 32)) - {28}) | set(range(48, 57)))
+# missing fixture out. 067 (crash-injection fan-out resume, proposal
+# 0070) is a crash/resume fixture this runner owns; it joined at v0.58.0.
+_CHECKPOINT_FIXTURE_NUMBERS: frozenset[int] = frozenset(
+    (set(range(24, 32)) - {28}) | set(range(48, 57)) | {67}
+)
 
 # Fixtures that need resume-aware test seams the conformance adapter
 # doesn't yet translate. Skipped here with a clear reason — the engine
@@ -129,7 +133,11 @@ class _CapturingCheckpointer:
     :class:`_AbortAfterInstance` AFTER the save that just transitioned
     the named instance index from ``not_started`` / ``in_flight`` to
     ``completed``. Simulates a crash at that exact point — used by
-    fixture 052 to test collect-mode error-record rollforward.
+    fixture 052 to test collect-mode error-record rollforward, and by
+    the ``crash_injection: {after_fan_out_instance}`` directive (proposal
+    0070). ``abort_after_node``: the same simulated crash AFTER the save
+    that records the named node in ``completed_positions`` — the
+    ``crash_injection: {after_node}`` boundary.
     """
 
     def __init__(
@@ -137,12 +145,14 @@ class _CapturingCheckpointer:
         *,
         fan_out_internal_save_batching: FanOutInternalSaveBatching | None = None,
         abort_after_instance: int | None = None,
+        abort_after_node: str | None = None,
     ) -> None:
         self._inner = InMemoryCheckpointer(
             fan_out_internal_save_batching=fan_out_internal_save_batching,
         )
         self.saves: list[CheckpointRecord] = []
         self._abort_after_instance = abort_after_instance
+        self._abort_after_node = abort_after_node
         self._aborted = False
         # Per proposal 0029 (fixture 056): mutating the saved record's
         # outer state on ``load`` simulates "user shrank/grew the input
@@ -184,20 +194,30 @@ class _CapturingCheckpointer:
             raise _AbortAfterInstance("post-abort save call")
 
     def _maybe_abort(self, record: CheckpointRecord) -> None:
-        """Check whether this save was the one transitioning the
-        configured ``abort_after_instance`` to ``completed``. If so,
-        raise the sentinel after the save has been recorded (so the
-        record is durably persisted before the simulated crash)."""
-        if self._abort_after_instance is None or self._aborted:
+        """Check whether this save is the configured crash boundary. If
+        so, raise the sentinel after the save has been recorded (so the
+        record is durably persisted before the simulated crash).
+        ``abort_after_instance`` fires on the save transitioning that
+        instance index to ``completed``; ``abort_after_node`` fires on
+        the save recording that node in ``completed_positions``."""
+        if self._aborted:
             return
-        target_idx = self._abort_after_instance
-        for fp in record.fan_out_progress:
-            if target_idx < len(fp.instances) and fp.instances[target_idx].state == "completed":
-                # Subsequent instances must NOT be completed — otherwise
-                # we'd abort after a later instance's save instead.
-                if all(inst.state != "completed" for inst in fp.instances[target_idx + 1 :]):
-                    self._aborted = True
-                    raise _AbortAfterInstance(f"simulated crash after instance {target_idx} completed save")
+        if self._abort_after_instance is not None:
+            target_idx = self._abort_after_instance
+            for fp in record.fan_out_progress:
+                if target_idx < len(fp.instances) and fp.instances[target_idx].state == "completed":
+                    # Subsequent instances must NOT be completed — otherwise
+                    # we'd abort after a later instance's save instead.
+                    if all(inst.state != "completed" for inst in fp.instances[target_idx + 1 :]):
+                        self._aborted = True
+                        raise _AbortAfterInstance(
+                            f"simulated crash after instance {target_idx} completed save"
+                        )
+        if self._abort_after_node is not None and any(
+            p.node_name == self._abort_after_node for p in record.completed_positions
+        ):
+            self._aborted = True
+            raise _AbortAfterInstance(f"simulated crash after node {self._abort_after_node} save")
 
     async def load(self, invocation_id: str) -> CheckpointRecord | None:
         record = await self._inner.load(invocation_id)
@@ -280,9 +300,13 @@ def _build_capturing(spec: Mapping[str, Any]) -> _CapturingCheckpointer:
             flush_every = int(batching_cfg.get("flush_every", 0))
             batching = FanOutInternalSaveBatching(flush_every=flush_every)
     abort_after = _find_abort_after_instance(spec)
+    ci_instance, ci_node = _find_crash_injection(spec)
+    if ci_instance is not None:
+        abort_after = ci_instance
     return _CapturingCheckpointer(
         fan_out_internal_save_batching=batching,
         abort_after_instance=abort_after,
+        abort_after_node=ci_node,
     )
 
 
@@ -297,6 +321,26 @@ def _find_abort_after_instance(spec: Mapping[str, Any]) -> int | None:
             if "abort_after_instance" in fan_out:
                 return int(fan_out["abort_after_instance"])
     return None
+
+
+# Conformance-adapter §5.6 ``crash_injection`` (proposal 0070): a simulated
+# crash at a checkpoint boundary, independent of an instance failure.
+def _find_crash_injection(spec: Mapping[str, Any]) -> tuple[int | None, str | None]:
+    """Parse the top-level ``crash_injection`` directive. Returns
+    ``(after_fan_out_instance_index, after_node_name)`` with at most one set.
+    Pairs with ``resume:`` the way ``first_run_expected_error`` does, but the
+    first run has no asserted outcome (it "crashed")."""
+    ci = spec.get("crash_injection")
+    if not isinstance(ci, dict):
+        return None, None
+    ci_dict = cast("Mapping[str, Any]", ci)
+    after_instance = ci_dict.get("after_fan_out_instance")
+    if isinstance(after_instance, dict):
+        return int(cast("Mapping[str, Any]", after_instance)["index"]), None
+    after_node = ci_dict.get("after_node")
+    if after_node is not None:
+        return None, str(after_node)
+    return None, None
 
 
 def _strip_abort_directive(spec: Mapping[str, Any]) -> Mapping[str, Any]:
@@ -333,10 +377,16 @@ async def _run_one_case(spec: Mapping[str, Any], *, top_level: Mapping[str, Any]
     # the same per-instance attempt table the resume assertions consult.
     # Subgraphs and the outer graph both contribute keyed by node name.
     flaky_per_index_recorders: dict[str, dict[int, list[int]]] = {}
+    # General per-instance execution recorder — populated for plain-node
+    # fan-outs (e.g. the crash_injection fixture 067) where no flaky_per_index
+    # body records which instances ran. Consulted as a fallback for the
+    # instances_executed / skipped assertions when no flaky_per_index node did.
+    instance_execution_recorders: dict[str, dict[int, list[int]]] = {}
     subgraphs = _build_subgraphs_for(
         spec,
         top_level,
         flaky_per_index_recorders=flaky_per_index_recorders,
+        instance_execution_recorders=instance_execution_recorders,
     )
 
     trace: list[str] = []
@@ -346,6 +396,7 @@ async def _run_one_case(spec: Mapping[str, Any], *, top_level: Mapping[str, Any]
         subgraphs=subgraphs,
         trace=trace,
         flaky_per_index_attempt_recorders=flaky_per_index_recorders,
+        instance_execution_recorders=instance_execution_recorders,
     )
     builder = built.builder
 
@@ -391,6 +442,10 @@ async def _run_one_case(spec: Mapping[str, Any], *, top_level: Mapping[str, Any]
 
     # Run #1 — first invocation. May succeed or fail per fixture.
     first_run_expected_error = spec.get("first_run_expected_error")
+    # crash_injection (proposal 0070): a simulated crash at a checkpoint
+    # boundary with NO asserted first-run outcome (it "crashed"). When set,
+    # the abort is expected and swallowed without a first_run_expected_error.
+    crash_injection = spec.get("crash_injection")
     invocation_id_first_run: str | None = None
     final_first_run: State | None = None
     trace.clear()
@@ -407,50 +462,66 @@ async def _run_one_case(spec: Mapping[str, Any], *, top_level: Mapping[str, Any]
         # node_exception per the fixture's first_run_expected_error
         # contract.
         if capturing._aborted:  # noqa: SLF001 — test driver intentional
-            if first_run_expected_error is None:
+            if crash_injection is not None:
+                # The simulated crash fired; no first-run outcome is asserted.
+                pass
+            elif first_run_expected_error is None:
                 raise AssertionError("abort_after_instance fired but no first_run_expected_error declared")
-            expected_category = first_run_expected_error["category"]
-            assert expected_category == "node_exception", (
-                f"abort_after_instance simulates node_exception; fixture asserts {expected_category!r}"
-            )
+            else:
+                expected_category = first_run_expected_error["category"]
+                assert expected_category == "node_exception", (
+                    f"abort_after_instance simulates node_exception; fixture asserts {expected_category!r}"
+                )
+        elif crash_injection is not None:
+            raise AssertionError("crash_injection configured but no crash fired during the first run")
         elif first_run_expected_error is not None:
             raise AssertionError(
                 f"expected first run to fail with category "
                 f"{first_run_expected_error!r} but it returned successfully"
             )
     except _AbortAfterInstance:
-        # Simulated crash from the abort_after_instance directive
-        # for fail_fast-style flows where the sentinel propagates
-        # out of the engine. Treat as a node_exception at the
-        # fan-out level — that's the fixture's
+        # Simulated crash sentinel propagated out of the engine (serial /
+        # fail_fast flows). For crash_injection it is the expected crash with
+        # no asserted outcome; otherwise it pairs with the fixture's
         # ``first_run_expected_error: node_exception`` shape.
-        if first_run_expected_error is None:
-            raise
-        expected_category = first_run_expected_error["category"]
-        assert expected_category == "node_exception", (
-            f"abort_after_instance simulates node_exception; fixture asserts {expected_category!r}"
-        )
+        if crash_injection is None:
+            if first_run_expected_error is None:
+                raise
+            expected_category = first_run_expected_error["category"]
+            assert expected_category == "node_exception", (
+                f"abort_after_instance simulates node_exception; fixture asserts {expected_category!r}"
+            )
     except CheckpointError:
-        # When abort_after_instance fires during a subsequent
-        # post-abort save (instance dispatched after the target's
-        # save), the engine wraps the abort sentinel as
-        # ``CheckpointSaveFailed`` and propagates it out. Treat
-        # the wrapped abort the same way as a direct sentinel
-        # propagation when the fixture declares it as a
+        # When the abort fires during a subsequent post-abort save
+        # (instance dispatched after the target's save), the engine wraps
+        # the abort sentinel as ``CheckpointSaveFailed`` and propagates it
+        # out. Treat the wrapped abort like a direct sentinel propagation:
+        # expected-and-swallowed under crash_injection, else paired with a
         # ``node_exception`` first-run failure.
-        if first_run_expected_error is None or not capturing._aborted:  # noqa: SLF001
+        if crash_injection is not None and capturing._aborted:  # noqa: SLF001
+            pass
+        elif first_run_expected_error is None or not capturing._aborted:  # noqa: SLF001
             raise
-        expected_category = first_run_expected_error["category"]
-        assert expected_category == "node_exception", (
-            f"abort_after_instance simulates node_exception; fixture asserts {expected_category!r}"
-        )
+        else:
+            expected_category = first_run_expected_error["category"]
+            assert expected_category == "node_exception", (
+                f"abort_after_instance simulates node_exception; fixture asserts {expected_category!r}"
+            )
     except RuntimeGraphError as e:
-        if first_run_expected_error is None:
+        # crash_injection's simulated crash can surface here too: under
+        # serial fail_fast the abort sentinel is wrapped as
+        # ``CheckpointSaveFailed`` and re-wrapped as a ``NodeException``.
+        # When the abort fired (``_aborted``), swallow it as the expected
+        # crash with no asserted outcome.
+        if crash_injection is not None and capturing._aborted:  # noqa: SLF001
+            pass
+        elif first_run_expected_error is None:
             raise
-        expected_category = first_run_expected_error["category"]
-        assert e.category == expected_category, (
-            f"first-run error category mismatch: actual={e.category!r}, expected={expected_category!r}"
-        )
+        else:
+            expected_category = first_run_expected_error["category"]
+            assert e.category == expected_category, (
+                f"first-run error category mismatch: actual={e.category!r}, expected={expected_category!r}"
+            )
 
     # Capture invocation_id from the latest save (we attached a
     # capturing checkpointer; every save record carries the engine's
@@ -534,12 +605,15 @@ async def _run_one_case(spec: Mapping[str, Any], *, top_level: Mapping[str, Any]
     # and ``instance_N_resume_attempt_count`` assertions.
     for recorder in flaky_per_index_recorders.values():
         recorder.clear()
+    for recorder in instance_execution_recorders.values():
+        recorder.clear()
     # Reset the abort gate so the resume run completes normally.
     # ``_aborted`` being False disables the ``_raise_if_post_abort``
-    # pre-flight check; clearing ``_abort_after_instance`` ensures
+    # pre-flight check; clearing the abort targets ensures
     # ``_maybe_abort`` is also a no-op on the resume path.
     capturing._aborted = False  # noqa: SLF001 — test driver intentional
     capturing._abort_after_instance = None  # noqa: SLF001
+    capturing._abort_after_node = None  # noqa: SLF001
     # Clear the trace so post-resume execution capture is isolated.
     trace.clear()
 
@@ -601,11 +675,19 @@ async def _run_one_case(spec: Mapping[str, Any], *, top_level: Mapping[str, Any]
     # instances_skipped_during_resume — assert against the
     # per-instance attempt recorders (each instance whose body ran
     # appears in the recorder).
+    # flaky_per_index recorders capture execution for retry-resume fixtures;
+    # for a plain-node fan-out (the crash_injection fixture 067) no
+    # flaky_per_index body records, so fall back to the general execution
+    # recorder. The flaky_per_index path stays primary, so existing fixtures
+    # are unchanged.
+    executed_set = set(_flatten_executed_instances(flaky_per_index_recorders))
+    if not executed_set:
+        executed_set = set(_flatten_executed_instances(instance_execution_recorders))
     if "instances_executed_during_resume" in resume_expected:
         expected_executed = sorted(
             int(i) for i in cast(Iterable[Any], resume_expected["instances_executed_during_resume"])
         )
-        actual_executed = sorted(_flatten_executed_instances(flaky_per_index_recorders))
+        actual_executed = sorted(executed_set)
         assert actual_executed == expected_executed, (
             f"instances_executed_during_resume mismatch: "
             f"actual={actual_executed}, expected={expected_executed}"
@@ -614,14 +696,11 @@ async def _run_one_case(spec: Mapping[str, Any], *, top_level: Mapping[str, Any]
         expected_skipped = sorted(
             int(i) for i in cast(Iterable[Any], resume_expected["instances_skipped_during_resume"])
         )
-        actual_executed_set = set(_flatten_executed_instances(flaky_per_index_recorders))
         # An instance is "skipped" if its body did NOT run during resume.
-        # We can validate by asserting it's not in the executed set —
-        # the fixtures specify the disjoint partitioning explicitly.
         for skipped_idx in expected_skipped:
-            assert skipped_idx not in actual_executed_set, (
+            assert skipped_idx not in executed_set, (
                 f"instance {skipped_idx} expected to be skipped on resume "
-                f"but its body ran (recorded attempts: {actual_executed_set})"
+                f"but its body ran (recorded attempts: {executed_set})"
             )
 
     if "invariants" in resume_expected or "invariants" in resume_block:
@@ -667,19 +746,22 @@ def _build_subgraphs_for(
     top_level: Mapping[str, Any],
     *,
     flaky_per_index_recorders: dict[str, dict[int, list[int]]] | None = None,
+    instance_execution_recorders: dict[str, dict[int, list[int]]] | None = None,
 ) -> dict[str, Any]:
     """Build subgraphs from either the case's own ``subgraph`` /
     ``subgraphs`` block or the cases-fixture's top-level shared
     ``subgraph`` block. Each case may declare local subgraphs OR
     inherit from the top level.
 
-    ``flaky_per_index_recorders`` (when supplied) threads through to
-    inner-subgraph build so per-instance flaky bodies inside subgraphs
-    populate the same recorder map the resume assertions read.
+    ``flaky_per_index_recorders`` and ``instance_execution_recorders``
+    (when supplied) thread through to inner-subgraph build so per-instance
+    bodies inside subgraphs populate the recorder maps the resume
+    assertions read.
     """
     return _build_subgraphs(
         {**dict(top_level), **dict(spec)},
         flaky_per_index_recorders=flaky_per_index_recorders,
+        instance_execution_recorders=instance_execution_recorders,
     )
 
 
@@ -687,14 +769,16 @@ def _build_subgraphs(
     spec: Mapping[str, Any],
     *,
     flaky_per_index_recorders: dict[str, dict[int, list[int]]] | None = None,
+    instance_execution_recorders: dict[str, dict[int, list[int]]] | None = None,
 ) -> dict[str, Any]:
     """Build any subgraphs (`subgraph:` or `subgraphs:`) the fixture
     declares. Returns a registry the adapter consumes by name.
 
     Inner subgraphs may declare flaky_per_index nodes (fixture 048+:
     the failing/succeeding scorer node lives in the inner subgraph,
-    not the outer graph). Thread the recorders through so those
-    flaky bodies populate the same per-instance attempt table.
+    not the outer graph) or plain nodes (fixture 067's crash_injection
+    scorer). Thread both recorder maps through so those bodies populate
+    the per-instance attempt / execution tables the resume assertions read.
     """
     subgraph_specs: dict[str, Any] = {}
     if "subgraph" in spec:
@@ -711,6 +795,7 @@ def _build_subgraphs(
             sub_spec,
             trace=sub_trace,
             flaky_per_index_attempt_recorders=flaky_per_index_recorders,
+            instance_execution_recorders=instance_execution_recorders,
         )
         compiled_subgraphs[name] = sub_built.builder.compile()
     return compiled_subgraphs
@@ -1068,3 +1153,41 @@ def _assert_invariants(
         for s in saves:
             for p in s.completed_positions:
                 assert p.fan_out_index is None, f"unexpected fan-out internal save: {p}"
+
+
+# ---------------------------------------------------------------------------
+# crash_injection: after_node boundary (proposal 0070)
+# ---------------------------------------------------------------------------
+
+
+async def test_capturing_checkpointer_aborts_after_node() -> None:
+    # The ``crash_injection: {after_node}`` boundary fires the simulated-crash
+    # sentinel after the save whose record records the named node in
+    # ``completed_positions``. Exercised directly because no v0.58.0 fixture
+    # uses after_node (fixture 067 uses after_fan_out_instance, which covers
+    # the shared abort path end-to-end); this pins the after_node branch.
+    cp = _CapturingCheckpointer(abort_after_node="target")
+    record = CheckpointRecord(
+        invocation_id="inv",
+        correlation_id="c",
+        state={},
+        completed_positions=(NodePosition(namespace=(), node_name="target", step=0),),
+        parent_states=(),
+        last_saved_at=0.0,
+    )
+    with pytest.raises(_AbortAfterInstance):
+        await cp.save("inv", record)
+    assert cp._aborted is True  # noqa: SLF001 — test driver intentional
+
+    # A save whose record does not record the target node does not abort.
+    cp_other = _CapturingCheckpointer(abort_after_node="target")
+    other_record = CheckpointRecord(
+        invocation_id="inv",
+        correlation_id="c",
+        state={},
+        completed_positions=(NodePosition(namespace=(), node_name="other", step=0),),
+        parent_states=(),
+        last_saved_at=0.0,
+    )
+    await cp_other.save("inv", other_record)
+    assert cp_other._aborted is False  # noqa: SLF001 — test driver intentional
