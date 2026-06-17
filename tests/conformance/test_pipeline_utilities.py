@@ -91,7 +91,7 @@ _LAST_DRIVEN_FIXTURE = 38
 # / test_checkpoint.py), not because this runner can't drive them. Fixture
 # 065 (fan-out degrade contribution, proposal 0066) joined when the spec pin
 # advanced to v0.56.0.
-_FAILURE_ISOLATION_FIXTURES = frozenset(range(58, 66))
+_FAILURE_ISOLATION_FIXTURES = frozenset(range(58, 67))
 
 
 def _fixture_paths() -> list[Path]:
@@ -189,6 +189,18 @@ def _unsupported_middleware(spec: dict[str, Any]) -> str | None:
         for entry in node_entries or []:
             if entry.get("type") not in known:
                 return f"per_node.{entry.get('type')}"
+    # Node-nested ``middleware:`` on plain nodes (the shape
+    # ``_translate_node_level_middleware`` lifts) is gated symmetrically — same
+    # plain-node scoping, so the skip-gate and the translator agree on which
+    # nodes carry liftable node middleware. (Reaches only the single-graph
+    # path; cases-shape fixtures are dispatched without this gate.)
+    nodes = cast("dict[str, dict[str, Any]]", spec.get("nodes") or {})
+    for _name, node_spec in nodes.items():
+        if any(k in node_spec for k in ("fan_out", "parallel_branches", "subgraph")):
+            continue
+        for entry in cast("list[dict[str, Any]]", node_spec.get("middleware") or []):
+            if entry.get("type") not in known:
+                return f"node.{entry.get('type')}"
     return None
 
 
@@ -347,6 +359,32 @@ def _translate_fan_out_instance_middleware(
             "list[dict[str, Any]]",
             fan_out_cfg.get("instance_middleware") or [],
         )
+        if not entries:
+            continue
+        out[node_name] = [_build_middleware(cfg, sinks, clock) for cfg in entries]
+    return out
+
+
+def _translate_node_level_middleware(
+    spec: Mapping[str, Any],
+    sinks: CaptureSinks,
+    clock: Callable[[], float] | None = None,
+) -> dict[str, list[Middleware]]:
+    """Walk ``spec.nodes`` for a node-nested ``middleware:`` list on a plain
+    function node (the graph-engine per-node middleware shape that cases-style
+    fixtures use, e.g. fixture 066 Case 2's node-level failure isolation) and
+    translate each into Middleware instances, keyed by node name. Composite
+    nodes are skipped because their middleware placements have dedicated
+    translators: fan-out instance (``_translate_fan_out_instance_middleware``),
+    parallel-branches branch (``_translate_parallel_branches_branch_middleware``),
+    and subgraph parent-node middleware (the top-level ``middleware.per_node``
+    block via ``_translate_middleware_block``)."""
+    out: dict[str, list[Middleware]] = {}
+    nodes = cast("dict[str, dict[str, Any]]", spec.get("nodes") or {})
+    for node_name, node_spec in nodes.items():
+        if any(k in node_spec for k in ("fan_out", "parallel_branches", "subgraph")):
+            continue
+        entries = cast("list[dict[str, Any]]", node_spec.get("middleware") or [])
         if not entries:
             continue
         out[node_name] = [_build_middleware(cfg, sinks, clock) for cfg in entries]
@@ -545,6 +583,12 @@ async def _run_one(spec: Mapping[str, Any], monkeypatch: pytest.MonkeyPatch) -> 
             captured_isolation.append(event)
 
     graph_mw, node_mw = _translate_middleware_block(spec.get("middleware"), sinks, clock)
+    # Node-nested ``middleware:`` (e.g. fixture 066 Case 2's node-level failure
+    # isolation) merges into the per-node map alongside any top-level
+    # ``middleware.per_node`` entries. Single-run fixtures (run_count == 1)
+    # reuse this ``node_mw`` directly below.
+    for nl_node, nl_mws in _translate_node_level_middleware(spec, sinks, clock).items():
+        node_mw.setdefault(nl_node, []).extend(nl_mws)
     fan_out_inst_mw = _translate_fan_out_instance_middleware(spec, sinks, clock)
     del monkeypatch  # retained in signature for future stubs that need it
 
@@ -670,11 +714,12 @@ async def _run_one(spec: Mapping[str, Any], monkeypatch: pytest.MonkeyPatch) -> 
     observer_fixtures: dict[str, ObserverFixture] = {}
     for run_idx in range(run_count):
         run_sinks = sinks if run_count == 1 else CaptureSinks()
-        run_graph_mw, run_node_mw = (
-            (graph_mw, node_mw)
-            if run_count == 1
-            else _translate_middleware_block(spec.get("middleware"), run_sinks, clock)
-        )
+        if run_count == 1:
+            run_graph_mw, run_node_mw = graph_mw, node_mw
+        else:
+            run_graph_mw, run_node_mw = _translate_middleware_block(spec.get("middleware"), run_sinks, clock)
+            for nl_node, nl_mws in _translate_node_level_middleware(spec, run_sinks, clock).items():
+                run_node_mw.setdefault(nl_node, []).extend(nl_mws)
         run_fan_out_inst_mw = (
             fan_out_inst_mw
             if run_count == 1
@@ -845,6 +890,23 @@ def _assert_failure_isolation_event(
             assert ev.caught_exception.category == ce["category"]
         if "message" in ce:
             assert ev.caught_exception.message == ce["message"]
+        # Cause chain (proposal 0068). Each expected link is subset-matched on
+        # the keys it supplies — carrier links pin only {carrier, category}
+        # (their engine-internal message is not asserted), non-carrier links
+        # pin {carrier, category, message}.
+        if "chain" in ce:
+            expected_chain = cast("list[Mapping[str, Any]]", ce["chain"])
+            actual_chain = ev.caught_exception.chain
+            assert len(actual_chain) == len(expected_chain), (
+                f"chain length mismatch: actual={actual_chain}, expected={expected_chain}"
+            )
+            for actual_link, expected_link in zip(actual_chain, expected_chain, strict=True):
+                if "carrier" in expected_link:
+                    assert actual_link.carrier == expected_link["carrier"]
+                if "category" in expected_link:
+                    assert actual_link.category == expected_link["category"]
+                if "message" in expected_link:
+                    assert actual_link.message == expected_link["message"]
 
 
 def _assert_final_state(

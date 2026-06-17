@@ -256,9 +256,12 @@ Like `RetryMiddleware`, it catches `Exception` only; `BaseException`
 On a catch, the middleware dispatches a `FailureIsolatedEvent` onto the
 observer stream. It is a distinct event variant, not a node event: it
 carries the `event_name`, the wrapped node's lineage identity, the input
-and degraded states, and a `CaughtException` record holding the
-exception's `category` (when it has one) and message. Observers narrow
-on it with `isinstance(event, FailureIsolatedEvent)`. The bundled OTel
+and degraded states, and a `CaughtException` record. That record holds a
+derived `category` (when the cause has one) and `message` for simple
+consumers, plus a `chain` of cause links (`CauseLink`) from the caught
+exception down to the originating raise, with graph-engine carrier
+wrappers flagged so a consumer can skip them. Observers narrow on it with
+`isinstance(event, FailureIsolatedEvent)`. The bundled OTel
 and Langfuse observers render it as a marker span / observation so the
 catch shows up alongside the node's own span. The default emission path
 is the observer stream only, with no logging-library dependency;

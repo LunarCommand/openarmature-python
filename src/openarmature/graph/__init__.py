@@ -38,6 +38,7 @@ from .errors import (
 )
 from .events import (
     CaughtException,
+    CauseLink,
     FailureIsolatedEvent,
     InvocationCompletedEvent,
     InvocationStartedEvent,
@@ -71,6 +72,7 @@ from .subgraph import SubgraphNode
 __all__ = [
     "END",
     "CaughtException",
+    "CauseLink",
     "CompileError",
     "CompiledGraph",
     "ConditionalEdge",
