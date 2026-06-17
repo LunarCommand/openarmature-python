@@ -49,6 +49,7 @@ from openarmature.checkpoint import (
     NodePosition,
 )
 from openarmature.graph import (
+    FailureIsolationMiddleware,
     RuntimeGraphError,
     State,
 )
@@ -68,8 +69,11 @@ CONFORMANCE_DIR = (
 # rather than relying on the test runner's file-glob to filter the
 # missing fixture out. 067 (crash-injection fan-out resume, proposal
 # 0070) is a crash/resume fixture this runner owns; it joined at v0.58.0.
+# 069 (fan-out degrade refinements, proposal 0069, v0.59.0) is a mixed
+# fixture: this runner drives its crash_injection/resume case and skips the
+# plain FI-degrade cases (owned by test_pipeline_utilities.py).
 _CHECKPOINT_FIXTURE_NUMBERS: frozenset[int] = frozenset(
-    (set(range(24, 32)) - {28}) | set(range(48, 57)) | {67}
+    (set(range(24, 32)) - {28}) | set(range(48, 57)) | {67, 69}
 )
 
 # Fixtures that need resume-aware test seams the conformance adapter
@@ -277,12 +281,31 @@ async def test_checkpoint_fixture(fixture_path: Path) -> None:
         )
     spec = _load(fixture_path)
     if "cases" in spec:
+        cases_run = 0
         for case in cast("list[dict[str, Any]]", spec["cases"]):
             case_name = case.get("name", "<unnamed>")
+            # This runner drives the checkpoint cases. A mixed fixture (069)
+            # interleaves plain FI-degrade cases owned by
+            # test_pipeline_utilities.py; skip a case with no checkpoint
+            # concern. The marker is checkpointer / resume / crash_injection —
+            # NOT resume alone: fixtures like 024 / 026 / 030 / 055 assert
+            # checkpoint behavior (saves, record shape, not-found,
+            # schema_version) with a checkpointer but no resume.
+            if not any(k in case for k in ("checkpointer", "resume", "crash_injection")):
+                continue
+            cases_run += 1
             try:
                 await _run_one_case(case, top_level=spec)
             except AssertionError as e:
                 raise AssertionError(f"case {case_name!r}: {e}") from e
+        # A cases-shaped fixture in this runner's set that drives zero cases
+        # (all skipped as non-checkpoint) would pass vacuously; fail loudly
+        # instead so a routing mistake surfaces.
+        assert cases_run > 0, (
+            f"{fixture_id}: cases-shaped fixture drove zero cases in this runner "
+            f"(all skipped as non-checkpoint). Fix the routing or remove it from "
+            f"_CHECKPOINT_FIXTURE_NUMBERS."
+        )
         return
     await _run_one_case(spec, top_level=spec)
 
@@ -367,6 +390,56 @@ def _find_crash_injection(spec: Mapping[str, Any]) -> tuple[int | None, str | No
     return None, None, None
 
 
+def _translate_fi_instance_middleware(
+    spec: Mapping[str, Any],
+) -> dict[str, list[FailureIsolationMiddleware]]:
+    """Translate a fan-out node's ``instance_middleware: [failure_isolation]``
+    into FailureIsolationMiddleware instances keyed by node name, for
+    build_graph's ``fan_out_instance_middleware``. Scoped to the static
+    ``degraded_update`` mapping form (the only shape the checkpoint fixtures
+    use, e.g. fixture 069 Case 3's degrade-survives-resume); the callable
+    forms are owned by test_pipeline_utilities.py, which drives the plain
+    FI-degrade cases."""
+    out: dict[str, list[FailureIsolationMiddleware]] = {}
+    nodes = cast("dict[str, dict[str, Any]]", spec.get("nodes") or {})
+    for node_name, node_spec in nodes.items():
+        fan_out = node_spec.get("fan_out")
+        if not isinstance(fan_out, dict):
+            continue
+        entries = cast(
+            "list[dict[str, Any]]",
+            cast("Mapping[str, Any]", fan_out).get("instance_middleware") or [],
+        )
+        mws: list[FailureIsolationMiddleware] = []
+        for entry in entries:
+            # Only failure_isolation is translated here. Other instance
+            # middleware (e.g. fixture 053's retry) is left unwired, as this
+            # runner did before — those fixtures drive their behavior via
+            # flaky_per_index seams, not a wired middleware.
+            if entry.get("type") != "failure_isolation":
+                continue
+            if "degraded_update" not in entry:
+                raise ValueError(
+                    f"fan-out node {node_name!r}: failure_isolation instance middleware "
+                    f"entry is missing the required 'degraded_update'"
+                )
+            degraded = entry["degraded_update"]
+            if not isinstance(degraded, dict):
+                raise ValueError(
+                    f"fan-out node {node_name!r}: checkpoint runner supports only the static "
+                    f"degraded_update form for instance middleware"
+                )
+            mws.append(
+                FailureIsolationMiddleware(
+                    degraded_update=dict(cast("Mapping[str, Any]", degraded)),
+                    event_name=entry.get("event_name", "degraded"),
+                )
+            )
+        if mws:
+            out[node_name] = mws
+    return out
+
+
 def _strip_abort_directive(spec: Mapping[str, Any]) -> Mapping[str, Any]:
     """Return a fresh spec dict with any ``abort_after_instance``
     directive removed from fan-out nodes. The engine doesn't recognize
@@ -421,6 +494,7 @@ async def _run_one_case(spec: Mapping[str, Any], *, top_level: Mapping[str, Any]
         trace=trace,
         flaky_per_index_attempt_recorders=flaky_per_index_recorders,
         instance_execution_recorders=instance_execution_recorders,
+        fan_out_instance_middleware=_translate_fi_instance_middleware(sanitized_spec),
     )
     builder = built.builder
 

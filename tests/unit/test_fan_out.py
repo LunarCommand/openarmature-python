@@ -33,14 +33,17 @@ from pydantic import Field
 from openarmature.graph import (
     END,
     CompiledGraph,
+    FailureIsolationMiddleware,
     FanOutCountModeAmbiguous,
     FanOutFieldNotList,
     GraphBuilder,
     NodeException,
+    ReducerError,
     RetryConfig,
     RetryMiddleware,
     State,
     append,
+    concat_flatten,
     deterministic_backoff,
 )
 
@@ -363,6 +366,55 @@ async def test_fail_fast_propagates_first_failure_with_parent_recoverable_state(
     assert excinfo.value.node_name == "process"
     assert excinfo.value.recoverable_state.items == [0, 1, 2]
     assert excinfo.value.recoverable_state.results == []
+
+
+class _StrictReducerParentState(State):
+    items: list[int] = Field(default_factory=list[int])
+    # concat_flatten requires every collected element to be a list; a degrade
+    # that nulls the slot contributes None, which the reducer rejects.
+    results: Annotated[list[int], concat_flatten] = Field(default_factory=list[int])
+
+
+async def test_degrade_null_slot_under_strict_reducer_raises_reducer_error() -> None:
+    # Proposal 0069 refinement (2) caveat: an absent collect_field is a
+    # graceful null slot and the fan-in does not raise, but under a
+    # strict-element reducer (concat_flatten / merge_all) the null contribution
+    # still raises ReducerError. The degrade-path .get() null is not suppressed
+    # because the reducer runs in the engine merge, downstream of the fan-in. A
+    # callable degrade is used because a static degrade omitting collect_field
+    # is a compile error (proposal 0066).
+    async def always_fail(_state: WorkerState) -> Mapping[str, Any]:
+        raise RuntimeError("instance down")
+
+    inner_builder: GraphBuilder[WorkerState] = GraphBuilder(WorkerState)
+    inner_builder.set_entry("compute")
+    inner_builder.add_node("compute", always_fail)
+    inner_builder.add_edge("compute", END)
+    inner = inner_builder.compile()
+
+    builder: GraphBuilder[_StrictReducerParentState] = GraphBuilder(_StrictReducerParentState)
+    builder.set_entry("process")
+    builder.add_fan_out_node(
+        "process",
+        subgraph=inner,
+        items_field="items",
+        item_field="item",
+        collect_field="result",
+        target_field="results",
+        instance_middleware=(
+            FailureIsolationMiddleware(
+                # Callable degrade omitting collect_field -> runtime null slot.
+                degraded_update=lambda _state: {},
+                event_name="degraded",
+            ),
+        ),
+    )
+    builder.add_edge("process", END)
+    compiled = builder.compile()
+
+    with pytest.raises(ReducerError):
+        await compiled.invoke(_StrictReducerParentState(items=[0]))
+    await compiled.drain()
 
 
 class CollectParentState(State):

@@ -32,7 +32,7 @@
 
 [manifest]
 implementation = "openarmature-python"
-spec_pin = "v0.58.0"
+spec_pin = "v0.59.0"
 
 # Status values:
 #   implemented   — shipped behavior matches the proposal's contract
@@ -661,5 +661,21 @@ since = "0.14.0"
 # 068 (failure-mock cause chain) pins 0068's outermost-wins derivation via the
 # mock ``cause``.
 [proposals."0070"]
+status = "implemented"
+since = "0.14.0"
+
+# Spec v0.59.0 (proposal 0069).  Fan-out degrade contribution refinements
+# (pipeline-utilities §9.3, refining 0066).  Three refinements python already
+# satisfied: (1) an omitted ``extra_outputs`` source contributes NULL at the
+# instance's positional slot (index-aligned with target_field), not "not
+# contributed"; (2) an absent ``collect_field`` on any fan-in path is a null
+# slot and the fan-in MUST NOT raise -- with the caveat that under a strict-
+# element reducer (``concat_flatten`` / ``merge_all``) a null contribution
+# still raises ``ReducerError`` (python does not suppress it; the reducer runs
+# in the engine merge); (3) a degraded slot survives a checkpoint + resume
+# round-trip.  No library behavior change.  Fixture 069's FI-degrade cases run
+# in test_pipeline_utilities, its crash_injection/resume case in
+# test_checkpoint; the strict-reducer caveat has a focused unit test.
+[proposals."0069"]
 status = "implemented"
 since = "0.14.0"
