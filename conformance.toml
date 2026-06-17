@@ -32,7 +32,7 @@
 
 [manifest]
 implementation = "openarmature-python"
-spec_pin = "v0.59.0"
+spec_pin = "v0.60.0"
 
 # Status values:
 #   implemented   — shipped behavior matches the proposal's contract
@@ -679,3 +679,11 @@ since = "0.14.0"
 [proposals."0069"]
 status = "implemented"
 since = "0.14.0"
+
+# Spec v0.60.0 (proposal 0071).  Conformance-adapter failure-mock directive
+# catalog (conformance-adapter §5.1) -- descriptive documentation of the
+# failure-mock family the adapter already implements.
+[proposals."0071"]
+status = "textual-only"
+since = "0.14.0"
+note = "Descriptive catalog of the failure-mock family (flaky + failure_sequence, flaky_by_index, flaky_per_index, flaky_instance_only, flaky_resume_aware) that the adapter already implements and the existing retry / failure-isolation / checkpoint-resume fixtures exercise; no new behavior, no new fixtures, no code change. Mirrors 0055's textual-only treatment of the conformance-adapter capability. The success-state naming drift (success_update / on_success / success_compute) is documented as-is by the proposal and left unchanged."
