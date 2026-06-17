@@ -87,7 +87,7 @@ def _build_cause_chain(exc: Exception) -> tuple[CauseLink, ...]:
         category = getattr(current, "category", None)
         links.append(
             CauseLink(
-                category=category if isinstance(category, str) else None,
+                category=category if isinstance(category, str) and category else None,
                 message=str(current),
                 carrier=isinstance(current, NodeException),
             )
