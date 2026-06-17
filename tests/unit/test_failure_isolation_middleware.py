@@ -18,6 +18,7 @@ from pydantic import Field
 from openarmature.graph import (
     END,
     CaughtException,
+    CauseLink,
     FailureIsolatedEvent,
     FailureIsolationMiddleware,
     GraphBuilder,
@@ -346,6 +347,95 @@ async def test_cyclic_cause_chain_terminates() -> None:
 
     assert out == {"result": []}
     assert len(events) == 1
+
+
+# ---------------------------------------------------------------------------
+# Cause chain (proposal 0068)
+# ---------------------------------------------------------------------------
+
+
+async def test_chain_records_carrier_then_categorized_cause() -> None:
+    # Instance-style placement: one engine carrier over a categorized
+    # originating cause. The chain records the carrier (flagged) then the
+    # non-carrier cause; the derived category is the non-carrier's.
+    events: list[Any] = []
+    disp_token = _set_active_dispatch(lambda e: events.append(e))
+    carrier = NodeException(node_name="work", cause=_TransientError("rate limited"), recoverable_state={})
+    try:
+        mw = FailureIsolationMiddleware(degraded_update={"result": []}, event_name="iso")
+        await mw("s", _raises(carrier))
+    finally:
+        _reset_active_dispatch(disp_token)
+
+    assert events[0].caught_exception.chain == (
+        CauseLink(category="node_exception", message=str(carrier), carrier=True),
+        CauseLink(category="provider_rate_limit", message="rate limited", carrier=False),
+    )
+
+
+async def test_chain_node_level_is_single_non_carrier_link() -> None:
+    # Node-level placement: the middleware catches the raw error (no carrier),
+    # so the chain is a single non-carrier link.
+    events: list[Any] = []
+    disp_token = _set_active_dispatch(lambda e: events.append(e))
+    try:
+        mw = FailureIsolationMiddleware(degraded_update={"result": []}, event_name="iso")
+        await mw("s", _raises(_TransientError("rate limited")))
+    finally:
+        _reset_active_dispatch(disp_token)
+
+    assert events[0].caught_exception.chain == (
+        CauseLink(category="provider_rate_limit", message="rate limited", carrier=False),
+    )
+
+
+async def test_chain_records_nested_carriers_then_cause() -> None:
+    # Nested carriers (carrier -> carrier -> categorized cause), the case the
+    # pinned fixture 066 does not cover: both carriers are recorded and
+    # flagged, then the originating link, and the derived category is the
+    # originating one.
+    events: list[Any] = []
+    disp_token = _set_active_dispatch(lambda e: events.append(e))
+    inner = NodeException(node_name="inner", cause=_TransientError("rate limited"), recoverable_state={})
+    outer = NodeException(node_name="outer", cause=inner, recoverable_state={})
+    try:
+        mw = FailureIsolationMiddleware(degraded_update={"result": []}, event_name="iso")
+        await mw("s", _raises(outer))
+    finally:
+        _reset_active_dispatch(disp_token)
+
+    chain = events[0].caught_exception.chain
+    assert [(link.category, link.carrier) for link in chain] == [
+        ("node_exception", True),
+        ("node_exception", True),
+        ("provider_rate_limit", False),
+    ]
+    assert events[0].caught_exception.category == "provider_rate_limit"
+
+
+async def test_chain_carries_both_non_carrier_links_on_recategorization() -> None:
+    # Two non-carrier links (a re-categorized surface over a deeper cause): the
+    # chain carries both, and the derived category is the OUTERMOST non-carrier
+    # (proposal 0068's surface-wins derivation).
+    events: list[Any] = []
+    disp_token = _set_active_dispatch(lambda e: events.append(e))
+    surface = _NonTransientError("misconfigured")
+    surface.__cause__ = _TransientError("rate limited")
+    carrier = NodeException(node_name="work", cause=surface, recoverable_state={})
+    try:
+        mw = FailureIsolationMiddleware(degraded_update={"result": []}, event_name="iso")
+        await mw("s", _raises(carrier))
+    finally:
+        _reset_active_dispatch(disp_token)
+
+    chain = events[0].caught_exception.chain
+    assert [(link.category, link.carrier) for link in chain] == [
+        ("node_exception", True),
+        ("provider_invalid_request", False),
+        ("provider_rate_limit", False),
+    ]
+    assert events[0].caught_exception.category == "provider_invalid_request"
+    assert events[0].caught_exception.message == "misconfigured"
 
 
 async def test_no_event_outside_invocation() -> None:

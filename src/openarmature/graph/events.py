@@ -659,20 +659,52 @@ class LlmFailedEvent:
     caller_invocation_metadata: Mapping[str, AttributeValue] | None = None
 
 
+# Spec: pipeline-utilities §6.3 cause chain (proposal 0068). A ``carrier``
+# link is a graph-engine §4 ``node_exception`` wrapper the engine applies at a
+# non-node placement (§9.7 instance / §11.7 branch / §9.6 / §11.6 parent-node
+# middleware); consumers grouping by the originating failure skip carriers via
+# the flag.
+@dataclass(frozen=True)
+class CauseLink:
+    """One link in a caught exception's resolved cause chain.
+
+    - ``category``: the link's failure category when it carries one (a
+      string), else ``None``.
+    - ``message``: the link's own message (the ``str`` of the exception).
+    - ``carrier``: ``True`` when the link is an engine-applied
+      ``node_exception`` carrier wrapper, ``False`` for an ordinary
+      (non-carrier) exception.
+    """
+
+    category: str | None
+    message: str
+    carrier: bool
+
+
+# Spec: pipeline-utilities §6.3 (proposals 0050, 0065, 0068). ``chain`` is the
+# full ordered cause chain; ``category`` / ``message`` are a derivation over it
+# — the outermost non-carrier link whose category is a non-empty string (else
+# ``None`` and the outermost non-carrier link's message). The derivation
+# reproduces 0065's single-value results; the chain adds the full provenance.
 @dataclass(frozen=True)
 class CaughtException:
     """Structured record of an exception caught by
     ``FailureIsolationMiddleware``.
 
-    - ``category``: the exception's failure category when it carries
-      one (e.g. an llm-provider error's ``category`` attribute), else
-      ``None`` for a bare exception that carries no category.
-    - ``message``: the human-readable exception message (``str(exc)``);
-      the empty string when the exception carried no message.
+    - ``category``: the caught failure's category (the derived single
+      value for simple consumers), or ``None`` when no non-carrier link
+      in the chain carries a category.
+    - ``message``: the message of the link ``category`` is derived from,
+      or (when no link carries a category) of the outermost non-carrier
+      link.
+    - ``chain``: the ordered cause chain, outermost (the caught
+      exception, index 0) to innermost (the originating raise), one
+      :class:`CauseLink` per exception.
     """
 
     category: str | None
     message: str
+    chain: tuple[CauseLink, ...]
 
 
 # Spec: realizes pipeline-utilities §6.3 failure-isolation middleware
@@ -706,7 +738,8 @@ class FailureIsolatedEvent:
     - ``post_state``: the degraded partial update the middleware
       returned in place of the node's output.
     - ``caught_exception``: a :class:`CaughtException` record of the
-      caught exception (category + message).
+      caught exception (its derived category / message and the full
+      cause ``chain``).
     """
 
     event_name: str
@@ -721,6 +754,7 @@ class FailureIsolatedEvent:
 
 __all__ = [
     "CaughtException",
+    "CauseLink",
     "FailureIsolatedEvent",
     "FanOutEventConfig",
     "InvocationCompletedEvent",

@@ -32,7 +32,7 @@
 
 [manifest]
 implementation = "openarmature-python"
-spec_pin = "v0.56.0"
+spec_pin = "v0.57.0"
 
 # Status values:
 #   implemented   — shipped behavior matches the proposal's contract
@@ -633,5 +633,18 @@ since = "0.14.0"
 # counterpart skips an uncovered projected field.  Fixture 065 (four
 # cases) passes.
 [proposals."0066"]
+status = "implemented"
+since = "0.14.0"
+
+# Spec v0.57.0 (proposal 0068).  Failure-isolation event structured cause
+# chain (pipeline-utilities §6.3).  ``caught_exception`` gains a ``chain`` of
+# cause links (``{category, message, carrier}``, outermost->innermost), with
+# graph-engine §4 ``node_exception`` carriers flagged.  The existing
+# ``category`` / ``message`` are redefined as a derivation over the chain (the
+# outermost non-carrier link carrying a category), superseding 0065's single
+# "originating cause" prose; the derivation reproduces 0065's values, so
+# fixture 064 is unchanged.  Fixture 066 (three cases: instance-site carrier
+# chain, node-level single link, uncategorized null category) passes.
+[proposals."0068"]
 status = "implemented"
 since = "0.14.0"
