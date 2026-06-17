@@ -210,6 +210,31 @@ class _CategorizedException(Exception):
         self.category = category
 
 
+# Conformance-adapter §5.1 ``cause`` (proposal 0070): a failure mock's raised
+# error MAY chain to an originating cause, recursively, so a consumer walking
+# the cause chain (pipeline-utilities §6.3 failure isolation) observes each
+# link's category / message.
+def _build_mock_cause(cause_spec: Mapping[str, Any] | None) -> Exception | None:
+    """Build the chained originating exception from a failure mock's ``cause``
+    directive. ``cause: {category, message, cause: {...}}`` nests recursively;
+    each link becomes a ``_CategorizedException`` (or a bare ``Exception`` when
+    its category is null) linked via ``__cause__``. Returns ``None`` when no
+    cause is configured."""
+    if cause_spec is None:
+        return None
+    inner = _build_mock_cause(cause_spec.get("cause"))
+    message = str(cause_spec.get("message", ""))
+    category = cause_spec.get("category")
+    exc: Exception = (
+        _CategorizedException(message=message, category=category)
+        if isinstance(category, str) and category
+        else Exception(message)
+    )
+    if inner is not None:
+        exc.__cause__ = inner
+    return exc
+
+
 def _make_pure_update_fn(
     node_name: str,
     update: Mapping[str, Any],
@@ -512,10 +537,16 @@ def _make_flaky_fn(
             entry = sequence[idx]
             if entry is None:
                 return copy.deepcopy(success_update)
-            raise _CategorizedException(
+            # An entry MAY carry a recursive ``cause`` (proposal 0070 §5.1)
+            # that chains the raised error to an originating cause.
+            cause_exc = _build_mock_cause(entry.get("cause"))
+            exc = _CategorizedException(
                 message=entry.get("message", "flaky"),
                 category=entry.get("category", "provider_unavailable"),
             )
+            if cause_exc is not None:
+                raise exc from cause_exc
+            raise exc
         return copy.deepcopy(success_update)
 
     return fn
@@ -536,6 +567,32 @@ def _wrap_with_sleep(
         return await fn(state)
 
     return fn_with_sleep
+
+
+def _wrap_with_execution_recorder(
+    fn: Callable[[Any], Awaitable[Mapping[str, Any]]],
+    node_name: str,
+    recorders: dict[str, dict[int, list[int]]],
+) -> Callable[[Any], Awaitable[Mapping[str, Any]]]:
+    """Wrap a node body so that, when it runs inside a fan-out instance, it
+    records the executing instance's ``current_fan_out_index()`` into
+    ``recorders`` (keyed by node name then index). Lets the checkpoint resume
+    driver tell which fan-out instances executed vs. rolled forward for a
+    plain-node fan-out (e.g. the crash_injection fixture 067), where no
+    ``flaky_per_index`` body records execution. Records at body entry, so an
+    instance whose body ran counts as executed even if it then fails."""
+    from openarmature.observability.correlation import (  # noqa: PLC0415
+        current_attempt_index,
+        current_fan_out_index,
+    )
+
+    async def fn_recording(state: Any) -> Mapping[str, Any]:
+        idx = current_fan_out_index()
+        if idx is not None:
+            recorders.setdefault(node_name, {}).setdefault(idx, []).append(current_attempt_index())
+        return await fn(state)
+
+    return fn_recording
 
 
 @dataclass(frozen=True)
@@ -658,6 +715,7 @@ def build_graph(
     fan_out_instance_middleware: Mapping[str, Sequence[Any]] | None = None,
     parallel_branches_branch_middleware: Mapping[str, Mapping[str, Sequence[Any]]] | None = None,
     flaky_per_index_attempt_recorders: dict[str, dict[int, list[int]]] | None = None,
+    instance_execution_recorders: dict[str, dict[int, list[int]]] | None = None,
 ) -> BuiltGraph:
     """Translate a graph-shaped fixture block into a `BuiltGraph`.
 
@@ -766,6 +824,13 @@ def build_graph(
         sleep_ms = node_spec.get("sleep_ms")
         if sleep_ms is not None:
             body = _wrap_with_sleep(body, int(sleep_ms))
+
+        # Record per-instance execution for plain-node fan-outs so the
+        # checkpoint resume driver can tell executed from rolled-forward
+        # instances. flaky_per_index records its own per-instance attempts,
+        # so it is skipped here; this covers the rest.
+        if instance_execution_recorders is not None and "flaky_per_index" not in node_spec:
+            body = _wrap_with_execution_recorder(body, node_name, instance_execution_recorders)
 
         builder.add_node(node_name, body, middleware=per_node_mw)
 

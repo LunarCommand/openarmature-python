@@ -32,7 +32,7 @@
 
 [manifest]
 implementation = "openarmature-python"
-spec_pin = "v0.57.0"
+spec_pin = "v0.58.0"
 
 # Status values:
 #   implemented   — shipped behavior matches the proposal's contract
@@ -646,5 +646,20 @@ since = "0.14.0"
 # fixture 064 is unchanged.  Fixture 066 (three cases: instance-site carrier
 # chain, node-level single link, uncategorized null category) passes.
 [proposals."0068"]
+status = "implemented"
+since = "0.14.0"
+
+# Spec v0.58.0 (proposal 0070).  Conformance-adapter crash/resume vocabulary,
+# crash-injection, and cause-chaining (conformance-adapter §5.1 / §5.6 / §5.8).
+# Two new adapter capabilities: ``crash_injection`` (``after_fan_out_instance``
+# + ``after_node``) simulates a crash at a checkpoint boundary independent of
+# an instance failure, and a recursive mock ``cause`` chains a failure mock's
+# raised error to an originating cause.  The crash/resume + saved-record +
+# resume-outcome directives the proposal formalizes were already implemented.
+# Fixture 067 (crash-injection fan-out resume) drives after_fan_out_instance
+# end-to-end; after_node has a unit test (no fixture exercises it).  Fixture
+# 068 (failure-mock cause chain) pins 0068's outermost-wins derivation via the
+# mock ``cause``.
+[proposals."0070"]
 status = "implemented"
 since = "0.14.0"

@@ -84,14 +84,15 @@ def _load(path: Path) -> dict[str, Any]:
 # the `cases:` shape carries seeded-record + migrations + resume blocks.
 _LAST_DRIVEN_FIXTURE = 38
 
-# Failure-isolation fixtures (058-065, proposals 0050 §6.3 + 0065 + 0066)
-# are middleware fixtures this runner handles. They sit past
-# _LAST_DRIVEN_FIXTURE only because the 039-057 range (state migration /
+# Failure-isolation fixtures (058-066 + 068, proposals 0050 §6.3 / 0065 /
+# 0066 / 0068 / 0070) are middleware fixtures this runner handles. They sit
+# past _LAST_DRIVEN_FIXTURE only because the 039-057 range (state migration /
 # checkpoint fan-out) is owned by dedicated runners (test_state_migration.py
 # / test_checkpoint.py), not because this runner can't drive them. Fixture
-# 065 (fan-out degrade contribution, proposal 0066) joined when the spec pin
-# advanced to v0.56.0.
-_FAILURE_ISOLATION_FIXTURES = frozenset(range(58, 67))
+# 066 (cause chain, 0068) joined at v0.57.0; 068 (failure-mock cause chain,
+# 0070) at v0.58.0. Fixture 067 (crash-injection fan-out resume) is a
+# checkpoint fixture owned by test_checkpoint.py, hence the gap at 67.
+_FAILURE_ISOLATION_FIXTURES = frozenset(range(58, 67)) | {68}
 
 
 def _fixture_paths() -> list[Path]:
