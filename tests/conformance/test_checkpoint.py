@@ -281,6 +281,7 @@ async def test_checkpoint_fixture(fixture_path: Path) -> None:
         )
     spec = _load(fixture_path)
     if "cases" in spec:
+        cases_run = 0
         for case in cast("list[dict[str, Any]]", spec["cases"]):
             case_name = case.get("name", "<unnamed>")
             # This runner drives the checkpoint cases. A mixed fixture (069)
@@ -292,10 +293,19 @@ async def test_checkpoint_fixture(fixture_path: Path) -> None:
             # schema_version) with a checkpointer but no resume.
             if not any(k in case for k in ("checkpointer", "resume", "crash_injection")):
                 continue
+            cases_run += 1
             try:
                 await _run_one_case(case, top_level=spec)
             except AssertionError as e:
                 raise AssertionError(f"case {case_name!r}: {e}") from e
+        # A cases-shaped fixture in this runner's set that drives zero cases
+        # (all skipped as non-checkpoint) would pass vacuously; fail loudly
+        # instead so a routing mistake surfaces.
+        assert cases_run > 0, (
+            f"{fixture_id}: cases-shaped fixture drove zero cases in this runner "
+            f"(all skipped as non-checkpoint). Fix the routing or remove it from "
+            f"_CHECKPOINT_FIXTURE_NUMBERS."
+        )
         return
     await _run_one_case(spec, top_level=spec)
 
@@ -408,10 +418,16 @@ def _translate_fi_instance_middleware(
             # flaky_per_index seams, not a wired middleware.
             if entry.get("type") != "failure_isolation":
                 continue
+            if "degraded_update" not in entry:
+                raise ValueError(
+                    f"fan-out node {node_name!r}: failure_isolation instance middleware "
+                    f"entry is missing the required 'degraded_update'"
+                )
             degraded = entry["degraded_update"]
             if not isinstance(degraded, dict):
                 raise ValueError(
-                    "checkpoint runner supports only the static degraded_update form for instance middleware"
+                    f"fan-out node {node_name!r}: checkpoint runner supports only the static "
+                    f"degraded_update form for instance middleware"
                 )
             mws.append(
                 FailureIsolationMiddleware(

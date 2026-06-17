@@ -542,6 +542,7 @@ async def test_pipeline_utility_fixture(
         shared_subgraph_blocks = {
             k: spec[k] for k in ("subgraph", "subgraph_with_idx", "subgraphs") if k in spec
         }
+        cases_run = 0
         for case in spec["cases"]:
             case_name = case.get("name", "<unnamed>")
             # Checkpoint-concern cases (fixture 069 Case 3) are owned by
@@ -549,6 +550,7 @@ async def test_pipeline_utility_fixture(
             # that runner's: checkpointer / resume / crash_injection.
             if any(k in case for k in ("checkpointer", "resume", "crash_injection")):
                 continue
+            cases_run += 1
             merged: dict[str, Any] = dict(case)
             # Compile-error cases (065 Case 2) nest the graph under ``graph:``
             # (the graph-engine fixture 007 convention) so it sits beside
@@ -563,6 +565,14 @@ async def test_pipeline_utility_fixture(
                 await _run_one(merged, monkeypatch)
             except AssertionError as e:
                 raise AssertionError(f"case {case_name!r}: {e}") from e
+        # A cases-shaped fixture in this runner's set that drives zero cases
+        # (all skipped as checkpoint-owned) would pass vacuously; fail loudly
+        # instead so a routing mistake surfaces.
+        assert cases_run > 0, (
+            f"{fixture_id}: cases-shaped fixture drove zero cases in this runner "
+            f"(all skipped as checkpoint-owned). Fix the routing or remove it from "
+            f"_FAILURE_ISOLATION_FIXTURES."
+        )
         return
 
     if (hit := _unsupported_directive(spec)) is not None:
