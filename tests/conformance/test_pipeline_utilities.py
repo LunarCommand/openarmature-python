@@ -84,15 +84,16 @@ def _load(path: Path) -> dict[str, Any]:
 # the `cases:` shape carries seeded-record + migrations + resume blocks.
 _LAST_DRIVEN_FIXTURE = 38
 
-# Failure-isolation fixtures (058-066 + 068, proposals 0050 §6.3 / 0065 /
-# 0066 / 0068 / 0070) are middleware fixtures this runner handles. They sit
-# past _LAST_DRIVEN_FIXTURE only because the 039-057 range (state migration /
-# checkpoint fan-out) is owned by dedicated runners (test_state_migration.py
-# / test_checkpoint.py), not because this runner can't drive them. Fixture
-# 066 (cause chain, 0068) joined at v0.57.0; 068 (failure-mock cause chain,
-# 0070) at v0.58.0. Fixture 067 (crash-injection fan-out resume) is a
-# checkpoint fixture owned by test_checkpoint.py, hence the gap at 67.
-_FAILURE_ISOLATION_FIXTURES = frozenset(range(58, 67)) | {68}
+# Failure-isolation fixtures (058-066, 068, 069, proposals 0050 §6.3 / 0065 /
+# 0066 / 0068 / 0070 / 0069) are middleware fixtures this runner handles. They
+# sit past _LAST_DRIVEN_FIXTURE only because the 039-057 range (state migration
+# / checkpoint fan-out) is owned by dedicated runners (test_state_migration.py
+# / test_checkpoint.py), not because this runner can't drive them. Fixture 066
+# (cause chain, 0068) joined at v0.57.0; 068 (failure-mock cause chain, 0070)
+# at v0.58.0; 069 (fan-out degrade refinements, 0069) at v0.59.0 — this runner
+# drives its FI-degrade cases and skips its crash_injection/resume case (owned
+# by test_checkpoint.py, which also owns fixture 067, hence the gap at 67).
+_FAILURE_ISOLATION_FIXTURES = frozenset(range(58, 67)) | {68, 69}
 
 
 def _fixture_paths() -> list[Path]:
@@ -543,6 +544,11 @@ async def test_pipeline_utility_fixture(
         }
         for case in spec["cases"]:
             case_name = case.get("name", "<unnamed>")
+            # Checkpoint-concern cases (fixture 069 Case 3) are owned by
+            # test_checkpoint.py; this runner skips them. The marker mirrors
+            # that runner's: checkpointer / resume / crash_injection.
+            if any(k in case for k in ("checkpointer", "resume", "crash_injection")):
+                continue
             merged: dict[str, Any] = dict(case)
             # Compile-error cases (065 Case 2) nest the graph under ``graph:``
             # (the graph-engine fixture 007 convention) so it sits beside
