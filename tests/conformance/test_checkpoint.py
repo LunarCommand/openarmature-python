@@ -145,6 +145,7 @@ class _CapturingCheckpointer:
         *,
         fan_out_internal_save_batching: FanOutInternalSaveBatching | None = None,
         abort_after_instance: int | None = None,
+        abort_after_instance_node: str | None = None,
         abort_after_node: str | None = None,
     ) -> None:
         self._inner = InMemoryCheckpointer(
@@ -152,6 +153,11 @@ class _CapturingCheckpointer:
         )
         self.saves: list[CheckpointRecord] = []
         self._abort_after_instance = abort_after_instance
+        # The fan-out node ``abort_after_instance`` targets. ``None`` (the
+        # legacy fan_out.abort_after_instance path) matches any fan-out;
+        # crash_injection.after_fan_out_instance sets it to scope the abort to
+        # the named node in a multi-fan-out graph.
+        self._abort_after_instance_node = abort_after_instance_node
         self._abort_after_node = abort_after_node
         self._aborted = False
         # Per proposal 0029 (fixture 056): mutating the saved record's
@@ -205,6 +211,14 @@ class _CapturingCheckpointer:
         if self._abort_after_instance is not None:
             target_idx = self._abort_after_instance
             for fp in record.fan_out_progress:
+                # Scope to the targeted fan-out node when one is named
+                # (crash_injection.after_fan_out_instance); the legacy path
+                # leaves it None and matches any fan-out.
+                if (
+                    self._abort_after_instance_node is not None
+                    and fp.fan_out_node_name != self._abort_after_instance_node
+                ):
+                    continue
                 if target_idx < len(fp.instances) and fp.instances[target_idx].state == "completed":
                     # Subsequent instances must NOT be completed — otherwise
                     # we'd abort after a later instance's save instead.
@@ -299,13 +313,18 @@ def _build_capturing(spec: Mapping[str, Any]) -> _CapturingCheckpointer:
             )
             flush_every = int(batching_cfg.get("flush_every", 0))
             batching = FanOutInternalSaveBatching(flush_every=flush_every)
-    abort_after = _find_abort_after_instance(spec)
-    ci_instance, ci_node = _find_crash_injection(spec)
-    if ci_instance is not None:
+    ci_instance, ci_instance_node, ci_node = _find_crash_injection(spec)
+    if ci_instance is not None or ci_node is not None:
+        # crash_injection defines the crash boundary exclusively; the legacy
+        # fan_out.abort_after_instance directive is ignored when it is set, so
+        # an instance-boundary and a node-boundary abort can't both be active.
         abort_after = ci_instance
+    else:
+        abort_after = _find_abort_after_instance(spec)
     return _CapturingCheckpointer(
         fan_out_internal_save_batching=batching,
         abort_after_instance=abort_after,
+        abort_after_instance_node=ci_instance_node,
         abort_after_node=ci_node,
     )
 
@@ -325,22 +344,27 @@ def _find_abort_after_instance(spec: Mapping[str, Any]) -> int | None:
 
 # Conformance-adapter §5.6 ``crash_injection`` (proposal 0070): a simulated
 # crash at a checkpoint boundary, independent of an instance failure.
-def _find_crash_injection(spec: Mapping[str, Any]) -> tuple[int | None, str | None]:
+def _find_crash_injection(spec: Mapping[str, Any]) -> tuple[int | None, str | None, str | None]:
     """Parse the top-level ``crash_injection`` directive. Returns
-    ``(after_fan_out_instance_index, after_node_name)`` with at most one set.
-    Pairs with ``resume:`` the way ``first_run_expected_error`` does, but the
-    first run has no asserted outcome (it "crashed")."""
+    ``(after_fan_out_instance_index, after_fan_out_instance_node,
+    after_node_name)``: the index + node identify the
+    ``after_fan_out_instance`` boundary, ``after_node_name`` the ``after_node``
+    boundary; at most one boundary is set. Pairs with ``resume:`` the way
+    ``first_run_expected_error`` does, but the first run has no asserted
+    outcome (it "crashed")."""
     ci = spec.get("crash_injection")
     if not isinstance(ci, dict):
-        return None, None
+        return None, None, None
     ci_dict = cast("Mapping[str, Any]", ci)
     after_instance = ci_dict.get("after_fan_out_instance")
     if isinstance(after_instance, dict):
-        return int(cast("Mapping[str, Any]", after_instance)["index"]), None
+        ai = cast("Mapping[str, Any]", after_instance)
+        node = ai.get("node")
+        return int(ai["index"]), (str(node) if node is not None else None), None
     after_node = ci_dict.get("after_node")
     if after_node is not None:
-        return None, str(after_node)
-    return None, None
+        return None, None, str(after_node)
+    return None, None, None
 
 
 def _strip_abort_directive(spec: Mapping[str, Any]) -> Mapping[str, Any]:
@@ -445,7 +469,12 @@ async def _run_one_case(spec: Mapping[str, Any], *, top_level: Mapping[str, Any]
     # crash_injection (proposal 0070): a simulated crash at a checkpoint
     # boundary with NO asserted first-run outcome (it "crashed"). When set,
     # the abort is expected and swallowed without a first_run_expected_error.
-    crash_injection = spec.get("crash_injection")
+    # Coerced to None when not a mapping, matching _find_crash_injection, so a
+    # malformed directive parses to no boundary rather than swallowing aborts
+    # or tripping the "configured but no crash fired" assertion.
+    crash_injection: Any = spec.get("crash_injection")
+    if not isinstance(crash_injection, dict):
+        crash_injection = None
     invocation_id_first_run: str | None = None
     final_first_run: State | None = None
     trace.clear()
@@ -613,6 +642,7 @@ async def _run_one_case(spec: Mapping[str, Any], *, top_level: Mapping[str, Any]
     # ``_maybe_abort`` is also a no-op on the resume path.
     capturing._aborted = False  # noqa: SLF001 — test driver intentional
     capturing._abort_after_instance = None  # noqa: SLF001
+    capturing._abort_after_instance_node = None  # noqa: SLF001
     capturing._abort_after_node = None  # noqa: SLF001
     # Clear the trace so post-resume execution capture is isolated.
     trace.clear()
