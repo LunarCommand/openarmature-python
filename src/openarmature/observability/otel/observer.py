@@ -1910,6 +1910,13 @@ class OTelObserver:
             kind=SpanKind.INTERNAL,
             attributes=self._detached_invocation_attrs(invocation_id, correlation_id, prefix, event),
         )
+        # A fresh detached invocation span at this prefix starts clean:
+        # discard any ERROR marker a prior generation left here (cyclic
+        # / fire-and-forget re-entry at the same prefix). Keys are only
+        # ever added while such a span is open, so this open is the one
+        # place stale state could otherwise persist; clearing it keeps
+        # the synthetic close paths reflecting only this generation.
+        inv_state.errored_detached_keys.discard(prefix)
         inv_state.detached_invocation_spans[prefix] = _OpenSpan(span=detached_invocation)
 
         # 4. Open the detached subgraph span as a child of the detached
@@ -1976,6 +1983,10 @@ class OTelObserver:
             kind=SpanKind.INTERNAL,
             attributes=self._detached_invocation_attrs(invocation_id, correlation_id, prefix, event),
         )
+        # Clear any stale ERROR marker for this instance key before the
+        # fresh span opens (see the detached-subgraph open path) so a
+        # re-run of the same instance starts clean.
+        inv_state.errored_detached_keys.discard(instance_key)
         inv_state.detached_invocation_spans[instance_key] = _OpenSpan(span=detached_invocation)
 
         # Open the detached instance root span as a child of the
