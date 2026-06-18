@@ -1,6 +1,6 @@
 """Typed directive sub-models — the shapes referenced inside fixtures.
 
-Phase 0 typing strategy: model every key in every fixture, but use
+Typing strategy: model every key in every fixture, but use
 ``dict[str, Any]`` for genuinely polymorphic payloads (notably the inner
 ``state``/``nodes``/``edges`` of recursive subgraph definitions, and the
 update payloads themselves which are arbitrary state-shaped dicts). The
@@ -38,7 +38,7 @@ class _AllowExtras(BaseModel):
     middleware-specific params, flaky/fan-out config). Validates KNOWN
     keys' types but doesn't reject unknown ones — the spec evolves these
     payloads frequently and modelling every parameter exhaustively
-    creates churn without proportional value. The Phase 0 strictness
+    creates churn without proportional value. The strictness
     contract sits at the directive STRUCTURE level (above), not the
     parameter-bag level (here)."""
 
@@ -90,7 +90,7 @@ class EdgeSpec(_AllowExtras):
     The spec defines static (``from``/``to``) and conditional
     (``from``/``condition``) edges; observability/011 also uses a
     ``when``-shaped predicate. Schema is permissive here so all forms
-    parse — Phase 1 (engine retrofit) interprets each shape against
+    parse — the engine retrofit interprets each shape against
     the engine's edge model.
     """
 
@@ -208,7 +208,7 @@ class UpdateFromFieldSpec(_ForbidExtras):
     """
 
     # Free-form: some fixtures use ``{result: x, multiplier: 2}``, others
-    # ``{score: item}`` with no multiplier. Phase 4 (fan-out runtime) reads
+    # ``{score: item}`` with no multiplier. The fan-out runtime reads
     # whichever keys are present.
     model_config = ConfigDict(extra="allow")
 

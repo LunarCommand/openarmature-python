@@ -2,26 +2,26 @@
 
 Driven fixtures:
 
-- **001-basic-trace** (Phase 6.0) — full span shape.
-- **002-subgraph-hierarchy** (PR-C) — synthetic dispatch span +
+- **001-basic-trace** — full span shape.
+- **002-subgraph-hierarchy** — synthetic dispatch span +
   inner-node parenting.
-- **003-error-status** (PR-C) — ERROR status mapping for the
+- **003-error-status** — ERROR status mapping for the
   ``node_exception`` case.
-- **005-llm-provider-span-nested** (Phase 6.0) — LLM span +
+- **005-llm-provider-span-nested** — LLM span +
   ``disable_llm_spans`` opt-out + TracerProvider isolation.
-- **007-retry-attempt-spans** (PR-C) — sibling attempt spans with
+- **007-retry-attempt-spans** — sibling attempt spans with
   per-attempt ``attempt_index`` under retry middleware.
-- **008-detached-trace-mode** (Phase 6.0) — detached subgraph
+- **008-detached-trace-mode** — detached subgraph
   + detached fan-out + cross-trace ``correlation_id``.
-- **009-correlation-id-cross-cutting** (Phase 6.0) — every span
+- **009-correlation-id-cross-cutting** — every span
   carries ``openarmature.correlation_id``; back-to-back
   invocations get distinct UUIDv4s.
-- **010-log-correlation** (PR-C.3) — log records emitted from
+- **010-log-correlation** — log records emitted from
   inside node bodies pick up the active node span's
   ``trace_id``/``span_id`` via the engine-side
   ``prepare_sync`` → OTel context attach pipeline; both nested
   and detached-trace cases.
-- **011-determinism** (PR-C) — deterministic span content
+- **011-determinism** — deterministic span content
   (hierarchy, names, status, attributes minus the canonical
   non-deterministic-by-design list) is identical across runs.
 
@@ -557,7 +557,7 @@ async def _run_fixture_004(spec: Mapping[str, Any]) -> None:
         assert unreachable not in by_name, f"{unreachable!r} MUST not produce a span — never reached"
 
     # Invocation span ends ERROR per the §4.2 invocation-status
-    # propagation contract (PR-C review fix).
+    # propagation contract.
     inv = by_name.get("openarmature.invocation")
     assert inv is not None
     assert inv.status.status_code == StatusCode.ERROR, (
@@ -2052,11 +2052,11 @@ def _compile_subgraphs(spec: Mapping[str, Any]) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
-# Phase 5 fixture 031 — span/log assertions deferred from Phase 5
+# Fixture 031 — span/log assertions deferred
 #
 # Lives in this file (not test_checkpoint.py) because the assertions
 # verify OTel span attributes across the original + resumed runs of
-# the same checkpoint fixture. The Phase 5 harness already covers the
+# the same checkpoint fixture. The checkpoint harness already covers the
 # record-level half (correlation_id preserved, invocation_id changes);
 # this picks up the cross-run span-attribute half.
 # ---------------------------------------------------------------------------
@@ -2172,7 +2172,7 @@ async def _run_fixture_031_case(case: Mapping[str, Any]) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Fixture 010 — log correlation (PR-C.3)
+# Fixture 010 — log correlation
 #
 # Two sub-cases. Both build the graph by hand rather than going through the
 # adapter — fixture 010's ``emits_log:`` directive isn't an adapter primitive

@@ -907,7 +907,7 @@ def test_install_log_bridge_is_idempotent() -> None:
     already-installed one.
 
     Wrapped in ``warnings.catch_warnings("error")`` to lock in the
-    Phase 6.1 PR-B migration: this is the canonical surface where
+    logging-handler migration: this is the canonical surface where
     the deprecated ``opentelemetry.sdk._logs.LoggingHandler`` used
     to emit a ``DeprecationWarning``. Any future regression that
     re-introduces the deprecated path fires here immediately."""
@@ -1036,9 +1036,9 @@ def test_log_bridge_exports_records_with_correlation_id() -> None:
     filter-on-root placement (the prior implementation) misses
     every reasonable user's logger.
 
-    Wrapped in ``warnings.catch_warnings("error")`` so the PR-B
-    migration's "no more deprecation warning" guarantee is
-    asserted on the affirmative export path too."""
+    Wrapped in ``warnings.catch_warnings("error")`` so the
+    logging-handler migration's "no more deprecation warning"
+    guarantee is asserted on the affirmative export path too."""
     import warnings
 
     from opentelemetry.sdk._logs import LoggerProvider
@@ -1099,7 +1099,7 @@ def test_log_bridge_exports_records_with_correlation_id() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Phase 6.1: concurrency-safe state scoping + §5.5 calling-node attribution
+# Concurrency-safe state scoping + §5.5 calling-node attribution
 # ---------------------------------------------------------------------------
 
 
@@ -1169,7 +1169,7 @@ async def test_shared_observer_concurrent_invocations_dont_collide() -> None:
 async def test_concurrent_fan_out_no_lifo_violation() -> None:
     """Regression check: under fan-out with multiple concurrent
     instances, started/completed events for different instances
-    interleave on the observer's call queue. The Phase 6.0
+    interleave on the observer's call queue. An earlier
     architecture used cross-event ``opentelemetry.context.attach``
     tokens that produced LIFO violations on out-of-order detach
     (suppressed by try/except guards in round-4 / round-7). Phase
@@ -1240,7 +1240,7 @@ async def test_concurrent_fan_out_no_lifo_violation() -> None:
 async def test_concurrent_fan_out_llm_spans_parent_under_calling_instance() -> None:
     """Under concurrent fan-out: each instance's
     ``openarmature.llm.complete`` span MUST parent under that
-    instance's calling node, not a sibling instance's. The Phase 6.1
+    instance's calling node, not a sibling instance's. The
     calling-node identity (namespace_prefix + attempt_index +
     fan_out_index threaded via ContextVar onto the LLM event
     payload) is what makes this attribution correct."""
@@ -1364,7 +1364,7 @@ async def test_llm_call_inside_retried_node_parents_per_attempt() -> None:
     """Under retry: when an LLM ``complete()`` call
     happens inside a node body wrapped with retry middleware, each
     attempt's LLM span MUST parent under THAT attempt's node span,
-    not a hardcoded ``attempt_index=0``. Phase 6.1's
+    not a hardcoded ``attempt_index=0``. The
     ``current_attempt_index`` ContextVar (set inside the per-attempt
     ``innermost`` scope) is what makes this work."""
     import httpx

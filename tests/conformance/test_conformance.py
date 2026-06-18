@@ -88,7 +88,7 @@ _DEFERRED_FIXTURES: dict[str, str] = {
 }
 
 
-# Node directives the legacy adapter doesn't (yet) translate. Phase 1+ will
+# Node directives the legacy adapter doesn't (yet) translate. A later pass will
 # either expand the adapter or replace it with the typed harness.
 _UNSUPPORTED_NODE_DIRECTIVES = frozenset(
     {

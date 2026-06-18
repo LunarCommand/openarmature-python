@@ -163,7 +163,7 @@ def validate_invocation_id(value: object) -> str:
 
 # ---------------------------------------------------------------------------
 # Active observer set — for capability backends emitting from outside the
-# engine's per-step path (llm-provider span hook in Phase 6, future
+# engine's per-step path (llm-provider span hook, future
 # Langfuse/Datadog backends, user-written instrumented capabilities).
 # ---------------------------------------------------------------------------
 
@@ -206,7 +206,7 @@ def _reset_active_observers(token: Token[tuple[SubscribedObserver, ...]]) -> Non
 # Active dispatch hook — queue-mediated event emission from outside the
 # engine's per-step path. The engine sets this ContextVar to a closure
 # over the current invocation's delivery queue + observer chain;
-# capability backends (the LLM provider span hook in Phase 6, future
+# capability backends (the LLM provider span hook, future
 # Langfuse/Datadog instrumentations) call ``current_dispatch()(event)``
 # to enqueue an event for the same delivery worker the engine uses.
 #

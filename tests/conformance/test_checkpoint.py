@@ -24,7 +24,7 @@ Fixture-by-fixture status:
 - 030 checkpoint-not-found — supported.
 - 031 correlation-id-preserved-across-resume — record-level
   assertions supported here; the OTel span/log assertions are
-  gated until Phase 6 lands the observability mapping.
+  gated until the observability mapping lands.
 - 048-054 per-instance fan-out resume contract — supported.
 """
 
@@ -818,7 +818,7 @@ async def _run_one_case(spec: Mapping[str, Any], *, top_level: Mapping[str, Any]
         _assert_resume_invariants(invariants_block, final_resume, flaky_per_index_recorders)
 
     # Fixture 031: assert correlation_id preserved + invocation_id
-    # changed. Span/log assertions deferred to Phase 6 — observability
+    # changed. Span/log assertions deferred — observability
     # isn't wired yet. Skip those cleanly here.
     if "correlation_id_assertions" in resume_expected:
         cid_block = cast("Mapping[str, Any]", resume_expected["correlation_id_assertions"])

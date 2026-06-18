@@ -1,6 +1,6 @@
 """Unit tests for the middleware infrastructure and canonical middleware.
 
-Covers the eight items from the Phase 2 plan:
+Covers eight middleware behaviors:
 
 1. Chain composition + ordering
 2. Short-circuit (middleware skips ``next``)

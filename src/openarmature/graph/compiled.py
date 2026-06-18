@@ -1521,7 +1521,7 @@ class CompiledGraph[StateT: State]:
             innermost,
         )
 
-        # Spec observability §3 / Phase 6 LLM-span hook: capability
+        # Spec observability §3 LLM-span hook: capability
         # backends emitting from inside a node body (the
         # llm-provider span instrumentation in OpenAIProvider) need
         # to find the observers active for THIS invocation, which
@@ -2503,7 +2503,7 @@ class CompiledGraph[StateT: State]:
         # before/after distinction for a save like there is for a
         # node attempt. The field is repurposed because a save
         # event represents "the state was persisted" rather than
-        # "the state transitioned." Phase 6 OTel mapping reads
+        # "the state transitioned." The OTel mapping reads
         # ``pre_state`` as the save's state.
         _dispatch(
             context,

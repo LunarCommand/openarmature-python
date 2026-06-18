@@ -1,6 +1,6 @@
 """Typed fixture root models.
 
-Per the Phase 0 plan: every YAML fixture under
+Every YAML fixture under
 ``openarmature-spec/spec/<capability>/conformance/`` lands as one of three
 typed shapes. The shape is chosen by a callable discriminator that inspects
 the raw dict's top-level keys (no tag field is present in the YAML).

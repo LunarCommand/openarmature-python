@@ -2283,7 +2283,7 @@ class OTelObserver:
         invocation in one call without needing to track ids
         externally. A first-class engine-level signal that lets
         observers auto-drain per-invocation state on completion is
-        tracked as Phase 6.1+ follow-up work in
+        tracked as follow-up work in
         ``openarmature-coord/docs/phase-6-1-conformance-fillin.md``.
         """
         inv_state = self._inv_states.pop(invocation_id, None)

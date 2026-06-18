@@ -991,7 +991,7 @@ def _add_fan_out_node(
     - ``state_field_read`` — read an int from a parent state field.
     - ``queue_chunk`` — ``max(1, len(state.<field>) // chunk_size)``.
 
-    These are the only callable shapes the in-scope Phase 3 fixtures
+    These are the only callable shapes the in-scope fan-out fixtures
     use. Adding more is straightforward.
     """
     sub_name = cfg["subgraph"]

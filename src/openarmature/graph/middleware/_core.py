@@ -109,7 +109,7 @@ def compose_chain(
     ``CompiledGraph._step_function_node``, producing one closure layer
     per middleware on every node step. For typical workloads
     (single-digit middleware × hundreds of node activations) this is
-    negligible. Under heavy fan-out (Phase 3+), e.g. 10K instances × 5
+    negligible. Under heavy fan-out, e.g. 10K instances × 5
     inner nodes × 3 middlewares = 150K closure constructions per
     invocation; worth measuring with realistic workloads when the
     fan-out runtime lands. The optimization shape (cache the chain at

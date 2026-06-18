@@ -148,7 +148,7 @@ def test_current_correlation_id_returns_none_outside_invocation() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Phase 5 / §10.4 step 3 + 4 — resume preserves correlation_id, mints new
+# §10.4 step 3 + 4 — resume preserves correlation_id, mints new
 # invocation_id. Already covered in test_checkpoint.py at the record
 # level; here we additionally verify the user-visible ContextVar half.
 # ---------------------------------------------------------------------------
@@ -156,7 +156,7 @@ def test_current_correlation_id_returns_none_outside_invocation() -> None:
 
 async def test_resume_preserves_correlation_id_visible_to_user_code() -> None:
     """Resume MUST preserve the original correlation_id verbatim. The
-    Phase 5 checkpoint test verifies
+    conformance checkpoint test verifies
     this at the saved-record level; here we additionally verify it
     propagates to the ContextVar that user code reads from inside
     node bodies during the resumed invocation."""

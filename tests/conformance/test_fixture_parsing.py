@@ -1,4 +1,4 @@
-"""Phase 0 exit criterion: every fixture in the spec submodule parses into a
+"""Every fixture in the spec submodule parses into a
 typed harness config, AND the parse is round-trip stable (parse → dump →
 parse produces an equal model).
 
@@ -529,9 +529,8 @@ def test_fixture_parses(case: tuple[str, Path]) -> None:
 
 @pytest.mark.parametrize("case", _FIXTURES, ids=_id)
 def test_fixture_round_trips(case: tuple[str, Path]) -> None:
-    """Parse → ``model_dump`` → re-parse → equal. Exit criterion for
-    Phase 0 per the implementation plan: catches dropped fields the user
-    intended to use later."""
+    """Parse → ``model_dump`` → re-parse → equal. Catches dropped
+    fields the user intended to use later."""
     case_id = _id(case)
     skip_if_deferred(case_id, _DEFERRED_FIXTURES)
     _, path = case
