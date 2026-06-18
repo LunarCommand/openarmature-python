@@ -4,14 +4,14 @@ Driven fixtures:
 
 - **001-basic-trace** (Phase 6.0) — full span shape.
 - **002-subgraph-hierarchy** (PR-C) — synthetic dispatch span +
-  inner-node parenting per §4.5.
-- **003-error-status** (PR-C) — §4.2 ERROR status mapping for the
+  inner-node parenting.
+- **003-error-status** (PR-C) — ERROR status mapping for the
   ``node_exception`` case.
-- **005-llm-provider-span-nested** (Phase 6.0) — §5.5 LLM span +
-  ``disable_llm_spans`` opt-out + §6 TracerProvider isolation.
+- **005-llm-provider-span-nested** (Phase 6.0) — LLM span +
+  ``disable_llm_spans`` opt-out + TracerProvider isolation.
 - **007-retry-attempt-spans** (PR-C) — sibling attempt spans with
   per-attempt ``attempt_index`` under retry middleware.
-- **008-detached-trace-mode** (Phase 6.0) — §4.4 detached subgraph
+- **008-detached-trace-mode** (Phase 6.0) — detached subgraph
   + detached fan-out + cross-trace ``correlation_id``.
 - **009-correlation-id-cross-cutting** (Phase 6.0) — every span
   carries ``openarmature.correlation_id``; back-to-back
@@ -350,7 +350,7 @@ async def _run_fixture_001(spec: Mapping[str, Any]) -> None:
 
 
 async def _run_fixture_002(spec: Mapping[str, Any]) -> None:
-    """Spec §4.5: the subgraph wrapper synthesizes a dispatch span;
+    """The subgraph wrapper synthesizes a dispatch span;
     inner-node spans parent under it; the dispatch span parents
     under the invocation."""
     observer, exporter = _build_observer()
@@ -428,7 +428,7 @@ async def _run_fixture_002(spec: Mapping[str, Any]) -> None:
 
 
 async def _run_fixture_003(spec: Mapping[str, Any]) -> None:
-    """Spec §4.2: a node-exception failure produces an ERROR span
+    """A node-exception failure produces an ERROR span
     with the canonical category in the description, an exception
     event recorded, and the ``openarmature.error.category``
     attribute. Sibling spans before the failure stay OK; the
@@ -494,8 +494,8 @@ async def _run_fixture_003(spec: Mapping[str, Any]) -> None:
 
 
 async def _run_fixture_004(spec: Mapping[str, Any]) -> None:
-    """Spec §4.2 + spec v0.9.0 / proposal 0012: routing errors land on
-    the preceding node's ``completed`` event with ``error`` populated
+    """Routing errors land on the preceding node's ``completed`` event
+    with ``error`` populated
     (sharing the started/completed pair rather than producing a
     separate one). The OTel observer's existing
     ``_handle_completed`` ERROR-mapping path picks this up
@@ -504,9 +504,8 @@ async def _run_fixture_004(spec: Mapping[str, Any]) -> None:
     Driver verifies: the ``pick`` node's span ends ERROR with
     ``status_description == "routing_error"``, an ``exception``
     event recorded, and the ``openarmature.error.category``
-    attribute. No span for the edge function (no ``edge_spans``)
-    per §4.2's "edge logic folded into the preceding node span"
-    framing."""
+    attribute. No span for the edge function (no ``edge_spans``) —
+    edge logic is folded into the preceding node span."""
     from opentelemetry.trace import StatusCode
 
     from openarmature.graph import RuntimeGraphError
@@ -572,8 +571,8 @@ async def _run_fixture_004(spec: Mapping[str, Any]) -> None:
 
 
 async def _run_fixture_006(spec: Mapping[str, Any]) -> None:
-    """Spec §5.4 + proposal 0013 (v0.10.0): non-detached fan-out
-    instances synthesize per-instance dispatch spans nested between
+    """Non-detached fan-out instances synthesize per-instance dispatch
+    spans nested between
     the fan-out node span and the inner-node spans. The fan-out node
     span carries ``item_count`` / ``concurrency`` / ``error_policy``
     from ``NodeEvent.fan_out_config``; per-instance spans carry
@@ -826,7 +825,7 @@ _DETERMINISM_IGNORED_ATTRS: frozenset[str] = frozenset(
 
 
 async def _run_fixture_011(spec: Mapping[str, Any]) -> None:
-    """Spec §8: deterministic span content is identical across two
+    """Deterministic span content is identical across two
     invocations of the same graph with the same input. The
     signature compared per-span:
     ``(name, status_code, parent_name, attrs ∖ ignored_set)``.
@@ -923,8 +922,8 @@ async def _run_fixture_011_case(case: Mapping[str, Any]) -> None:
 
 
 async def _run_fixture_028(spec: Mapping[str, Any]) -> None:
-    """Proposal 0034 §3.4: caller-supplied metadata keys under
-    reserved namespaces (``openarmature.*``, ``gen_ai.*``) MUST
+    """Caller-supplied metadata keys under reserved namespaces
+    (``openarmature.*``, ``gen_ai.*``) MUST
     raise at the ``invoke()`` boundary before any work begins.
     The harness asserts:
 
@@ -1208,12 +1207,12 @@ async def _run_fixture_009_case(case: Mapping[str, Any]) -> None:
 async def _run_fixture_005(spec: Mapping[str, Any]) -> None:
     """Three sub-cases:
 
-    1. ``default`` — LLM span emits with §5 attributes, parented under
+    1. ``default`` — LLM span emits with its attributes, parented under
        the calling node.
     2. ``disable_llm_spans`` — opt-out suppresses the LLM span entirely.
     3. ``external_auto_instrumentation_active`` — second exporter on
        the OTel global provider; openarmature spans MUST NOT leak to
-       it (the load-bearing §6 TracerProvider isolation guarantee).
+       it (the load-bearing TracerProvider isolation guarantee).
     """
     cases = cast("list[dict[str, Any]]", spec["cases"])
     for case in cases:
@@ -1420,12 +1419,12 @@ def _resolve_target_for_005(case: Mapping[str, Any]) -> Any:
 
 
 async def _run_fixture_038(spec: Mapping[str, Any]) -> None:
-    """Single-case proposal-0044 fixture: a two-branch parallel-branches
-    graph where each branch's inner ``ask`` node makes an LLM call.
+    """A two-branch parallel-branches fixture where each branch's inner
+    ``ask`` node makes an LLM call.
 
     The OTel observer MUST synthesize a per-branch dispatch span between
     the parallel-branches NODE span and each branch's inner-node spans;
-    the §5.7 attribute surface (``branch_count`` + ``error_policy`` on
+    the attribute surface (``branch_count`` + ``error_policy`` on
     the NODE span, ``branch_name`` + ``parent_node_name`` on each
     dispatch span, ``branch_name`` on inner-branch leaf spans) MUST
     appear; per-branch dispatch spans MUST close before the NODE span
@@ -2069,9 +2068,8 @@ _PIPELINE_CONFORMANCE_DIR = (
 
 
 async def test_phase5_fixture_031_span_assertions() -> None:
-    """Spec §10.4 step 3 + step 4 + observability §3 / §5.6: every
-    span across BOTH the original and resumed runs MUST carry the
-    same ``openarmature.correlation_id``; ``invocation_id`` differs
+    """Every span across BOTH the original and resumed runs MUST carry
+    the same ``openarmature.correlation_id``; ``invocation_id`` differs
     across the two runs (each is its own invocation in the
     observability sense)."""
     fixture_path = _PIPELINE_CONFORMANCE_DIR / "031-checkpoint-correlation-id-preserved-across-resume.yaml"
@@ -2499,7 +2497,7 @@ def _build_observer_with_detached(detached_subgraphs: frozenset[str]) -> tuple[O
 
 
 async def _run_llm_payload_fixture(spec: Mapping[str, Any]) -> None:
-    """Generic driver for the ten v0.17.0 LLM-attribute fixtures.
+    """Generic driver for the ten LLM-attribute fixtures.
 
     Each fixture is single-case (GraphFixture shape) with a top-level
     ``cases:`` list of one entry; the case carries the graph + the
@@ -3323,7 +3321,7 @@ def _assert_node_completed_event_carries_error(
 ) -> None:
     """Failure-path assertion (fixture 053): the calling node's
     completed NodeEvent carries an error whose cause chain bottoms
-    out in an llm-provider §7 category matching the expectation.
+    out in an llm-provider category matching the expectation.
     The engine wraps the underlying ProviderUnavailable (etc.) in a
     NodeException; walk ``__cause__`` to reach the categorized cause.
     """
@@ -3363,8 +3361,8 @@ class _AllEventsCollector:
 
 
 async def _run_llm_cache_fixture(spec: Mapping[str, Any]) -> None:
-    """Run the proposal 0047 §5.5.3.1 cache-attribute fixtures (040,
-    041, 042). All three share the same simple-shape graph and assert
+    """Run the cache-attribute fixtures (040, 041, 042). All three
+    share the same simple-shape graph and assert
     on ``Response.usage`` cache fields plus the LLM provider span's
     ``openarmature.llm.cache_read.input_tokens`` /
     ``openarmature.llm.cache_creation.input_tokens`` attribute set.
