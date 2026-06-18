@@ -8,7 +8,8 @@ asserting against the fixture's ``saved_record_assertions`` (including
 ``fan_out_progress`` matchers), ``expected.checkpoint_saves``,
 ``invariants``, and resume expectations (including per-instance
 ``instances_executed_during_resume`` / ``instances_skipped_during_resume``
-and per-instance attempt-count assertions from proposal 0009 fixtures).
+and per-instance attempt-count assertions from the per-instance resume
+fixtures).
 
 Fixture-by-fixture status:
 
