@@ -145,8 +145,7 @@ class FanOutDegradedUpdateMissingCollectField(CompileError):
 
 class ParallelBranchesNoBranches(CompileError):
     """Raised at registration when a parallel-branches node's
-    ``branches`` mapping is empty. Per pipeline-utilities §11.9
-    / proposal 0011. Non-transient."""
+    ``branches`` mapping is empty. Non-transient."""
 
     category = "parallel_branches_no_branches"
 
@@ -184,18 +183,16 @@ class NodeException(RuntimeGraphError):
 
 class ParallelBranchesBranchFailed(NodeException):
     """Raised when a branch's subgraph raises under
-    ``error_policy: 'fail_fast'``. Per pipeline-utilities §11.9 /
-    proposal 0011.
+    ``error_policy: 'fail_fast'``.
 
-    Subtype of :class:`NodeException` (per §11.9: "a
-    ``node_exception`` subtype attached at the parallel-branches
-    node's level"). The existing NodeException-classifier path
-    handles transient classification from ``__cause__`` per §6.1:
-    non-transient by default, inheriting transient classification
-    from the wrapped exception.
+    Subtype of :class:`NodeException` (a ``node_exception`` subtype
+    attached at the parallel-branches node's level). The existing
+    NodeException-classifier path handles transient classification
+    from ``__cause__``: non-transient by default, inheriting transient
+    classification from the wrapped exception.
 
-    Carries ``branch_name`` as a structured field per §11.9; the
-    inner exception rides ``__cause__``.
+    Carries ``branch_name`` as a structured field; the inner exception
+    rides ``__cause__``.
     """
 
     category = "parallel_branches_branch_failed"

@@ -112,11 +112,10 @@ class ParallelBranchesEventConfig:
 
     - ``branch_names``: non-empty ordered tuple of strings. The branch
       identifiers in declaration / dispatch order, as configured on
-      the parallel-branches node (pipeline-utilities §11.1).
+      the parallel-branches node.
     - ``branch_count``: positive int. Equals ``len(branch_names)``.
       Surfaced explicitly so observers don't have to derive it.
-    - ``error_policy``: one of ``"fail_fast"`` or ``"collect"`` (per
-      pipeline-utilities §11.5).
+    - ``error_policy``: one of ``"fail_fast"`` or ``"collect"``.
     - ``parent_node_name``: the parallel-branches node's name in the
       parent graph. Carried here for caching by backend observers
       when attributing per-branch dispatch spans.
@@ -180,8 +179,7 @@ class NodeEvent:
       :class:`FanOutEventConfig`. ``None`` on every other event.
     - ``branch_name`` is the non-empty string name of the
       parallel-branches branch this event came from. ``None`` for
-      nodes outside any branch. Per graph-engine §6 / pipeline-
-      utilities §11, the combination of ``namespace``,
+      nodes outside any branch. The combination of ``namespace``,
       ``branch_name``, ``fan_out_index``, ``attempt_index``, and
       ``phase`` jointly uniquely identifies an event source.
       ``branch_name`` and ``fan_out_index`` are independent; both
@@ -195,9 +193,9 @@ class NodeEvent:
     - On ``completed`` events, exactly one of ``post_state`` and
       ``error`` is populated.
 
-    **Synthetic phases.** ``"checkpoint_saved"`` (pipeline-utilities
-    §10.8) and ``"checkpoint_migrated"`` (proposal 0014 §6
-    cross-ref) repurpose this dataclass for non-node events. Both
+    **Synthetic phases.** ``"checkpoint_saved"`` and
+    ``"checkpoint_migrated"`` repurpose this dataclass for non-node
+    events. Both
     are opt-in via ``phases={...}`` on observer registration;
     default subscriptions are ``{"started", "completed"}`` only, so
     legacy observers never see them. Conventions on synthetic
@@ -332,14 +330,14 @@ class MetadataAugmentationEvent:
 
     Distinct from :class:`NodeEvent` because there is no node phase,
     no pre/post state, and no error: this event reports a side-channel
-    augmentation, not a node-attempt boundary. Per graph-engine §6 the
-    event is NOT subject to the observer ``phases`` filter (which only
-    governs ``NodeEvent`` phases); the delivery worker forwards it to
-    every subscribed observer. Observers that handle it iterate their
-    open observations whose lineage is an ancestor of (or equal to)
-    the augmenting context's lineage and apply the entries as
-    ``openarmature.user.<key>`` (OTel, §5.6) /
-    ``metadata.<key>`` (Langfuse, §8.4.1+§8.4.2).
+    augmentation, not a node-attempt boundary. The event is NOT
+    subject to the observer ``phases`` filter (which only governs
+    ``NodeEvent`` phases); the delivery worker forwards it to every
+    subscribed observer. Observers that handle it iterate their open
+    observations whose lineage is an ancestor of (or equal to) the
+    augmenting context's lineage and apply the entries as
+    ``openarmature.user.<key>`` (OTel) / ``metadata.<key>``
+    (Langfuse).
     """
 
     entries: Mapping[str, AttributeValue]
@@ -373,21 +371,21 @@ class InvocationStartedEvent:
     Emitted once per invocation, before any node fires. Observers that
     populate Trace-level input fields (the Langfuse observer, today)
     consume it to resolve ``trace.input`` per the three-lever decision
-    tree in observability §8.4.1. Observers without a Trace-level
-    input concept (the OTel observer) treat it as a no-op.
+    tree. Observers without a Trace-level input concept (the OTel
+    observer) treat it as a no-op.
 
     Carries:
 
     - ``initial_state``: the raw state object the engine constructed
       from ``invoke()``'s arguments (the typed-state instance).
     - ``invocation_id``: the invocation id (caller-supplied or
-      framework-generated per proposal 0039).
-    - ``correlation_id``: the §3 correlation id when present.
+      framework-generated).
+    - ``correlation_id``: the correlation id when present.
     - ``entry_node``: the outermost-graph entry node name.
 
-    Per graph-engine §6 the event is NOT subject to the observer
-    ``phases`` filter (which only governs ``NodeEvent`` phases); the
-    delivery worker forwards it to every subscribed observer.
+    The event is NOT subject to the observer ``phases`` filter (which
+    only governs ``NodeEvent`` phases); the delivery worker forwards it
+    to every subscribed observer.
     """
 
     initial_state: Any
@@ -410,8 +408,8 @@ class InvocationCompletedEvent:
     after a failure boundary on the failure path). Observers that
     populate Trace-level output fields (the Langfuse observer, today)
     consume it to resolve ``trace.output`` per the three-lever
-    decision tree in observability §8.4.1. Observers without a
-    Trace-level output concept (the OTel observer) treat it as a no-op.
+    decision tree. Observers without a Trace-level output concept (the
+    OTel observer) treat it as a no-op.
 
     Carries:
 
@@ -424,11 +422,10 @@ class InvocationCompletedEvent:
     - ``final_node``: the name of the node whose execution preceded
       the END-reached transition on the success path, or the node
       that raised on the failure path.
-    - ``invocation_id`` / ``correlation_id``: the §3 / §5.1 ids.
+    - ``invocation_id`` / ``correlation_id``: the run + correlation ids.
 
-    Per graph-engine §6 the event is NOT subject to the observer
-    ``phases`` filter; the delivery worker forwards it to every
-    subscribed observer.
+    The event is NOT subject to the observer ``phases`` filter; the
+    delivery worker forwards it to every subscribed observer.
     """
 
     final_state: Any
@@ -541,7 +538,7 @@ class LlmCompletionEvent:
     - ``caller_invocation_metadata``: optional snapshot of caller-
       supplied invocation metadata at LLM-call time. Spec-defined as
       OPTIONAL; the python OpenAIProvider populates it by default so
-      the bundled OTel/Langfuse observers can emit the §5.6
+      the bundled OTel/Langfuse observers can emit the
       ``openarmature.user.<key>`` span-attribute family without an
       extra opt-in. Pass ``populate_caller_metadata=False`` to suppress
       the snapshot. Future non-OpenAI providers MAY default to
@@ -606,7 +603,7 @@ class LlmFailedEvent:
     """A typed LLM provider call failure event delivered to observers.
 
     Carries identity, scoping, and failure-context data for an LLM
-    call that raised a llm-provider §7 category exception. Observer
+    call that raised a llm-provider category exception. Observer
     code filters by type discrimination (``isinstance(event,
     LlmFailedEvent)``) rather than by the impl-current sentinel-
     namespace string match.
@@ -619,8 +616,8 @@ class LlmFailedEvent:
 
     Failure-specific fields:
 
-    - ``error_category``: the llm-provider §7 normative error
-      category the call raised. One of the 9 canonical strings
+    - ``error_category``: the llm-provider normative error category
+      the call raised. One of the 9 canonical strings
       (``provider_authentication``, ``provider_unavailable``,
       ``provider_invalid_model``, ``provider_model_not_loaded``,
       ``provider_rate_limit``, ``provider_invalid_response``,
