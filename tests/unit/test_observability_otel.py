@@ -2711,13 +2711,30 @@ async def test_detached_subgraph_at_depth_two_mints_fresh_trace() -> None:
         and dict(s.attributes or {}).get("openarmature.subgraph.detached") is True
     ]
     assert len(detached_roots) == 1
-    # Its trace_id MUST differ from the leaf's parent invocation trace.
+    # Proposal 0061: the detached trace roots in its OWN
+    # ``openarmature.invocation`` span (parent + detached = two
+    # invocation spans), both carrying the SAME invocation_id, with the
+    # detached subgraph span nested under the detached invocation span.
     inv_spans = [s for s in spans if s.name == "openarmature.invocation"]
-    assert len(inv_spans) == 1
-    inv_trace_id = cast("Any", inv_spans[0].context).trace_id
+    assert len(inv_spans) == 2, f"expected parent + detached invocation spans, got {len(inv_spans)}"
     detached_trace_id = cast("Any", detached_roots[0].context).trace_id
-    assert detached_trace_id != inv_trace_id, (
+    detached_inv = next((s for s in inv_spans if cast("Any", s.context).trace_id == detached_trace_id), None)
+    parent_inv = next((s for s in inv_spans if cast("Any", s.context).trace_id != detached_trace_id), None)
+    assert detached_inv is not None, "detached trace MUST root in an openarmature.invocation span"
+    assert parent_inv is not None
+    assert detached_trace_id != cast("Any", parent_inv.context).trace_id, (
         "detached subgraph root MUST live in a fresh trace, not the parent invocation trace"
+    )
+    # Shared invocation_id across the trace boundary (§4.3).
+    detached_inv_id = dict(detached_inv.attributes or {}).get("openarmature.invocation_id")
+    parent_inv_id = dict(parent_inv.attributes or {}).get("openarmature.invocation_id")
+    assert detached_inv_id is not None and detached_inv_id == parent_inv_id, (
+        "detached invocation span MUST carry the SAME invocation_id as the parent (§4.3)"
+    )
+    # The detached subgraph span nests under the detached invocation span.
+    assert detached_roots[0].parent is not None
+    assert detached_roots[0].parent.span_id == cast("Any", detached_inv.context).span_id, (
+        "detached subgraph span MUST nest under the detached invocation span"
     )
 
 

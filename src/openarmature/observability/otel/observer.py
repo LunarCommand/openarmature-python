@@ -312,6 +312,24 @@ class _InvState:
     open_spans: dict[_StackKey, _OpenSpan] = field(default_factory=dict[_StackKey, _OpenSpan])
     subgraph_spans: dict[tuple[str, ...], _OpenSpan] = field(default_factory=dict[tuple[str, ...], _OpenSpan])
     detached_roots: dict[tuple[str, ...], _OpenSpan] = field(default_factory=dict[tuple[str, ...], _OpenSpan])
+    # Proposal 0061 (observability §4.4): a detached trace roots in its
+    # own ``openarmature.invocation`` span carrying the parent's
+    # invocation_id; the detached subgraph / fan-out-instance span in
+    # ``detached_roots`` nests under it. Keyed identically to
+    # ``detached_roots`` (the prefix for a detached subgraph, ``prefix +
+    # (str(fan_out_index),)`` for a detached fan-out instance) so the
+    # two close together as a coterminous parent/child pair.
+    detached_invocation_spans: dict[tuple[str, ...], _OpenSpan] = field(
+        default_factory=dict[tuple[str, ...], _OpenSpan]
+    )
+    # Proposal 0061 §4.2: keys (matching ``detached_roots`` /
+    # ``detached_invocation_spans``, and the detached prefix in
+    # ``subgraph_spans``) whose spans the detached-error propagation
+    # marked ERROR. The synthetic close paths consult this to SKIP their
+    # default ``set_status(OK)``: the OTel SDK treats OK as final and
+    # lets it OVERRIDE a prior ERROR (only a set to UNSET is ignored), so
+    # an unconditional OK at close would erase the detached-trace ERROR.
+    errored_detached_keys: set[tuple[str, ...]] = field(default_factory=set[tuple[str, ...]])
     fan_out_instance_root_prefixes: set[tuple[str, ...]] = field(default_factory=set[tuple[str, ...]])
     # Per spec §5.4 + proposal 0013 (v0.10.0): non-detached fan-outs
     # synthesize per-instance dispatch spans nested between the fan-out
@@ -810,14 +828,23 @@ class OTelObserver:
             # Per spec §4.2 / fixture 003: the invocation span MUST
             # end with ERROR status when any child node errors. OTel
             # doesn't auto-propagate child status to parents — we set
-            # it explicitly here. The OTel SDK's status-precedence
-            # rule preserves ERROR through any subsequent
-            # ``set_status(OK)`` calls (only UNSET → OK transitions
-            # are honoured), so the close path's UNSET-leave still
-            # works for clean invocations.
+            # it explicitly here. This ERROR survives to export because
+            # ``_close_invocation_span`` deliberately never calls
+            # ``set_status(OK)`` on the clean-completion path (it leaves
+            # the status UNSET, which exporters map to OK). That matters
+            # because the OTel SDK treats OK as FINAL and lets a later
+            # OK OVERRIDE a prior ERROR (only a set to UNSET is ignored)
+            # — an unconditional OK at a close site would erase this,
+            # the same hazard the §4.2 detached-error propagation guards
+            # against via ``errored_detached_keys``.
             inv_open = self._invocation_span.get(invocation_id)
             if inv_open is not None:
                 inv_open.span.set_status(Status(StatusCode.ERROR, description=event.error.category))
+            # Proposal 0061 §4.2: when the erroring node is inside a
+            # DETACHED subtree, that trace needs its OWN error carriers
+            # — the invocation span set just above belongs to the PARENT
+            # trace. Surface ERROR on the detached trace's spans too.
+            self._propagate_error_to_detached_spans(inv_state, event)
         else:
             span.set_status(Status(StatusCode.OK))
         self._run_enrichers(span, event)
@@ -825,6 +852,51 @@ class OTelObserver:
         # If this was a detached root prefix, drop the root entry so a
         # subsequent re-entry mints a fresh trace.
         inv_state.detached_roots.pop(event.namespace, None)
+
+    def _propagate_error_to_detached_spans(self, inv_state: _InvState, event: NodeEvent) -> None:
+        # Proposal 0061 §4.2 (Detached invocation span status): a node
+        # raising inside a detached subtree surfaces ERROR on that
+        # trace's OWN carriers, not just the parent trace's. For each
+        # enclosing detached prefix:
+        #   - the detached invocation span (the detached trace's root /
+        #     authoritative carrier) and the parent-trace dispatch span
+        #     (the §4.4 Link carrier) each get the FULL treatment —
+        #     ERROR status + an OTel exception event + the §4 category
+        #     attribute, mirroring the parent invocation span;
+        #   - the detached subgraph / instance span between them gets
+        #     ERROR status only (the invocation span above it carries
+        #     the exception event for that trace).
+        # Set while the spans are still open; the synthetic close paths
+        # SKIP their default ``set_status(OK)`` for keys recorded in
+        # ``errored_detached_keys`` (OTel treats OK as final and lets it
+        # override a prior ERROR), so the ERROR survives to export. Keys
+        # cover both the detached-subgraph (prefix) and detached-fan-out-
+        # instance (prefix + index) schemes.
+        if event.error is None:
+            return
+        err = event.error
+        category = err.category
+        for prefix_len in range(len(event.namespace), 0, -1):
+            base = event.namespace[:prefix_len]
+            keys = [base]
+            if event.fan_out_index is not None:
+                keys.append(base + (str(event.fan_out_index),))
+            for key in keys:
+                inv_span = inv_state.detached_invocation_spans.get(key)
+                if inv_span is None:
+                    continue
+                inv_state.errored_detached_keys.add(key)
+                inv_span.span.set_status(Status(StatusCode.ERROR, description=category))
+                inv_span.span.record_exception(err)
+                inv_span.span.set_attribute("openarmature.error.category", category)
+                dispatch = inv_state.subgraph_spans.get(key)
+                if dispatch is not None:
+                    dispatch.span.set_status(Status(StatusCode.ERROR, description=category))
+                    dispatch.span.record_exception(err)
+                    dispatch.span.set_attribute("openarmature.error.category", category)
+                root = inv_state.detached_roots.get(key)
+                if root is not None:
+                    root.span.set_status(Status(StatusCode.ERROR, description=category))
 
     # ------------------------------------------------------------------
     # Metadata augmentation (proposal 0040 §3.4 + §6)
@@ -1605,7 +1677,9 @@ class OTelObserver:
             # fan-out (event.fan_out_index populated, fan-out NODE
             # name at ``prefix[-1]`` in the configured set).
             if event.fan_out_index is not None and prefix[-1] in self.detached_fan_outs:
-                self._open_detached_fan_out_instance_root(inv_state, correlation_id, prefix, event)
+                self._open_detached_fan_out_instance_root(
+                    inv_state, invocation_id, correlation_id, prefix, event
+                )
                 continue
             # Per spec §5.4 + proposal 0013: non-detached fan-out
             # instances get a synthetic per-instance dispatch span
@@ -1720,9 +1794,44 @@ class OTelObserver:
         open_span = inv_state.subgraph_spans.pop(prefix, None)
         if open_span is None:
             return
-        open_span.span.set_status(Status(StatusCode.OK))
+        # Skip the default OK for a detached dispatch span the §4.2 error
+        # path marked ERROR (proposal 0061) — OTel lets a later OK
+        # override ERROR (see errored_detached_keys).
+        if prefix not in inv_state.errored_detached_keys:
+            open_span.span.set_status(Status(StatusCode.OK))
         self._run_enrichers(open_span.span, None)
         open_span.span.end()
+
+    def _detached_invocation_attrs(
+        self,
+        invocation_id: str,
+        correlation_id: str | None,
+        prefix: tuple[str, ...],
+        event: NodeEvent,
+    ) -> dict[str, Any]:
+        # Proposal 0061 §5.1 attribute set for a detached invocation
+        # span. Mirrors ``_open_invocation_span`` but carries the SAME
+        # invocation_id as the parent (detached mode shares the run
+        # identity per §4.3 — distinct from checkpoint-resume, which
+        # mints a fresh id) and the detached unit's OWN entry node: the
+        # namespace segment immediately after the detached prefix, which
+        # is the entry node of the outermost graph OF THE DETACHED TRACE
+        # (the detached subgraph, or the fan-out instance subgraph).
+        # Callers always pass a strict-ancestor prefix (the ancestor walk
+        # in ``_sync_subgraph_spans`` only fires at depths below the
+        # event's namespace length), so ``len(prefix) < len(namespace)``
+        # and the index is always in range.
+        attrs: dict[str, Any] = {
+            "openarmature.graph.entry_node": event.namespace[len(prefix)],
+            "openarmature.graph.spec_version": self.spec_version,
+            "openarmature.implementation.name": self.implementation_name,
+            "openarmature.implementation.version": self.implementation_version,
+            "openarmature.invocation_id": invocation_id,
+        }
+        if correlation_id is not None:
+            attrs["openarmature.correlation_id"] = correlation_id
+        _apply_caller_metadata(attrs, event.caller_invocation_metadata)
+        return attrs
 
     def _open_detached_subgraph_root(
         self,
@@ -1784,16 +1893,41 @@ class OTelObserver:
         )
         inv_state.subgraph_spans[prefix] = _OpenSpan(span=parent_dispatch)
 
-        # 3. Open the detached root span — parented to the synthetic
-        #    detached SpanContext so OTel uses the new trace_id.
+        # 3. Proposal 0061: the detached trace roots in its OWN
+        #    ``openarmature.invocation`` span (parented to the synthetic
+        #    detached SpanContext so OTel uses the new trace_id). It
+        #    carries the §5.1 invocation-span attribute set with the
+        #    SAME invocation_id as the parent — detached mode is
+        #    observer-side trace rendering, not a new run (§4.3) — so
+        #    the §5.1 always-emit attribution invariant lands on the
+        #    detached trace's root with no per-context caveat.
         detached_parent_ctx = otel_trace.set_span_in_context(
             NonRecordingSpan(detached_sc), otel_context.Context()
         )
+        detached_invocation = self._tracer.start_span(
+            name="openarmature.invocation",
+            context=cast("Any", detached_parent_ctx),
+            kind=SpanKind.INTERNAL,
+            attributes=self._detached_invocation_attrs(invocation_id, correlation_id, prefix, event),
+        )
+        # A fresh detached invocation span at this prefix starts clean:
+        # discard any ERROR marker a prior generation left here (cyclic
+        # / fire-and-forget re-entry at the same prefix). Keys are only
+        # ever added while such a span is open, so this open is the one
+        # place stale state could otherwise persist; clearing it keeps
+        # the synthetic close paths reflecting only this generation.
+        inv_state.errored_detached_keys.discard(prefix)
+        inv_state.detached_invocation_spans[prefix] = _OpenSpan(span=detached_invocation)
+
+        # 4. Open the detached subgraph span as a child of the detached
+        #    invocation span (normal §4.3 nesting within the detached
+        #    trace). Inner-node spans continue to parent under THIS span
+        #    via ``detached_roots`` — the invocation span sits above it.
         attrs_root: dict[str, Any] = dict(attrs_parent)
         attrs_root["openarmature.subgraph.detached"] = True
         detached_root = self._tracer.start_span(
             name=prefix[-1],
-            context=cast("Any", detached_parent_ctx),
+            context=cast("Any", set_span_in_context(detached_invocation)),
             kind=SpanKind.INTERNAL,
             attributes=attrs_root,
         )
@@ -1802,6 +1936,7 @@ class OTelObserver:
     def _open_detached_fan_out_instance_root(
         self,
         inv_state: _InvState,
+        invocation_id: str,
         correlation_id: str | None,
         prefix: tuple[str, ...],
         event: NodeEvent,
@@ -1833,10 +1968,29 @@ class OTelObserver:
         if fan_out_open is not None:
             fan_out_open.span.add_link(detached_sc)
 
-        # Open the detached instance root span.
+        # Proposal 0061: each detached instance trace roots in its OWN
+        # ``openarmature.invocation`` span (shared parent invocation_id,
+        # the instance subgraph's entry node), with the fan-out instance
+        # span nested under it. Keyed by prefix + (str(fan_out_index),)
+        # so per-instance roots stay distinct.
+        instance_key = prefix + (str(event.fan_out_index),)
         detached_parent_ctx = otel_trace.set_span_in_context(
             NonRecordingSpan(detached_sc), otel_context.Context()
         )
+        detached_invocation = self._tracer.start_span(
+            name="openarmature.invocation",
+            context=cast("Any", detached_parent_ctx),
+            kind=SpanKind.INTERNAL,
+            attributes=self._detached_invocation_attrs(invocation_id, correlation_id, prefix, event),
+        )
+        # Clear any stale ERROR marker for this instance key before the
+        # fresh span opens (see the detached-subgraph open path) so a
+        # re-run of the same instance starts clean.
+        inv_state.errored_detached_keys.discard(instance_key)
+        inv_state.detached_invocation_spans[instance_key] = _OpenSpan(span=detached_invocation)
+
+        # Open the detached instance root span as a child of the
+        # per-instance invocation span.
         attrs: dict[str, Any] = {
             "openarmature.node.name": prefix[-1],
             "openarmature.fan_out.parent_node_name": prefix[-1],
@@ -1847,13 +2001,10 @@ class OTelObserver:
         _apply_caller_metadata(attrs, event.caller_invocation_metadata)
         instance_root = self._tracer.start_span(
             name=prefix[-1],
-            context=cast("Any", detached_parent_ctx),
+            context=cast("Any", set_span_in_context(detached_invocation)),
             kind=SpanKind.INTERNAL,
             attributes=attrs,
         )
-        # Key by prefix + (str(fan_out_index),) so per-instance
-        # roots stay distinct.
-        instance_key = prefix + (str(event.fan_out_index),)
         inv_state.detached_roots[instance_key] = _OpenSpan(span=instance_root)
         inv_state.fan_out_instance_root_prefixes.add(instance_key)
 
@@ -2011,9 +2162,26 @@ class OTelObserver:
     def _close_detached_root(self, inv_state: _InvState, prefix: tuple[str, ...]) -> None:
         inv_state.fan_out_instance_root_prefixes.discard(prefix)
         open_span = inv_state.detached_roots.pop(prefix, None)
+        if open_span is not None:
+            if prefix not in inv_state.errored_detached_keys:
+                open_span.span.set_status(Status(StatusCode.OK))
+            self._run_enrichers(open_span.span, None)
+            open_span.span.end()
+        # Proposal 0061: close the paired detached invocation span (the
+        # parent of the detached root within the detached trace) AFTER
+        # the root — children before parents.
+        self._close_detached_invocation_span(inv_state, prefix)
+
+    def _close_detached_invocation_span(self, inv_state: _InvState, prefix: tuple[str, ...]) -> None:
+        open_span = inv_state.detached_invocation_spans.pop(prefix, None)
         if open_span is None:
             return
-        open_span.span.set_status(Status(StatusCode.OK))
+        # Skip the default OK when the §4.2 error path marked this key
+        # ERROR (proposal 0061) — OTel lets a later OK override ERROR
+        # (see errored_detached_keys); an UNSET close maps to OK by
+        # exporter convention.
+        if prefix not in inv_state.errored_detached_keys:
+            open_span.span.set_status(Status(StatusCode.OK))
         self._run_enrichers(open_span.span, None)
         open_span.span.end()
 
@@ -2158,6 +2326,10 @@ class OTelObserver:
                 self._drain_open_span(open_span)
         for prefix in sorted(inv_state.detached_roots.keys(), key=lambda k: -len(k)):
             self._close_detached_root(inv_state, prefix)
+        # Defensive: _close_detached_root closes the paired invocation
+        # span, but a re-entry pop (or a partial open) could orphan one.
+        for prefix in sorted(inv_state.detached_invocation_spans.keys(), key=lambda k: -len(k)):
+            self._close_detached_invocation_span(inv_state, prefix)
         for prefix in sorted(inv_state.subgraph_spans.keys(), key=lambda k: -len(k)):
             self._close_subgraph_span(inv_state, prefix)
 

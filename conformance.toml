@@ -687,3 +687,10 @@ since = "0.14.0"
 status = "textual-only"
 since = "0.14.0"
 note = "Descriptive catalog of the failure-mock family (flaky + failure_sequence, flaky_by_index, flaky_per_index, flaky_instance_only, flaky_resume_aware) that the adapter already implements and the existing retry / failure-isolation / checkpoint-resume fixtures exercise; no new behavior, no new fixtures, no code change. Mirrors 0055's textual-only treatment of the conformance-adapter capability. The success-state naming drift (success_update / on_success / success_compute) is documented as-is by the proposal and left unchanged."
+
+# Spec v0.61.0 (proposal 0061).  Detached-trace invocation span
+# (observability §4.4 / §4.3 / §4.1 / §4.2 / §5.1).
+[proposals."0061"]
+status = "implemented"
+since = "0.15.0"
+note = "The OTel observer synthesizes an openarmature.invocation span at the root of each detached trace (a detached subgraph + each detached fan-out instance), carrying the parent's SHARED invocation_id (detached mode is observer-side trace rendering, not a new run) and the detached unit's own entry_node; the detached subgraph / instance span nests under it. A raising detached subgraph surfaces ERROR + the category + an OTel exception event on BOTH the parent dispatch span and the detached invocation span. Observer-side only -- no graph-engine change; the Langfuse observer is unchanged (its Trace entity already plays the invocation-level-container role). Fixtures 008 (rewritten) and 058 (newly wired) run in test_observability."
