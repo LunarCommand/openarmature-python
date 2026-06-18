@@ -166,8 +166,7 @@ def _read_implementation_version() -> str:
 
 def _apply_caller_metadata(attrs: dict[str, Any], metadata: Mapping[str, Any]) -> None:
     """Merge caller-supplied invocation metadata into a span's
-    attribute dict as ``openarmature.user.<key>`` entries per
-    observability §5.6.
+    attribute dict as ``openarmature.user.<key>`` entries.
 
     Called at every span-emission site so the metadata family is
     cross-cutting (invocation span, every node span, subgraph
@@ -187,12 +186,13 @@ def _subgraph_identity_at(event: NodeEvent, depth: int) -> str:
     given 1-based namespace depth, or the empty string when no
     identity is tracked at that depth.
 
-    Per observability §5.3 + the coord-thread
-    ``clarify-subgraph-name-semantics`` resolution: empty-string
-    fallback matches the spec's "if the implementation tracks one"
-    clause for callers using ``SubgraphNode(name=..., compiled=...)``
-    without supplying ``subgraph_identity``.
+    The empty-string fallback matches the spec's "if the implementation
+    tracks one" clause for callers using
+    ``SubgraphNode(name=..., compiled=...)`` without supplying
+    ``subgraph_identity``.
     """
+    # Spec observability §5.3 (coord thread
+    # clarify-subgraph-name-semantics).
     idx = depth - 1
     if 0 <= idx < len(event.subgraph_identities):
         identity = event.subgraph_identities[idx]
@@ -214,10 +214,10 @@ class _OpenSpan:
     single event handler's scope, so no token needs to live across
     events.
 
-    Per proposal 0045: carries the span's own ``fan_out_index_chain``
-    and ``branch_name_chain`` so the augmentation walk can apply
-    §3.4's lineage-aware boundary rule without re-deriving the chain
-    from successive events."""
+    Carries the span's own ``fan_out_index_chain`` and
+    ``branch_name_chain`` so the augmentation walk can apply the
+    lineage-aware boundary rule without re-deriving the chain from
+    successive events."""
 
     span: Span
     fan_out_index_chain: tuple[int | None, ...] = ()
@@ -231,7 +231,7 @@ def _span_chain_on_path(
 ) -> bool:
     """Return True iff ``open_span``'s chain is a prefix-match of the
     augmenter's chain — i.e., the span sits on the augmenter's
-    call-stack ancestor path.  Per proposal 0045 §3.4:
+    call-stack ancestor path:
 
     - A span shorter than the augmenter (chain prefix-matches) is an
       ancestor on the path.
@@ -240,6 +240,7 @@ def _span_chain_on_path(
     - A span deeper than the augmenter, OR with a position-mismatch
       anywhere, is a sibling and MUST NOT be updated.
     """
+    # Spec observability §3.4 (proposal 0045): lineage-aware boundary.
     span_fi = open_span.fan_out_index_chain
     span_bn = open_span.branch_name_chain
     if len(span_fi) > len(aug_fi_chain):
@@ -385,7 +386,7 @@ class _InvState:
 
 @dataclass
 class OTelObserver:
-    """Observer-driven OTel span lifecycle per spec observability §6.
+    """Observer-driven OTel span lifecycle.
 
     Construct with a :class:`SpanProcessor` (typically a
     :class:`BatchSpanProcessor` wrapping a real exporter, or a
@@ -443,6 +444,7 @@ class OTelObserver:
     event handler's scope.
     """
 
+    # Spec observability §6 (observer-driven span lifecycle).
     # span_processor accepts a single processor or a sequence per
     # observability friction-roundup #5. The dataclass field type is
     # the union; ``__post_init__`` normalizes to a tuple internally.
@@ -764,7 +766,7 @@ class OTelObserver:
         )
 
     def _handle_completed(self, event: NodeEvent) -> None:
-        """Close the matching span, applying §4.2 status mapping."""
+        """Close the matching span, applying the status mapping."""
         from openarmature.observability.correlation import current_invocation_id
 
         invocation_id = current_invocation_id()
@@ -942,8 +944,7 @@ class OTelObserver:
         self, invocation_id: str, event: MetadataAugmentationEvent
     ) -> list[Span]:
         """Collect open spans on the augmenter's call-stack ancestor
-        chain per proposal 0045 §3.4.  Three-step boundary decision
-        tree per open span:
+        chain.  Three-step boundary decision tree per open span:
 
         1. Same context as augmenter (or descendant sharing the
            mutated mapping) — update.
@@ -1060,17 +1061,17 @@ class OTelObserver:
     # ------------------------------------------------------------------
 
     def _emit_checkpoint_migrate_span(self, event: NodeEvent) -> None:
-        """Spec pipeline-utilities §6 cross-ref (proposal 0014): emit a
-        zero-duration ``openarmature.checkpoint.migrate`` span when
-        a versioned resume's migration chain runs. The synthetic
-        event carries ``_MigrationSummary`` on ``pre_state``; this
-        handler reads ``from_version`` / ``to_version`` /
+        """Emit a zero-duration ``openarmature.checkpoint.migrate``
+        span when a versioned resume's migration chain runs. The
+        synthetic event carries ``_MigrationSummary`` on ``pre_state``;
+        this handler reads ``from_version`` / ``to_version`` /
         ``chain_length`` from the summary onto the span.
 
         Emitted under the invocation's root span (no parent-node
         context — the migration runs before any node fires), so
         trace UIs surface it as the first child of the invocation.
         """
+        # Spec pipeline-utilities §6 cross-ref (proposal 0014).
         from openarmature.graph.compiled import _MigrationSummary
         from openarmature.observability.correlation import (
             current_correlation_id,
@@ -1117,10 +1118,10 @@ class OTelObserver:
         span.end()
 
     def _emit_checkpoint_save_span(self, event: NodeEvent) -> None:
-        """Spec pipeline-utilities §10.8 + observability §4.5: emit a
-        zero-duration ``openarmature.checkpoint.save`` span attached
-        to the most-recently-opened node span (the node whose
+        """Emit a zero-duration ``openarmature.checkpoint.save`` span
+        attached to the most-recently-opened node span (the node whose
         completed event triggered the save)."""
+        # Spec pipeline-utilities §10.8 + observability §4.5.
         from openarmature.observability.correlation import (
             current_correlation_id,
             current_invocation_id,
@@ -1313,8 +1314,8 @@ class OTelObserver:
 
     def _handle_typed_llm_failed(self, event: LlmFailedEvent) -> None:
         """Open + close the ``openarmature.llm.complete`` span from the
-        typed LlmFailedEvent (failure path, proposal 0058). Same span
-        shape as the success path with ERROR status +
+        typed LlmFailedEvent (failure path). Same span shape as the
+        success path with ERROR status +
         ``openarmature.error.category`` attribute attached."""
         from openarmature.observability.correlation import (
             current_correlation_id,
@@ -1605,16 +1606,17 @@ class OTelObserver:
         correlation_id: str | None,
         event: NodeEvent,
     ) -> None:
-        """Open any synthetic subgraph dispatch spans we need (per
-        observability §4.5: subgraph wrapper MUST emit a span); close
-        any subgraph spans whose prefix is no longer an ancestor of
-        the current event's namespace.
+        """Open any synthetic subgraph dispatch spans we need (the
+        subgraph wrapper MUST emit a span); close any subgraph spans
+        whose prefix is no longer an ancestor of the current event's
+        namespace.
 
         Called from ``_open_started_span`` BEFORE opening the leaf
         node span. Detached-mode entries (subgraph or fan-out instance)
         are registered as detached roots so their inner spans live
         in a fresh trace.
         """
+        # Spec observability §4.5: the subgraph wrapper emits a span.
         namespace = event.namespace
         # 1. Close any open subgraph spans that aren't ancestors of
         #    the current namespace — we've left those subgraphs.
@@ -2015,10 +2017,9 @@ class OTelObserver:
         prefix: tuple[str, ...],
         event: NodeEvent,
     ) -> None:
-        """Per-instance dispatch span for a non-detached fan-out
-        (per spec §5.4 + proposal 0013, v0.10.0). Mirror of
-        ``_open_detached_fan_out_instance_root`` but lives in the
-        parent trace (no fresh trace_id).
+        """Per-instance dispatch span for a non-detached fan-out.
+        Mirror of ``_open_detached_fan_out_instance_root`` but lives in
+        the parent trace (no fresh trace_id).
 
         Parents under the fan-out node span at ``prefix``. Span name
         is the fan-out node's name; attributes are
@@ -2084,9 +2085,8 @@ class OTelObserver:
         prefix: tuple[str, ...],
         event: NodeEvent,
     ) -> None:
-        """Per-branch dispatch span for a parallel-branches NODE (per
-        observability §5.7 + proposal 0044, v0.36.0).  Mirror of
-        ``_open_fan_out_instance_dispatch_span``.
+        """Per-branch dispatch span for a parallel-branches NODE.
+        Mirror of ``_open_fan_out_instance_dispatch_span``.
 
         Parents under the parallel-branches node span at ``prefix``.
         Span name is the branch's identifier (``event.branch_name``).
@@ -2209,7 +2209,7 @@ class OTelObserver:
         return None
 
     def _node_attrs(self, event: NodeEvent, correlation_id: str | None) -> dict[str, Any]:
-        """Build the §5 attribute set for a node span."""
+        """Build the attribute set for a node span."""
         attrs: dict[str, Any] = {
             "openarmature.node.name": event.node_name,
             "openarmature.node.namespace": list(event.namespace),
