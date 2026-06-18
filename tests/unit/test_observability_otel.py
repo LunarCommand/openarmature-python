@@ -7,16 +7,16 @@ missing deps.
 
 These tests fill the gaps the conformance harness defers:
 
-- §6 TracerProvider isolation — the load-bearing "spans don't leak
+- TracerProvider isolation — the load-bearing "spans don't leak
   into the OTel global provider" guarantee.
-- §5 attribute population on every span type.
-- §4.2 status mapping for every §4 error category.
-- §5.5 LLM provider span via the ContextVar dispatch hook (queue-
+- attribute population on every span type.
+- status mapping for every error category.
+- LLM provider span via the ContextVar dispatch hook (queue-
   mediated; no synchronous direct dispatch).
-- §4.4 detached trace mode key separation in the span stack.
-- §10.8 checkpoint_saved → ``openarmature.checkpoint.save`` zero-
+- detached trace mode key separation in the span stack.
+- checkpoint_saved → ``openarmature.checkpoint.save`` zero-
   duration span.
-- §7 log bridge filter + correlation_id injection.
+- log bridge filter + correlation_id injection.
 """
 
 from __future__ import annotations
@@ -121,7 +121,7 @@ def _reset_otel_global_tracer_provider(restore_to: object) -> None:
 
 
 async def test_observer_uses_private_provider_not_global() -> None:
-    """Spec §6 TracerProvider isolation: the OTelObserver MUST use a
+    """TracerProvider isolation: the OTelObserver MUST use a
     PRIVATE TracerProvider; spans MUST NOT appear on the OTel global
     provider's exporter (this is the load-bearing guarantee against
     duplicate spans from external auto-instrumentation libraries)."""
@@ -159,8 +159,8 @@ async def test_observer_uses_private_provider_not_global() -> None:
 
 
 async def test_node_span_carries_required_attributes() -> None:
-    """Spec §5.2: every node span MUST carry the four
-    ``openarmature.node.*`` base attributes."""
+    """Every node span MUST carry the four ``openarmature.node.*``
+    base attributes."""
     g, exporter = _build_linear_graph()
     await g.invoke(_LinearState(), correlation_id="test-cid")  # type: ignore[attr-defined]
     await g.drain()  # type: ignore[attr-defined]
@@ -178,8 +178,8 @@ async def test_node_span_carries_required_attributes() -> None:
 
 
 async def test_invocation_span_carries_required_attributes() -> None:
-    """Spec §5.1: invocation span MUST carry
-    ``openarmature.graph.entry_node`` + ``openarmature.graph.spec_version``."""
+    """Invocation span MUST carry ``openarmature.graph.entry_node`` +
+    ``openarmature.graph.spec_version``."""
     exporter = InMemorySpanExporter()
     observer = OTelObserver(span_processor=SimpleSpanProcessor(exporter))
     g, _ = _build_linear_graph(observer)
@@ -307,7 +307,7 @@ async def _failing_node(_s: _FailState) -> dict[str, int]:
 
 
 async def test_failing_node_span_carries_error_status() -> None:
-    """Spec §4.2: a node-exception failure produces a span with
+    """A node-exception failure produces a span with
     ERROR status, an exception event recorded, and the
     ``openarmature.error.category`` attribute on the span."""
     from opentelemetry.trace import StatusCode
@@ -340,8 +340,7 @@ async def test_failing_node_span_carries_error_status() -> None:
 
 
 async def test_checkpoint_migrate_emits_span_with_chain_metadata(tmp_path: Path) -> None:
-    """Spec §6 cross-ref in proposal 0014: a versioned resume whose
-    migration chain runs SHOULD emit an
+    """A versioned resume whose migration chain runs SHOULD emit an
     ``openarmature.checkpoint.migrate`` span carrying
     ``from_version`` / ``to_version`` (final) / ``chain_length``."""
     from openarmature.checkpoint import (
@@ -405,8 +404,8 @@ async def test_checkpoint_migrate_emits_span_with_chain_metadata(tmp_path: Path)
 
 
 async def test_checkpoint_migrate_span_absent_on_version_match(tmp_path: Path) -> None:
-    """Spec §10.12.3 fast path: when the saved record's schema_version
-    equals the current state class's schema_version, the migration
+    """Fast path: when the saved record's schema_version equals the
+    current state class's schema_version, the migration
     registry is NOT consulted. The OTel observer MUST NOT emit a
     ``openarmature.checkpoint.migrate`` span in that case."""
     from openarmature.checkpoint import CheckpointRecord, SQLiteCheckpointer
@@ -454,8 +453,8 @@ async def test_checkpoint_migrate_span_absent_on_version_match(tmp_path: Path) -
 
 
 async def test_checkpoint_save_emits_zero_duration_span() -> None:
-    """Spec §10.8: a checkpoint save SHOULD emit a §6-style observer
-    event surfaced as a span. Our implementation emits a
+    """A checkpoint save SHOULD emit an observer event surfaced as a
+    span. Our implementation emits a
     ``openarmature.checkpoint.save`` span on every save."""
     cp = InMemoryCheckpointer()
     exporter = InMemorySpanExporter()
@@ -493,8 +492,8 @@ async def test_checkpoint_save_emits_zero_duration_span() -> None:
 
 
 async def test_active_prompt_propagates_to_llm_span_attributes() -> None:
-    """Spec prompt-management §11: when an LLM call fires inside a
-    ``with_active_prompt`` context, the OTel observer MUST surface
+    """When an LLM call fires inside a ``with_active_prompt`` context,
+    the OTel observer MUST surface
     ``openarmature.prompt.*`` attributes on the LLM-call span.
     ``with_active_prompt_group`` adds ``openarmature.prompt.group_name``."""
     from datetime import UTC, datetime
@@ -660,8 +659,8 @@ async def test_llm_span_emits_cache_creation_attribute_when_payload_carries_it()
 
 
 async def test_disable_llm_spans_skips_llm_provider_span() -> None:
-    """Spec §5.5: ``disable_llm_spans=True`` MUST suppress the
-    LLM-provider span emission while leaving all other spans intact."""
+    """``disable_llm_spans=True`` MUST suppress the LLM-provider span
+    emission while leaving all other spans intact."""
     from openarmature.graph.events import NodeEvent
 
     # We don't drive a real provider here; instead we emit a synthetic
@@ -845,8 +844,8 @@ async def test_llm_error_path_emits_error_span_from_typed_failed_event() -> None
 
 
 def test_log_record_factory_injects_correlation_id() -> None:
-    """Spec §7: every log record emitted during an invocation MUST
-    carry ``openarmature.correlation_id``. The bridge installs a
+    """Every log record emitted during an invocation MUST carry
+    ``openarmature.correlation_id``. The bridge installs a
     process-global :class:`logging.LogRecord` factory (rather than
     a logger-level filter) so the attribute lands on every record
     regardless of which logger originated it — Python's logging
@@ -1028,8 +1027,8 @@ def test_install_log_bridge_adds_handler_when_pre_attached_uses_different_provid
 
 
 def test_log_bridge_exports_records_with_correlation_id() -> None:
-    """Spec §7 end-to-end: a log record emitted on a CHILD logger
-    under ``current_correlation_id`` flows through the bridge to
+    """End-to-end: a log record emitted on a CHILD logger under
+    ``current_correlation_id`` flows through the bridge to
     the OTel ``LoggerProvider``'s exporter with
     ``openarmature.correlation_id`` populated. Child-logger emit
     is the load-bearing case — Python's logging propagates child
@@ -1106,8 +1105,8 @@ def test_log_bridge_exports_records_with_correlation_id() -> None:
 
 async def test_shared_observer_concurrent_invocations_dont_collide() -> None:
     """A single observer shared across concurrent invocations MUST
-    keep their span trees isolated. Per spec §5.1 each invocation
-    has its own ``invocation_id`` and therefore its own
+    keep their span trees isolated. Each invocation has its own
+    ``invocation_id`` and therefore its own
     ``trace_id``; with shared internal state keyed by
     ``invocation_id`` the observer no longer collides on overlapping
     namespaces, no longer closes another in-flight invocation's span
@@ -1239,7 +1238,7 @@ async def test_concurrent_fan_out_no_lifo_violation() -> None:
 
 
 async def test_concurrent_fan_out_llm_spans_parent_under_calling_instance() -> None:
-    """Spec §5.5 under concurrent fan-out: each instance's
+    """Under concurrent fan-out: each instance's
     ``openarmature.llm.complete`` span MUST parent under that
     instance's calling node, not a sibling instance's. The Phase 6.1
     calling-node identity (namespace_prefix + attempt_index +
@@ -1362,7 +1361,7 @@ async def test_concurrent_fan_out_llm_spans_parent_under_calling_instance() -> N
 
 
 async def test_llm_call_inside_retried_node_parents_per_attempt() -> None:
-    """Spec §5.5 under retry: when an LLM ``complete()`` call
+    """Under retry: when an LLM ``complete()`` call
     happens inside a node body wrapped with retry middleware, each
     attempt's LLM span MUST parent under THAT attempt's node span,
     not a hardcoded ``attempt_index=0``. Phase 6.1's
