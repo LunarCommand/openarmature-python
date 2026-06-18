@@ -354,9 +354,9 @@ class _MockPromptBackend:
     - ``mock_with_langfuse_reference``: attaches the supplied
       ``langfuse_prompt_reference`` sentinel under
       ``Prompt.observability_entities['langfuse_prompt']``. Verifies
-      §8.4.4 case 1 (Generation linked to Prompt entity).
-    - ``filesystem``: no Langfuse reference attached. Verifies §8.4.4
-      case 2 (metadata-only).
+      the Generation-linked-to-Prompt-entity case.
+    - ``filesystem``: no Langfuse reference attached. Verifies the
+      metadata-only case.
     """
 
     def __init__(self, prompts: dict[str, dict[str, Any]], *, with_langfuse_reference: bool) -> None:

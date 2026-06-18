@@ -319,12 +319,12 @@ class ParallelBranchSpec(_AllowExtras):
 
 
 class ParallelBranchesSpec(_AllowExtras):
-    """``parallel_branches:`` block on a NodeSpec (pipeline-utilities §11).
+    """``parallel_branches:`` block on a NodeSpec.
 
     Mirrors :class:`FanOutSpec` but topology-driven: M heterogeneous
     branches, each referencing a different compiled subgraph by name
     against the case's top-level ``subgraphs:`` block. Branch insertion
-    order is preserved per §11.8.
+    order is preserved.
     """
 
     branches: dict[str, ParallelBranchSpec]
@@ -333,8 +333,8 @@ class ParallelBranchesSpec(_AllowExtras):
 
 
 class RuntimeConfigSpec(_AllowExtras):
-    """``calls_llm.config`` block — mirrors ``RuntimeConfig`` (llm-provider
-    §6). Used by observability fixtures 016-018 (request-parameter and
+    """``calls_llm.config`` block — mirrors ``RuntimeConfig``. Used by
+    observability fixtures 016-018 (request-parameter and
     extras emission) and by the GenAI semconv set.
 
     Each field maps one-to-one to ``openarmature.llm.response.RuntimeConfig``
@@ -358,7 +358,7 @@ class CallsLlmSpec(_AllowExtras):
     and stores the response (assistant content) in ``stores_response_in``.
     Used by observability fixtures to verify LLM-provider span emission.
 
-    ``config`` (proposal 0024, fixtures 016-018) carries the optional
+    ``config`` (fixtures 016-018) carries the optional
     ``RuntimeConfig`` field set for the call — temperature, max_tokens,
     top_p, seed, and a provider-specific ``extras`` bag.
     """
@@ -396,7 +396,7 @@ class NodeSpec(_ForbidExtras):
       ``error_category``.
     - ``subgraph`` — references a top-level ``subgraph``/``subgraphs``
       definition by name. Companions: ``inputs``, ``outputs`` for explicit
-      mapping (spec v0.2 §2).
+      mapping.
     - ``fan_out`` — see :class:`FanOutSpec`.
     - ``flaky`` and the four ``flaky_*`` variants — harness mocks for
       retry/checkpoint behaviours.
@@ -407,7 +407,7 @@ class NodeSpec(_ForbidExtras):
     - ``emits_log`` — fires a log record with the node's update.
     - ``also_emits_via_global_tracer`` — fires a span on the OTel global
       provider (used to verify isolation).
-    - ``middleware`` — per-node middleware list (spec v0.5 §3).
+    - ``middleware`` — per-node middleware list.
     """
 
     # Primary directives — exactly one of these must be set.
@@ -517,8 +517,8 @@ class TraceRecorderMiddleware(_AllowExtras):
 
 
 class FailureIsolationMiddleware(_AllowExtras):
-    """Canonical failure-isolation middleware (proposal 0050 §6.3,
-    fixtures 058-063). Catches an exception escaping the inner chain and
+    """Canonical failure-isolation middleware (fixtures 058-063).
+    Catches an exception escaping the inner chain and
     returns a configured degraded partial update, emitting a distinct
     ``FailureIsolatedEvent``."""
 
@@ -577,7 +577,7 @@ class MockResponse(_AllowExtras):
     Permissive shape because the body's content mirrors OpenAI's wire
     format which is wide and evolving; modelling every field would
     duplicate the OpenAI schema. The ``llm-provider`` capability's
-    spec.md §8.1 is the authoritative shape.
+    spec is the authoritative shape.
     """
 
     status: int | None = None
@@ -617,10 +617,10 @@ class ObserverSpec(_ForbidExtras):
     - ``target`` is ``outer`` (outermost graph) or a subgraph name.
     - ``behavior`` is ``record`` (capture events for assertion) or
       ``raise`` (raise to verify error isolation).
-    - ``phases`` (optional, spec v0.6 §6) — subset of ``{"started",
-      "completed"}`` for per-observer phase subscription.
-    - ``sleep_ms_per_event`` (proposal 0010 §6 Drain conformance) — the
-      slow-observer directive. An int means a constant sleep per
+    - ``phases`` (optional) — subset of ``{"started", "completed"}``
+      for per-observer phase subscription.
+    - ``sleep_ms_per_event`` — the slow-observer directive. An int
+      means a constant sleep per
       event; a dict with ``first_invocation`` / ``subsequent_invocations``
       keys selects per invocation index (used by fixture 024 to slow
       only the first invocation).

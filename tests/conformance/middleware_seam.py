@@ -81,8 +81,8 @@ class TraceRecorderMiddleware:
 class ShortCircuitMiddleware:
     """Returns the configured partial without calling `next`.
 
-    Per spec §2: the rest of the chain — subsequent middleware and the
-    wrapped node — does not execute. The short-circuiting middleware's
+    The rest of the chain — subsequent middleware and the wrapped node
+    — does not execute. The short-circuiting middleware's
     own post-phase is also skipped (because there's no `await next`
     return point to pass through).
     """
@@ -98,8 +98,8 @@ class ShortCircuitMiddleware:
 class ErrorRecoveryMiddleware:
     """Catches any Exception from `next`; returns the configured partial.
 
-    Per spec §5: middleware MAY catch an exception and return a partial
-    update instead of re-raising. The engine treats the dispatch as a
+    Middleware MAY catch an exception and return a partial update
+    instead of re-raising. The engine treats the dispatch as a
     success (post_state populated, no error in the completed event).
     """
 
@@ -117,7 +117,7 @@ class ErrorRaiserMiddleware:
     """Raises a configured exception in the pre-phase.
 
     Verifies that middleware-raised exceptions surface as
-    ``node_exception`` per graph-engine §4.
+    ``node_exception``.
     """
 
     def __init__(self, *, message: str) -> None:

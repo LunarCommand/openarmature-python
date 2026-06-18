@@ -9,12 +9,11 @@ naming one of the harness mock functions), and a ``resume`` block
 specifying either an ``expected`` happy-path or an
 ``expected_error`` raise.
 
-Fixture 047 (``state-migration-chain-ambiguous``, added in spec
-v0.16.0 / proposal 0018) exercises the
+Fixture 047 (``state-migration-chain-ambiguous``) exercises the
 ``expected_chain_ambiguity_error`` harness primitive that accepts
 the canonical ``checkpoint_state_migration_chain_ambiguous``
 category at EITHER build time (duplicate-pair registration) or
-resume time (multi-shortest-path detection) per spec §10.12.2's
+resume time (multi-shortest-path detection), per the
 compile-time-SHOULD / load-time-acceptable carve-out.
 
 The driver:
@@ -232,8 +231,8 @@ async def _run_one_case(case: dict[str, Any], tmp_path: Path) -> None:
     OR inside ``resume:`` (load-time detection: registration
     succeeds and BFS raises during the resume attempt). The driver
     wraps both phases in try/except so the canonical category
-    surfaces from either timing per spec §10.12.2's compile-time-
-    SHOULD / load-time-acceptable carve-out.
+    surfaces from either timing, per the compile-time-SHOULD /
+    load-time-acceptable carve-out.
     """
     state_cls = _build_state_cls(case["state"], model_name=f"Case_{case['name']}")
 

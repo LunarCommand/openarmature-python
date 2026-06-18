@@ -35,7 +35,7 @@ class GraphEngineExpected(_ForbidExtras):
     """Expected block for graph-engine fixtures (001–018).
 
     Top-level keys union'd across every fixture in
-    ``spec/graph-engine/conformance/`` at v0.8.0.
+    ``spec/graph-engine/conformance/``.
     """
 
     final_state: dict[str, Any] | None = None

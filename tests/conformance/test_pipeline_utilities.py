@@ -1,6 +1,6 @@
 """Run every spec pipeline-utilities conformance fixture against the engine.
 
-Phase 2 scope (proposal 0004 middleware): fixtures 001-016. Fixtures
+Phase 2 scope (middleware): fixtures 001-016. Fixtures
 017-019 (fan-out) and 020-021 (fan-out + middleware composition) skip
 via `_unsupported_directive` until Phase 3 lands the fan-out runtime.
 Fixtures 022-031 (fan-out and checkpointing) similarly skip until their
@@ -319,7 +319,7 @@ def _translate_parallel_branches_branch_middleware(
     """Walk ``spec.nodes`` for parallel_branches blocks with per-branch
     ``middleware:`` and translate each into a list of Middleware
     instances. Returned map is keyed by parallel-branches node name
-    then branch name (per spec §11.7 branch middleware) and consumed by
+    then branch name (branch middleware) and consumed by
     build_graph's ``parallel_branches_branch_middleware`` kwarg."""
     out: dict[str, dict[str, list[Middleware]]] = {}
     nodes = cast("dict[str, dict[str, Any]]", spec.get("nodes") or {})
@@ -849,7 +849,7 @@ def _collect_parallel_branches_errors_fields(spec: Mapping[str, Any]) -> set[str
     """Return the set of parent-state field names used as
     ``errors_field`` on any parallel_branches node in ``spec``.
 
-    Per spec §11.1 ``errors_field`` carries an implementation-defined
+    The ``errors_field`` carries an implementation-defined
     record shape; the spec only mandates ``branch_name`` + category. The
     engine's record carries additional engine-defined keys (``message``,
     ``cause_type``). Fixtures asserting against ``errors_field`` records
