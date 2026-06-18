@@ -11,7 +11,7 @@
 
 """Langfuse client Protocol + in-memory recorder.
 
-The :class:`LangfuseObserver` consumes the §6 OA event stream and
+The :class:`LangfuseObserver` consumes the OA event stream and
 emits Langfuse Trace + Observation entities through a
 :class:`LangfuseClient`. The Protocol is intentionally narrow: it
 declares only the methods the observer calls. Concrete sinks:
@@ -55,7 +55,7 @@ class LangfuseObservation:
     Carries the observation's type-discriminated shape — Spans hold
     timing + metadata; Generations add model/parameters/usage/input/
     output/prompt-entity link; Events are point-in-time markers
-    (reserved per spec §8.2 — not used by this version of the mapping).
+    (reserved, not used by this version of the mapping).
     """
 
     id: str
@@ -161,7 +161,7 @@ class LangfuseClient(Protocol):
     closes.
 
     The Protocol does NOT define `event(...)` — Event observations
-    are reserved by §8.2 but not used in v0.23.0 of the mapping.
+    are reserved but not used by this mapping.
     """
 
     def trace(
@@ -173,10 +173,11 @@ class LangfuseClient(Protocol):
     ) -> None:
         """Create a new Trace.
 
-        The Trace `id` MUST be the OA invocation_id verbatim (§8.4.1).
+        The Trace `id` MUST be the OA invocation_id verbatim.
         Implementations track Traces internally; observation calls
         pass `trace_id` to associate.
         """
+        # Spec §8.4.1: the Trace id is the OA invocation_id verbatim.
         ...
 
     # The current observer doesn't invoke this method — it sets the
@@ -199,10 +200,10 @@ class LangfuseClient(Protocol):
         """Update an existing Trace's mutable fields after creation.
 
         Used by the observer when the caller-supplied invocation
-        label (§8.6) lands later than the Trace's open call, when
-        additional metadata becomes available mid-invocation, or
-        when the proposal 0043 invocation-boundary events populate
-        ``trace.input`` / ``trace.output``.
+        label lands later than the Trace's open call, when additional
+        metadata becomes available mid-invocation, or when the
+        invocation-boundary events populate ``trace.input`` /
+        ``trace.output``.
         """
         ...
 

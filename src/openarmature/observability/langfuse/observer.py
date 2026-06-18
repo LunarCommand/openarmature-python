@@ -97,10 +97,10 @@ _StackKey = tuple[tuple[str, ...], int, int | None, str | None]
 class _OpenObservation:
     """An in-flight Langfuse observation pinned in the observer's state.
 
-    Per proposal 0045: carries the observation's own
-    ``fan_out_index_chain`` and ``branch_name_chain`` so the
-    augmentation walk can apply §3.4's lineage-aware boundary rule
-    (mirror of the OTel observer's ``_OpenSpan``)."""
+    Carries the observation's own ``fan_out_index_chain`` and
+    ``branch_name_chain`` so the augmentation walk can apply the
+    lineage-aware boundary rule (mirror of the OTel observer's
+    ``_OpenSpan``)."""
 
     handle: LangfuseSpanHandle | LangfuseGenerationHandle
     fan_out_index_chain: tuple[int | None, ...] = ()
@@ -138,22 +138,23 @@ def _empty_str_frozenset() -> frozenset[str]:
 
 def _apply_caller_metadata(metadata: dict[str, Any], caller_metadata: Mapping[str, Any]) -> None:
     """Merge caller-supplied invocation metadata into a Trace's or
-    Observation's metadata bag at top level per observability §8.4.1
-    + §8.4.2 (proposal 0034).
+    Observation's metadata bag at top level.
 
-    Top-level placement is by spec: Langfuse UI filters on
+    Top-level placement lets the Langfuse UI filter on
     ``metadata.<key>`` directly, so caller-supplied entries become
     siblings to ``correlation_id`` / ``entry_node`` rather than
     nested under a ``user`` sub-object.
 
-    Reserved-key collision with §8.4.1 / §8.4.2 keys
+    Reserved-key collision with the OA-emitted keys
     (``correlation_id``, ``entry_node``, ``spec_version``,
-    ``namespace``, etc.) is not currently checked here: the spec
-    permits the rejection to happen at either boundary, and the
-    ``invoke()`` API-boundary validation already rejects
-    ``openarmature.*`` / ``gen_ai.*`` prefixed keys. Per-Langfuse-
-    backend collision rejection is queued as a follow-up.
+    ``namespace``, etc.) is not currently checked here: the rejection
+    may happen at either boundary, and the ``invoke()`` API-boundary
+    validation already rejects ``openarmature.*`` / ``gen_ai.*``
+    prefixed keys. Per-Langfuse-backend collision rejection is queued
+    as a follow-up.
     """
+    # Spec observability §8.4.1 / §8.4.2 (proposal 0034): top-level
+    # placement of caller-supplied metadata on the Trace / Observation.
     for key, value in caller_metadata.items():
         metadata[key] = value
 
@@ -163,15 +164,16 @@ def _subgraph_identity_at(event: NodeEvent, depth: int) -> str:
     given 1-based namespace depth, or the empty string when no
     identity is tracked at that depth.
 
-    Per observability §5.3 + the coord-thread
-    ``clarify-subgraph-name-semantics`` resolution: the empty-string
-    fallback matches the spec's "if the implementation tracks one"
-    clause for implementations / direct ``SubgraphNode(...)`` callers
-    that don't wire an identity through. Conformance fixtures
-    031/032/033 lock identity as the required value; the empty-string
-    path keeps direct callers conformant with §5.3 but failing those
-    fixtures.
+    The empty-string fallback matches the spec's "if the
+    implementation tracks one" clause for implementations / direct
+    ``SubgraphNode(...)`` callers that don't wire an identity through.
+    Conformance fixtures 031/032/033 lock identity as the required
+    value; the empty-string path keeps direct callers conformant but
+    failing those fixtures.
     """
+    # Spec observability §5.3 (coord thread
+    # clarify-subgraph-name-semantics): empty-string fallback is
+    # conformant for callers that don't track a subgraph identity.
     idx = depth - 1
     if 0 <= idx < len(event.subgraph_identities):
         identity = event.subgraph_identities[idx]
@@ -254,12 +256,12 @@ class _InvState:
 
 @dataclass
 class LangfuseObserver:
-    """Observer-driven Langfuse mapping per spec observability §8.
+    """Observer-driven Langfuse mapping.
 
     Construct with a :class:`LangfuseClient` — the bundled
     :class:`InMemoryLangfuseClient` for tests, or a real
     ``langfuse.Langfuse()`` instance for production. The observer
-    handles the §6 event stream and emits Trace + Observation entities
+    handles the event stream and emits Trace + Observation entities
     through the client.
 
     Constructor knobs:
@@ -267,34 +269,34 @@ class LangfuseObserver:
     - ``client``: the Langfuse sink (Protocol-typed).
     - ``disable_llm_spans``: when ``True`` the observer skips
       Generation observations on LLM provider events.
-    - ``disable_provider_payload``: default ``True`` per §8.9's "symmetric
-      privacy posture" with the OTel observer. Gates
+    - ``disable_provider_payload``: default ``True`` for a symmetric
+      privacy posture with the OTel observer. Gates
       ``generation.input`` / ``output`` / ``metadata.request_extras``
       emission. The name carries the broadened provider-payload scope;
       LLM completion is OA's only provider-call payload today.
     - ``payload_byte_cap``: per-attribute byte cap on the source
       payload string before parse-back. Mirrors the OTel observer's
       ``payload_max_bytes`` semantic — emission preserves the raw
-      truncated string when the §5.5.5 marker is present (per §8.7).
-      Default 64 KiB; same minimum (256 bytes) applies.
+      truncated string when the truncation marker is present. Default
+      64 KiB; same minimum (256 bytes) applies.
     - ``detached_subgraphs``: set of subgraph wrapper node names that
-      run in their own Langfuse Trace per §8.5. Each such subgraph
-      gets a fresh trace_id; the main Trace's dispatch observation
-      surfaces the link via ``metadata.detached_child_trace_ids``.
+      run in their own Langfuse Trace. Each such subgraph gets a fresh
+      trace_id; the main Trace's dispatch observation surfaces the link
+      via ``metadata.detached_child_trace_ids``.
     - ``detached_fan_outs``: set of fan-out node names whose instances
       each get their own Langfuse Trace. Same link mechanism on the
       fan-out node observation: each per-instance detached trace_id
       lands in the array.
-    - ``disable_state_payload``: default ``True`` per §8.4.1 *Trace
-      input/output sourcing* (proposal 0043). When ``True`` the
-      observer does NOT serialize ``initial_state`` / final state
-      directly onto ``trace.input`` / ``trace.output``; the minimal
-      stub applies unless ``trace_input_from_state`` /
-      ``trace_output_from_state`` overrides. When ``False`` the raw
-      state object is serialized to the Trace fields, subject to
-      ``payload_byte_cap`` truncation. Independent of
-      ``disable_provider_payload`` — the two payloads carry distinct
-      threat models (LLM-call transcript vs. application state).
+    - ``disable_state_payload``: default ``True`` (Trace input/output
+      sourcing). When ``True`` the observer does NOT serialize
+      ``initial_state`` / final state directly onto ``trace.input`` /
+      ``trace.output``; the minimal stub applies unless
+      ``trace_input_from_state`` / ``trace_output_from_state``
+      overrides. When ``False`` the raw state object is serialized to
+      the Trace fields, subject to ``payload_byte_cap`` truncation.
+      Independent of ``disable_provider_payload`` — the two payloads
+      carry distinct threat models (LLM-call transcript vs.
+      application state).
     - ``trace_input_from_state``: optional caller hook returning the
       value to use as ``trace.input``. Called once per invocation at
       the ``InvocationStartedEvent``. Returning ``None`` falls
@@ -309,8 +311,8 @@ class LangfuseObserver:
       parameterization.
     - ``implementation_version``: string surfaced as
       ``trace.metadata.implementation_version`` on every Trace.
-      Defaults to ``openarmature.__version__``. Always-emit invariant
-      inherited from §5.1 — not gated by ``disable_state_payload``,
+      Defaults to ``openarmature.__version__``. Always emitted —
+      not gated by ``disable_state_payload``,
       ``disable_provider_payload``, or any other privacy knob.
 
     The observer reads the spec version from the package at
@@ -318,6 +320,11 @@ class LangfuseObserver:
     and across resumes of the same correlation_id; per-invocation
     state isolation keys all internal maps by invocation_id.
     """
+
+    # Spec observability §8 (Langfuse backend mapping). Knob spec
+    # basis: §8.9 privacy posture; §8.4.1 Trace input/output sourcing
+    # (proposal 0043); §8.5 detached traces; §5.1 always-emit
+    # attribution invariant.
 
     client: LangfuseClient
     disable_llm_spans: bool = False
@@ -1451,9 +1458,9 @@ class LangfuseObserver:
 
     def _handle_typed_llm_failed(self, event: LlmFailedEvent) -> None:
         """Open + close an ERROR-level Generation observation from the
-        typed LlmFailedEvent (failure path, proposal 0058). Same shape
-        as the success path with ERROR level + error_category as the
-        Generation observation's statusMessage."""
+        typed LlmFailedEvent (failure path). Same shape as the success
+        path with ERROR level + error_category as the Generation
+        observation's statusMessage."""
         from openarmature.observability.correlation import (
             current_correlation_id,
             current_invocation_id,
@@ -1600,8 +1607,9 @@ class LangfuseObserver:
         return metadata
 
     def _usage_from_typed_event(self, event: LlmCompletionEvent) -> LangfuseUsage | None:
-        """Map the typed event's Usage onto the Langfuse Usage record
-        per §8.4.3. Returns None when no usage was reported."""
+        """Map the typed event's Usage onto the Langfuse Usage record.
+        Returns None when no usage was reported."""
+        # Spec observability §8.4.3 (Langfuse usage mapping).
         usage = event.usage
         if usage is None:
             return None
@@ -1614,8 +1622,9 @@ class LangfuseObserver:
         )
 
     def _resolve_prompt_link_from_typed_event(self, event: LlmCompletionEvent | LlmFailedEvent) -> Any:
-        """§8.4.4 case discrimination on the typed event's active_prompt
+        """Case discrimination on the typed event's active_prompt
         snapshot."""
+        # Spec observability §8.4.4.
         active_prompt = event.active_prompt
         if active_prompt is None:
             return None

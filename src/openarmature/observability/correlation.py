@@ -139,14 +139,16 @@ _INVOCATION_ID_RE = re.compile(r"^[A-Za-z0-9._~-]+$")
 def validate_invocation_id(value: object) -> str:
     """Validate a caller-supplied ``invocation_id`` and return it.
 
-    Per observability §5.1 a caller-supplied id MAY be any non-empty
-    URL-safe string. Rejects empty / non-string / non-URL-safe values
-    at the ``invoke()`` boundary so the violation surfaces
-    synchronously to the caller rather than as a downstream trace-id
-    derivation failure. Typed ``object`` (like
-    :func:`validate_invocation_metadata`) so the boundary check guards
-    against untyped callers. Raises :class:`ValueError`.
+    A caller-supplied id MAY be any non-empty URL-safe string. Rejects
+    empty / non-string / non-URL-safe values at the ``invoke()``
+    boundary so the violation surfaces synchronously to the caller
+    rather than as a downstream trace-id derivation failure. Typed
+    ``object`` (like :func:`validate_invocation_metadata`) so the
+    boundary check guards against untyped callers. Raises
+    :class:`ValueError`.
     """
+    # Spec observability §5.1: a caller-supplied invocation_id MAY be
+    # any non-empty URL-safe string.
     if not isinstance(value, str):
         raise ValueError(f"invocation_id must be a string; got {type(value).__name__}")
     if not value:

@@ -16,7 +16,7 @@
 Public surface:
 
 - :class:`LangfuseObserver` — observer-driven Langfuse Trace +
-  Observation emission per spec observability §8.
+  Observation emission.
 - :class:`LangfuseClient` — Protocol the observer calls. Satisfied by
   the bundled :class:`InMemoryLangfuseClient` and (structurally) by
   the real ``langfuse.Langfuse`` SDK class.
