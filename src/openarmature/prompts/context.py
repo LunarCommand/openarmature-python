@@ -1,19 +1,20 @@
 """Context variables for propagating prompt identity to observability.
 
-Spec §11 leaves the propagation mechanism implementation-defined.
-This module provides the Python implementation: two ``ContextVar``s
-plus two context managers (``with_active_prompt`` and
+The propagation mechanism is implementation-defined. This module
+provides the Python implementation: two ``ContextVar``s plus two
+context managers (``with_active_prompt`` and
 ``with_active_prompt_group``) that observers read to surface the
-normative ``openarmature.prompt.*`` and
-``openarmature.prompt.group_name`` span attributes.
+``openarmature.prompt.*`` and ``openarmature.prompt.group_name`` span
+attributes.
 
 Nesting policy: innermost-wins. When two ``with_active_prompt``
 contexts nest, the inner result is the active one for the
 duration of the inner block; the same applies to
 ``with_active_prompt_group``. This matches Python's natural
-``ContextVar`` token-stacking behavior; spec §11 doesn't mandate
-a nesting policy.
+``ContextVar`` token-stacking behavior.
 """
+# Spec prompt-management §11: propagation mechanism is
+# implementation-defined (no mandated nesting policy).
 
 from __future__ import annotations
 

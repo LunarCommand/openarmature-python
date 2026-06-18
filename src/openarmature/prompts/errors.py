@@ -54,8 +54,8 @@ class PromptRenderError(PromptError):
     Carries the source prompt's identity plus the variable mapping
     and a description of the render failure.
 
-    Non-transient per spec §10: retrying the same render with the
-    same prompt + variables will not succeed. Callers whose backend
+    Non-transient: retrying the same render with the same prompt +
+    variables will not succeed. Callers whose backend
     serves a fixed template later should re-fetch + re-render rather
     than relying on retry-middleware to auto-retry the failed render.
     """

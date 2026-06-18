@@ -24,7 +24,7 @@ def compute_rendered_hash(messages: list[Message]) -> str:
     """SHA-256 over a canonical JSON serialization of ``messages``.
 
     Preserves message boundaries, roles, content (including
-    content-block structure per llm-provider §3.1), and tool_calls.
+    content-block structure), and tool_calls.
     ``json.dumps(sort_keys=True, separators=(",", ":"))`` over the
     per-message ``model_dump(mode="json")`` is deterministic across
     runs; datetimes serialize as ISO-8601 strings.

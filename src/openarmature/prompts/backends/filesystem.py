@@ -21,7 +21,7 @@ class FilesystemPromptBackend:
     - ``layout="per-label"`` (default): ``<root>/<label>/<name>.j2``.
       The ``label`` subdirectory keeps name-collisions across labels
       distinct (e.g., ``prompts/production/greeting.j2`` and
-      ``prompts/staging/greeting.j2``). Spec §5 permits filesystem
+      ``prompts/staging/greeting.j2``). The spec permits filesystem
       backends to interpret label as "a subdirectory or filename
       suffix"; this is the subdirectory variant.
     - ``layout="flat"``: ``<root>/<name>.j2``. The same template
@@ -39,7 +39,7 @@ class FilesystemPromptBackend:
     well past any realistic single-backend exposure.
 
     Optional ``sampling_source`` populates ``Prompt.sampling`` from a
-    sidecar file, per the spec §5 informative filesystem convention:
+    sidecar file, per the informative filesystem convention:
 
     - ``"none"`` (default): never populate ``sampling``.
     - ``"per-prompt-sidecar"``: read ``<name>.config.json`` from the

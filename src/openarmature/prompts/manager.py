@@ -53,7 +53,7 @@ class PromptManager:
     Users interact with the manager; backends are an implementation
     detail of construction. The manager owns:
 
-    - ``fetch``: consults backends in order per §9 (was §8) fallback semantics.
+    - ``fetch``: consults backends in order with fallback semantics.
     - ``render``: synchronous local string transform; produces a
       ``PromptResult``.
     - ``get``: convenience: ``render(await fetch(...), variables)``.
@@ -62,12 +62,15 @@ class PromptManager:
 
     - ``label_resolver``: optional ``LabelResolver`` consulted by
       :meth:`fetch` / :meth:`get` when no explicit ``label`` argument
-      is supplied (§6 step-2 of the fallback chain).
+      is supplied (step 2 of the fallback chain).
     - ``jinja_undefined``: Jinja ``Undefined`` subclass for render-time
-      variable resolution. Default ``StrictUndefined`` matches spec
-      §8 (was §7); pass ``jinja2.ChainableUndefined`` or any other
-      ``Undefined`` subclass to opt out of strict-by-default rendering.
+      variable resolution. Default ``StrictUndefined`` for
+      strict-by-default rendering; pass ``jinja2.ChainableUndefined``
+      or any other ``Undefined`` subclass to opt out.
     """
+
+    # Spec prompt-management: fetch fallback (§9), label-resolution
+    # chain (§6), strict-by-default render (§8).
 
     def __init__(
         self,
@@ -108,11 +111,10 @@ class PromptManager:
         return SPEC_FALLBACK_LABEL
 
     async def fetch(self, name: str, label: str | None = None) -> Prompt:
-        """Consult composed backends in order, applying §9 (was §8) fallback.
+        """Consult composed backends in order, applying the fallback chain.
 
-        Label is resolved per §6's three-step chain: explicit
-        argument > configured ``LabelResolver`` > spec fallback
-        ``"production"``.
+        Label is resolved by a three-step chain: explicit argument >
+        configured ``LabelResolver`` > the ``"production"`` fallback.
 
         - First successful fetch wins; further backends are not consulted.
         - ``PromptNotFound`` from any backend STOPS the chain: the
@@ -169,18 +171,18 @@ class PromptManager:
         """Apply ``variables`` (and optionally ``placeholders``) and return a PromptResult.
 
         Render is synchronous; no I/O.  Variables are strict by
-        default per §8: a template reference to a name not in
-        ``variables`` raises ``PromptRenderError``.
+        default: a template reference to a name not in ``variables``
+        raises ``PromptRenderError``.
 
-        For a :class:`TextPrompt`, ``placeholders`` is ignored per
-        spec §6 ("a Text-prompt renders to exactly one Message with
+        For a :class:`TextPrompt`, ``placeholders`` is ignored ("a
+        Text-prompt renders to exactly one Message with
         ``role: "user"`` and ``content`` equal to the rendered
         template text").  Implementations MUST NOT raise on a
         non-empty ``placeholders`` mapping passed alongside a Text
         prompt.
 
         For a :class:`ChatPrompt`, the chat_template is rendered
-        segment-by-segment per spec §6 — content segments substitute
+        segment-by-segment — content segments substitute
         ``variables`` into the text (or per-block content) and
         produce one Message per segment; placeholder segments inject
         the caller-supplied ``list[Message]`` from
@@ -400,8 +402,8 @@ class PromptManager:
         key: str,
     ) -> ContentBlock | None:
         """Render a single content-block template.  Returns None when
-        a text block renders to the empty string (caller surfaces
-        §11 empty-text-block error)."""
+        a text block renders to the empty string (caller surfaces the
+        empty-text-block error)."""
         if isinstance(block, TextBlockTemplate):
             rendered = self._render_template_text(compute_template_hash(block.text), block.text, variables)
             if not rendered:
