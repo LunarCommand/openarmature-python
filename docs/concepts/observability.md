@@ -644,8 +644,11 @@ obs = OTelObserver(
 )
 ```
 
-A detached subgraph or fan-out gets a fresh trace root (new
-`trace_id`); the `correlation_id` still propagates through, so
+A detached subgraph or fan-out renders into a fresh trace, rooted in
+its own `openarmature.invocation` span that carries the same
+`invocation_id` as the parent (detached mode is an observer-side
+rendering choice, not a separate run). The new trace has a fresh
+`trace_id`, and the `correlation_id` still propagates through, so
 join semantics survive even when trace boundaries don't.
 
 The non-detached default is what you want most of the time: one

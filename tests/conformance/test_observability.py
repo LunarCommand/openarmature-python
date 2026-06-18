@@ -35,7 +35,7 @@ import copy
 import re
 from collections.abc import Mapping, Sequence
 from pathlib import Path
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import pytest
 import yaml
@@ -50,6 +50,9 @@ pytest.importorskip("opentelemetry.sdk.trace")
 from openarmature.observability.otel import OTelObserver  # noqa: E402
 
 from .adapter import build_graph  # noqa: E402
+
+if TYPE_CHECKING:
+    from opentelemetry.sdk.trace import ReadableSpan
 
 
 # OTel SDK 1.x makes ``set_tracer_provider`` one-shot: once a non-default
@@ -141,6 +144,12 @@ _SUPPORTED_FIXTURES = frozenset(
         "054-llm-completion-event-fan-out-index-population",
         "055-llm-completion-event-branch-name-population",
         "056-llm-completion-event-strict-serial-ordering",
+        # proposal 0052 attribution fixture (case 1) + proposal 0061
+        # (case 2: the §5.1 attribution lands on the detached trace's own
+        # openarmature.invocation span). Wired together now that 0061
+        # (v0.61.0) resolves the detached-invocation-span shape case 2
+        # presupposed — the whole fixture was unwired pending that.
+        "058-implementation-attribution-otel",
     }
 )
 
@@ -232,6 +241,8 @@ async def test_observability_fixture(fixture_path: Path) -> None:
         await _run_fixture_055(spec)
     elif fixture_id == "056-llm-completion-event-strict-serial-ordering":
         await _run_fixture_056(spec)
+    elif fixture_id == "058-implementation-attribution-otel":
+        await _run_fixture_058(spec)
     elif fixture_id in {
         "012-otel-llm-payload-default-off",
         "013-otel-llm-payload-enabled",
@@ -1696,14 +1707,22 @@ async def _run_fixture_008(spec: Mapping[str, Any]) -> None:
             raise AssertionError(f"case {case_name!r}: {e}") from e
 
 
-async def _run_fixture_008_case(case: Mapping[str, Any]) -> None:
-    case_name = case["name"]
-    # The fixture configures detached subgraphs by the SUBGRAPH'S
-    # IDENTITY NAME (the key in ``subgraphs:``), but the OTel observer
-    # keys on the WRAPPER NODE'S NAME in the parent graph (consistent
-    # with graph-engine §6's namespace convention — see fixture 029
-    # spec note). Translate by looking up the wrapper node that
-    # references each detached subgraph identity.
+async def _run_detached_case_graph(
+    case: Mapping[str, Any], *, expect_raise: bool = False
+) -> Sequence[ReadableSpan]:
+    """Build + invoke a detached-mode fixture case; return the finished
+    spans. Shared by fixture 008 (detached trace mode) and fixture 058
+    case 2 (attribution on the detached invocation span).
+
+    ``expect_raise`` swallows the ``invoke()`` exception for the
+    error-status case (the detached subgraph raises and propagates); the
+    spans are captured regardless.
+    """
+    # The fixture configures detached subgraphs by the SUBGRAPH'S IDENTITY
+    # NAME (the key in ``subgraphs:``), but the OTel observer keys on the
+    # WRAPPER NODE'S NAME in the parent graph (graph-engine §6 namespace
+    # convention; see the fixture 029 spec note). Translate by looking up
+    # the wrapper node that references each detached subgraph identity.
     detached_subgraph_identities = set(cast("list[str]", case.get("detached_subgraphs") or []))
     nodes = cast("dict[str, Any]", case.get("nodes") or {})
     wrapper_names_for_detached: set[str] = set()
@@ -1726,24 +1745,42 @@ async def _run_fixture_008_case(case: Mapping[str, Any]) -> None:
         detached_fan_outs=detached_fan_outs,
     )
 
-    # Patch the inner subgraph's ``update_pure_from_state`` directive
-    # if present — the adapter doesn't translate it, but the test
-    # assertions only inspect span structure (Links, trace counts),
-    # not the computed values. Replacing with a no-op ``update_pure``
-    # keeps the graph runnable.
+    # Patch test-seam directives the adapter doesn't translate
+    # (``update_pure_from_state`` etc.) with a benign no-op; these
+    # assertions only inspect span structure, not computed values.
     _patch_unsupported_directives(case)
 
-    # Build subgraphs declared by the fixture (subgraph: or subgraphs:).
     subgraphs = _compile_subgraphs(case)
     trace_log: list[str] = []
     built = build_graph(case, subgraphs=subgraphs, trace=trace_log)
     compiled = built.builder.compile()
     compiled.attach_observer(observer)
     initial_state = built.initial_state(case.get("initial_state", {}))
-    await compiled.invoke(initial_state)
+    try:
+        await compiled.invoke(initial_state)
+    except Exception:
+        if not expect_raise:
+            raise
     await compiled.drain()
     observer.shutdown()
-    spans = exporter.get_finished_spans()
+    return exporter.get_finished_spans()
+
+
+def _invocation_id_of(span: Any) -> Any:
+    """The ``openarmature.invocation_id`` attribute off a span (or None)."""
+    return dict(span.attributes or {}).get("openarmature.invocation_id")
+
+
+def _has_exception_event(span: Any) -> bool:
+    """Whether the span recorded an OTel exception event."""
+    events = cast("list[Any]", span.events or [])
+    return any(getattr(e, "name", None) == "exception" for e in events)
+
+
+async def _run_fixture_008_case(case: Mapping[str, Any]) -> None:
+    case_name = case["name"]
+    expect_raise = case_name == "detached_subgraph_raises_error_status_on_both_spans"
+    spans = await _run_detached_case_graph(case, expect_raise=expect_raise)
 
     if case_name == "detached_subgraph_two_traces_one_link":
         # Group by trace_id. Span context is non-None for any span
@@ -1763,7 +1800,8 @@ async def _run_fixture_008_case(case: Mapping[str, Any]) -> None:
         # Find the parent dispatch span (it's the one with a Link).
         dispatch_spans = [s for s in spans if s.name == "dispatch"]
         # Two "dispatch" spans: one in parent trace (with Link), one in
-        # detached trace (the root). Pick the one with links.
+        # detached trace (under the detached invocation span). Pick the
+        # one with links.
         parent_dispatch = next((s for s in dispatch_spans if s.links), None)
         assert parent_dispatch is not None, "expected a 'dispatch' span carrying a Link to the detached trace"
         assert len(parent_dispatch.links) == 1, (
@@ -1781,6 +1819,21 @@ async def _run_fixture_008_case(case: Mapping[str, Any]) -> None:
         assert link_target_trace_id == detached_trace_id, (
             f"Link target trace_id MUST match the detached trace's trace_id; "
             f"got link={link_target_trace_id!r}, detached={detached_trace_id!r}"
+        )
+        # Proposal 0061: the detached trace roots in its OWN
+        # openarmature.invocation span sharing the parent's invocation_id
+        # (invariant detached_invocation_id_equals_parent).
+        inv_spans = [s for s in spans if s.name == "openarmature.invocation"]
+        assert len(inv_spans) == 2, f"expected parent + detached invocation spans; got {len(inv_spans)}"
+        parent_inv = next((s for s in inv_spans if cast("Any", s.context).trace_id == parent_trace_id), None)
+        detached_inv = next(
+            (s for s in inv_spans if cast("Any", s.context).trace_id == detached_trace_id), None
+        )
+        assert detached_inv is not None, "detached trace MUST root in an openarmature.invocation span"
+        assert parent_inv is not None
+        parent_iid = _invocation_id_of(parent_inv)
+        assert parent_iid is not None and _invocation_id_of(detached_inv) == parent_iid, (
+            "detached invocation span MUST share the parent's invocation_id (§4.3)"
         )
         return
 
@@ -1807,6 +1860,145 @@ async def _run_fixture_008_case(case: Mapping[str, Any]) -> None:
         assert len(parent_fan_out.links) == 3, (
             f"fan-out span MUST carry one Link per instance (3); got {len(parent_fan_out.links)}"
         )
+        # Proposal 0061: each instance trace roots in its OWN
+        # openarmature.invocation span sharing the parent's invocation_id.
+        parent_trace_id = cast("Any", parent_fan_out.context).trace_id
+        inv_spans = [s for s in spans if s.name == "openarmature.invocation"]
+        assert len(inv_spans) == 4, f"expected parent + 3 instance invocation spans; got {len(inv_spans)}"
+        parent_inv = next((s for s in inv_spans if cast("Any", s.context).trace_id == parent_trace_id), None)
+        assert parent_inv is not None
+        parent_iid = _invocation_id_of(parent_inv)
+        instance_invs = [s for s in inv_spans if cast("Any", s.context).trace_id != parent_trace_id]
+        assert len(instance_invs) == 3, (
+            f"expected 3 detached instance invocation spans; got {len(instance_invs)}"
+        )
+        for inv in instance_invs:
+            assert parent_iid is not None and _invocation_id_of(inv) == parent_iid, (
+                "each detached instance invocation span MUST share the parent's invocation_id"
+            )
+        return
+
+    if case_name == "detached_subgraph_raises_error_status_on_both_spans":
+        # Proposal 0061 §4.2: a raising detached subgraph surfaces ERROR
+        # on BOTH the parent's dispatch span and the detached invocation
+        # span — distinct traces, shared invocation_id, each with the §4
+        # category + an OTel exception event.
+        dispatch_spans = [s for s in spans if s.name == "dispatch"]
+        parent_dispatch = next((s for s in dispatch_spans if s.links), None)
+        assert parent_dispatch is not None, "expected a parent 'dispatch' span with a Link"
+        assert parent_dispatch.status.status_code.name == "ERROR", (
+            "parent dispatch span MUST carry ERROR for a raising detached subgraph"
+        )
+        assert _has_exception_event(parent_dispatch), "parent dispatch span MUST record the exception"
+        assert dict(parent_dispatch.attributes or {}).get("openarmature.error.category") == "node_exception"
+        parent_trace_id = cast("Any", parent_dispatch.context).trace_id
+        detached_trace_id = parent_dispatch.links[0].context.trace_id
+        assert detached_trace_id != parent_trace_id, "detached + parent traces MUST be distinct"
+        inv_spans = [s for s in spans if s.name == "openarmature.invocation"]
+        detached_inv = next(
+            (s for s in inv_spans if cast("Any", s.context).trace_id == detached_trace_id), None
+        )
+        parent_inv = next((s for s in inv_spans if cast("Any", s.context).trace_id == parent_trace_id), None)
+        assert detached_inv is not None, "detached trace MUST root in an openarmature.invocation span"
+        assert parent_inv is not None
+        assert detached_inv.status.status_code.name == "ERROR", (
+            "detached invocation span MUST carry the detached unit's ERROR status (§4.2)"
+        )
+        assert _has_exception_event(detached_inv), "detached invocation span MUST record the exception"
+        assert dict(detached_inv.attributes or {}).get("openarmature.error.category") == "node_exception"
+        parent_iid = _invocation_id_of(parent_inv)
+        assert parent_iid is not None and _invocation_id_of(detached_inv) == parent_iid, (
+            "detached invocation span MUST share the parent's invocation_id"
+        )
+        return
+
+    raise AssertionError(f"unknown sub-case {case_name!r}")
+
+
+def _assert_attribution_on_invocation_only(spans: Any) -> None:
+    """Assert every openarmature.invocation span carries non-empty
+    implementation.name (the canonical python value) and
+    implementation.version, and that no inner span carries either."""
+    # Proposal 0052 §5.1: the attribution attributes are invocation-span-
+    # only (not §5.6 cross-cutting), so inner spans MUST NOT carry them.
+    inv_spans = [s for s in spans if s.name == "openarmature.invocation"]
+    assert inv_spans, "expected at least one openarmature.invocation span"
+    for inv in inv_spans:
+        iattrs = dict(inv.attributes or {})
+        name = iattrs.get("openarmature.implementation.name")
+        version = iattrs.get("openarmature.implementation.version")
+        assert name == "openarmature-python", (
+            f"implementation.name MUST equal the canonical python value; got {name!r}"
+        )
+        assert isinstance(version, str) and len(version) > 0, (
+            "implementation.version MUST be a non-empty string"
+        )
+    for s in spans:
+        if s.name == "openarmature.invocation":
+            continue
+        sattrs = dict(s.attributes or {})
+        assert "openarmature.implementation.name" not in sattrs, (
+            f"inner span {s.name!r} MUST NOT carry implementation.name"
+        )
+        assert "openarmature.implementation.version" not in sattrs, (
+            f"inner span {s.name!r} MUST NOT carry implementation.version"
+        )
+
+
+async def _run_fixture_058(spec: Mapping[str, Any]) -> None:
+    """Implementation-attribution attributes. Case 1: present on the
+    invocation span, absent on inner spans. Case 2: the attribution
+    lands on the detached trace's OWN openarmature.invocation span, with
+    the subgraph-wrapper span nested under it."""
+    # Case 1 covers proposal 0052 (§5.1 attribution); case 2 additionally
+    # depends on proposal 0061 (the detached trace gains its own
+    # invocation-span root for the attributes to land on).
+    for case in cast("list[dict[str, Any]]", spec["cases"]):
+        case_name = cast("str", case["name"])
+        try:
+            await _run_fixture_058_case(case)
+        except AssertionError as e:
+            raise AssertionError(f"case {case_name!r}: {e}") from e
+
+
+async def _run_fixture_058_case(case: Mapping[str, Any]) -> None:
+    case_name = case["name"]
+    if case_name == "implementation_attribution_attributes_present_on_invocation_span":
+        observer, exporter = _build_observer()
+        await _run_graph(case, observer)
+        observer.shutdown()
+        _assert_attribution_on_invocation_only(exporter.get_finished_spans())
+        return
+
+    if case_name == "detached_subgraph_attribution_propagates_to_child_trace_invocation_span":
+        spans = await _run_detached_case_graph(case)
+        # Two invocation spans (parent + detached); §5.1 attribution on
+        # both, absent on every inner span across both traces.
+        inv_spans = [s for s in spans if s.name == "openarmature.invocation"]
+        assert len(inv_spans) == 2, f"expected parent + detached invocation spans; got {len(inv_spans)}"
+        _assert_attribution_on_invocation_only(spans)
+        # Proposal 0061: the detached subgraph-wrapper span nests BETWEEN
+        # the detached invocation span and the inner node (058 case 2
+        # added the previously-missing wrapper layer).
+        wrapper = next(
+            (s for s in spans if dict(s.attributes or {}).get("openarmature.subgraph.detached") is True),
+            None,
+        )
+        assert wrapper is not None, "expected a detached subgraph-wrapper span"
+        detached_trace_id = cast("Any", wrapper.context).trace_id
+        detached_inv = next(
+            (s for s in inv_spans if cast("Any", s.context).trace_id == detached_trace_id), None
+        )
+        assert detached_inv is not None, "detached trace MUST root in an openarmature.invocation span"
+        assert (
+            wrapper.parent is not None and wrapper.parent.span_id == cast("Any", detached_inv.context).span_id
+        ), "detached subgraph-wrapper span MUST nest under the detached invocation span"
+        inner = [
+            s
+            for s in spans
+            if s.parent is not None and s.parent.span_id == cast("Any", wrapper.context).span_id
+        ]
+        assert inner, "the inner node MUST nest under the subgraph-wrapper span (no skipped layer)"
         return
 
     raise AssertionError(f"unknown sub-case {case_name!r}")
