@@ -10,7 +10,7 @@ field.
 
 This is the single place in the engine where multiple subgraph
 executions overlap in time within a single invocation; everywhere else
-(graph-engine §3) execution is single-threaded.
+execution is single-threaded.
 
 The module contains:
 
@@ -137,20 +137,20 @@ class FanOutNode[ParentT: State, ChildT: State]:
         fan-in collected/extra fields, write count_field and
         errors_field if configured.
 
-        Per proposal 0009 / §10.11 per-instance resume contract: this
-        method registers a per-fan-out tracking entry on the shared
+        Per the per-instance resume contract: this method registers a
+        per-fan-out tracking entry on the shared
         ``context.fan_out_progress_state`` dict before dispatching,
         flips each instance's state through
         ``not_started -> in_flight -> completed`` as the instance
         progresses, and fires an explicit "instance completed" save
         after the per-instance contribution has been recorded into
-        the accumulator. The atomicity contract from §10.11 is
+        the accumulator. The atomicity contract is
         observed: the per-instance state mutation precedes the save,
         so a crash after mutation but before save leaves the saved
         record showing ``in_flight`` (resume re-runs the instance).
 
-        ``pre_resolved_count`` / ``pre_resolved_concurrency`` are the
-        proposal-0013 v0.10.0 hooks: when the engine has already
+        ``pre_resolved_count`` / ``pre_resolved_concurrency`` are
+        hooks: when the engine has already
         resolved the config eagerly to populate
         ``NodeEvent.fan_out_config`` for the fan-out node's events,
         it passes the resolved values in so callable resolvers
@@ -469,12 +469,12 @@ def _build_instance_states(
 ) -> list[Any]:
     """Project parent state to per-instance subgraph states.
 
-    Per spec §9.1:
+    By mode:
     - items_field mode: one instance per item, item_field gets the item
     - count mode: ``count`` instances, item_field absent
     - both modes: inputs map parent fields onto subgraph state fields
 
-    ``pre_resolved_count`` (proposal-0013 hook): if the engine has
+    ``pre_resolved_count``: if the engine has
     already resolved ``cfg.count`` to populate
     ``NodeEvent.fan_out_config.item_count``, the resolved value is
     passed in here so the callable resolver isn't invoked twice.
@@ -526,7 +526,7 @@ def _build_instance_states(
 
 
 def _resolve_count(node_name: str, cfg: FanOutConfig, parent_state: Any) -> int:
-    """Resolve the ``count`` config to an int. Spec §9.1."""
+    """Resolve the ``count`` config to an int."""
     raw = cfg.count
     if callable(raw):
         resolved = raw(parent_state)
@@ -545,7 +545,7 @@ def _resolve_count(node_name: str, cfg: FanOutConfig, parent_state: Any) -> int:
 
 
 def _resolve_concurrency(node_name: str, cfg: FanOutConfig, parent_state: Any) -> int | None:
-    """Resolve the ``concurrency`` config. Spec §9.2."""
+    """Resolve the ``concurrency`` config."""
     raw = cfg.concurrency
     if callable(raw):
         resolved = raw(parent_state)
@@ -647,7 +647,7 @@ async def _save_instance_in_flight(
     save only fires on successful merge (failure path skips it).
 
     Routes through the checkpointer's ``save_fan_out_in_flight_failure``
-    seam (when present) per §10.11.4. Batching backends typically
+    seam (when present). Batching backends typically
     buffer this save WITHOUT triggering a flush — the "crash" the
     failure represents would lose the buffer, including this save,
     in a real-world scenario. Non-batching backends route it through
@@ -692,17 +692,17 @@ async def _save_instance_completed(
     parent_state: Any,
     context: _InvocationContext,
 ) -> None:
-    """Fire the explicit "instance completed" save closing the §10.11
+    """Fire the explicit "instance completed" save closing the
     atomicity gap. The per-instance state has already been flipped to
     ``completed`` with ``result`` populated; this save durably records
     that transition so resume can skip the instance.
 
-    Routed through the fan-out-internal batching seam per §10.11.4 —
+    Routed through the fan-out-internal batching seam —
     backends opting into batching may buffer the save; non-batching
     backends call ``save`` directly. On crash with buffered-but-
     unflushed saves, the instance reverts to ``in_flight`` /
     ``not_started`` on resume and re-runs (contributing for the first
-    time, no double-merge per §10.11.1).
+    time, no double-merge).
     """
     # Lazy imports: ``compiled`` and ``checkpoint.protocol`` would
     # create textual cycles at module-load. Function-scope keeps the
@@ -773,8 +773,8 @@ def _fan_in_fail_fast(
 ) -> dict[str, Any]:
     """Merge per-instance partials into a single fan-out partial under
     the fail_fast policy. All ``results`` succeeded (otherwise gather
-    would have raised), so the count is just ``len(results)``. Spec
-    §9.3 + §9.4: instance-index order."""
+    would have raised), so the count is just ``len(results)``;
+    instance-index order."""
     # §9.4 projection: read each instance's subgraph-space partial by
     # subgraph field name and collect into the parent field. ``.get`` keeps
     # an omitted collect_field (a callable degrade that doesn't set it, §9.3)
@@ -796,7 +796,7 @@ def _fan_in_collect(
 ) -> dict[str, Any]:
     """Merge per-instance results under the collect policy. Failures
     contribute nothing to target_field; if errors_field is configured,
-    failed instances' exceptions are recorded there. Spec §9.5."""
+    failed instances' exceptions are recorded there."""
     successes: list[Mapping[str, Any]] = []
     error_records: list[dict[str, str]] = []
     for idx, r in enumerate(raw_results):

@@ -240,15 +240,14 @@ def _merge_partial[StateT: State](
 class _StepResult[StateT: State]:
     """Return shape of the per-step dispatchers
     (``_step_function_node`` / ``_step_subgraph_node`` /
-    ``_step_fan_out_node``) under the proposal-0012 v0.9.0 swap.
+    ``_step_fan_out_node``).
 
-    Spec graph-engine §3 step 3 (revised) requires the
-    ``completed`` event for the just-completed node to fire AFTER
+    The ``completed`` event for the just-completed node fires AFTER
     edge evaluation completes — so that edge-resolution failures
     (``routing_error``, ``edge_exception``) land on the preceding
     node's completed event with ``error`` populated, sharing the
     started/completed pair rather than producing a separate event
-    pair (§6 revised).
+    pair.
 
     The step dispatchers can't call ``_dispatch_completed`` for
     the success path themselves anymore, because the outcome
@@ -268,9 +267,9 @@ class _StepResult[StateT: State]:
     For ``_step_subgraph_node``, the wrapper is transparent per
     fixture 013 (no started/completed pair); ``finalize_completed``
     is a no-op closure so edge errors after a subgraph wrapper
-    propagate silently per proposal 0012's "preceding unit's
-    pair" framing applied to a unit that never had one. Same for
-    middleware that short-circuits without invoking ``next``.
+    propagate silently — the "preceding unit's pair" framing applied
+    to a unit that never had one. Same for middleware that short-
+    circuits without invoking ``next``.
     """
 
     state: StateT
@@ -282,7 +281,7 @@ def _no_op_finalize(_edge_error: RuntimeGraphError | None) -> None:
     didn't dispatch a started/completed pair — subgraph wrappers
     (transparent per fixture 013) and middleware that short-
     circuits without invoking ``next``. Edge errors propagate
-    silently per proposal 0012 + fixture 013."""
+    silently per fixture 013."""
 
 
 # Helpers for the proposal 0009 per-instance fan-out resume contract.
@@ -332,7 +331,7 @@ def _project_fan_out_progress(
     """Project the engine-internal mutable per-fan-out state into the
     frozen :class:`FanOutProgress` shape on a saved record.
 
-    Per §10.11's snapshot semantics, a save fires with ALL concurrent
+    Per the snapshot semantics, a save fires with ALL concurrent
     fan-out instances' states captured at the moment of the save —
     not just the one whose ``completed`` event triggered the save.
     This projection enumerates the whole dict; the engine save site
@@ -382,8 +381,8 @@ def _restore_fan_out_progress_state(
     them, surface as a follow-on.
 
     ``result_is_error`` is read verbatim from the saved record's
-    explicit field per spec §10.11 (proposal 0027). The pre-0027
-    structural-pattern heuristic is gone — the spec mandates the
+    explicit field. The earlier structural-pattern heuristic is gone
+    — the spec mandates the
     explicit field as the authoritative discriminator because the
     user's state schema can legitimately contain values that match
     the engine's canonical error-record shape, and a heuristic would
@@ -420,8 +419,8 @@ async def _save_fan_out_internal(
     """Route a fan-out-internal save through the checkpointer's
     optional batching seam.
 
-    Per spec §10.11.4, Checkpointer backends MAY support batching
-    scoped to fan-out internal saves. When the backend exposes a
+    Checkpointer backends MAY support batching scoped to fan-out
+    internal saves. When the backend exposes a
     ``save_fan_out_internal`` coroutine, route there so it can buffer
     or flush per its configuration. Otherwise, fall back to the
     standard ``save`` — non-batching backends see no behavioral change.
@@ -439,8 +438,8 @@ async def _save_fan_out_in_flight_failure(  # pyright: ignore[reportUnusedFuncti
     record: CheckpointRecord,
 ) -> None:
     """Route an "instance failed mid-execution" save through the
-    checkpointer's failure-save seam (§10.11.4 + the in_flight
-    observability gap §10.11).
+    checkpointer's failure-save seam (closing the in_flight
+    observability gap).
 
     Backends that expose ``save_fan_out_in_flight_failure`` get the
     save directly; under batching, the typical implementation
@@ -461,8 +460,8 @@ class _MigrationSummary:
     """Per-resume migration-chain metadata threaded out of
     ``_migrate_record`` so the engine can dispatch an
     ``openarmature.checkpoint.migrate`` observer event after the
-    invocation context is built (per spec §6 cross-ref in proposal
-    0014). Carried on the synthetic ``NodeEvent.pre_state``
+    invocation context is built. Carried on the synthetic
+    ``NodeEvent.pre_state``
     payload for ``phase="checkpoint_migrated"``; the OTel observer
     reads it to emit the span.
     """
@@ -479,8 +478,8 @@ def _apply_migration_step(
 ) -> Any:
     """Apply one migration step to one value (outer state or one
     parent-state entry). Wraps the user-supplied migration function's
-    raise as ``CheckpointStateMigrationFailed`` per spec §10.12.2.
-    The original exception rides ``__cause__``.
+    raise as ``CheckpointStateMigrationFailed``. The original
+    exception rides ``__cause__``.
     """
     try:
         return migration.migrate(value)
@@ -618,19 +617,18 @@ class CompiledGraph[StateT: State]:
         has ``state`` + ``parent_states`` mapped through the chain.
         ``summary`` carries the chain's metadata so the caller can
         dispatch a ``checkpoint_migrated`` observer event after the
-        invocation context exists (per the spec §6 cross-ref in
-        proposal 0014).
+        invocation context exists.
 
         Caller is responsible for the post-migration deserialization
-        step (§10.12.4): if the migrated state cannot deserialize
-        against the current state class, the resulting failure
-        surfaces as ``CheckpointRecordInvalid``.
+        step: if the migrated state cannot deserialize against the
+        current state class, the resulting failure surfaces as
+        ``CheckpointRecordInvalid``.
 
-        Spec §10.12.2 says "parent states MUST be treated as carrying
-        the same ``schema_version`` as the outer record." We apply
-        the same chain to every entry in ``parent_states`` lockstep
-        with the outer state. Future per-parent versioning would
-        need a spec follow-on.
+        Parent states MUST be treated as carrying the same
+        ``schema_version`` as the outer record, so we apply the same
+        chain to every entry in ``parent_states`` lockstep with the
+        outer state. Future per-parent versioning would need a
+        follow-on.
         """
         # Eligibility check first per §10.12.1: backends that hold
         # typed in-memory state or class-bound serialization cannot
@@ -904,7 +902,7 @@ class CompiledGraph[StateT: State]:
         - ``correlation_id`` is the per-invocation cross-backend join
           key. Caller-supplied or auto-generated UUIDv4 when absent.
           Preserved unchanged across ``resume_invocation``.
-        - ``invocation_id`` (proposal 0039) is the per-attempt id.
+        - ``invocation_id`` is the per-attempt id.
           Caller-supplied or auto-generated UUIDv4 when absent; a
           caller value MAY be any non-empty URL-safe string. Applies
           to the fresh-invocation path only — a ``resume_invocation``
@@ -925,7 +923,7 @@ class CompiledGraph[StateT: State]:
           own retry logic if transient backend failures should be
           reattempted.
 
-        **Caller-supplied invocation metadata (proposal 0034).**
+        **Caller-supplied invocation metadata.**
 
         - ``metadata`` is an optional mapping of arbitrary
           ``key → value`` entries the framework propagates to every
@@ -935,7 +933,7 @@ class CompiledGraph[StateT: State]:
           the ``openarmature.*`` or ``gen_ai.*`` reserved namespaces.
           Validation runs synchronously at the API boundary; rule
           violations raise ``ValueError`` BEFORE any work begins.
-        - Per spec §5.6 the OTel observer emits each entry as an
+        - The OTel observer emits each entry as an
           ``openarmature.user.<key>`` cross-cutting span attribute on
           every span and OTel log record. The Langfuse observer
           merges each entry into ``trace.metadata`` AND every
@@ -1397,7 +1395,7 @@ class CompiledGraph[StateT: State]:
     ) -> _StepResult[StateT]:
         """Run one function-node step through the middleware chain.
 
-        Per pipeline-utilities §3, the runtime chain composes:
+        The runtime chain composes:
 
             [per_graph...] -> [per_node...] -> innermost
 
@@ -1406,10 +1404,10 @@ class CompiledGraph[StateT: State]:
         to ``innermost`` is one attempt; middleware that calls ``next``
         repeatedly (e.g., retry) produces multiple attempts and therefore
         multiple started/completed event pairs from the engine, each
-        tagged with an incrementing ``attempt_index`` (graph-engine §6).
+        tagged with an incrementing ``attempt_index``.
 
-        Per proposal-0012 v0.9.0: the success-case ``completed`` event
-        for the FINAL successful attempt fires AFTER edge eval, not
+        The success-case ``completed`` event for the FINAL successful
+        attempt fires AFTER edge eval, not
         inside ``innermost``. Failure-case dispatches
         (``node_exception`` / ``reducer_error`` /
         ``state_validation_error``) stay inline in ``innermost`` —
@@ -1640,7 +1638,7 @@ class CompiledGraph[StateT: State]:
     ) -> _StepResult[StateT]:
         """Run one subgraph-as-node step through the parent's middleware chain.
 
-        Per pipeline-utilities §4: the parent's per-graph middleware plus
+        The parent's per-graph middleware plus
         any per-node middleware on the SubgraphNode wraps the subgraph
         dispatch as a single atomic call. The subgraph's INTERNAL nodes
         get their own middleware via the subgraph's own CompiledGraph;
@@ -1650,12 +1648,11 @@ class CompiledGraph[StateT: State]:
         events come from the subgraph's internal node executions (per
         fixture 013).
 
-        Per proposal-0012 v0.9.0 + spec coordination: edge errors
-        AFTER a transparent subgraph wrapper propagate to the caller
-        as ``RuntimeGraphError`` per §4 WITHOUT an associated
+        Edge errors AFTER a transparent subgraph wrapper propagate to
+        the caller as ``RuntimeGraphError`` WITHOUT an associated
         completed event — the wrapper has no started/completed pair
-        to share, and proposal 0012's "preceding node's pair" MUST
-        is vacuous (not violated) when the preceding unit emitted
+        to share, and the "preceding node's pair" MUST is vacuous
+        (not violated) when the preceding unit emitted
         no pair. The :class:`_StepResult` returned here uses
         :func:`_no_op_finalize` so the outer ``_invoke`` call to
         ``finalize_completed(edge_error)`` is a no-op.
@@ -1720,7 +1717,7 @@ class CompiledGraph[StateT: State]:
     ) -> _StepResult[StateT]:
         """Run one fan-out-as-node step through the parent's middleware chain.
 
-        Per pipeline-utilities §9.6: the parent's per-graph + per-node
+        The parent's per-graph + per-node
         middleware wraps the fan-out as a SINGLE dispatch — one started
         event before the fan-out begins, one completed event after all
         instances complete and fan-in is done. Per-instance events
@@ -1728,10 +1725,10 @@ class CompiledGraph[StateT: State]:
         post_state shape is the inner subgraph's state, and they carry
         ``fan_out_index`` populated.
 
-        Raw exceptions escaping the chain become NodeException per §4.
+        Raw exceptions escaping the chain become NodeException.
 
-        Per proposal-0012 v0.9.0: the fan-out's success-case
-        completed event fires AFTER edge eval (mirrors
+        The fan-out's success-case completed event fires AFTER edge
+        eval (mirrors
         ``_step_function_node``). Failure-path dispatches stay
         inline; the success-case is deferred via the returned
         :class:`_StepResult`.
@@ -2084,13 +2081,12 @@ class CompiledGraph[StateT: State]:
         """Run one parallel-branches-as-node step through the parent's
         middleware chain.
 
-        Per pipeline-utilities §11.6: the parent's per-graph +
+        The parent's per-graph +
         per-node middleware wraps the parallel-branches dispatch
         as a SINGLE unit — one started event before dispatch
         begins, one completed event after all branches complete
         and fan-in is done. Per-branch internal events come from
-        the branches' subgraph executions and carry ``branch_name``
-        per graph-engine §6.
+        the branches' subgraph executions and carry ``branch_name``.
 
         Mirrors ``_step_fan_out_node`` minus the eager
         count/concurrency resolution (parallel branches has no
@@ -2364,8 +2360,7 @@ class CompiledGraph[StateT: State]:
         """Fire a checkpoint save for the just-completed node, if a
         backend is registered.
 
-        Per spec pipeline-utilities §10.3 (revised by proposal 0009 /
-        spec v0.18.0):
+        Save policy:
 
         - Save fires for outermost-graph nodes, subgraph-internal
           nodes, fan-out instance internal nodes, AND the fan-out
@@ -2378,7 +2373,7 @@ class CompiledGraph[StateT: State]:
           ``fan_out_progress`` field projects this shared dict so
           all concurrent instances' snapshots are captured atomically.
 
-        Atomicity contract (§10.11): the save-call site below
+        Atomicity contract: the save-call site below
         completes the "produce contribution + record into accumulator
         + save" sequence the spec mandates. ``FanOutNode.run_with_context``
         flips an instance's state to ``completed`` and stashes its
@@ -2387,18 +2382,18 @@ class CompiledGraph[StateT: State]:
         below leaves the in-memory dict updated but the persisted
         record showing ``in_flight``, so resume re-runs the instance
         and the append/last_write_wins/merge reducer's exactly-once
-        guarantee per §10.11.1 holds.
+        guarantee holds.
 
         Save also enumerates ALL concurrent fan-out instances when
         building ``fan_out_progress`` (not just the one whose
         ``completed`` event triggered this save) — the per-instance
-        snapshot is consistent across siblings, matching §10.11's
-        "captured when a sibling instance's ``completed`` event
-        triggers a save during this instance's execution" wording.
+        snapshot is consistent across siblings, captured when a
+        sibling instance's ``completed`` event triggers a save during
+        this instance's execution.
 
         After ``Checkpointer.save`` returns, dispatch a
-        ``checkpoint_saved`` observer event (per §10.8 SHOULD-level
-        guidance) so observability backends can surface saves as spans.
+        ``checkpoint_saved`` observer event so observability backends
+        can surface saves as spans.
 
         Save failures raise ``CheckpointSaveFailed`` to the caller of
         ``invoke()`` immediately; saves are NOT retried by the engine.
