@@ -336,11 +336,14 @@ def build_graph(mode: str = "fail_fast") -> CompiledGraph[BatchState]:
         # partial in place of the instance result, so the batch finishes
         # instead of aborting (fail_fast) or dropping the instance
         # (collect). Retry stays inner so it still sees raw transients
-        # first. The degraded mapping is keyed the way the fan-out
-        # projects an instance: the collect_field (``summary``) plus
-        # each parent extra_outputs key (``topics``).
+        # first. The degraded mapping is keyed in the subgraph's
+        # field-name space (proposal 0066): the collect_field (``summary``)
+        # plus each extra_outputs subgraph field (``topic``, which the
+        # fan-out projects to the parent ``topics`` list). Supplying
+        # ``topic`` keeps the slot non-null so the ``list[str]`` parent
+        # field validates (an omitted source would be a null slot, §9.3).
         degrade = FailureIsolationMiddleware(
-            degraded_update={"summary": "(unavailable)", "topics": "other"},
+            degraded_update={"summary": "(unavailable)", "topic": "other"},
             event_name="headline_degraded",
         )
         instance_middleware = (degrade, retry, timing)
