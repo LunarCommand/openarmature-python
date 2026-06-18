@@ -1,4 +1,4 @@
-"""Unit tests for the parallel-branches runtime (pipeline-utilities §11).
+"""Unit tests for the parallel-branches runtime.
 
 Covers spec corner cases the conformance fixtures exercise only
 implicitly:

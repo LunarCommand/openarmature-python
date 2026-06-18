@@ -1,6 +1,6 @@
-"""Unit tests for the caller-supplied invocation surface: metadata
-(proposal 0034), the caller-supplied invocation_id (proposal 0039),
-and the reserved exact-key-name rejection (proposal 0041).
+"""Unit tests for the caller-supplied invocation surface: metadata,
+the caller-supplied invocation_id, and the reserved exact-key-name
+rejection.
 
 These tests pin the validation rules, the ContextVar lifecycle, the
 mid-invocation augmentation helper, and the per-async-context COW

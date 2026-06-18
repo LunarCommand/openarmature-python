@@ -152,8 +152,8 @@ async def test_sdk_adapter_generation_timestamps_round_trip_through_langfuse() -
     reading the projected timestamps back from the REST API and
     asserting they reflect the back-dated values.
 
-    Catches the failure mode the v0.13.0 Langfuse migration is
-    susceptible to: if a future SDK release renames _otel_tracer,
+    Catches the failure mode the Langfuse migration is susceptible to:
+    if a future SDK release renames _otel_tracer,
     moves LangfuseGeneration, or otherwise breaks the private-API
     surface the adapter relies on, the back-dating routing fails
     silently — the Langfuse UI shows call-time timestamps instead

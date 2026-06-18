@@ -1,4 +1,4 @@
-"""Unit + integration tests for FailureIsolationMiddleware (proposal 0050 §6.3).
+"""Unit + integration tests for FailureIsolationMiddleware.
 
 Covers the middleware's catch / degrade / predicate / on_caught
 contract, the framework-emitted ``FailureIsolatedEvent`` and its field

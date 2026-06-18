@@ -29,8 +29,8 @@ class ChildNoOverlap(State):
 
 
 def test_project_in_returns_subgraph_defaults() -> None:
-    """Per spec v0.2.0 §2: default projection-in is no projection — subgraph
-    starts from its own field defaults regardless of parent state."""
+    """Default projection-in is no projection — subgraph starts from
+    its own field defaults regardless of parent state."""
 
     proj = FieldNameMatching[Parent, ChildOverlap]()
     sub = proj.project_in(Parent(shared="ignored"), ChildOverlap)

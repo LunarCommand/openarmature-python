@@ -239,8 +239,8 @@ def test_retry_middleware_rejects_non_config() -> None:
 
 
 async def test_error_recovery_via_catch_and_return_partial() -> None:
-    """Per spec §5: middleware MAY catch an exception and return a
-    partial update. The chain returns successfully — no exception
+    """Middleware MAY catch an exception and return a partial update.
+    The chain returns successfully — no exception
     reaches the engine."""
     inner_called = [0]
 
@@ -323,7 +323,7 @@ async def test_timing_records_failure_with_category() -> None:
 
 
 async def test_middleware_can_call_next_repeatedly() -> None:
-    """Per spec §2: a middleware MAY call ``next`` more than once. Retry
+    """A middleware MAY call ``next`` more than once. Retry
     exercises this with N=2-3 attempts; this test pins the contract
     independently by calling ``next`` 5 times in a loop and asserting the
     inner runs exactly that many times."""
@@ -358,8 +358,8 @@ async def test_timing_callback_failure_replaces_original_exception() -> None:
     exception chaining preserves the original on ``__context__``, but the
     active exception observers see is the callback's.
 
-    Spec §6.2 says callbacks SHOULD be fast and infallible — this test
-    documents what happens if a user violates that, so a future change
+    Callbacks SHOULD be fast and infallible — this test documents what
+    happens if a user violates that, so a future change
     that wants to preserve the original (e.g., via explicit ``raise exc
     from cb_exc``) doesn't silently regress this contract.
     """
@@ -394,8 +394,8 @@ class InnerState(State):
 
 
 async def test_parent_middleware_does_not_wrap_subgraph_internal_nodes() -> None:
-    """Per spec §4: parent's middleware wraps the SubgraphNode dispatch
-    but NOT the subgraph's internal nodes. The subgraph's own middleware
+    """Parent's middleware wraps the SubgraphNode dispatch but NOT the
+    subgraph's internal nodes. The subgraph's own middleware
     is the only thing wrapping its inner nodes."""
     parent_calls: list[str] = []
     sub_calls: list[str] = []
@@ -462,8 +462,8 @@ def test_default_classifier_recognizes_transient_via_direct_category() -> None:
 
 
 def test_default_classifier_walks_cause_for_node_exception_wrappers() -> None:
-    """Per spec §6.1: a node_exception whose ``__cause__`` is a transient
-    category MUST be classified as transient."""
+    """A node_exception whose ``__cause__`` is a transient category MUST
+    be classified as transient."""
     raw = _CategorizedTransient()
     wrapper = RuntimeError("wrapped")
     wrapper.__cause__ = raw
