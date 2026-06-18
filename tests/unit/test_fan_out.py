@@ -1,4 +1,4 @@
-"""Unit tests for the fan-out runtime (pipeline-utilities §9).
+"""Unit tests for the fan-out runtime.
 
 Covers the spec-corner cases the conformance fixtures exercise only
 implicitly:
@@ -97,7 +97,7 @@ class ItemsParentState(State):
 
 async def test_items_field_projection_doubles_each() -> None:
     """Each instance receives one item; collected results preserve input
-    order (per §9.3 / §9.4)."""
+    order."""
     inner = _build_doubler()
     builder: GraphBuilder[ItemsParentState] = GraphBuilder(ItemsParentState)
     builder.set_entry("process")
@@ -167,7 +167,7 @@ async def test_count_mode_state_reading_callable() -> None:
 
 
 async def test_count_callable_resolved_exactly_once_at_entry() -> None:
-    """Per §9.2: count callable is invoked exactly once at fan-out entry.
+    """The count callable is invoked exactly once at fan-out entry.
     A callable with side effects (counter increment) MUST be observed to
     run exactly once."""
     inner = _build_constant_one()
@@ -195,7 +195,7 @@ async def test_count_callable_resolved_exactly_once_at_entry() -> None:
 
 
 async def test_concurrency_callable_resolved_exactly_once_at_entry() -> None:
-    """Per §9.2: concurrency callable, like count, is invoked exactly
+    """The concurrency callable, like count, is invoked exactly
     once at fan-out entry — even with many instances (which would
     otherwise be a natural place to call it per-instance by mistake)."""
 
@@ -242,8 +242,8 @@ class InputsParentState(State):
 
 
 async def test_inputs_mapping_projects_parent_fields() -> None:
-    """Per §9.1: ``inputs`` maps parent fields onto the per-instance
-    subgraph state at entry, alongside item_field."""
+    """``inputs`` maps parent fields onto the per-instance subgraph
+    state at entry, alongside item_field."""
 
     async def compute(state: WorkerState) -> Mapping[str, Any]:
         return {"result": state.item + state.extra}
@@ -332,7 +332,7 @@ class FailFastParentState(State):
 
 
 async def test_fail_fast_propagates_first_failure_with_parent_recoverable_state() -> None:
-    """Per §9.5: the first failure raises through the fan-out as a
+    """The first failure raises through the fan-out as a
     NodeException whose recoverable_state is the parent's pre-fan-out
     snapshot, NOT the inner instance's state."""
 
@@ -424,7 +424,7 @@ class CollectParentState(State):
 
 
 async def test_collect_records_per_instance_errors() -> None:
-    """Per §9.5: collect mode runs all instances to completion; failures
+    """Collect mode runs all instances to completion; failures
     are recorded in errors_field; successes contribute to target_field."""
 
     async def maybe_fail(state: WorkerState) -> Mapping[str, Any]:
@@ -474,7 +474,7 @@ class EmptyParentState(State):
 
 
 async def test_on_empty_raise_default_raises_fan_out_empty() -> None:
-    """Per §9.1: empty fan-out with on_empty='raise' (default) raises
+    """Empty fan-out with on_empty='raise' (default) raises
     a NodeException tagged with fan_out_category='fan_out_empty'."""
     inner = _build_doubler()
     builder: GraphBuilder[EmptyParentState] = GraphBuilder(EmptyParentState)
@@ -497,7 +497,7 @@ async def test_on_empty_raise_default_raises_fan_out_empty() -> None:
 
 
 async def test_on_empty_noop_writes_count_field_zero() -> None:
-    """Per §9.1: on_empty='noop' produces a clean no-op; count_field
+    """on_empty='noop' produces a clean no-op; count_field
     captures the resolved 0."""
     inner = _build_doubler()
     builder: GraphBuilder[EmptyParentState] = GraphBuilder(EmptyParentState)
@@ -533,8 +533,8 @@ class CountFieldParentState(State):
 
 
 async def test_count_field_records_actual_count_on_success() -> None:
-    """Per §9 Configuration: count_field is written with the resolved
-    instance count after fan-in, regardless of whether on_empty fires."""
+    """count_field is written with the resolved instance count after
+    fan-in, regardless of whether on_empty fires."""
     inner = _build_doubler()
     builder: GraphBuilder[CountFieldParentState] = GraphBuilder(CountFieldParentState)
     builder.set_entry("process")
@@ -567,7 +567,7 @@ class ExtraOutputsParentState(State):
 
 
 async def test_extra_outputs_merges_additional_per_instance_fields() -> None:
-    """Per §9.3: extra_outputs collects additional non-collected fields
+    """extra_outputs collects additional non-collected fields
     from each instance and merges them via the parent's reducer."""
 
     async def compute(state: WorkerState) -> Mapping[str, Any]:
@@ -699,7 +699,7 @@ async def _run_with_random_delays(seed: int) -> list[int]:
 
 
 async def test_fan_in_preserves_input_order_under_random_completion_timing() -> None:
-    """Per §9.4: target_field is in instance-index order, NOT completion
+    """target_field is in instance-index order, NOT completion
     order. Run the same fan-out N times with different random sleep
     seeds; every run produces the same result list."""
     expected = list(range(20))
@@ -720,7 +720,7 @@ class _CompileTestState(State):
 
 
 def test_compile_error_count_mode_ambiguous_when_both_specified() -> None:
-    """Per spec §9: specifying both items_field AND count is a compile
+    """Specifying both items_field AND count is a compile
     error with category fan_out_count_mode_ambiguous."""
     inner = _build_doubler()
     builder: GraphBuilder[_CompileTestState] = GraphBuilder(_CompileTestState)
@@ -750,8 +750,8 @@ def test_compile_error_count_mode_ambiguous_when_neither_specified() -> None:
 
 
 def test_compile_error_field_not_list() -> None:
-    """Per spec §9: items_field must reference a list-typed parent
-    field. A non-list type is a compile error with category
+    """items_field must reference a list-typed parent field. A non-list
+    type is a compile error with category
     fan_out_field_not_list."""
     inner = _build_doubler()
     builder: GraphBuilder[_CompileTestState] = GraphBuilder(_CompileTestState)
@@ -767,8 +767,8 @@ def test_compile_error_field_not_list() -> None:
 
 
 def test_compile_error_inputs_references_undeclared_parent_field() -> None:
-    """Per spec §9: ``inputs`` mapping entries MUST refer to declared
-    fields on both sides. An undeclared parent field raises
+    """``inputs`` mapping entries MUST refer to declared fields on both
+    sides. An undeclared parent field raises
     ``mapping_references_undeclared_field`` at registration time."""
     from openarmature.graph import MappingReferencesUndeclaredField
 

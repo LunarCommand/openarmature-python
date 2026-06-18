@@ -5,7 +5,7 @@ covers the spec's behavioral surface end-to-end against the
 fixtures. These unit tests fill gaps the conformance suite doesn't
 exercise directly: backend round-trip + durability, the canonical
 category-string contract, schema_version mismatch handling, the
-fan-out save gate, the §10.1.1 default-off behavior, and the
+fan-out save gate, the default-off behavior, and the
 subgraph-resume parent_states preservation that fixture 029 covers
 in conformance but is awaiting spec namespace clarification (see
 test_checkpoint.py's _DEFERRED_FIXTURES note).
@@ -181,7 +181,7 @@ async def test_sqlite_pickle_round_trip(tmp_path: Path) -> None:
 
 
 async def test_sqlite_json_round_trip_with_pydantic_state(tmp_path: Path) -> None:
-    """Spec §10.11: JSON mode accepts Pydantic State instances. The
+    """JSON mode accepts Pydantic State instances. The
     backend's encoder MUST walk the value tree converting BaseModel
     instances via ``model_dump(mode="json")`` before ``json.dumps`` —
     otherwise live State instances handed in by the engine raise
@@ -240,7 +240,7 @@ async def test_sqlite_durability_across_reopen(tmp_path: Path) -> None:
 
 
 async def test_sqlite_upsert_retention(tmp_path: Path) -> None:
-    """Spec §10.3.1: upsert — one row per invocation_id, overwritten on
+    """Upsert — one row per invocation_id, overwritten on
     every save. After two saves with the same id, only the second
     record is retrievable."""
     cp = SQLiteCheckpointer(tmp_path / "ck.db")
@@ -272,7 +272,7 @@ async def test_sqlite_upsert_retention(tmp_path: Path) -> None:
 async def test_sqlite_serialization_mismatch_raises(tmp_path: Path) -> None:
     """A record written with serialization=pickle MUST NOT be loadable
     by a checkpointer constructed with serialization=json (and vice
-    versa). The mismatch raises CheckpointRecordInvalid per §10.10."""
+    versa). The mismatch raises CheckpointRecordInvalid."""
     db_path = tmp_path / "ck.db"
     cp_pickle = SQLiteCheckpointer(db_path, serialization="pickle")
     record = CheckpointRecord(
@@ -314,8 +314,8 @@ async def test_schema_version_round_trips(tmp_path: Path) -> None:
 
 
 async def test_schema_version_round_trips_through_sqlite_unchanged(tmp_path: Path) -> None:
-    """Per spec §10.12 (proposal 0014), the SQLite backend no longer
-    rejects records with non-default ``schema_version`` values — that
+    """The SQLite backend no longer rejects records with non-default
+    ``schema_version`` values — that
     routing is now an engine concern at resume time. The backend
     just round-trips the version identifier as opaque data so the
     engine's migration registry has the chance to bridge it."""
@@ -368,8 +368,8 @@ def _build_simple_graph(checkpointer: Checkpointer | None = None) -> CompiledGra
 
 
 async def test_no_checkpointer_means_no_saves() -> None:
-    """§10.1.1: without a registered Checkpointer the engine never
-    calls ``save()`` — no record is produced."""
+    """Without a registered Checkpointer the engine never calls
+    ``save()`` — no record is produced."""
     compiled = _build_simple_graph(None)
     final = await compiled.invoke(_SimpleState())
     assert final.a == 1
@@ -377,8 +377,8 @@ async def test_no_checkpointer_means_no_saves() -> None:
 
 
 async def test_no_checkpointer_resume_raises_not_found() -> None:
-    """§10.1.1: ``invoke(resume_invocation=X)`` against an unregistered
-    backend raises checkpoint_not_found — the user has misconfigured
+    """``invoke(resume_invocation=X)`` against an unregistered backend
+    raises checkpoint_not_found — the user has misconfigured
     the run."""
     compiled = _build_simple_graph(None)
     with pytest.raises(CheckpointNotFound):
@@ -386,8 +386,7 @@ async def test_no_checkpointer_resume_raises_not_found() -> None:
 
 
 async def test_resume_against_empty_checkpointer_raises_not_found() -> None:
-    """§10.10: load() returning None surfaces as
-    checkpoint_not_found."""
+    """load() returning None surfaces as checkpoint_not_found."""
     cp = InMemoryCheckpointer()
     compiled = _build_simple_graph(cp)
     with pytest.raises(CheckpointNotFound):
@@ -395,8 +394,8 @@ async def test_resume_against_empty_checkpointer_raises_not_found() -> None:
 
 
 async def test_resume_with_invalid_saved_state_raises_record_invalid() -> None:
-    """§10.10: a saved record whose state-shape doesn't validate
-    against the current graph's state class MUST surface as
+    """A saved record whose state-shape doesn't validate against the
+    current graph's state class MUST surface as
     ``checkpoint_record_invalid``, not a raw pydantic ValidationError.
     Models the JSON-serialized backend path: the load returns a
     dict that the engine re-validates against ``state_cls``; an
@@ -500,8 +499,8 @@ async def _scorer(s: _ItemState) -> dict[str, int]:
 
 
 async def test_fan_out_internal_saves_fire_per_instance() -> None:
-    """Per spec §10.3 (revised by proposal 0009 / v0.18.0): fan-out
-    instance internal nodes DO produce saves. Each per-instance
+    """Fan-out instance internal nodes DO produce saves. Each
+    per-instance
     completion emits at least one save with ``fan_out_index``
     populated on the inner-node position, plus an explicit "instance
     completed" save that flips the instance's ``fan_out_progress``
@@ -592,7 +591,7 @@ async def _failing_scorer(s: _FailingItemState) -> dict[str, int]:
 
 
 async def test_fail_fast_cancellation_leaves_failed_instance_in_flight() -> None:
-    """Per §10.11.2 fail_fast cancellation contract: the failed
+    """Per the fail_fast cancellation contract: the failed
     instance's ``fan_out_progress`` state on the saved record is
     ``in_flight`` (no ``result`` recorded), and cancelled siblings
     are also ``in_flight`` or ``not_started`` — never ``completed``
@@ -678,8 +677,8 @@ async def _nested_schema_scorer(s: _NestedSchemaInnerState) -> dict[str, int]:
 
 
 async def test_nested_fan_out_records_outermost_schema_version() -> None:
-    """Per spec §10.2: a ``CheckpointRecord``'s ``schema_version`` is the
-    outermost graph state's declared version (the record represents the
+    """A ``CheckpointRecord``'s ``schema_version`` is the outermost
+    graph state's declared version (the record represents the
     whole invocation tree). For a fan-out inside a subgraph, the
     engine's ``_save_instance_completed`` / ``_save_instance_in_flight``
     helpers read from the outermost state via
@@ -766,8 +765,8 @@ async def _inner_step(_s: _InnerState) -> dict[str, Any]:
 
 
 async def test_inner_node_save_carries_parent_states() -> None:
-    """Spec §10.2: a save from inside a subgraph populates
-    ``parent_states`` with the chain of containing-graph states.
+    """A save from inside a subgraph populates ``parent_states`` with
+    the chain of containing-graph states.
     This is the contract that fixture 029 verifies in conformance —
     here we isolate the parent_states logic without depending on
     the namespace-convention question."""
@@ -824,8 +823,8 @@ async def _flaky_node(_s: _SimpleState) -> dict[str, int]:
 
 
 async def test_resume_preserves_correlation_id_and_mints_new_invocation_id() -> None:
-    """Spec §10.4 steps 3+4: resume MUST keep the original
-    correlation_id verbatim (cross-backend join key) AND mint a new
+    """Resume MUST keep the original correlation_id verbatim
+    (cross-backend join key) AND mint a new
     invocation_id (each attempt is its own invocation)."""
     _first_run_should_fail[0] = True
     cp = InMemoryCheckpointer()
