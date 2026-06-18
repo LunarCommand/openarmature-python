@@ -281,8 +281,8 @@ class SQLiteCheckpointer:
 
     async def save(self, invocation_id: str, record: CheckpointRecord) -> None:
         """Upsert ``record`` under ``invocation_id``. The state,
-        completed positions, parent-state stack, and (per proposal 0009)
-        per-fan-out-node progress are serialized via the configured
+        completed positions, parent-state stack, and per-fan-out-node
+        progress are serialized via the configured
         :class:`SerializationMode` and written in a single statement.
         Writes are durable on return (WAL mode, per-write fsync at the
         SQLite layer)."""

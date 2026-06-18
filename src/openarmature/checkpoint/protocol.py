@@ -23,12 +23,13 @@ subgraph-internal nodes. Fan-out instance internal events do NOT
 produce records in the shipping version (atomic-restart contract).
 
 ``CheckpointRecord.schema_version`` carries the user-facing
-state-schema identifier per spec §10.2 (proposal 0014 repurposes
-the field from the original backend-internal record-shape role).
-The framework reads ``type(state).schema_version`` at save time;
-on load, version mismatches route through the migration registry
-(per §10.12) rather than a strict equality check.
+state-schema identifier. The framework reads
+``type(state).schema_version`` at save time; on load, version
+mismatches route through the migration registry rather than a strict
+equality check.
 """
+# Spec pipeline-utilities §10.2 (proposal 0014): schema_version is the
+# state-schema identifier; §10.12 migration registry on mismatch.
 
 from __future__ import annotations
 
@@ -98,14 +99,14 @@ class FanOutInstanceProgress:
       correctness contract: an instance marked ``completed`` MUST have
       its contribution recorded into the accumulator AND that
       contribution MUST be reflected in ``result``. Reducer composition
-      rules (§10.11.1) depend on this exactly-once guarantee.
+      rules depend on this exactly-once guarantee.
     - ``result``: for ``completed`` instances, the durable contribution
       to the fan-out accumulator (a success value for the
       ``target_field`` bucket, or under ``collect`` error policy an
       error entry for the ``errors_field`` bucket). Typed per the
       parent state schema's ``target_field`` / ``errors_field``
-      (representation is implementation-defined per §10.11; Python
-      stores as ``Any`` since dynamic typing absorbs the variance).
+      (representation is implementation-defined; Python stores as
+      ``Any`` since dynamic typing absorbs the variance).
       Unused for ``in_flight`` and ``not_started``.
     - ``result_is_error``: boolean discriminator for ``completed``
       entries — ``True`` when the contribution is a ``collect``-mode
@@ -113,8 +114,8 @@ class FanOutInstanceProgress:
       when the contribution is a success value that rolls forward
       into ``target_field``. MUST be ``False`` for ``in_flight`` and
       ``not_started`` (the value of ``result`` is ignored for those).
-      Per proposal 0027 (spec v0.21.0): implementations MUST consult
-      this field on resume rather than inferring routing from
+      Implementations MUST consult this field on resume rather than
+      inferring routing from
       ``result``'s shape — heuristic inspection would misclassify
       user state values that happen to match the engine's
       error-record shape.
@@ -148,7 +149,7 @@ class FanOutProgress:
       the fan-out (empty for outermost-graph fan-outs). Disambiguates
       fan-outs of the same name in different nested-subgraph contexts.
     - ``instance_count``: the resolved instance count for this fan-out
-      (per pipeline-utilities §9 count or items_field mode).
+      (count or items_field mode).
     - ``instances``: a tuple of per-instance entries indexed by
       ``fan_out_index`` (``instances[i]`` is the entry for
       ``fan_out_index=i``). Length equals ``instance_count``.
@@ -167,7 +168,7 @@ class CheckpointRecord:
 
     Frozen: backends MUST treat the record as immutable. The engine
     builds a fresh record per ``completed`` event rather than mutating
-    a shared one. The ``fan_out_progress`` field (per §10.11) carries
+    a shared one. The ``fan_out_progress`` field carries
     per-fan-out-node entries when one or more fan-outs are in flight
     at save time; an empty tuple means no fan-out progress to record.
     """
@@ -234,8 +235,8 @@ class Checkpointer(Protocol):
     plain dict, JSON tree, or similar) that is independent of the
     current state class. JSON-encoded backends naturally satisfy
     this; backends that store live typed state instances or use
-    class-bound serialization (pickle) cannot. Per spec §10.12.1,
-    backends that cannot expose the intermediate MUST raise
+    class-bound serialization (pickle) cannot. Backends that cannot
+    expose the intermediate MUST raise
     ``CheckpointRecordInvalid`` on version mismatch even when
     migrations are registered; the registry has no chance to bridge.
 

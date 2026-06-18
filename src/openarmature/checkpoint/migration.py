@@ -1,12 +1,12 @@
 """State migration types and registry.
 
-Realizes pipeline-utilities §10.12 (proposal 0014). A
-``StateMigration`` describes one edge in the migration graph;
+A ``StateMigration`` describes one edge in the migration graph;
 ``MigrationRegistry`` holds the ordered set and resolves chains
 via BFS. Ambiguity (duplicate ``(from, to)`` pairs OR multiple
 distinct shortest paths between the same source/sink) is a
-configuration-style error per §10.12.1 / §10.12.2.
+configuration-style error.
 """
+# Realizes pipeline-utilities §10.12 (proposal 0014).
 
 from __future__ import annotations
 
@@ -29,9 +29,9 @@ class StateMigration:
     chain (or for final deserialization into the current state class).
 
     Migrations MUST be pure: deterministic, no I/O, no implicit
-    state. The framework does not police purity per spec §10.12.2
-    ("the contract is documented, not policed"); violating it
-    risks non-deterministic resume.
+    state. The framework does not police purity (the contract is
+    documented, not policed); violating it risks non-deterministic
+    resume.
     """
 
     from_version: str
@@ -46,15 +46,14 @@ class MigrationRegistry:
 
     - Two migrations with the same ``from_version`` AND
       ``to_version`` raise ``CheckpointStateMigrationChainAmbiguous``
-      directly per spec §10.10 (proposal 0018) so the canonical
-      category surfaces at the registration boundary without any
-      wrapping by the builder.
+      directly so the canonical category surfaces at the registration
+      boundary without any wrapping by the builder.
     - Two migrations with the same ``from_version`` and different
       ``to_version`` are permitted (branched migration graph;
       chain resolution picks a path or raises ambiguity if multiple
       shortest paths exist).
 
-    Resolution-time semantics (per §10.12.2):
+    Resolution-time semantics:
 
     - BFS from ``record.schema_version`` to
       ``current.schema_version``. BFS naturally finds the shortest
@@ -133,8 +132,7 @@ class MigrationRegistry:
 
         Raises ``CheckpointStateMigrationChainAmbiguous`` if
         multiple distinct shortest paths exist between
-        ``from_version`` and ``to_version`` (ambiguous chain per
-        spec §10.10 / §10.12.2; proposal 0018 / spec v0.16.0).
+        ``from_version`` and ``to_version`` (an ambiguous chain).
         Same canonical category as the duplicate-pair detection
         in ``register``; one type for chain ambiguity regardless
         of when it surfaces.

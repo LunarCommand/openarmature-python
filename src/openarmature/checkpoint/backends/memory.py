@@ -19,23 +19,25 @@ from ..protocol import CheckpointFilter, CheckpointRecord, CheckpointSummary
 
 @dataclass(frozen=True)
 class FanOutInternalSaveBatching:
-    """Per-Checkpointer-instance configuration for §10.11.4 fan-out
-    internal save batching.
+    """Per-Checkpointer-instance configuration for fan-out internal
+    save batching.
 
     Applies ONLY to fan-out instance internal saves. Outermost-graph,
     subgraph-internal, and fan-out node completion saves remain
-    synchronous per §10.3.
+    synchronous.
 
     - ``flush_every``: flush the buffer every N buffered saves. ``0``
       / negative means batching is disabled (every save flushes
       immediately). The buffered save count resets at each flush.
 
-    Buffered-but-unflushed saves are LOST on crash per §10.11.4;
-    on resume, instances whose completed state was buffered-only
-    revert to ``in_flight`` / ``not_started`` and re-run. The §10.11.1
-    reducer correctness holds because their contributions hadn't
-    durably committed.
+    Buffered-but-unflushed saves are LOST on crash; on resume,
+    instances whose completed state was buffered-only revert to
+    ``in_flight`` / ``not_started`` and re-run. Reducer correctness
+    holds because their contributions hadn't durably committed.
     """
+
+    # Spec pipeline-utilities §10.11.4 (fan-out internal save batching);
+    # §10.3 synchronous saves; §10.11.1 reducer correctness.
 
     flush_every: int = 0
 
@@ -53,23 +55,22 @@ class InMemoryCheckpointer:
     from :meth:`load`; no serialization round-trip. (This is the
     feature: tests can assert on the saved state's identity.)
 
-    **State-migration eligibility:** none. Per spec §10.12.1, a
-    backend supports migration only when it can expose a structural
-    intermediate form of the loaded state independent of the current
+    **State-migration eligibility:** none. A backend supports
+    migration only when it can expose a structural intermediate form
+    of the loaded state independent of the current
     state class. This backend holds live typed instances by
     reference, so a version mismatch on resume raises
     ``CheckpointRecordInvalid`` rather than consulting the
     migration registry.
 
-    **Fan-out internal save batching** (per spec §10.11.4): optional
-    via the ``fan_out_internal_save_batching`` constructor parameter.
+    **Fan-out internal save batching**: optional via the
+    ``fan_out_internal_save_batching`` constructor parameter.
     Default is no batching (every save flushes immediately). When
     enabled, fan-out instance internal saves buffer in memory and
     flush every ``flush_every`` saves. Outermost-graph,
     subgraph-internal, and fan-out node completion saves bypass the
     buffer entirely (they remain synchronous). On crash, buffered
-    saves are lost — by design, per §10.11.4's documented cost
-    trade-off.
+    saves are lost — by design, a documented cost trade-off.
     """
 
     # Per spec §10.12.1: in-memory storage holds live typed-state
@@ -104,8 +105,8 @@ class InMemoryCheckpointer:
         previous record for the same id. Not durable across process
         restarts.
 
-        Per §10.11.4: outermost-graph, subgraph-internal, and
-        fan-out node completion saves are synchronous regardless of
+        Outermost-graph, subgraph-internal, and fan-out node
+        completion saves are synchronous regardless of
         the batching configuration. The engine routes fan-out
         instance internal saves through :meth:`save_fan_out_internal`
         instead; this method bypasses the buffer.
@@ -121,8 +122,8 @@ class InMemoryCheckpointer:
             self._records[invocation_id] = record
 
     async def save_fan_out_internal(self, invocation_id: str, record: CheckpointRecord) -> None:
-        """Buffer a fan-out instance internal save under the §10.11.4
-        batching policy. When batching is disabled (default), behaves
+        """Buffer a fan-out instance internal save under the batching
+        policy. When batching is disabled (default), behaves
         identically to :meth:`save` — every save is synchronously
         durable. When ``flush_every`` is positive, the save is
         buffered; the buffer flushes when the count reaches the
@@ -142,10 +143,10 @@ class InMemoryCheckpointer:
         invocation_id: str,
         record: CheckpointRecord,
     ) -> None:
-        """Buffer an "instance failed mid-execution" save under §10.11.4
-        batching. The failure save records the in_flight state of an
-        instance whose terminal inner node raised; this save closes the
-        in_flight observability gap (per §10.11) for instances whose
+        """Buffer an "instance failed mid-execution" save under the
+        batching policy. The failure save records the in_flight state
+        of an instance whose terminal inner node raised; this save
+        closes the in_flight observability gap for instances whose
         subgraphs have no sibling-completed save to piggyback on.
 
         Under batching, this save buffers BUT does NOT count toward
@@ -184,8 +185,8 @@ class InMemoryCheckpointer:
 
     async def load(self, invocation_id: str) -> CheckpointRecord | None:
         """Return the saved record for ``invocation_id`` or ``None``
-        if nothing has been saved under that id. Per §10.11.4:
-        buffered-but-unflushed fan-out internal saves are NOT visible
+        if nothing has been saved under that id. Buffered-but-unflushed
+        fan-out internal saves are NOT visible
         to ``load`` — that's the crash-loses-buffered contract. To
         simulate a crash before the buffer flushes, drop the
         Checkpointer reference; the buffer is in-memory only.
