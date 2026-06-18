@@ -372,18 +372,17 @@ def _restore_fan_out_progress_state(
     into the mutable per-fan-out tracking dict that ``FanOutNode``
     consults to decide which instances to skip vs re-run.
 
-    Extra-output state isn't preserved across resume — the spec models
-    ``result`` as a single accumulator entry and is silent on
+    Extra-output state isn't preserved across resume: ``result`` is
+    modeled as a single accumulator entry, with nothing recorded for
     ``extra_outputs``. Reconstructing them would require either
-    serializing them on the record (a spec change) or recomputing them
+    serializing them on the record (a record-format change) or recomputing them
     (defeating the point of skip-on-resume). Fixtures don't exercise
     ``extra_outputs`` on the resume path; if a future workload needs
     them, surface as a follow-on.
 
     ``result_is_error`` is read verbatim from the saved record's
-    explicit field. The earlier structural-pattern heuristic is gone
-    — the spec mandates the
-    explicit field as the authoritative discriminator because the
+    explicit field. The earlier structural-pattern heuristic is gone:
+    the explicit field is the authoritative discriminator because the
     user's state schema can legitimately contain values that match
     the engine's canonical error-record shape, and a heuristic would
     misclassify them.
@@ -1412,7 +1411,7 @@ class CompiledGraph[StateT: State]:
         (``node_exception`` / ``reducer_error`` /
         ``state_validation_error``) stay inline in ``innermost`` —
         those errors short-circuit before edge eval can run, so the
-        spec's "before the failure propagates" MUST is preserved by
+        "before the failure propagates" requirement is preserved by
         the inline dispatch.
 
         Returns a :class:`_StepResult` carrying the merged state +
@@ -2375,7 +2374,7 @@ class CompiledGraph[StateT: State]:
 
         Atomicity contract: the save-call site below
         completes the "produce contribution + record into accumulator
-        + save" sequence the spec mandates. ``FanOutNode.run_with_context``
+        + save" sequence. ``FanOutNode.run_with_context``
         flips an instance's state to ``completed`` and stashes its
         ``result`` BEFORE invoking the save that durably records the
         transition. A crash between that state mutation and the save

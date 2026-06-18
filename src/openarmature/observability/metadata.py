@@ -27,7 +27,7 @@ Validation rules (apply at every entry point):
 
 - Keys MUST be strings.
 - Keys MUST NOT start with ``openarmature.`` or ``gen_ai.`` (reserved
-  for spec-normative attribute namespaces; collisions would silently
+  attribute namespaces; collisions would silently
   overwrite OA-emitted state at the observer layer).
 - Keys MUST NOT exactly match a reserved OA-emitted top-level metadata
   key name (the Langfuse set plus ``invocation_id``) for the same

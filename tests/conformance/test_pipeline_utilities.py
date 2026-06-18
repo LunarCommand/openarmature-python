@@ -850,10 +850,10 @@ def _collect_parallel_branches_errors_fields(spec: Mapping[str, Any]) -> set[str
     ``errors_field`` on any parallel_branches node in ``spec``.
 
     The ``errors_field`` carries an implementation-defined
-    record shape; the spec only mandates ``branch_name`` + category. The
+    record shape; only ``branch_name`` + category are required. The
     engine's record carries additional engine-defined keys (``message``,
     ``cause_type``). Fixtures asserting against ``errors_field`` records
-    use subset semantics — assert the spec-mandated keys are present
+    use subset semantics — assert the required keys are present
     with the expected values, ignore the rest.
     """
     out: set[str] = set()

@@ -8,7 +8,7 @@ fixture authors mixing keys across capabilities, and gives runtime code
 in :mod:`runtime` typed access to the assertion payload it needs.
 
 Typing depth: TOP-LEVEL keys per capability are exhaustively
-typed (catches new directives the spec adds). The nested payload values
+typed (catches new fixture directives). The nested payload values
 underneath (e.g., individual span tree entries, observer event details)
 are kept loose as ``list[Any]`` / ``dict[str, Any]`` because the runtime
 code that consumes them is the right place to tighten.

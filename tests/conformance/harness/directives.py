@@ -28,7 +28,7 @@ from pydantic import (
 class _ForbidExtras(BaseModel):
     """Strict — used for the structural skeleton (state schema, node primary
     directive set, edges, observer registration, middleware config split).
-    Catches new directives the spec adds at the load-bearing places."""
+    Catches new fixture directives at the load-bearing places."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -36,8 +36,8 @@ class _ForbidExtras(BaseModel):
 class _AllowExtras(BaseModel):
     """Permissive — used for payload-shape models (mock LLM responses,
     middleware-specific params, flaky/fan-out config). Validates KNOWN
-    keys' types but doesn't reject unknown ones — the spec evolves these
-    payloads frequently and modelling every parameter exhaustively
+    keys' types but doesn't reject unknown ones — these payloads evolve
+    frequently and modelling every parameter exhaustively
     creates churn without proportional value. The strictness
     contract sits at the directive STRUCTURE level (above), not the
     parameter-bag level (here)."""
@@ -87,8 +87,8 @@ class StateSchema(_ForbidExtras):
 class EdgeSpec(_AllowExtras):
     """One edge in a graph definition.
 
-    The spec defines static (``from``/``to``) and conditional
-    (``from``/``condition``) edges; observability/011 also uses a
+    Edges come in static (``from``/``to``) and conditional
+    (``from``/``condition``) forms; observability/011 also uses a
     ``when``-shaped predicate. Schema is permissive here so all forms
     parse — the engine retrofit interprets each shape against
     the engine's edge model.
@@ -576,8 +576,8 @@ class MockResponse(_AllowExtras):
 
     Permissive shape because the body's content mirrors OpenAI's wire
     format which is wide and evolving; modelling every field would
-    duplicate the OpenAI schema. The ``llm-provider`` capability's
-    spec is the authoritative shape.
+    duplicate the OpenAI schema. The OpenAI wire format is the
+    authoritative shape.
     """
 
     status: int | None = None

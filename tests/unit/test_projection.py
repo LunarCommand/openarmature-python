@@ -106,7 +106,7 @@ def test_explicit_mapping_outputs_projects_only_named_pairs() -> None:
 
 
 def test_explicit_mapping_outputs_absent_falls_back_to_field_name_matching() -> None:
-    """`outputs=None` (absent) falls back to spec default field-name matching;
+    """`outputs=None` (absent) falls back to the default field-name matching;
     `outputs={}` (present, empty) projects nothing."""
 
     sub_final = ChildEM(input=1, result=2, note="from-child")

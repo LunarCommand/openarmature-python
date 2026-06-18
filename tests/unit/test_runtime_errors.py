@@ -1,6 +1,6 @@
 """Runtime-error categories not exercised by the conformance suite.
 
-The spec defines five runtime categories. The conformance fixtures cover
+There are five runtime-error categories. The conformance fixtures cover
 `node_exception` (009) and `routing_error` (008) directly and reach the
 others incidentally via 001–006. These tests target the three categories no
 fixture triggers: `edge_exception`, `reducer_error`, and

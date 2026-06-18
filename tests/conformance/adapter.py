@@ -504,7 +504,7 @@ def _make_flaky_fn(
       031): the engine's first invoke aborts on this node; the
       resumed invoke succeeds. No retry middleware is wrapped around
       these nodes (any wrapping would bypass the resume path), so
-      "fail-once-then-succeed" matches the spec contract directly.
+      "fail-once-then-succeed" matches the resume contract directly.
     """
     sequence = list(flaky.get("failure_sequence", []))
     success_update = dict(flaky.get("success_update", {}))
@@ -694,7 +694,7 @@ def _projection_for(node_spec: Mapping[str, Any]) -> ProjectionStrategy[State, S
     """Pick the projection strategy declared on a subgraph node spec.
 
     `inputs:` and/or `outputs:` in the YAML → `ExplicitMapping`. Both absent →
-    the spec's default `FieldNameMatching`.
+    the default `FieldNameMatching`.
     """
 
     inputs = node_spec.get("inputs")

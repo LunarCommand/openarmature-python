@@ -1,6 +1,6 @@
 """Unit tests for the parallel-branches runtime.
 
-Covers spec corner cases the conformance fixtures exercise only
+Covers edge cases the conformance fixtures exercise only
 implicitly:
 
 - compile-time empty-branches rejection

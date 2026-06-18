@@ -72,7 +72,7 @@ def _segment_from_fixture(entry: dict[str, Any]) -> Any:
     validators — the harness exists to test render-time behavior,
     including fixtures that intentionally build prompts violating
     construction-time invariants (placeholder regex, role-block
-    compat).  Render-time enforcement (the spec-normative trigger)
+    compat).  Render-time enforcement (the normative trigger)
     still runs; only the construction-time ergonomic-only check is
     bypassed.
 
@@ -546,7 +546,7 @@ def _assert_capture_attrs(capture_name: str, actual: Any, expected: dict[str, An
 
 def _message_to_dict_for_compare(message: Message) -> dict[str, Any]:
     """Dump a Message to a plain dict for structural equality against
-    a fixture YAML expected value.  Mirrors the spec's documented
+    a fixture YAML expected value.  Mirrors the documented
     Message shape: ``{role, content}`` with optional extras."""
     dumped = message.model_dump(exclude_none=True)
     # Normalize content-blocks shape: drop pydantic internal

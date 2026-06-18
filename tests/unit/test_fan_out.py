@@ -1,6 +1,6 @@
 """Unit tests for the fan-out runtime.
 
-Covers the spec-corner cases the conformance fixtures exercise only
+Covers the edge cases the conformance fixtures exercise only
 implicitly:
 
 - items_field projection

@@ -22,7 +22,7 @@ This module defines:
 - `_dispatch`: enqueues an event for the worker to deliver.
 - `deliver_loop`: the worker coroutine. Reads items from the queue and
   calls each observer in order, filtering by subscribed phase and
-  isolating exceptions via `warnings.warn` per spec.
+  isolating exceptions via `warnings.warn`.
 """
 
 from __future__ import annotations
@@ -344,7 +344,7 @@ class DrainSummary:
     delivered to every subscribed observer before cancellation, and
     `timeout_reached is True`.
 
-    The spec-mandated minimum is these two fields. Implementations MAY
+    These two fields are the required minimum. Implementations MAY
     extend the shape with diagnostic detail (per-observer counts,
     sampled event metadata) in subsequent versions; this version ships
     the minimum.
@@ -376,8 +376,8 @@ class _FanOutInstanceState:
     - ``result_is_error`` distinguishes success contributions
       (``False``) from collect-mode error contributions (``True``).
       Internal flag — not exposed on the public
-      ``FanOutInstanceProgress`` shape because the spec presents
-      ``result`` as a single typed entry per the parent state schema.
+      ``FanOutInstanceProgress`` shape because ``result`` is exposed
+      as a single typed entry per the parent state schema.
       ``FanOutNode.run_with_context`` consults this on resume to
       route the rolled-forward contribution through the
       ``errors_field`` bucket rather than ``target_field``.
@@ -385,8 +385,8 @@ class _FanOutInstanceState:
       ``extra_outputs`` mapping (parent-field -> sub-field) so that
       per-instance resume preserves the FULL per-instance contribution
       (not just the ``target_field`` slice). Internal — not exposed on
-      the public ``FanOutInstanceProgress`` shape because the spec
-      describes ``result`` as a single accumulator entry.
+      the public ``FanOutInstanceProgress`` shape because ``result``
+      is a single accumulator entry.
     - ``completed_inner_positions`` accumulates ``NodePosition`` entries
       from inner nodes that complete inside this instance's subgraph
       execution. Captures the instance's progress for observational

@@ -62,7 +62,7 @@ _log = logging.getLogger(__name__)
 class BranchSpec[ChildT: State]:
     """One entry in a :class:`ParallelBranchesNode`'s branch mapping.
 
-    Branches are heterogeneous: each spec MAY reference a different
+    Branches are heterogeneous: each branch may reference a different
     compiled subgraph with a different state schema. ``inputs`` /
     ``outputs`` follow the same shape as subgraph projection
     mappings.

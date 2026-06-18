@@ -34,8 +34,8 @@ async def _read_correlation(state: _S) -> dict[str, str]:
 
 async def test_caller_supplied_correlation_id_visible_inside_node() -> None:
     """User code in a node body can read the supplied correlation_id
-    via :func:`current_correlation_id` — the spec's mandated
-    cross-backend join key surface."""
+    via :func:`current_correlation_id`, the cross-backend join key
+    surface."""
     g = GraphBuilder(_S).add_node("read", _read_correlation).add_edge("read", END).set_entry("read").compile()
     final = await g.invoke(_S(), correlation_id="my-business-request-42")
     assert final.captured == "my-business-request-42"

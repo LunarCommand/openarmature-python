@@ -186,10 +186,9 @@ def _subgraph_identity_at(event: NodeEvent, depth: int) -> str:
     given 1-based namespace depth, or the empty string when no
     identity is tracked at that depth.
 
-    The empty-string fallback matches the spec's "if the implementation
-    tracks one" clause for callers using
-    ``SubgraphNode(name=..., compiled=...)`` without supplying
-    ``subgraph_identity``.
+    The empty-string fallback is the "no identity tracked" case, for
+    callers using ``SubgraphNode(name=..., compiled=...)`` without
+    supplying ``subgraph_identity``.
     """
     # Spec observability §5.3 (coord thread
     # clarify-subgraph-name-semantics).

@@ -536,8 +536,8 @@ class LlmCompletionEvent:
       lifetime, unique within the run. Distinct from
       ``response_id``.
     - ``caller_invocation_metadata``: optional snapshot of caller-
-      supplied invocation metadata at LLM-call time. Spec-defined as
-      OPTIONAL; the python OpenAIProvider populates it by default so
+      supplied invocation metadata at LLM-call time. OPTIONAL; the
+      python OpenAIProvider populates it by default so
       the bundled OTel/Langfuse observers can emit the
       ``openarmature.user.<key>`` span-attribute family without an
       extra opt-in. Pass ``populate_caller_metadata=False`` to suppress
@@ -625,7 +625,7 @@ class LlmFailedEvent:
       ``provider_unsupported_content_block``,
       ``structured_output_invalid``). Always present.
     - ``error_type``: OPTIONAL impl-level / vendor-specific error
-      type or code. Two acceptable styles per spec:
+      type or code. Two acceptable styles:
       vendor error code (e.g. ``"rate_limit_exceeded"``) OR
       upstream exception class name (e.g. ``"RateLimitError"``).
       ``None`` when no impl-side type is available.

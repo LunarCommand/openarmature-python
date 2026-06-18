@@ -21,9 +21,9 @@ class FilesystemPromptBackend:
     - ``layout="per-label"`` (default): ``<root>/<label>/<name>.j2``.
       The ``label`` subdirectory keeps name-collisions across labels
       distinct (e.g., ``prompts/production/greeting.j2`` and
-      ``prompts/staging/greeting.j2``). The spec permits filesystem
-      backends to interpret label as "a subdirectory or filename
-      suffix"; this is the subdirectory variant.
+      ``prompts/staging/greeting.j2``). A filesystem backend may
+      interpret label as a subdirectory or filename suffix; this is
+      the subdirectory variant.
     - ``layout="flat"``: ``<root>/<name>.j2``. The same template
       is returned regardless of which label was requested; the
       Prompt's ``label`` field is the requested label verbatim.

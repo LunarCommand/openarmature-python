@@ -183,7 +183,7 @@ class _PromptBase(BaseModel):
             into ``provider.complete(config=...)`` without translation.
         observability_entities: Optional backend-keyed references to
             first-class entities the prompt has been registered as in
-            observability backends.  Spec-normative key:
+            observability backends.  Recognized key:
             ``langfuse_prompt`` (the Langfuse SDK Prompt-entity ref).
         metadata: Optional backend-supplied metadata.
     """

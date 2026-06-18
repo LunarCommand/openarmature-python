@@ -79,7 +79,7 @@ class ForceTool(BaseModel):
 
     Use the record form of the `tool_choice` discriminated union when
     you need the model to call a specific tool by name. ``type`` is the
-    spec-level discriminator (``"tool"``); the wire mapping renames it
+    discriminator (``"tool"``); the wire mapping renames it
     to ``"function"`` for the OpenAI body. The
     ``name`` MUST match a ``Tool.name`` in the supplied ``tools``
     list; ``validate_tool_choice`` enforces this at pre-send time and
