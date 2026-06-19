@@ -247,3 +247,50 @@ async def test_sdk_adapter_generation_timestamps_round_trip_through_langfuse() -
         # queues. Without this, a long-running pytest process could
         # accumulate background threads across integration tests.
         client.shutdown()
+
+
+@pytest.mark.integration
+async def test_sdk_adapter_populates_session_and_user_id_on_live_langfuse() -> None:
+    """End-to-end (proposal 0064 §8.4.1): trace(session_id=, user_id=)
+    populates the live Trace's sessionId / userId grouping fields.
+
+    The observer leaves session_id dormant until the sessions capability
+    (proposal 0020) supplies openarmature.session_id, but the adapter
+    passes whatever it is given, so this exercises BOTH passthroughs at
+    the SDK boundary: when 0020 lands, the session_id rides the same
+    propagate_attributes path the userId promotion uses today.
+    """
+    from langfuse import Langfuse
+
+    from openarmature.observability.langfuse.adapter import LangfuseSDKAdapter
+
+    client = Langfuse()
+    adapter = LangfuseSDKAdapter(client)
+
+    invocation_id = str(uuid.uuid4())
+    session_id = f"sess-{uuid.uuid4().hex[:8]}"
+    user_id = f"user-{uuid.uuid4().hex[:8]}"
+
+    # session_id / user_id ride on the observations under the trace via
+    # propagate_attributes (the same carrier as name / metadata), so open
+    # one real observation for them to attach to.
+    adapter.trace(
+        id=invocation_id,
+        name="test_sdk_adapter_session_user",
+        metadata={"userId": user_id},
+        session_id=session_id,
+        user_id=user_id,
+    )
+    span_handle = adapter.span(trace_id=invocation_id, name="verify_entry")
+    span_handle.end()
+
+    adapter.force_flush()
+    time.sleep(2)
+
+    hex_id = invocation_id.replace("-", "")
+    try:
+        trace = _poll_trace_with_retry(client, hex_id)
+        assert trace.session_id == session_id, f"trace.session_id mismatch: got {trace.session_id!r}"
+        assert trace.user_id == user_id, f"trace.user_id mismatch: got {trace.user_id!r}"
+    finally:
+        client.shutdown()
