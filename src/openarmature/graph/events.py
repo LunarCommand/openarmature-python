@@ -656,6 +656,72 @@ class LlmFailedEvent:
     caller_invocation_metadata: Mapping[str, AttributeValue] | None = None
 
 
+# Python-internal per-attempt LLM event. NOT a spec-normative event type
+# (unlike LlmCompletionEvent / LlmFailedEvent): it is the observer-side
+# vehicle for the observability §5.5 per-attempt span surface under
+# llm-provider §7.1 call-level retry. One is dispatched per in-call
+# attempt (including the single attempt of a no-retry call); the OTel
+# observer renders one openarmature.llm.complete span from each, while
+# the terminal LlmCompletionEvent / LlmFailedEvent stay one-per-call
+# (payload/latency, Langfuse mapping, the fixture-072 mutual exclusion).
+@dataclass(frozen=True)
+class LlmRetryAttemptEvent:
+    """One LLM-call attempt delivered to observers for per-attempt span
+    rendering.
+
+    Carries the full request-side surface plus that attempt's outcome.
+    ``error_category`` discriminates the outcome: ``None`` for a
+    successful attempt (the response-side fields are populated), a
+    category string for a failed attempt (the response-side fields are
+    ``None`` — no response was received).
+
+    Field set:
+
+    - ``llm_attempt_index``: the call-level retry-attempt index, ``0``
+      for the first attempt and ``0..N-1`` across the N attempts of a
+      call-level retry. Distinct from ``attempt_index`` (the node-level
+      retry index used for calling-span resolution); the two are
+      independent.
+    - identity / scoping (``invocation_id`` ... ``call_id``) and the
+      request side (``input_messages`` / ``request_params`` /
+      ``request_extras`` / ``active_prompt`` / ``active_prompt_group``)
+      mirror :class:`LlmCompletionEvent`, carried on every attempt.
+    - response side (``response_id`` / ``response_model`` / ``usage`` /
+      ``finish_reason`` / ``output_content``): populated on a successful
+      attempt; ``None`` on a failed attempt.
+    - failure side (``error_category`` / ``error_message`` /
+      ``error_type``): populated on a failed attempt; ``None`` on a
+      successful one.
+    """
+
+    invocation_id: str
+    correlation_id: str | None
+    node_name: str
+    namespace: tuple[str, ...]
+    attempt_index: int
+    fan_out_index: int | None
+    branch_name: str | None
+    provider: str
+    model: str
+    call_id: str
+    llm_attempt_index: int
+    latency_ms: float | None
+    input_messages: list[dict[str, Any]]
+    request_params: Mapping[str, Any]
+    request_extras: Mapping[str, Any]
+    active_prompt: Any
+    active_prompt_group: Any
+    response_id: str | None = None
+    response_model: str | None = None
+    usage: "Usage | None" = None
+    finish_reason: str | None = None
+    output_content: str | None = None
+    error_category: str | None = None
+    error_message: str | None = None
+    error_type: str | None = None
+    caller_invocation_metadata: Mapping[str, AttributeValue] | None = None
+
+
 # Spec: pipeline-utilities §6.3 cause chain (proposal 0068). A ``carrier``
 # link is a graph-engine §4 ``node_exception`` wrapper the engine applies at a
 # non-node placement (§9.7 instance / §11.7 branch / §9.6 / §11.6 parent-node
@@ -758,6 +824,7 @@ __all__ = [
     "InvocationStartedEvent",
     "LlmCompletionEvent",
     "LlmFailedEvent",
+    "LlmRetryAttemptEvent",
     "MetadataAugmentationEvent",
     "NodeEvent",
     "ParallelBranchesEventConfig",
