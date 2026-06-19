@@ -89,6 +89,9 @@ _SUPPORTED_FIXTURES = frozenset(
         # §5.7 attribute surface end-to-end against a two-branch
         # parallel-branches graph with calls_llm in each branch.
         "038-otel-parallel-branches-dispatch-span",
+        # v0.42.0 — proposal 0050 call-level-retry per-attempt LLM span
+        # surface. Single-attempt default: one span, attempt_index 0.
+        "057-llm-attempt-index-single-attempt-default",
         "001-otel-basic-trace",
         "002-otel-subgraph-hierarchy",
         "003-otel-error-status",
@@ -256,6 +259,7 @@ async def test_observability_fixture(fixture_path: Path) -> None:
         "021-otel-llm-disable-genai-semconv",
         "025-otel-llm-request-params-extended",
         "026-otel-caller-supplied-metadata",
+        "057-llm-attempt-index-single-attempt-default",
     }:
         await _run_llm_payload_fixture(spec)
     else:
