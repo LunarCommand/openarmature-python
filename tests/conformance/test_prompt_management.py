@@ -264,8 +264,22 @@ class MockPromptBackend:
                     ),
                 )
         self.call_count = 0
+        # Proposal 0072 (conformance-adapter §6.8) caching-primitive
+        # state. ``source_read_count`` counts only source reads (cache
+        # miss / bypass / staleness), distinct from ``call_count`` (every
+        # fetch). The clock is controllable via ``advance_clock``.
+        self._caching = spec.caching
+        self._clock_seconds = 0
+        self._cache_entry_time: dict[tuple[str, str], int] = {}
+        self.source_read_count = 0
 
-    async def fetch(self, name: str, label: str = "production") -> Prompt:
+    def advance_clock(self, seconds: int) -> None:
+        """Advance the controllable clock."""
+        self._clock_seconds += seconds
+
+    async def fetch(
+        self, name: str, label: str = "production", *, cache_ttl_seconds: int | None = None
+    ) -> Prompt:
         self.call_count += 1
         if self._simulate_unavailable:
             raise PromptStoreUnavailable(
@@ -279,7 +293,23 @@ class MockPromptBackend:
                 label=label,
                 backend=self.name,
             )
+        if self._caching and not self._serves_from_cache(key, cache_ttl_seconds):
+            # Source read: count it and (re)stamp the cache entry's age.
+            self.source_read_count += 1
+            self._cache_entry_time[key] = self._clock_seconds
         return self._prompts[key]
+
+    def _serves_from_cache(self, key: tuple[str, str], cache_ttl_seconds: int | None) -> bool:
+        # Proposal 0072 read-side control: 0 bypasses the cache (always a
+        # source read); a missing entry is a source read; None serves any
+        # cached entry; N > 0 serves only while the entry is younger than
+        # N seconds (else a fresh source read).
+        if cache_ttl_seconds == 0 or key not in self._cache_entry_time:
+            return False
+        if cache_ttl_seconds is None:
+            return True
+        age = self._clock_seconds - self._cache_entry_time[key]
+        return age < cache_ttl_seconds
 
 
 # ---------------------------------------------------------------------------
@@ -317,7 +347,10 @@ async def _run_call(
             assert manager is not None
             if operation == "fetch":
                 assert call.name is not None
-                return await manager.fetch(call.name, call.label), None
+                return (
+                    await manager.fetch(call.name, call.label, cache_ttl_seconds=call.cache_ttl_seconds),
+                    None,
+                )
             if operation == "render":
                 # Either inline fetched_prompt or a ref to a capture.
                 if call.fetched_prompt_ref is not None:
@@ -352,6 +385,7 @@ async def _run_call(
                         call.label,
                         call.variables or {},
                         placeholders=placeholders,
+                        cache_ttl_seconds=call.cache_ttl_seconds,
                     ),
                     None,
                 )
@@ -362,7 +396,12 @@ async def _run_call(
         backend = backends[target.backend]
         if operation == "fetch":
             assert call.name is not None and call.label is not None
-            return await backend.fetch(call.name, call.label), None
+            return await backend.fetch(call.name, call.label, cache_ttl_seconds=call.cache_ttl_seconds), None
+        if operation == "advance_clock":
+            # Proposal 0072 §6.8: advance the caching backend's clock.
+            assert call.seconds is not None
+            backend.advance_clock(call.seconds)
+            return None, None
         raise AssertionError(f"unsupported backend operation: {operation!r}")
     except PromptError as exc:
         return None, exc
@@ -600,9 +639,11 @@ async def test_prompt_management_fixture(fixture_path: Path) -> None:
         (fixture.tertiary_manager, fixture.tertiary_calls),
     ]
     for manager_spec, manager_calls in manager_pairs:
-        if manager_spec is None:
-            continue
-        manager = _build_manager(manager_spec, backends, resolvers_map)
+        # ``manager_spec is None`` with direct-backend calls is the
+        # proposal 0072 fixtures 033/034 shape (no manager; calls target
+        # backends directly). Build a manager only when one is declared;
+        # direct-backend calls don't need it.
+        manager = _build_manager(manager_spec, backends, resolvers_map) if manager_spec is not None else None
         for call in manager_calls:
             result, raised = await _run_call(call, backends, manager, captures)
             _assert_per_call(call, result, raised, backends)
@@ -638,6 +679,15 @@ async def test_prompt_management_fixture(fixture_path: Path) -> None:
                         captures[call.capture_as] = result
             if case_fixture.expected is not None:
                 _apply_top_level_expected(case_fixture.expected, captures)
+
+    # Proposal 0072: per-backend end-state (e.g. source_read_count from
+    # the caching primitive).
+    if fixture.expected_backend_state is not None:
+        for backend_name, state in fixture.expected_backend_state.items():
+            backend = backends[backend_name]
+            for attr, want in state.items():
+                got = getattr(backend, attr)
+                assert got == want, f"backend {backend_name!r} {attr}: got {got!r}, expected {want!r}"
 
     if fixture.expected is None:
         return

@@ -110,7 +110,9 @@ class PromptManager:
             return self._label_resolver.resolve(name)
         return SPEC_FALLBACK_LABEL
 
-    async def fetch(self, name: str, label: str | None = None) -> Prompt:
+    async def fetch(
+        self, name: str, label: str | None = None, *, cache_ttl_seconds: int | None = None
+    ) -> Prompt:
         """Consult composed backends in order, applying the fallback chain.
 
         Label is resolved by a three-step chain: explicit argument >
@@ -123,12 +125,23 @@ class PromptManager:
         - ``PromptStoreUnavailable`` from a backend continues to the
           next. After ALL backends are exhausted with unavailable
           failures, the manager raises ``PromptStoreUnavailable``.
+
+        ``cache_ttl_seconds`` is a read-side cache control forwarded to
+        each backend's ``fetch``: ``None`` keeps
+        current behavior, ``0`` forces a fresh read, ``N > 0`` bounds a
+        served entry's staleness to N seconds; a negative value is
+        rejected. Cacheless backends ignore it.
         """
+        if cache_ttl_seconds is not None and cache_ttl_seconds < 0:
+            raise ValueError(
+                f"cache_ttl_seconds must be >= 0 (got {cache_ttl_seconds!r}); "
+                "None preserves current behavior, 0 forces a fresh read"
+            )
         resolved_label = self._resolve_label(label, name)
         causes: list[BaseException] = []
         for backend in self._backends:
             try:
-                return await backend.fetch(name, resolved_label)
+                return await backend.fetch(name, resolved_label, cache_ttl_seconds=cache_ttl_seconds)
             except PromptNotFound:
                 raise
             except PromptStoreUnavailable as exc:
@@ -520,13 +533,16 @@ class PromptManager:
         variables: Mapping[str, Any] | None = None,
         *,
         placeholders: Mapping[str, Sequence[Message]] | None = None,
+        cache_ttl_seconds: int | None = None,
     ) -> PromptResult:
         """Convenience equivalent to ``render(await fetch(name, label), variables)``.
 
         ``label`` follows the same three-step resolution as :meth:`fetch`.
         ``placeholders`` is forwarded to :meth:`render`.
+        ``cache_ttl_seconds`` is forwarded to :meth:`fetch` (the read-side
+        cache control).
         """
-        prompt = await self.fetch(name, label)
+        prompt = await self.fetch(name, label, cache_ttl_seconds=cache_ttl_seconds)
         return self.render(prompt, variables, placeholders=placeholders)
 
 

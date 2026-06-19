@@ -222,7 +222,9 @@ def test_render_empty_string_output_maps_to_prompt_render_error() -> None:
     prompt = _make_prompt(template="{{ x if x else '' }}")
 
     class _NullBackend:
-        async def fetch(self, name: str, label: str = "production") -> Prompt:
+        async def fetch(
+            self, name: str, label: str = "production", *, cache_ttl_seconds: int | None = None
+        ) -> Prompt:
             return prompt
 
     manager = PromptManager(_NullBackend())
@@ -236,7 +238,9 @@ def test_render_propagates_identity_fields() -> None:
     prompt = _make_prompt()
 
     class _Backend:
-        async def fetch(self, name: str, label: str = "production") -> Prompt:
+        async def fetch(
+            self, name: str, label: str = "production", *, cache_ttl_seconds: int | None = None
+        ) -> Prompt:
             return prompt
 
     manager = PromptManager(_Backend())
@@ -248,6 +252,20 @@ def test_render_propagates_identity_fields() -> None:
     assert result.fetched_at == prompt.fetched_at
     assert result.variables == {"user": "Alice"}
     assert len(result.messages) == 1
+
+
+async def test_fetch_rejects_negative_cache_ttl_seconds() -> None:
+    prompt = _make_prompt()
+
+    class _Backend:
+        async def fetch(
+            self, name: str, label: str = "production", *, cache_ttl_seconds: int | None = None
+        ) -> Prompt:
+            return prompt
+
+    manager = PromptManager(_Backend())
+    with pytest.raises(ValueError, match="cache_ttl_seconds must be >= 0"):
+        await manager.fetch("greeting", "production", cache_ttl_seconds=-1)
 
 
 # ---------------------------------------------------------------------------
@@ -374,7 +392,9 @@ async def test_manager_fetch_first_match_short_circuits() -> None:
         def __init__(self) -> None:
             self.calls = 0
 
-        async def fetch(self, name: str, label: str = "production") -> Prompt:
+        async def fetch(
+            self, name: str, label: str = "production", *, cache_ttl_seconds: int | None = None
+        ) -> Prompt:
             self.calls += 1
             return prompt
 
@@ -382,7 +402,9 @@ async def test_manager_fetch_first_match_short_circuits() -> None:
         def __init__(self) -> None:
             self.calls = 0
 
-        async def fetch(self, name: str, label: str = "production") -> Prompt:
+        async def fetch(
+            self, name: str, label: str = "production", *, cache_ttl_seconds: int | None = None
+        ) -> Prompt:
             self.calls += 1
             return prompt
 
@@ -398,7 +420,9 @@ def test_manager_render_caches_compiled_templates_by_hash() -> None:
     prompt = _make_prompt()
 
     class _Backend:
-        async def fetch(self, name: str, label: str = "production") -> Prompt:
+        async def fetch(
+            self, name: str, label: str = "production", *, cache_ttl_seconds: int | None = None
+        ) -> Prompt:
             return prompt
 
     manager = PromptManager(_Backend())
@@ -414,7 +438,9 @@ async def test_manager_render_signature_returns_user_message() -> None:
     prompt = _make_prompt()
 
     class _Backend:
-        async def fetch(self, name: str, label: str = "production") -> Prompt:
+        async def fetch(
+            self, name: str, label: str = "production", *, cache_ttl_seconds: int | None = None
+        ) -> Prompt:
             return prompt
 
     manager = PromptManager(_Backend())
@@ -672,7 +698,9 @@ async def test_chat_segment_template_cache_is_content_stable() -> None:
 
 
 class _DummyBackend:
-    async def fetch(self, name: str, label: str = "production") -> Any:
+    async def fetch(
+        self, name: str, label: str = "production", *, cache_ttl_seconds: int | None = None
+    ) -> Any:
         raise NotImplementedError
 
 
@@ -727,7 +755,9 @@ class _StubBackend:
     def __init__(self, prompt: Prompt) -> None:
         self._prompt = prompt
 
-    async def fetch(self, name: str, label: str = "production") -> Prompt:
+    async def fetch(
+        self, name: str, label: str = "production", *, cache_ttl_seconds: int | None = None
+    ) -> Prompt:
         return self._prompt
 
 

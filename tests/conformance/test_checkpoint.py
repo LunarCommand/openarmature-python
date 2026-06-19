@@ -72,8 +72,10 @@ CONFORMANCE_DIR = (
 # 069 (fan-out degrade refinements, proposal 0069, v0.59.0) is a mixed
 # fixture: this runner drives its crash_injection/resume case and skips the
 # plain FI-degrade cases (owned by test_pipeline_utilities.py).
+# 070 (crash-injection after_node resume, proposal 0070 coverage, spec
+# v0.63.1) is a crash/resume fixture this runner owns, alongside 067.
 _CHECKPOINT_FIXTURE_NUMBERS: frozenset[int] = frozenset(
-    (set(range(24, 32)) - {28}) | set(range(48, 57)) | {67, 69}
+    (set(range(24, 32)) - {28}) | set(range(48, 57)) | {67, 69, 70}
 )
 
 # Fixtures that need resume-aware test seams the conformance adapter

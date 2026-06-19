@@ -70,9 +70,13 @@ class _FakeClient:
         self._result = result
         self._exc = exc
         self.calls: list[tuple[str, str]] = []
+        self.last_cache_ttl_seconds: int | None = None
 
-    def get_prompt(self, name: str, *, label: str = "production", **_: Any) -> Any:
+    def get_prompt(
+        self, name: str, *, label: str = "production", cache_ttl_seconds: int | None = None, **_: Any
+    ) -> Any:
         self.calls.append((name, label))
+        self.last_cache_ttl_seconds = cache_ttl_seconds
         if self._exc is not None:
             raise self._exc
         return self._result
@@ -106,6 +110,20 @@ async def test_fetch_passes_label_through() -> None:
     await backend.fetch("greeting", "staging")
 
     assert fake.calls == [("greeting", "staging")]
+
+
+async def test_fetch_forwards_cache_ttl_seconds_to_sdk() -> None:
+    # The langfuse backend forwards the read-side cache control to the
+    # SDK's own get_prompt cache; an absent value forwards None (the
+    # SDK's default TTL), preserving prior behavior.
+    fake = _FakeClient(result=_text_client())
+    backend = LangfusePromptBackend(fake)
+
+    await backend.fetch("greeting", "production", cache_ttl_seconds=42)
+    assert fake.last_cache_ttl_seconds == 42
+
+    await backend.fetch("greeting", "production")
+    assert fake.last_cache_ttl_seconds is None
 
 
 async def test_chat_prompt_maps_to_chat_prompt() -> None:

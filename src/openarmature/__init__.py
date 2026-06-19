@@ -25,7 +25,7 @@ your environment can reach:
 """
 
 __version__ = "0.14.0"
-__spec_version__ = "0.62.0"
+__spec_version__ = "0.63.1"
 # Proposal 0052 (spec observability §5.1 / §8.4.1): canonical
 # package-registry name for this implementation. Surfaces on every
 # OTel invocation span as ``openarmature.implementation.name`` and on

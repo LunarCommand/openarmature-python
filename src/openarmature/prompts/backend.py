@@ -33,7 +33,9 @@ class PromptBackend(Protocol):
     original fetch time, not the cache hit time.
     """
 
-    async def fetch(self, name: str, label: str = "production") -> Prompt:
+    async def fetch(
+        self, name: str, label: str = "production", *, cache_ttl_seconds: int | None = None
+    ) -> Prompt:
         """Return the prompt registered as ``(name, label)``.
 
         ``label`` defaults to ``"production"``. Raises
@@ -41,5 +43,11 @@ class PromptBackend(Protocol):
         ``PromptStoreUnavailable`` if the backing store is unreachable.
         The returned ``Prompt`` carries its raw template plus
         metadata; rendering is the manager's job, not the backend's.
+
+        ``cache_ttl_seconds`` is a read-side cache control: ``None``
+        preserves the backend's current behavior, ``0`` forces a fresh
+        read past any client-side cache, and ``N > 0`` bounds a served
+        cached entry's staleness to N seconds. Cacheless backends ignore
+        it; caching backends honor it.
         """
         ...

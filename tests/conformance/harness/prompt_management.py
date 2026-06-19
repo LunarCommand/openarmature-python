@@ -60,6 +60,10 @@ class FixtureBackendSpec(_StrictModel):
     name: str
     prompts: list[FixturePromptSpec] = []
     simulate_unavailable: bool = False
+    # Proposal 0072 (conformance-adapter §6.8): when true, the backend is
+    # a caching primitive — it caches by (name, label), counts source
+    # reads, and honors cache_ttl_seconds via a controllable clock.
+    caching: bool = False
 
 
 class FixtureLabelResolverSpec(_StrictModel):
@@ -131,8 +135,12 @@ class FixtureCall(_StrictModel):
     # ``operation`` is required for fetch / render / get calls. The
     # ``construct_prompt_group`` shape uses the target as the operation
     # indicator (no separate operation field on the call).
-    operation: Literal["fetch", "render", "get"] | None = None
+    operation: Literal["fetch", "render", "get", "advance_clock"] | None = None
     name: str | None = None
+    # Proposal 0072: per-fetch read-side cache control, and the
+    # advance_clock control op's step (in seconds).
+    cache_ttl_seconds: int | None = None
+    seconds: int | None = None
     # `label` is optional per spec §6 v0.26.0: omitting it triggers
     # the configured LabelResolver (step 2) or the spec fallback
     # `"production"` (step 3). Distinct from ``label: null`` which
@@ -237,3 +245,6 @@ class PromptManagementFixture(_StrictModel):
     tertiary_manager: FixtureManagerSpec | None = None
     tertiary_calls: list[FixtureCall] = []
     expected: FixtureExpectedTopLevel | None = None
+    # Proposal 0072: per-backend end-state assertions (e.g.
+    # source_read_count) for the caching primitive.
+    expected_backend_state: dict[str, dict[str, Any]] | None = None

@@ -274,7 +274,9 @@ class _NoFetchBackend:
     ``fetch()`` is never invoked.
     """
 
-    async def fetch(self, name: str, label: str = "production") -> Prompt:
+    async def fetch(
+        self, name: str, label: str = "production", *, cache_ttl_seconds: int | None = None
+    ) -> Prompt:
         raise NotImplementedError("example constructs prompts inline; fetch not used")
 
 

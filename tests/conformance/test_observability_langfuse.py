@@ -376,7 +376,9 @@ class _MockPromptBackend:
                 observability_entities=observability_entities,
             )
 
-    async def fetch(self, name: str, label: str = "production") -> Prompt:
+    async def fetch(
+        self, name: str, label: str = "production", *, cache_ttl_seconds: int | None = None
+    ) -> Prompt:
         return self._prompts[name]
 
 
