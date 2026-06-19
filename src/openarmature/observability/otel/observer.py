@@ -103,6 +103,7 @@ from openarmature.graph.events import (
     InvocationStartedEvent,
     LlmCompletionEvent,
     LlmFailedEvent,
+    LlmRetryAttemptEvent,
     MetadataAugmentationEvent,
     NodeEvent,
 )
@@ -475,7 +476,7 @@ class OTelObserver:
     # close sites (subgraph dispatch, detached root, fan-out instance,
     # invocation span, shutdown drain).
     attribute_enrichers: Sequence[
-        Callable[[Span, NodeEvent | LlmCompletionEvent | LlmFailedEvent | None], None]
+        Callable[[Span, NodeEvent | LlmCompletionEvent | LlmFailedEvent | LlmRetryAttemptEvent | None], None]
     ] = ()
     # Read from the package's ``__spec_version__`` (one of the three
     # places the spec version is pinned per CLAUDE.md). Bumping the
@@ -548,7 +549,7 @@ class OTelObserver:
     # ``event`` is None on synthetic close sites (subgraph dispatch,
     # detached root, fan-out instance, invocation span, orphan drain).
     def _run_enrichers(
-        self, span: Span, event: NodeEvent | LlmCompletionEvent | LlmFailedEvent | None
+        self, span: Span, event: NodeEvent | LlmCompletionEvent | LlmFailedEvent | LlmRetryAttemptEvent | None
     ) -> None:
         """Invoke configured enrichers against ``span`` before
         ``span.end()`` is called."""
@@ -594,6 +595,7 @@ class OTelObserver:
             | InvocationCompletedEvent
             | LlmCompletionEvent
             | LlmFailedEvent
+            | LlmRetryAttemptEvent
             | FailureIsolatedEvent
         ),
     ) -> None:
@@ -604,20 +606,19 @@ class OTelObserver:
         # before any node-specific logic runs.
         if isinstance(event, InvocationStartedEvent | InvocationCompletedEvent):
             return
-        # Proposal 0049 typed LlmCompletionEvent (success path).
-        # Drives the openarmature.llm.complete span lifecycle for
-        # successful provider calls.
-        if isinstance(event, LlmCompletionEvent):
+        # Proposal 0050 per-attempt LLM span surface: the
+        # openarmature.llm.complete span(s) render from the per-attempt
+        # LlmRetryAttemptEvent — one span per attempt under call-level
+        # retry (attempt_index 0..N-1), one for a no-retry call.
+        if isinstance(event, LlmRetryAttemptEvent):
             if not self.disable_llm_spans:
-                self._handle_typed_llm_completion(event)
+                self._handle_typed_llm_retry_attempt(event)
             return
-        # Proposal 0058 typed LlmFailedEvent (failure path). Drives
-        # the same openarmature.llm.complete span lifecycle for failed
-        # provider calls, with ERROR status + openarmature.error.category
-        # attribute.
-        if isinstance(event, LlmFailedEvent):
-            if not self.disable_llm_spans:
-                self._handle_typed_llm_failed(event)
+        # The terminal LlmCompletionEvent / LlmFailedEvent no longer
+        # drive the OTel span (the per-attempt event does); they stay on
+        # the queue for the Langfuse mapping and payload/latency
+        # consumers, so the OTel observer ignores them here.
+        if isinstance(event, LlmCompletionEvent | LlmFailedEvent):
             return
         # Proposal 0050 §6.3 framework-emitted failure-isolation event.
         if isinstance(event, FailureIsolatedEvent):
@@ -1180,9 +1181,17 @@ class OTelObserver:
     # active_prompt_group snapshots taken at dispatch time — NOT the
     # ContextVar. The dispatch worker's task-local Context doesn't see
     # node-body ContextVar writes.
-    def _handle_typed_llm_completion(self, event: LlmCompletionEvent) -> None:
-        """Open + close the ``openarmature.llm.complete`` span from the
-        typed LlmCompletionEvent (success path)."""
+    def _handle_typed_llm_retry_attempt(self, event: LlmRetryAttemptEvent) -> None:
+        """Open + close one ``openarmature.llm.complete`` span from a
+        per-attempt LlmRetryAttemptEvent.
+
+        N call-level retry attempts produce N spans, all parented under
+        the calling node span, each carrying
+        ``openarmature.llm.attempt_index`` 0..N-1. A successful attempt
+        (``error_category is None``) carries the full response surface
+        with OK status; a failed attempt carries ERROR status + the
+        error category and no response attributes.
+        """
         # Mid-call metadata augmentation can't reach this span: the
         # typed event arrives only after complete() returns, and the
         # span is back-dated past any augmentation event that fired
@@ -1216,7 +1225,10 @@ class OTelObserver:
             calling_fan_out_index=event.fan_out_index,
             calling_branch_name=event.branch_name,
         )
-        attrs: dict[str, Any] = {"openarmature.llm.model": event.model}
+        attrs: dict[str, Any] = {
+            "openarmature.llm.model": event.model,
+            "openarmature.llm.attempt_index": event.llm_attempt_index,
+        }
         cid = current_correlation_id()
         if cid is not None:
             attrs["openarmature.correlation_id"] = cid
@@ -1268,6 +1280,14 @@ class OTelObserver:
             attributes=attrs,
             start_time=start_time_ns,
         )
+        if event.error_category is not None:
+            # Failed attempt: ERROR + the §4 category, no response
+            # attributes (no response was received).
+            span.set_status(Status(StatusCode.ERROR, description=event.error_category))
+            span.set_attribute("openarmature.error.category", event.error_category)
+            self._run_enrichers(span, event)
+            span.end(end_time=end_time_ns)
+            return
         usage = event.usage
         if event.finish_reason is not None:
             span.set_attribute("openarmature.llm.finish_reason", event.finish_reason)
@@ -1308,100 +1328,6 @@ class OTelObserver:
             attrs_out = _truncate_for_attribute(event.output_content, self.payload_max_bytes)
             span.set_attribute("openarmature.llm.output.content", attrs_out)
         span.set_status(Status(StatusCode.OK))
-        self._run_enrichers(span, event)
-        span.end(end_time=end_time_ns)
-
-    def _handle_typed_llm_failed(self, event: LlmFailedEvent) -> None:
-        """Open + close the ``openarmature.llm.complete`` span from the
-        typed LlmFailedEvent (failure path). Same span shape as the
-        success path with ERROR status +
-        ``openarmature.error.category`` attribute attached."""
-        from openarmature.observability.correlation import (
-            current_correlation_id,
-            current_invocation_id,
-        )
-
-        invocation_id = current_invocation_id()
-        if invocation_id is None:
-            return
-        inv_state = self._inv_state_for(invocation_id)
-        # Back-date start_time using latency_ms (mirrors the success-
-        # path handler). For failures, latency reflects time spent
-        # until the §7 exception was raised — useful for diagnosing
-        # whether failures are fast-failing (pre-send validation) or
-        # slow-failing (provider timeout).
-        end_time_ns = time.time_ns()
-        if event.latency_ms is not None:
-            start_time_ns = end_time_ns - int(event.latency_ms * 1_000_000)
-        else:
-            start_time_ns = end_time_ns
-        parent_ctx = self._resolve_llm_parent(
-            inv_state,
-            invocation_id,
-            calling_namespace_prefix=event.namespace,
-            calling_attempt_index=event.attempt_index,
-            calling_fan_out_index=event.fan_out_index,
-            calling_branch_name=event.branch_name,
-        )
-        attrs: dict[str, Any] = {"openarmature.llm.model": event.model}
-        cid = current_correlation_id()
-        if cid is not None:
-            attrs["openarmature.correlation_id"] = cid
-        if event.caller_invocation_metadata is not None:
-            _apply_caller_metadata(attrs, event.caller_invocation_metadata)
-        active_prompt = event.active_prompt
-        if active_prompt is not None:
-            attrs["openarmature.prompt.name"] = active_prompt.name
-            attrs["openarmature.prompt.version"] = active_prompt.version
-            attrs["openarmature.prompt.label"] = active_prompt.label
-            attrs["openarmature.prompt.template_hash"] = active_prompt.template_hash
-            attrs["openarmature.prompt.rendered_hash"] = active_prompt.rendered_hash
-        active_group = event.active_prompt_group
-        if active_group is not None:
-            attrs["openarmature.prompt.group_name"] = active_group.group_name
-        if not self.disable_genai_semconv:
-            attrs["gen_ai.system"] = event.provider
-            attrs["gen_ai.request.model"] = event.model
-            request_params = event.request_params or {}
-            if "temperature" in request_params:
-                attrs["gen_ai.request.temperature"] = request_params["temperature"]
-            if "max_tokens" in request_params:
-                attrs["gen_ai.request.max_tokens"] = request_params["max_tokens"]
-            if "top_p" in request_params:
-                attrs["gen_ai.request.top_p"] = request_params["top_p"]
-            if "seed" in request_params:
-                attrs["gen_ai.request.seed"] = request_params["seed"]
-            if "frequency_penalty" in request_params:
-                attrs["gen_ai.request.frequency_penalty"] = request_params["frequency_penalty"]
-            if "presence_penalty" in request_params:
-                attrs["gen_ai.request.presence_penalty"] = request_params["presence_penalty"]
-            if "stop_sequences" in request_params:
-                attrs["gen_ai.request.stop_sequences"] = request_params["stop_sequences"]
-        if not self.disable_provider_payload:
-            if event.input_messages:
-                serialized = _serialize_for_attribute(event.input_messages)
-                attrs["openarmature.llm.input.messages"] = _truncate_for_attribute(
-                    serialized, self.payload_max_bytes
-                )
-            if event.request_extras:
-                serialized_extras = _serialize_for_attribute(event.request_extras)
-                attrs["openarmature.llm.request.extras"] = _truncate_for_attribute(
-                    serialized_extras, self.payload_max_bytes
-                )
-        span = self._tracer.start_span(
-            name="openarmature.llm.complete",
-            context=cast("Any", parent_ctx),
-            kind=SpanKind.CLIENT,
-            attributes=attrs,
-            start_time=start_time_ns,
-        )
-        span.set_status(
-            Status(
-                StatusCode.ERROR,
-                description=event.error_category,
-            )
-        )
-        span.set_attribute("openarmature.error.category", event.error_category)
         self._run_enrichers(span, event)
         span.end(end_time=end_time_ns)
 

@@ -659,14 +659,17 @@ as nested spans.
 
 When an `OpenAIProvider` (or any [custom Provider](../model-providers/authoring.md)
 that wires the dispatch hook) is used inside a graph with `OTelObserver`
-attached, each `provider.complete()` call emits a dedicated span named
-`openarmature.llm.complete`, parented under the calling node's span.
-The span carries two attribute families.
+attached, each `provider.complete()` attempt emits a dedicated span
+named `openarmature.llm.complete`, parented under the calling node's
+span. A call without retry emits one span; a call-level `retry=` that
+retries emits [one span per attempt](#per-attempt-spans-under-call-level-retry).
+Each span carries two attribute families.
 
 **`openarmature.llm.*` (always on).** The framework's canonical
 namespace: model identifier, finish reason, token counts, prompt
-identity from `with_active_prompt(...)`, error category on failure.
-Set unconditionally whenever the LLM span itself emits.
+identity from `with_active_prompt(...)`, error category on failure, and
+`openarmature.llm.attempt_index` (the 0-based call-level attempt
+counter). Set unconditionally whenever the LLM span itself emits.
 
 **`gen_ai.*` (OpenTelemetry GenAI semantic conventions, default on).**
 Cross-vendor attribute names every LLM-aware backend reads
@@ -701,6 +704,28 @@ Disable the GenAI semconv set with `OTelObserver(disable_genai_semconv=True)`
 when an external auto-instrumentation library (OpenInference,
 `opentelemetry-instrumentation-openai`) is already the canonical
 source on your stack.
+
+#### Per-attempt spans under call-level retry
+
+[Call-level retry](llms.md#retrying-transient-failures)
+(`provider.complete(retry=...)`) retries transient provider errors
+inside a single call. Each attempt emits its own
+`openarmature.llm.complete` span tagged with
+`openarmature.llm.attempt_index` (0-based). A call that succeeds on the
+first try emits one span at `attempt_index` 0; a call that fails twice
+transiently before succeeding emits three spans (indices 0, 1, 2). Each
+failed attempt's span carries `ERROR` status plus
+`openarmature.error.category`; the final attempt's span carries the
+terminal outcome (`OK` on success, `ERROR` on an exhausted or
+non-transient failure).
+
+`openarmature.llm.attempt_index` is the **call-level** attempt counter,
+[independent of the node-level `attempt_index`](llms.md#call-level-vs-node-level-retry):
+the former counts attempts inside one `complete()` call, the latter
+counts node re-executions driven by retry *middleware*. A node retried
+once by middleware, each execution calling a provider that itself
+retries once, produces node `attempt_index` 0/1 and, within each,
+call-level `attempt_index` 0/1.
 
 ### LLM payload attributes
 
@@ -834,6 +859,14 @@ correctly; doing it from a `SpanProcessor.on_end` callback does
 not, because the framework has already called `span.end()` and the
 OTel SDK silently drops `set_attribute` on ended spans.
 
+For the `openarmature.llm.complete` span the close event is an
+`LlmRetryAttemptEvent` (one per attempt) rather than a `NodeEvent`;
+that is the per-attempt event the observer renders the LLM span from.
+An enricher scoped to that span (`span.name ==
+"openarmature.llm.complete"`) can read the attempt's outcome straight
+off it: `event.llm_attempt_index`, `event.error_category`,
+`event.usage`, `event.finish_reason`, and so on.
+
 Exceptions raised by an enricher are caught and warned, never
 propagated.
 
@@ -879,6 +912,16 @@ dispatches `LlmCompletionEvent(...)` on success and
 via `current_dispatch()`. See
 [Authoring providers](../model-providers/authoring.md) for the full
 pattern.
+
+Under [call-level retry](#per-attempt-spans-under-call-level-retry) the
+bundled `OpenAIProvider` additionally dispatches a python-internal
+`LlmRetryAttemptEvent` once per attempt; that is the event the OTel
+observer renders each per-attempt span from (including the lone attempt
+of a no-retry call, at index 0). The terminal `LlmCompletionEvent` /
+`LlmFailedEvent` above are unchanged: still one per call, still the
+stable surface for per-call consumption (token accounting, failure
+tracking). An observer that only cares about per-call outcomes can
+ignore `LlmRetryAttemptEvent`.
 
 #### Legacy sentinel-namespace pattern (compatibility surface)
 

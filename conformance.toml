@@ -372,30 +372,34 @@ status = "implemented"
 since = "0.13.0"
 
 # Spec v0.42.0 (proposal 0050).  Retry & degradation primitives —
-# failure-isolation middleware (§6.3) + call-level retry (§7).  Both
-# primitives implemented across the v0.14.0 cycle:
-# FailureIsolationMiddleware (distinct FailureIsolatedEvent +
-# CaughtException) and the call-level ``retry`` parameter on
-# ``Provider.complete()`` — an in-call loop over transient §7 errors
-# reusing the §6.1 RetryConfig record.  ``partial`` because §7.1's
-# per-attempt span surface — N ``openarmature.llm.complete`` spans +
-# the ``openarmature.llm.attempt_index`` attribute — is DEFERRED: the
-# python LLM span is rendered from the typed event, which is
-# terminal-only per the graph-engine §6 mutual-exclusion contract, so
-# per-attempt spans require a dedicated within-call sub-event
-# (LlmRetryAttemptEvent) scoped to a future cycle.  Call-level retry
-# ships terminal-only: exactly one LlmCompletionEvent / LlmFailedEvent
-# per ``complete()`` call.  Failure-isolation conformance fixtures
-# (058-063) are all wired + passing: the FailureIsolatedEvent's
-# attempt_index reports the final / exhausting attempt per §6.3's
-# lineage-correlation rule (spec ruled this in the attempt-index coord
-# thread; RetryMiddleware now records the final attempt in a
-# terminal-attempt scope the outer isolation reads, rather than the
-# post-reset baseline).  ``partial`` is now solely about the
-# call-level-retry per-attempt span surface above.
+# failure-isolation middleware (§6.3) + call-level retry (§7),
+# including §7.1's per-attempt span surface.  Implemented across the
+# v0.14.0 + v0.15.0 cycles: FailureIsolationMiddleware (distinct
+# FailureIsolatedEvent + CaughtException) and the call-level ``retry``
+# parameter on ``Provider.complete()`` — an in-call loop over transient
+# §7 errors reusing the §6.1 RetryConfig record.  §7.1's per-attempt
+# span surface now ships: a call-level ``retry`` emits N
+# ``openarmature.llm.complete`` spans — one per attempt — each carrying
+# ``openarmature.llm.attempt_index`` (0-based, call-level, independent
+# of the node-level attempt_index).  A python-internal
+# LlmRetryAttemptEvent dispatched once per attempt is the SOLE source of
+# the OTel LLM span (including single no-retry calls, at index 0); the
+# terminal LlmCompletionEvent / LlmFailedEvent stay one-per-call
+# (payload, latency, Langfuse Generation, fixture-072 mutual exclusion)
+# and no longer drive the OTel span.  Langfuse renders one terminal
+# Generation per call.  llm-provider fixtures 056-058 (per-attempt
+# spans) are validated in tests/unit/test_observability_otel.py through
+# the provider + OTel observer; observability fixture 057
+# (single-attempt attempt_index) is wired in test_observability.
+# Failure-isolation fixtures (058-063) are all wired + passing: the
+# FailureIsolatedEvent's attempt_index reports the final / exhausting
+# attempt per §6.3's lineage-correlation rule (spec ruled this in the
+# attempt-index coord thread; RetryMiddleware now records the final
+# attempt in a terminal-attempt scope the outer isolation reads, rather
+# than the post-reset baseline).
 [proposals."0050"]
-status = "partial"
-since = "0.14.0"
+status = "implemented"
+since = "0.15.0"
 
 # Spec v0.43.0 (proposal 0051).  Langfuse trace.input/trace.output
 # implementation-surface caveat.  Purely textual: documents that the

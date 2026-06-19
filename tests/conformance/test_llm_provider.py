@@ -103,12 +103,15 @@ _DEFERRED_FIXTURES: dict[str, str] = {
     "055-anthropic-wire-byte-stability": (
         "Proposal 0047 wire-byte stability; queued for v0.13.0 (also Anthropic-pending)"
     ),
-    # Proposal 0050 (call-level retry, v0.42.0) — three fixtures
-    # exercise the new ``retry`` kwarg on ``complete()``. Queued for
-    # v0.14.0 retry & reliability primitives batch.
-    "056-call-level-retry-transient": ("Proposal 0050 call-level retry; queued for v0.14.0"),
-    "057-call-level-retry-exhaustion": ("Proposal 0050 call-level retry; queued for v0.14.0"),
-    "058-call-level-retry-non-transient-no-retry": ("Proposal 0050 call-level retry; queued for v0.14.0"),
+    # Proposal 0050 (call-level retry, v0.42.0) — three fixtures exercise
+    # the ``retry`` kwarg on ``complete()`` AND assert per-attempt LLM
+    # spans (observability §5.5). They stay deferred in this provider
+    # harness (which has no observer) and are activated + asserted in
+    # test_observability_otel.py::test_call_level_retry_fixture_per_attempt_spans,
+    # which drives them through the provider + an OTel observer.
+    "056-call-level-retry-transient": ("per-attempt LLM spans; see test_observability_otel.py"),
+    "057-call-level-retry-exhaustion": ("per-attempt LLM spans; see test_observability_otel.py"),
+    "058-call-level-retry-non-transient-no-retry": ("per-attempt LLM spans; see test_observability_otel.py"),
 }
 
 

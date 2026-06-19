@@ -508,7 +508,7 @@ async def test_active_prompt_propagates_to_llm_span_attributes() -> None:
         PromptResult,
         TextPrompt,
     )
-    from tests._helpers.typed_event import make_typed_event
+    from tests._helpers.typed_event import make_retry_attempt_event
 
     exporter = InMemorySpanExporter()
     observer = OTelObserver(span_processor=SimpleSpanProcessor(exporter))
@@ -543,7 +543,7 @@ async def test_active_prompt_propagates_to_llm_span_attributes() -> None:
         # The observer reads from the typed event, NOT from the live
         # ContextVar — that ContextVar is unreachable from the
         # dispatch worker's task-local Context.
-        await observer(make_typed_event(active_prompt=result, active_prompt_group=group))
+        await observer(make_retry_attempt_event(active_prompt=result, active_prompt_group=group))
     finally:
         _reset_invocation_id(token)
 
@@ -566,14 +566,14 @@ async def test_llm_span_has_no_prompt_attributes_when_no_active_prompt() -> None
         _reset_invocation_id,
         _set_invocation_id,
     )
-    from tests._helpers.typed_event import make_typed_event
+    from tests._helpers.typed_event import make_retry_attempt_event
 
     exporter = InMemorySpanExporter()
     observer = OTelObserver(span_processor=SimpleSpanProcessor(exporter))
 
     token = _set_invocation_id("inv-2")
     try:
-        await observer(make_typed_event())
+        await observer(make_retry_attempt_event())
     finally:
         _reset_invocation_id(token)
     observer.shutdown()
@@ -584,12 +584,42 @@ async def test_llm_span_has_no_prompt_attributes_when_no_active_prompt() -> None
     assert not any(k.startswith("openarmature.prompt.") for k in attrs)
 
 
+async def test_otel_observer_ignores_terminal_llm_events() -> None:
+    """Feeding a terminal LlmCompletionEvent or LlmFailedEvent to the
+    OTel observer produces no ``openarmature.llm.complete`` span; the
+    per-attempt event is the sole span source."""
+    # Proposal 0050: the OTel span renders only from LlmRetryAttemptEvent.
+    # The terminal events stay on the queue for the Langfuse mapping +
+    # payload consumers; this guards against reintroducing the
+    # terminal-event span path (which would double-emit alongside the
+    # per-attempt span).
+    from openarmature.observability.correlation import (
+        _reset_invocation_id,
+        _set_invocation_id,
+    )
+    from tests._helpers.typed_event import make_failed_event, make_typed_event
+
+    exporter = InMemorySpanExporter()
+    observer = OTelObserver(span_processor=SimpleSpanProcessor(exporter))
+
+    token = _set_invocation_id("inv-terminal")
+    try:
+        await observer(make_typed_event())
+        await observer(make_failed_event())
+    finally:
+        _reset_invocation_id(token)
+    observer.shutdown()
+
+    llm_spans = [s for s in exporter.get_finished_spans() if s.name == "openarmature.llm.complete"]
+    assert llm_spans == []
+
+
 async def _drive_llm_span_with_cached_tokens(
     *,
     cached_tokens: int | None,
     cache_creation_tokens: int | None = None,
 ) -> dict[str, Any]:
-    """Drive the OTel observer through a typed LlmCompletionEvent
+    """Drive the OTel observer through a per-attempt LlmRetryAttemptEvent
     carrying the supplied cache-stat fields on the event's Usage
     record. Returns the LLM-span's attribute map.
     """
@@ -598,14 +628,14 @@ async def _drive_llm_span_with_cached_tokens(
         _reset_invocation_id,
         _set_invocation_id,
     )
-    from tests._helpers.typed_event import make_typed_event
+    from tests._helpers.typed_event import make_retry_attempt_event
 
     exporter = InMemorySpanExporter()
     observer = OTelObserver(span_processor=SimpleSpanProcessor(exporter))
     token = _set_invocation_id("inv-cache")
     try:
         await observer(
-            make_typed_event(
+            make_retry_attempt_event(
                 usage=Usage(
                     prompt_tokens=100,
                     completion_tokens=5,
@@ -714,14 +744,14 @@ async def test_llm_span_duration_matches_typed_event_latency() -> None:
         _reset_invocation_id,
         _set_invocation_id,
     )
-    from tests._helpers.typed_event import make_typed_event
+    from tests._helpers.typed_event import make_retry_attempt_event
 
     exporter = InMemorySpanExporter()
     observer = OTelObserver(span_processor=SimpleSpanProcessor(exporter))
     latency_ms = 123.456
     token = _set_invocation_id("inv-duration")
     try:
-        await observer(make_typed_event(latency_ms=latency_ms))
+        await observer(make_retry_attempt_event(latency_ms=latency_ms))
     finally:
         _reset_invocation_id(token)
     observer.shutdown()
@@ -745,13 +775,13 @@ async def test_llm_span_zero_duration_when_latency_missing() -> None:
         _reset_invocation_id,
         _set_invocation_id,
     )
-    from tests._helpers.typed_event import make_typed_event
+    from tests._helpers.typed_event import make_retry_attempt_event
 
     exporter = InMemorySpanExporter()
     observer = OTelObserver(span_processor=SimpleSpanProcessor(exporter))
     token = _set_invocation_id("inv-no-latency")
     try:
-        await observer(make_typed_event(latency_ms=None))
+        await observer(make_retry_attempt_event(latency_ms=None))
     finally:
         _reset_invocation_id(token)
     observer.shutdown()
@@ -766,11 +796,11 @@ async def test_typed_llm_event_drops_silently_outside_invocation() -> None:
     # No invocation in scope (no _set_invocation_id) → the handler
     # MUST early-return without emitting a span. Symmetric with the
     # error path's no-invocation drop.
-    from tests._helpers.typed_event import make_typed_event
+    from tests._helpers.typed_event import make_retry_attempt_event
 
     exporter = InMemorySpanExporter()
     observer = OTelObserver(span_processor=SimpleSpanProcessor(exporter))
-    await observer(make_typed_event())
+    await observer(make_retry_attempt_event())
     observer.shutdown()
     llm_spans = [s for s in exporter.get_finished_spans() if s.name == "openarmature.llm.complete"]
     assert llm_spans == []
@@ -785,7 +815,7 @@ async def test_disable_llm_spans_skips_typed_event_path() -> None:
         _reset_invocation_id,
         _set_invocation_id,
     )
-    from tests._helpers.typed_event import make_typed_event
+    from tests._helpers.typed_event import make_retry_attempt_event
 
     exporter = InMemorySpanExporter()
     observer = OTelObserver(
@@ -794,7 +824,7 @@ async def test_disable_llm_spans_skips_typed_event_path() -> None:
     )
     token = _set_invocation_id("inv-disabled")
     try:
-        await observer(make_typed_event())
+        await observer(make_retry_attempt_event())
     finally:
         _reset_invocation_id(token)
     observer.shutdown()
@@ -812,19 +842,20 @@ async def test_llm_error_path_emits_error_span_from_typed_failed_event() -> None
         _reset_invocation_id,
         _set_invocation_id,
     )
-    from tests._helpers.typed_event import make_failed_event
+    from tests._helpers.typed_event import make_retry_attempt_event
 
     exporter = InMemorySpanExporter()
     observer = OTelObserver(span_processor=SimpleSpanProcessor(exporter))
     token = _set_invocation_id("inv-err")
     try:
         await observer(
-            make_failed_event(
+            make_retry_attempt_event(
                 invocation_id="inv-err",
                 error_category="provider_rate_limit",
                 error_type="ProviderRateLimit",
                 error_message="429 from upstream",
                 call_id="cc-err",
+                finish_reason=None,
             )
         )
     finally:
@@ -836,6 +867,117 @@ async def test_llm_error_path_emits_error_span_from_typed_failed_event() -> None
     assert span.status.status_code == StatusCode.ERROR
     attrs = dict(span.attributes or {})
     assert attrs.get("openarmature.error.category") == "provider_rate_limit"
+
+
+@pytest.mark.parametrize(
+    "fixture_id",
+    [
+        "056-call-level-retry-transient",
+        "057-call-level-retry-exhaustion",
+        "058-call-level-retry-non-transient-no-retry",
+    ],
+)
+async def test_call_level_retry_fixture_per_attempt_spans(fixture_id: str) -> None:
+    # Proposal 0050 §7.1 / observability §5.5: drive each spec
+    # call-level-retry fixture (spec/llm-provider/conformance/) through
+    # the provider + an OTel observer and assert its per-attempt
+    # openarmature.llm.complete spans. These fixtures assert SPANS, so
+    # they are activated here (otel-gated, with an observer) rather than
+    # the generic llm-provider harness, which has no observer. The
+    # provider dispatches one LlmRetryAttemptEvent per attempt and the
+    # observer renders one span per event; in production the engine's
+    # serial queue carries them, here they are captured then replayed.
+    import json
+    from pathlib import Path
+
+    import httpx
+    import yaml
+    from opentelemetry.trace import StatusCode
+
+    from openarmature.graph.events import LlmRetryAttemptEvent
+    from openarmature.graph.middleware import RetryConfig, deterministic_backoff
+    from openarmature.llm.errors import LlmProviderError
+    from openarmature.llm.messages import UserMessage
+    from openarmature.llm.providers.openai import OpenAIProvider
+    from openarmature.observability.correlation import (
+        _reset_active_dispatch,
+        _reset_invocation_id,
+        _set_active_dispatch,
+        _set_invocation_id,
+    )
+
+    fixture_dir = (
+        Path(__file__).resolve().parents[2] / "openarmature-spec" / "spec" / "llm-provider" / "conformance"
+    )
+    spec = cast("dict[str, Any]", yaml.safe_load((fixture_dir / f"{fixture_id}.yaml").read_text()))
+    responses = cast("list[dict[str, Any]]", spec["mock_provider"]["responses"])
+    call = cast("dict[str, Any]", spec["call"])
+    expected = cast("dict[str, Any]", spec["expected"])
+
+    response_iter = iter(responses)
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        entry = next(response_iter)
+        body = entry.get("body")
+        content = json.dumps(body).encode() if body is not None else b""
+        return httpx.Response(int(entry.get("status", 200)), content=content)
+
+    retry_cfg = cast("dict[str, Any]", call["retry"])
+    backoff_seconds = float(cast("dict[str, Any]", retry_cfg.get("backoff") or {}).get("seconds", 0.0))
+    retry = RetryConfig(
+        max_attempts=int(retry_cfg["max_attempts"]),
+        backoff=deterministic_backoff(backoff_seconds),
+    )
+    messages = [
+        UserMessage(content=cast("str", m["content"])) for m in cast("list[dict[str, Any]]", call["messages"])
+    ]
+
+    captured: list[Any] = []
+    disp_token = _set_active_dispatch(lambda e: captured.append(e))
+    inv_token = _set_invocation_id("inv-clr")
+    provider = OpenAIProvider(
+        base_url="http://test", model="gpt-test", api_key="k", transport=httpx.MockTransport(handler)
+    )
+    try:
+        if "raises" in expected:
+            with pytest.raises(LlmProviderError) as excinfo:
+                await provider.complete(messages, retry=retry)
+            assert excinfo.value.category == expected["raises"]["category"]
+        else:
+            result = await provider.complete(messages, retry=retry)
+            expected_content = cast("dict[str, Any]", expected["response"]["message"])["content"]
+            assert result.message.content == expected_content
+    finally:
+        await provider.aclose()
+        _reset_invocation_id(inv_token)
+        _reset_active_dispatch(disp_token)
+
+    exporter = InMemorySpanExporter()
+    observer = OTelObserver(span_processor=SimpleSpanProcessor(exporter))
+    inv_token2 = _set_invocation_id("inv-clr")
+    try:
+        for event in captured:
+            if isinstance(event, LlmRetryAttemptEvent):
+                await observer(event)
+    finally:
+        _reset_invocation_id(inv_token2)
+    observer.shutdown()
+
+    spans = [s for s in exporter.get_finished_spans() if s.name == "openarmature.llm.complete"]
+    expected_spans = cast("list[dict[str, Any]]", expected["llm_spans"])
+    assert len(spans) == len(expected_spans)
+    spans_by_index = {dict(s.attributes or {})["openarmature.llm.attempt_index"]: s for s in spans}
+    for exp_span in expected_spans:
+        idx = exp_span["attempt_index"]
+        span = spans_by_index[idx]
+        span_attrs = dict(span.attributes or {})
+        for key, val in cast("dict[str, Any]", exp_span.get("attributes") or {}).items():
+            assert span_attrs.get(key) == val, f"attempt {idx}: {key}={span_attrs.get(key)!r} != {val!r}"
+        if exp_span.get("error_category"):
+            assert span.status.status_code == StatusCode.ERROR
+            assert span_attrs.get("openarmature.error.category") == exp_span["error_category"]
+        else:
+            assert span.status.status_code == StatusCode.OK
 
 
 # ---------------------------------------------------------------------------

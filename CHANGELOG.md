@@ -4,6 +4,17 @@ All notable changes to `openarmature-python` are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). The package follows [Semantic Versioning](https://semver.org/); pre-1.0 minor bumps may carry behavioral changes per [spec governance](https://github.com/LunarCommand/openarmature-spec/blob/main/GOVERNANCE.md).
 
+## [0.15.0] — 2026-06-18
+
+### Added
+
+- **Detached-trace invocation span** (proposal 0061, observability §4.4, spec v0.61.0). The OTel observer now synthesizes an `openarmature.invocation` span at the root of each detached trace (a detached subgraph and each detached fan-out instance), carrying the parent's shared `invocation_id` (detached mode is observer-side trace rendering, not a new run) and the detached unit's own `entry_node`; the detached subgraph / instance span nests under it. A raising detached subgraph surfaces ERROR plus the error category and an OTel exception event on both the parent dispatch span and the detached invocation span. This is observer-side only, with no graph-engine change; the Langfuse observer is unchanged (its Trace entity already plays the invocation-level-container role). Conformance fixtures 008 (rewritten) and 058 (newly wired) run in `test_observability`.
+- **Per-attempt LLM spans under call-level retry** (proposal 0050, observability §5.5 / llm-provider §7.1). Completes proposal 0050, which shipped `partial` in v0.14.0 (failure-isolation middleware and the `complete(retry=...)` loop landed then; the per-attempt span surface was deferred). Under call-level retry the OTel observer now emits one `openarmature.llm.complete` span per attempt, each carrying `openarmature.llm.attempt_index` (0-based, 0..N-1, and 0 for a no-retry call). An intermediate failed attempt's span carries ERROR status plus its error category and the request-side attributes; the final attempt's span carries the terminal outcome and, on success, the full response surface. A python-internal `LlmRetryAttemptEvent`, dispatched once per attempt, is the sole source of the OTel span; the terminal `LlmCompletionEvent` / `LlmFailedEvent` stay one per call (payload, latency, Langfuse Generation) and no longer drive the OTel span. Langfuse renders one terminal Generation per call, with the per-attempt detail on the OTel span surface only (a spec-side §8 clarification to pin this is tracked, non-blocking). `conformance.toml` flips proposal 0050 to `implemented`; the call-level fixtures 056-058 are driven through the provider plus OTel observer and the single-attempt observability fixture 057 is wired.
+
+### Changed
+
+- **Pinned spec advances v0.60.0 → v0.61.0** (proposal 0061, the detached-trace invocation span above). A single step this cycle; `conformance.toml` records proposal 0061 as `implemented`. Proposal 0050 needed no pin bump of its own (it was already within the pin from its v0.42.0 acceptance); its v0.14.0 `partial` entry flips to `implemented` with the per-attempt span surface above.
+
 ## [0.14.0] — 2026-06-17
 
 ### Added
