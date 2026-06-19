@@ -839,6 +839,87 @@ async def test_llm_error_path_emits_error_span_from_typed_failed_event() -> None
     assert attrs.get("openarmature.error.category") == "provider_rate_limit"
 
 
+async def test_call_level_retry_emits_one_llm_span_per_attempt() -> None:
+    # Proposal 0050 §7.1 / observability §5.5: a complete(retry=...) that
+    # fails transiently then succeeds emits TWO openarmature.llm.complete
+    # spans — attempt_index 0 (ERROR, provider_unavailable) and 1 (OK).
+    # Validates the per-attempt span surface end to end: the provider
+    # dispatches one LlmRetryAttemptEvent per attempt and the observer
+    # renders one span per event. In production the engine's serial
+    # queue carries the events; here they are captured then replayed.
+    import httpx
+    from opentelemetry.trace import StatusCode
+
+    from openarmature.graph.events import LlmRetryAttemptEvent
+    from openarmature.graph.middleware import RetryConfig, deterministic_backoff
+    from openarmature.llm.messages import UserMessage
+    from openarmature.llm.providers.openai import OpenAIProvider
+    from openarmature.observability.correlation import (
+        _reset_active_dispatch,
+        _reset_invocation_id,
+        _set_active_dispatch,
+        _set_invocation_id,
+    )
+
+    calls = {"n": 0}
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return httpx.Response(503, json={"error": {"message": "service down"}})
+        return httpx.Response(
+            200,
+            json={
+                "id": "cc-056",
+                "object": "chat.completion",
+                "model": "gpt-test",
+                "choices": [
+                    {"index": 0, "message": {"role": "assistant", "content": "ok"}, "finish_reason": "stop"}
+                ],
+                "usage": {"prompt_tokens": 4, "completion_tokens": 1, "total_tokens": 5},
+            },
+        )
+
+    captured: list[Any] = []
+    disp_token = _set_active_dispatch(lambda e: captured.append(e))
+    inv_token = _set_invocation_id("inv-retry")
+    provider = OpenAIProvider(
+        base_url="http://test", model="gpt-test", api_key="k", transport=httpx.MockTransport(handler)
+    )
+    try:
+        result = await provider.complete(
+            [UserMessage(content="go")],
+            retry=RetryConfig(max_attempts=2, backoff=deterministic_backoff(0.0)),
+        )
+    finally:
+        await provider.aclose()
+        _reset_invocation_id(inv_token)
+        _reset_active_dispatch(disp_token)
+    assert result.message.content == "ok"
+
+    exporter = InMemorySpanExporter()
+    observer = OTelObserver(span_processor=SimpleSpanProcessor(exporter))
+    inv_token2 = _set_invocation_id("inv-retry")
+    try:
+        for event in captured:
+            if isinstance(event, LlmRetryAttemptEvent):
+                await observer(event)
+    finally:
+        _reset_invocation_id(inv_token2)
+    observer.shutdown()
+
+    llm_spans = [s for s in exporter.get_finished_spans() if s.name == "openarmature.llm.complete"]
+    assert len(llm_spans) == 2
+    spans_by_index = {dict(s.attributes or {})["openarmature.llm.attempt_index"]: s for s in llm_spans}
+    assert set(spans_by_index) == {0, 1}
+    s0 = spans_by_index[0]
+    assert s0.status.status_code == StatusCode.ERROR
+    assert dict(s0.attributes or {})["openarmature.error.category"] == "provider_unavailable"
+    s1 = spans_by_index[1]
+    assert s1.status.status_code == StatusCode.OK
+    assert dict(s1.attributes or {}).get("openarmature.llm.finish_reason") == "stop"
+
+
 # ---------------------------------------------------------------------------
 # §7 log bridge: correlation_id injection
 # ---------------------------------------------------------------------------
