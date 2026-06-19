@@ -800,56 +800,44 @@ class OpenAIProvider:
         caller_metadata: Mapping[str, AttributeValue] | None = None
         if self._populate_caller_metadata:
             caller_metadata = dict(current_invocation_metadata())
+        # Identity / scoping + request-side fields are shared; only the
+        # outcome fields differ between the success and failure branches.
+        base: dict[str, Any] = {
+            "invocation_id": invocation_id,
+            "correlation_id": current_correlation_id(),
+            "node_name": node_name,
+            "namespace": namespace,
+            "attempt_index": current_attempt_index(),
+            "fan_out_index": current_fan_out_index(),
+            "branch_name": current_branch_name(),
+            "provider": self._genai_system,
+            "model": self.model,
+            "call_id": call_id,
+            "llm_attempt_index": llm_attempt_index,
+            "latency_ms": latency_ms,
+            "input_messages": input_messages,
+            "request_params": request_params,
+            "request_extras": request_extras,
+            "active_prompt": active_prompt,
+            "active_prompt_group": active_prompt_group,
+            "caller_invocation_metadata": caller_metadata,
+        }
         if response is not None:
             return LlmRetryAttemptEvent(
-                invocation_id=invocation_id,
-                correlation_id=current_correlation_id(),
-                node_name=node_name,
-                namespace=namespace,
-                attempt_index=current_attempt_index(),
-                fan_out_index=current_fan_out_index(),
-                branch_name=current_branch_name(),
-                provider=self._genai_system,
-                model=self.model,
-                call_id=call_id,
-                llm_attempt_index=llm_attempt_index,
-                latency_ms=latency_ms,
-                input_messages=input_messages,
-                request_params=request_params,
-                request_extras=request_extras,
-                active_prompt=active_prompt,
-                active_prompt_group=active_prompt_group,
+                **base,
                 response_id=response.response_id,
                 response_model=response.response_model,
                 usage=response.usage,
                 finish_reason=response.finish_reason,
                 output_content=response.message.content or None,
-                caller_invocation_metadata=caller_metadata,
             )
         if exc is None:
             raise ValueError("_build_llm_retry_attempt_event requires response or exc")
         return LlmRetryAttemptEvent(
-            invocation_id=invocation_id,
-            correlation_id=current_correlation_id(),
-            node_name=node_name,
-            namespace=namespace,
-            attempt_index=current_attempt_index(),
-            fan_out_index=current_fan_out_index(),
-            branch_name=current_branch_name(),
-            provider=self._genai_system,
-            model=self.model,
-            call_id=call_id,
-            llm_attempt_index=llm_attempt_index,
-            latency_ms=latency_ms,
-            input_messages=input_messages,
-            request_params=request_params,
-            request_extras=request_extras,
-            active_prompt=active_prompt,
-            active_prompt_group=active_prompt_group,
+            **base,
             error_category=exc.category,
             error_type=type(exc).__name__,
             error_message=str(exc),
-            caller_invocation_metadata=caller_metadata,
         )
 
     async def _do_complete(
