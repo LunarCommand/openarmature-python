@@ -143,13 +143,18 @@ class FilesystemPromptBackend:
             )
         return _sampling_from_dict(cast(dict[str, Any], raw))
 
-    async def fetch(self, name: str, label: str = "production") -> Prompt:
+    async def fetch(
+        self, name: str, label: str = "production", *, cache_ttl_seconds: int | None = None
+    ) -> Prompt:
         """Read the prompt template and (optionally) its sidecar sampling config.
 
         Returns a ``Prompt`` whose ``version`` is the leading 16 hex
         chars of the template's SHA-256 and ``template_hash`` is the
         full digest. Raises ``PromptNotFound`` when the template is
         missing and ``PromptStoreUnavailable`` on other I/O errors.
+
+        The filesystem backend is cacheless, so ``cache_ttl_seconds`` is
+        accepted for protocol conformance and ignored.
         """
         path = self._template_path(name, label)
         try:

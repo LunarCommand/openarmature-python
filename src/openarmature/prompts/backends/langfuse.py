@@ -46,7 +46,9 @@ class LangfusePromptClient(Protocol):
     tests can supply a lightweight fake.
     """
 
-    def get_prompt(self, name: str, *, label: str = "production") -> TextPromptClient | ChatPromptClient: ...
+    def get_prompt(
+        self, name: str, *, label: str = "production", cache_ttl_seconds: int | None = None
+    ) -> TextPromptClient | ChatPromptClient: ...
 
 
 # Langfuse prompt `config` keys that line up with SamplingConfig's
@@ -89,10 +91,14 @@ class LangfusePromptBackend:
     def __init__(self, client: LangfusePromptClient) -> None:
         self._client = client
 
-    async def fetch(self, name: str, label: str = "production") -> Prompt:
+    async def fetch(
+        self, name: str, label: str = "production", *, cache_ttl_seconds: int | None = None
+    ) -> Prompt:
         # The Langfuse SDK's get_prompt is synchronous (and does its own
-        # client-side caching); run it off the event loop.
-        result = await asyncio.to_thread(self._get_prompt, name, label)
+        # client-side caching); run it off the event loop. The proposal
+        # 0072 cache_ttl_seconds control forwards to that SDK cache:
+        # None = SDK default, 0 = no cache (fresh), N = N-second bound.
+        result = await asyncio.to_thread(self._get_prompt, name, label, cache_ttl_seconds)
 
         if isinstance(result, ChatPromptClient):
             normalized = _normalized_langfuse_entries(result.prompt, name=name, label=label)
@@ -134,9 +140,11 @@ class LangfusePromptBackend:
             metadata=_metadata_from(result),
         )
 
-    def _get_prompt(self, name: str, label: str) -> TextPromptClient | ChatPromptClient:
+    def _get_prompt(
+        self, name: str, label: str, cache_ttl_seconds: int | None = None
+    ) -> TextPromptClient | ChatPromptClient:
         try:
-            return self._client.get_prompt(name, label=label)
+            return self._client.get_prompt(name, label=label, cache_ttl_seconds=cache_ttl_seconds)
         except NotFoundError as exc:
             raise PromptNotFound(
                 f"prompt ({name!r}, {label!r}) not found in Langfuse",

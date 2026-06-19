@@ -123,7 +123,9 @@ class _MockLangfusePromptBackend:
             },
         )
 
-    async def fetch(self, name: str, label: str = "production") -> Prompt:
+    async def fetch(
+        self, name: str, label: str = "production", *, cache_ttl_seconds: int | None = None
+    ) -> Prompt:
         if name != "mission-briefing":
             from openarmature.prompts import PromptNotFound
 
