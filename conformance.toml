@@ -698,3 +698,10 @@ note = "Descriptive catalog of the failure-mock family (flaky + failure_sequence
 status = "implemented"
 since = "0.15.0"
 note = "The OTel observer synthesizes an openarmature.invocation span at the root of each detached trace (a detached subgraph + each detached fan-out instance), carrying the parent's SHARED invocation_id (detached mode is observer-side trace rendering, not a new run) and the detached unit's own entry_node; the detached subgraph / instance span nests under it. A raising detached subgraph surfaces ERROR + the category + an OTel exception event on BOTH the parent dispatch span and the detached invocation span. Observer-side only -- no graph-engine change; the Langfuse observer is unchanged (its Trace entity already plays the invocation-level-container role). Fixtures 008 (rewritten) and 058 (newly wired) run in test_observability."
+
+# Spec v0.62.0 (proposal 0064).  Langfuse trace.sessionId / trace.userId
+# population (observability §8.4.1 / §8.10).
+[proposals."0064"]
+status = "partial"
+since = "0.15.0"
+note = "The Langfuse observer promotes a recognized userId caller-metadata key to the first-class trace.userId (additive: the key also stays in trace.metadata.userId), and sets trace.sessionId from openarmature.session_id when present. trace.userId is LIVE (sourced from 0034 caller metadata): fixture 084 cases 2/3/4 (not-session-bound, userId present additive, userId absent) pass. partial because trace.sessionId is DORMANT -- openarmature.session_id is established by the sessions capability (0020, observability §5.6), unimplemented in python until v0.19.0, so there is no session_id source yet; the trace(session_id=) plumbing is wired end to end but the observer passes None. Fixture 084 session-bound cases 1 + 5 are deferred (per-case) pending 0020. Langfuse-only: no OTel change (the OTel side already carries openarmature.session_id + openarmature.user.* as span attributes; no trace-level OTel equivalent)."
