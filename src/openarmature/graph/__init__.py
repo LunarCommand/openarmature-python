@@ -44,6 +44,7 @@ from .events import (
     InvocationStartedEvent,
     LlmCompletionEvent,
     LlmFailedEvent,
+    LlmRetryAttemptEvent,
     MetadataAugmentationEvent,
     NodeEvent,
 )
@@ -101,6 +102,7 @@ __all__ = [
     "InvocationStartedEvent",
     "LlmCompletionEvent",
     "LlmFailedEvent",
+    "LlmRetryAttemptEvent",
     "MappingReferencesUndeclaredField",
     "MetadataAugmentationEvent",
     "Middleware",
