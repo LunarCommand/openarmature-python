@@ -508,7 +508,7 @@ async def test_active_prompt_propagates_to_llm_span_attributes() -> None:
         PromptResult,
         TextPrompt,
     )
-    from tests._helpers.typed_event import make_typed_event
+    from tests._helpers.typed_event import make_retry_attempt_event
 
     exporter = InMemorySpanExporter()
     observer = OTelObserver(span_processor=SimpleSpanProcessor(exporter))
@@ -543,7 +543,7 @@ async def test_active_prompt_propagates_to_llm_span_attributes() -> None:
         # The observer reads from the typed event, NOT from the live
         # ContextVar — that ContextVar is unreachable from the
         # dispatch worker's task-local Context.
-        await observer(make_typed_event(active_prompt=result, active_prompt_group=group))
+        await observer(make_retry_attempt_event(active_prompt=result, active_prompt_group=group))
     finally:
         _reset_invocation_id(token)
 
@@ -566,14 +566,14 @@ async def test_llm_span_has_no_prompt_attributes_when_no_active_prompt() -> None
         _reset_invocation_id,
         _set_invocation_id,
     )
-    from tests._helpers.typed_event import make_typed_event
+    from tests._helpers.typed_event import make_retry_attempt_event
 
     exporter = InMemorySpanExporter()
     observer = OTelObserver(span_processor=SimpleSpanProcessor(exporter))
 
     token = _set_invocation_id("inv-2")
     try:
-        await observer(make_typed_event())
+        await observer(make_retry_attempt_event())
     finally:
         _reset_invocation_id(token)
     observer.shutdown()
@@ -598,14 +598,14 @@ async def _drive_llm_span_with_cached_tokens(
         _reset_invocation_id,
         _set_invocation_id,
     )
-    from tests._helpers.typed_event import make_typed_event
+    from tests._helpers.typed_event import make_retry_attempt_event
 
     exporter = InMemorySpanExporter()
     observer = OTelObserver(span_processor=SimpleSpanProcessor(exporter))
     token = _set_invocation_id("inv-cache")
     try:
         await observer(
-            make_typed_event(
+            make_retry_attempt_event(
                 usage=Usage(
                     prompt_tokens=100,
                     completion_tokens=5,
@@ -714,14 +714,14 @@ async def test_llm_span_duration_matches_typed_event_latency() -> None:
         _reset_invocation_id,
         _set_invocation_id,
     )
-    from tests._helpers.typed_event import make_typed_event
+    from tests._helpers.typed_event import make_retry_attempt_event
 
     exporter = InMemorySpanExporter()
     observer = OTelObserver(span_processor=SimpleSpanProcessor(exporter))
     latency_ms = 123.456
     token = _set_invocation_id("inv-duration")
     try:
-        await observer(make_typed_event(latency_ms=latency_ms))
+        await observer(make_retry_attempt_event(latency_ms=latency_ms))
     finally:
         _reset_invocation_id(token)
     observer.shutdown()
@@ -745,13 +745,13 @@ async def test_llm_span_zero_duration_when_latency_missing() -> None:
         _reset_invocation_id,
         _set_invocation_id,
     )
-    from tests._helpers.typed_event import make_typed_event
+    from tests._helpers.typed_event import make_retry_attempt_event
 
     exporter = InMemorySpanExporter()
     observer = OTelObserver(span_processor=SimpleSpanProcessor(exporter))
     token = _set_invocation_id("inv-no-latency")
     try:
-        await observer(make_typed_event(latency_ms=None))
+        await observer(make_retry_attempt_event(latency_ms=None))
     finally:
         _reset_invocation_id(token)
     observer.shutdown()
@@ -766,11 +766,11 @@ async def test_typed_llm_event_drops_silently_outside_invocation() -> None:
     # No invocation in scope (no _set_invocation_id) → the handler
     # MUST early-return without emitting a span. Symmetric with the
     # error path's no-invocation drop.
-    from tests._helpers.typed_event import make_typed_event
+    from tests._helpers.typed_event import make_retry_attempt_event
 
     exporter = InMemorySpanExporter()
     observer = OTelObserver(span_processor=SimpleSpanProcessor(exporter))
-    await observer(make_typed_event())
+    await observer(make_retry_attempt_event())
     observer.shutdown()
     llm_spans = [s for s in exporter.get_finished_spans() if s.name == "openarmature.llm.complete"]
     assert llm_spans == []
@@ -785,7 +785,7 @@ async def test_disable_llm_spans_skips_typed_event_path() -> None:
         _reset_invocation_id,
         _set_invocation_id,
     )
-    from tests._helpers.typed_event import make_typed_event
+    from tests._helpers.typed_event import make_retry_attempt_event
 
     exporter = InMemorySpanExporter()
     observer = OTelObserver(
@@ -794,7 +794,7 @@ async def test_disable_llm_spans_skips_typed_event_path() -> None:
     )
     token = _set_invocation_id("inv-disabled")
     try:
-        await observer(make_typed_event())
+        await observer(make_retry_attempt_event())
     finally:
         _reset_invocation_id(token)
     observer.shutdown()
@@ -812,19 +812,20 @@ async def test_llm_error_path_emits_error_span_from_typed_failed_event() -> None
         _reset_invocation_id,
         _set_invocation_id,
     )
-    from tests._helpers.typed_event import make_failed_event
+    from tests._helpers.typed_event import make_retry_attempt_event
 
     exporter = InMemorySpanExporter()
     observer = OTelObserver(span_processor=SimpleSpanProcessor(exporter))
     token = _set_invocation_id("inv-err")
     try:
         await observer(
-            make_failed_event(
+            make_retry_attempt_event(
                 invocation_id="inv-err",
                 error_category="provider_rate_limit",
                 error_type="ProviderRateLimit",
                 error_message="429 from upstream",
                 call_id="cc-err",
+                finish_reason=None,
             )
         )
     finally:
