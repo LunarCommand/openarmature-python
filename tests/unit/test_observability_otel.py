@@ -584,12 +584,42 @@ async def test_llm_span_has_no_prompt_attributes_when_no_active_prompt() -> None
     assert not any(k.startswith("openarmature.prompt.") for k in attrs)
 
 
+async def test_otel_observer_ignores_terminal_llm_events() -> None:
+    """Feeding a terminal LlmCompletionEvent or LlmFailedEvent to the
+    OTel observer produces no ``openarmature.llm.complete`` span; the
+    per-attempt event is the sole span source."""
+    # Proposal 0050: the OTel span renders only from LlmRetryAttemptEvent.
+    # The terminal events stay on the queue for the Langfuse mapping +
+    # payload consumers; this guards against reintroducing the
+    # terminal-event span path (which would double-emit alongside the
+    # per-attempt span).
+    from openarmature.observability.correlation import (
+        _reset_invocation_id,
+        _set_invocation_id,
+    )
+    from tests._helpers.typed_event import make_failed_event, make_typed_event
+
+    exporter = InMemorySpanExporter()
+    observer = OTelObserver(span_processor=SimpleSpanProcessor(exporter))
+
+    token = _set_invocation_id("inv-terminal")
+    try:
+        await observer(make_typed_event())
+        await observer(make_failed_event())
+    finally:
+        _reset_invocation_id(token)
+    observer.shutdown()
+
+    llm_spans = [s for s in exporter.get_finished_spans() if s.name == "openarmature.llm.complete"]
+    assert llm_spans == []
+
+
 async def _drive_llm_span_with_cached_tokens(
     *,
     cached_tokens: int | None,
     cache_creation_tokens: int | None = None,
 ) -> dict[str, Any]:
-    """Drive the OTel observer through a typed LlmCompletionEvent
+    """Drive the OTel observer through a per-attempt LlmRetryAttemptEvent
     carrying the supplied cache-stat fields on the event's Usage
     record. Returns the LLM-span's attribute map.
     """
