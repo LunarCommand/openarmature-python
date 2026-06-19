@@ -347,7 +347,10 @@ async def _run_call(
             assert manager is not None
             if operation == "fetch":
                 assert call.name is not None
-                return await manager.fetch(call.name, call.label), None
+                return (
+                    await manager.fetch(call.name, call.label, cache_ttl_seconds=call.cache_ttl_seconds),
+                    None,
+                )
             if operation == "render":
                 # Either inline fetched_prompt or a ref to a capture.
                 if call.fetched_prompt_ref is not None:
@@ -382,6 +385,7 @@ async def _run_call(
                         call.label,
                         call.variables or {},
                         placeholders=placeholders,
+                        cache_ttl_seconds=call.cache_ttl_seconds,
                     ),
                     None,
                 )
