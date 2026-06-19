@@ -160,6 +160,16 @@ def _apply_caller_metadata(metadata: dict[str, Any], caller_metadata: Mapping[st
         metadata[key] = value
 
 
+def _promoted_user_id(metadata: Mapping[str, Any]) -> str | None:
+    # Proposal 0064 §8.4.1: a recognized ``userId`` caller-metadata key
+    # promotes to Langfuse's first-class trace.userId (recognized, not
+    # reserved; automatic, not opt-in). Read from the already-merged trace
+    # metadata, so the promotion is additive -- the key also remains at
+    # trace.metadata.userId. Absent key -> None (trace.userId unset).
+    value = metadata.get("userId")
+    return str(value) if value is not None else None
+
+
 def _subgraph_identity_at(event: NodeEvent, depth: int) -> str:
     """Return the compiled-subgraph identity for the wrapper at the
     given 1-based namespace depth, or the empty string when no
@@ -781,6 +791,24 @@ class LangfuseObserver:
                 return str(state)
         return str(state)
 
+    def _client_trace(self, *, id: str, name: str | None, metadata: dict[str, Any]) -> None:
+        # Proposal 0064 §8.4.1: every Trace open routes through here so the
+        # sessionId / userId promotions apply uniformly across the main,
+        # lazy, and detached trace-open sites.
+        #   - trace.userId: promoted from the recognized ``userId`` caller
+        #     key (already merged into ``metadata`` by _apply_caller_metadata).
+        #   - trace.sessionId: sourced from openarmature.session_id (sessions
+        #     capability, observability §5.6 / proposal 0020). python has no
+        #     session_id source until 0020 lands, so it is unset (None) today;
+        #     this is the single hook 0020 wires the source into.
+        self.client.trace(
+            id=id,
+            name=name,
+            metadata=metadata,
+            session_id=None,
+            user_id=_promoted_user_id(metadata),
+        )
+
     def _open_trace_lazy(
         self,
         invocation_id: str,
@@ -805,7 +833,7 @@ class LangfuseObserver:
         if correlation_id is not None:
             metadata["correlation_id"] = correlation_id
         _apply_caller_metadata(metadata, current_invocation_metadata())
-        self.client.trace(id=invocation_id, name=entry_node, metadata=metadata)
+        self._client_trace(id=invocation_id, name=entry_node, metadata=metadata)
         self._inv_states[invocation_id] = _InvState(trace_id=invocation_id)
 
     def _open_trace(self, invocation_id: str, correlation_id: str | None, event: NodeEvent) -> None:
@@ -834,7 +862,7 @@ class LangfuseObserver:
         # The caller-supplied path lands in proposal 0034 (PR 4) — for
         # now only the fallback is wired.
         trace_name = entry_node
-        self.client.trace(id=invocation_id, name=trace_name, metadata=metadata)
+        self._client_trace(id=invocation_id, name=trace_name, metadata=metadata)
         self._inv_states[invocation_id] = _InvState(trace_id=invocation_id)
 
     def _key_for(self, event: NodeEvent) -> _StackKey:
@@ -1150,7 +1178,7 @@ class LangfuseObserver:
         # ``subgraph_identity = "X"``, not every wrapper that
         # happens to be named ``X``.
         wrapper_obs_name = identity or prefix[-1]
-        self.client.trace(id=detached_trace_id, name=wrapper_obs_name, metadata=detached_metadata)
+        self._client_trace(id=detached_trace_id, name=wrapper_obs_name, metadata=detached_metadata)
         # §8.4.2 (proposal 0042): `detached: true` lives on the
         # PARENT-side dispatching observation (the link observation
         # above), not on the dispatch observation IN the detached
@@ -1228,7 +1256,7 @@ class LangfuseObserver:
         if correlation_id is not None:
             detached_metadata["correlation_id"] = correlation_id
         _apply_caller_metadata(detached_metadata, event.caller_invocation_metadata)
-        self.client.trace(
+        self._client_trace(
             id=detached_trace_id,
             name=prefix[-1],
             metadata=detached_metadata,
@@ -1662,7 +1690,7 @@ class LangfuseObserver:
             metadata["correlation_id"] = correlation_id
         if event.caller_invocation_metadata is not None:
             _apply_caller_metadata(metadata, event.caller_invocation_metadata)
-        self.client.trace(id=invocation_id, name=entry_node, metadata=metadata)
+        self._client_trace(id=invocation_id, name=entry_node, metadata=metadata)
         self._inv_states[invocation_id] = _InvState(trace_id=invocation_id)
 
     def _maybe_truncate_for_input(self, value: Any) -> Any:

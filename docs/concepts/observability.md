@@ -1048,6 +1048,18 @@ for a runnable demo.
 - **Trace name.** Defaults to the entry-node name (spec §8.6
   fallback). Caller-supplied invocation labels land in PR 4
   (proposal 0034).
+- **Session / user grouping (`trace.sessionId` / `trace.userId`).**
+  The observer populates the two cross-trace grouping fields behind
+  Langfuse's Sessions and Users dashboards (spec §8.4.1, proposal
+  0064). `trace.userId` is promoted from a recognized `userId` key in
+  the caller-supplied invocation metadata, automatically and
+  additively (the key also stays at `trace.metadata.userId`); an
+  absent key leaves it unset. `trace.sessionId` is sourced from
+  `openarmature.session_id` (the sessions capability), which is not
+  yet implemented, so it is unset for now. There is no OTel
+  equivalent (an OTel trace has no trace-level session / user field);
+  the same identity already rides as `openarmature.session_id` and the
+  `openarmature.user.*` family on the OTel span side.
 - **Per-observation metadata.** Each Span / Generation carries
   `namespace`, `step`, `attempt_index`, optional `fan_out_index` /
   `branch_name`, and the `correlation_id` cross-cutting join key

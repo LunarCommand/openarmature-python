@@ -104,6 +104,12 @@ class LangfuseTrace:
     # invocation-boundary events; absent when no observer wrote them.
     input: Any | None = None
     output: Any | None = None
+    # Proposal 0064 §8.4.1: Langfuse's two cross-trace grouping fields.
+    # ``session_id`` groups traces sharing a session (Sessions dashboard);
+    # ``user_id`` populates the Users dimension. Each is unset (None) when
+    # its source is absent.
+    session_id: str | None = None
+    user_id: str | None = None
     observations: list[LangfuseObservation] = field(default_factory=list[LangfuseObservation])
 
     def find_observation(self, observation_id: str) -> LangfuseObservation | None:
@@ -170,12 +176,18 @@ class LangfuseClient(Protocol):
         id: str,
         name: str | None = None,
         metadata: dict[str, Any] | None = None,
+        session_id: str | None = None,
+        user_id: str | None = None,
     ) -> None:
         """Create a new Trace.
 
         The Trace `id` MUST be the OA invocation_id verbatim.
         Implementations track Traces internally; observation calls
         pass `trace_id` to associate.
+
+        `session_id` / `user_id` (proposal 0064 §8.4.1) populate
+        Langfuse's cross-trace grouping fields (the Sessions / Users
+        dashboards); each is unset when its source is absent.
         """
         # Spec §8.4.1: the Trace id is the OA invocation_id verbatim.
         ...
@@ -368,11 +380,15 @@ class InMemoryLangfuseClient:
         id: str,
         name: str | None = None,
         metadata: dict[str, Any] | None = None,
+        session_id: str | None = None,
+        user_id: str | None = None,
     ) -> None:
         self.traces[id] = LangfuseTrace(
             id=id,
             name=name,
             metadata=dict(metadata) if metadata is not None else {},
+            session_id=session_id,
+            user_id=user_id,
         )
 
     def update_trace(

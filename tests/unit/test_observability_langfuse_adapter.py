@@ -337,7 +337,10 @@ async def test_adapter_against_real_langfuse_cloud() -> None:
         .compile()
     )
     graph.attach_observer(observer)
-    await graph.invoke(_S())
+    # metadata={"userId": ...} exercises the proposal 0064 promotion end
+    # to end: the observer lifts the recognized userId caller key to the
+    # live Trace's first-class userId field (the Users dashboard).
+    await graph.invoke(_S(), metadata={"userId": "flight-controller-gene"})
     await graph.drain()
     observer.shutdown()
     # Use ``client.shutdown()`` rather than ``client.flush()`` here:
@@ -348,7 +351,9 @@ async def test_adapter_against_real_langfuse_cloud() -> None:
     # to drain without releasing SDK resources.
     client.shutdown()
     # Manual check: open the trace in the dashboard and confirm
-    # "step_a" + "step_b" appear as Span observations under one Trace.
+    # "step_a" + "step_b" appear as Span observations under one Trace,
+    # and that the Trace's userId field reads "flight-controller-gene"
+    # (the proposal 0064 promotion from the userId caller-metadata key).
     # The trace_id in the dashboard is the 32-char hex form (no dashes)
     # of OA's UUID4 invocation_id; strip dashes from any logged
     # correlation_id / invocation_id to find it.

@@ -209,6 +209,8 @@ class LangfuseSDKAdapter:
         id: str,
         name: str | None = None,
         metadata: dict[str, Any] | None = None,
+        session_id: str | None = None,
+        user_id: str | None = None,
     ) -> None:
         # v4 has no explicit trace creation; cache the info and apply
         # it via propagate_attributes on every observation under this
@@ -221,7 +223,15 @@ class LangfuseSDKAdapter:
         # reserved (proposal 0041), so no caller metadata collides.
         if not _is_uuid(id):
             md.setdefault("invocation_id", id)
-        self._trace_info[id] = {"name": name, "metadata": md}
+        # Proposal 0064 §8.4.1: cache the session/user grouping fields so
+        # propagate_attributes can apply them around every observation
+        # under this trace_id (v4 has no explicit trace-create call).
+        self._trace_info[id] = {
+            "name": name,
+            "metadata": md,
+            "session_id": session_id,
+            "user_id": user_id,
+        }
 
     def update_trace(
         self,
@@ -292,6 +302,8 @@ class LangfuseSDKAdapter:
                     propagate_attributes(
                         trace_name=entry["name"],
                         metadata=_stringify_metadata(entry["metadata"]),
+                        session_id=entry.get("session_id"),
+                        user_id=entry.get("user_id"),
                     )
                 )
             obs = cast(
@@ -438,6 +450,8 @@ class LangfuseSDKAdapter:
                     propagate_attributes(
                         trace_name=trace_entry["name"],
                         metadata=_stringify_metadata(trace_entry["metadata"]),
+                        session_id=trace_entry.get("session_id"),
+                        user_id=trace_entry.get("user_id"),
                     )
                 )
             stack.enter_context(otel_trace_api.use_span(remote_parent_span))
@@ -524,6 +538,8 @@ class LangfuseSDKAdapter:
                     propagate_attributes(
                         trace_name=trace_entry["name"],
                         metadata=_stringify_metadata(trace_entry["metadata"]),
+                        session_id=trace_entry.get("session_id"),
+                        user_id=trace_entry.get("user_id"),
                     )
                 )
             obs = cast("Any", self._client.start_observation(**kwargs))

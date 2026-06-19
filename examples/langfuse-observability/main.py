@@ -16,7 +16,10 @@ Langfuse Prompt entity reference to each rendered prompt; the Generation
 observation picks that up and links back to the entity, which is how
 production Langfuse dashboards thread "this generation came from prompt
 v7 of `mission-briefing`" without you having to wire anything up
-manually.
+manually. It also tags each trace with a ``userId`` (operator identity)
+via invocation metadata; the observer promotes that to Langfuse's
+first-class user dimension, so the Users dashboard groups and filters
+the assistant's traffic by operator.
 
 The example uses the bundled ``InMemoryLangfuseClient`` recorder so the
 demo runs without a Langfuse account; at the end we print the captured
@@ -193,6 +196,8 @@ def _format_trace(trace: LangfuseTrace) -> str:
     lines: list[str] = []
     lines.append(f"Trace id={trace.id}")
     lines.append(f"      name={trace.name!r}")
+    if trace.user_id is not None:
+        lines.append(f"      userId={trace.user_id!r}  (promoted to the Langfuse Users dimension)")
     lines.append(f"      metadata={_format_metadata(trace.metadata)}")
     for obs in trace.children_of(None):
         _format_observation(lines, trace, obs, indent="  ")
@@ -274,7 +279,15 @@ async def main() -> None:
     graph.attach_observer(observer)
 
     try:
-        final = await graph.invoke(BriefingState(question=question))
+        # metadata={"userId": ...} tags the trace with an operator
+        # identity. The Langfuse observer promotes a recognized ``userId``
+        # key to the first-class trace.userId field so the Users dashboard
+        # can group and filter traces by operator (additive: it also stays
+        # in trace.metadata.userId).
+        final = await graph.invoke(
+            BriefingState(question=question),
+            metadata={"userId": "flight-controller-gene"},
+        )
     finally:
         # Required for short-lived processes: invoke() returns when the
         # graph reaches END regardless of whether the observer queue

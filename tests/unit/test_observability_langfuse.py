@@ -51,6 +51,35 @@ def test_in_memory_recorder_trace_create_then_update() -> None:
     assert trace.metadata == {"correlation_id": "c1", "extra": "value"}
 
 
+def test_in_memory_trace_records_session_and_user_id() -> None:
+    # Proposal 0064 §8.4.1: trace(session_id=, user_id=) populates the two
+    # Langfuse cross-trace grouping fields. This exercises the session_id
+    # plumbing the observer leaves dormant until 0020 (so the deferred
+    # fixture-084 session cases are still covered at the client layer).
+    client = InMemoryLangfuseClient()
+    client.trace(id="t1", name="a", metadata={"userId": "u-7"}, session_id="sess-9", user_id="u-7")
+    trace = client.traces["t1"]
+    assert trace.session_id == "sess-9"
+    assert trace.user_id == "u-7"
+    # Additive: userId also remains in the metadata bag.
+    assert trace.metadata["userId"] == "u-7"
+    # Both default to None when not supplied.
+    client.trace(id="t2", name="b", metadata={})
+    assert client.traces["t2"].session_id is None
+    assert client.traces["t2"].user_id is None
+
+
+def test_promoted_user_id_recognizes_userid_key() -> None:
+    # Proposal 0064 §8.4.1: the userId promotion reads a recognized key,
+    # coerces to str, and is None when absent.
+    from openarmature.observability.langfuse.observer import _promoted_user_id
+
+    assert _promoted_user_id({"userId": "u-1"}) == "u-1"
+    assert _promoted_user_id({"userId": 42}) == "42"
+    assert _promoted_user_id({"tenantId": "acme"}) is None
+    assert _promoted_user_id({}) is None
+
+
 def test_in_memory_recorder_span_handle_update_and_end() -> None:
     client = InMemoryLangfuseClient()
     client.trace(id="t1")

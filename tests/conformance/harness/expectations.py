@@ -197,6 +197,11 @@ class ObservabilityExpected(_ForbidExtras):
     determinism_check: dict[str, Any] | None = None
     # Multi-invocation fixtures (009 cross-cutting, 011 determinism).
     invocation_count: int | None = None
+    # Langfuse Trace-level expectations (proposal 0064, fixture 084): the
+    # single-trace shape (sessionId / userId / metadata) and the
+    # multi-invocation grouping case's per-trace list.
+    langfuse_trace: dict[str, Any] | None = None
+    langfuse_traces: list[dict[str, Any]] | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -240,6 +245,9 @@ _OBSERVABILITY_KEYS = frozenset(
         "no_llm_provider_span",
         "determinism_check",
         "invocation_count",
+        # proposal 0064 (fixture 084) Langfuse Trace-level expectations
+        "langfuse_trace",
+        "langfuse_traces",
     }
 )
 
