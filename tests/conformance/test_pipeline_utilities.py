@@ -93,7 +93,9 @@ _LAST_DRIVEN_FIXTURE = 38
 # at v0.58.0; 069 (fan-out degrade refinements, 0069) at v0.59.0 — this runner
 # drives its FI-degrade cases and skips its crash_injection/resume case (owned
 # by test_checkpoint.py, which also owns fixture 067, hence the gap at 67).
-_FAILURE_ISOLATION_FIXTURES = frozenset(range(58, 67)) | {68, 69}
+# 071 (fan-out degrade strict-reducer-raise, proposal 0069 coverage,
+# spec v0.63.1) is an FI-degrade fixture this runner drives.
+_FAILURE_ISOLATION_FIXTURES = frozenset(range(58, 67)) | {68, 69, 71}
 
 
 def _fixture_paths() -> list[Path]:
