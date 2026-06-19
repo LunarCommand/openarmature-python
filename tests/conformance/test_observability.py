@@ -153,6 +153,11 @@ _SUPPORTED_FIXTURES = frozenset(
         # (v0.61.0) resolves the detached-invocation-span shape case 2
         # presupposed — the whole fixture was unwired pending that.
         "058-implementation-attribution-otel",
+        # v0.62.0 — proposal 0064 (Langfuse trace.sessionId / trace.userId
+        # population). Cases 2/3/4 (not session-bound + userId promotion)
+        # run; session-bound cases 1/5 defer until the sessions capability
+        # (0020) supplies openarmature.session_id.
+        "084-langfuse-session-user-promotion",
     }
 )
 
@@ -246,6 +251,8 @@ async def test_observability_fixture(fixture_path: Path) -> None:
         await _run_fixture_056(spec)
     elif fixture_id == "058-implementation-attribution-otel":
         await _run_fixture_058(spec)
+    elif fixture_id == "084-langfuse-session-user-promotion":
+        await _run_fixture_084(spec)
     elif fixture_id in {
         "012-otel-llm-payload-default-off",
         "013-otel-llm-payload-enabled",
@@ -2173,6 +2180,74 @@ async def _run_fixture_031_case(case: Mapping[str, Any]) -> None:
         f"original and resumed runs MUST produce DIFFERENT trace_ids "
         f"(per §10.4 step 4 + §5.1); got {len(trace_ids)} distinct trace_ids"
     )
+
+
+# ---------------------------------------------------------------------------
+# Fixture 084 — Langfuse session/user promotion (proposal 0064)
+# ---------------------------------------------------------------------------
+
+
+async def _run_fixture_084(spec: Mapping[str, Any]) -> None:
+    from openarmature.observability.langfuse import (  # noqa: PLC0415
+        InMemoryLangfuseClient,
+        LangfuseObserver,
+    )
+
+    # Proposal 0064 §8.4.1. Cases 1 + 5 are session-bound: they supply
+    # session_id at invoke(), which needs the sessions capability
+    # (proposal 0020, §5.6) to surface openarmature.session_id. That is
+    # unimplemented in python until v0.19.0, so trace.sessionId has no
+    # source and these cases defer (per-case continue). Cases 2/3/4 (not
+    # session-bound + the userId promotion) run now.
+    _deferred_cases = {
+        "session_bound_sets_trace_session_id",
+        "multi_invocation_shared_session_groups",
+    }
+    cases = cast("list[dict[str, Any]]", spec["cases"])
+    for case in cases:
+        case_name = cast("str", case["name"])
+        if case_name in _deferred_cases:
+            continue
+        try:
+            client = InMemoryLangfuseClient()
+            observer = LangfuseObserver(client=client)
+            trace: list[str] = []
+            built = build_graph(case, trace=trace)
+            compiled = built.builder.compile()
+            compiled.attach_observer(observer)
+            initial_state = built.initial_state(case.get("initial_state", {}))
+            caller_metadata = cast("dict[str, Any] | None", case.get("caller_metadata"))
+            if caller_metadata is not None:
+                await compiled.invoke(initial_state, metadata=caller_metadata)
+            else:
+                await compiled.invoke(initial_state)
+            await compiled.drain()
+            observer.shutdown()
+
+            assert len(client.traces) == 1, f"expected 1 trace, got {len(client.traces)}"
+            lf_trace = next(iter(client.traces.values()))
+            expected = cast("dict[str, Any]", case["expected"]["langfuse_trace"])
+            # trace.sessionId is unset for the runnable cases (no session
+            # source until 0020).
+            assert lf_trace.session_id == expected.get("sessionId"), (
+                f"sessionId: got {lf_trace.session_id!r}, expected {expected.get('sessionId')!r}"
+            )
+            # trace.userId: promoted from the userId caller key (case 3),
+            # unset otherwise (cases 2/4).
+            assert lf_trace.user_id == expected.get("userId"), (
+                f"userId: got {lf_trace.user_id!r}, expected {expected.get('userId')!r}"
+            )
+            # Additive promotion + unaffected metadata: every concrete
+            # (non-placeholder) expected metadata key also lands top-level.
+            expected_md = cast("dict[str, Any]", expected.get("metadata") or {})
+            for key, val in expected_md.items():
+                if isinstance(val, str) and val.startswith("<") and val.endswith(">"):
+                    continue
+                assert lf_trace.metadata.get(key) == val, (
+                    f"metadata.{key}: got {lf_trace.metadata.get(key)!r}, expected {val!r}"
+                )
+        except AssertionError as e:
+            raise AssertionError(f"case {case_name!r}: {e}") from e
 
 
 # ---------------------------------------------------------------------------

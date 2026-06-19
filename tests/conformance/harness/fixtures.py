@@ -134,7 +134,9 @@ class CaseSpec(BaseModel):
     caller_correlation_id: str | None = None
     # observability — mock LLM responses + per-case run config.
     mock_llm: list[MockResponse] | None = None
-    invocations: int | None = None
+    # ``int`` = a run-count (fixtures 009 / 011); ``list`` = per-invocation
+    # specs for a multi-invocation fixture (proposal 0064 fixture 084 case 5).
+    invocations: int | list[dict[str, Any]] | None = None
 
 
 # ---------------------------------------------------------------------------
