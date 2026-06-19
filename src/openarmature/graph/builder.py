@@ -306,11 +306,11 @@ class GraphBuilder[StateT: State]:
         errors_field: str | None = None,
         middleware: Iterable[Middleware] | None = None,
     ) -> Self:
-        """Register a parallel-branches node per pipeline-utilities §11.
+        """Register a parallel-branches node.
 
         ``branches`` is a mapping from non-empty branch name to a
         :class:`BranchSpec`. Insertion order is preserved and is
-        the dispatch + merge order per §11.8.
+        the dispatch + merge order.
 
         Validates at registration:
 
@@ -397,7 +397,7 @@ class GraphBuilder[StateT: State]:
         to_version: str,
         migrate: Callable[[Any], Any],
     ) -> Self:
-        """Register one state migration per pipeline-utilities §10.12.
+        """Register one state migration.
 
         On resume, when the saved record's ``schema_version`` does not
         match the current state class's ``schema_version``, the engine
@@ -406,15 +406,14 @@ class GraphBuilder[StateT: State]:
         ``parent_states``) before deserialization.
 
         Migrations MUST be pure: deterministic, no I/O, no implicit
-        state. The framework does not police purity (per §10.12.2),
-        but violating it risks non-deterministic resume.
+        state. The framework does not police purity, but violating it
+        risks non-deterministic resume.
 
         Raises ``CheckpointStateMigrationChainAmbiguous`` at
         registration if the ``(from_version, to_version)`` pair is
-        already registered (per spec §10.10 / §10.12.1; proposal
-        0018 / spec v0.16.0). Also raises ``ValueError`` if
+        already registered. Also raises ``ValueError`` if
         ``to_version`` is the empty-string sentinel (the un-declared
-        marker per §10.2 is not a valid chain target).
+        marker is not a valid chain target).
         """
         self._migration_registry.register(
             StateMigration(

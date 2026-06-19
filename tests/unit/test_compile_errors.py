@@ -52,8 +52,8 @@ def test_duplicate_subgraph_name_raises_value_error() -> None:
 
 
 def test_compile_validates_subgraph_projection_mapping() -> None:
-    """Per spec v0.2.0 §2: compilation MUST fail when a subgraph-as-node
-    mapping references a field not declared in the relevant state schema."""
+    """Compilation MUST fail when a subgraph-as-node mapping references
+    a field not declared in the relevant state schema."""
 
     inner = GraphBuilder(ChildS).add_node("i", _noop).add_edge("i", END).set_entry("i").compile()
 

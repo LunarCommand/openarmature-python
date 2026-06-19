@@ -7,7 +7,7 @@
 # at the ``invoke()`` boundary and at mid-invocation augmentation
 # via ``set_invocation_metadata``.
 
-"""Caller-supplied invocation metadata (proposal 0034).
+"""Caller-supplied invocation metadata.
 
 Two surfaces:
 
@@ -27,11 +27,11 @@ Validation rules (apply at every entry point):
 
 - Keys MUST be strings.
 - Keys MUST NOT start with ``openarmature.`` or ``gen_ai.`` (reserved
-  for spec-normative attribute namespaces; collisions would silently
+  attribute namespaces; collisions would silently
   overwrite OA-emitted state at the observer layer).
 - Keys MUST NOT exactly match a reserved OA-emitted top-level metadata
-  key name (the §8.4 Langfuse set plus ``invocation_id``; proposal
-  0041) for the same collision reason.
+  key name (the Langfuse set plus ``invocation_id``) for the same
+  collision reason.
 - Values MUST be OTel-attribute-compatible scalars: ``str``, ``int``,
   ``float``, ``bool``, or a homogeneous list/tuple of those types.
   ``None``, nested objects, and mixed-type arrays are rejected.
@@ -123,11 +123,10 @@ def current_invocation_metadata() -> MappingProxyType[str, AttributeValue]:
     callers MUST NOT mutate it. Use :func:`set_invocation_metadata`
     to add entries.
 
-    Aliased as :func:`get_invocation_metadata` per spec §3.4 (proposal
-    0048, v0.40.0); the alias is the canonical spec-idiomatic name
-    paralleling :func:`set_invocation_metadata`. Both names point at
-    the same function — pick whichever reads naturally at the call
-    site.
+    Aliased as :func:`get_invocation_metadata`; the alias is the
+    canonical idiomatic name paralleling :func:`set_invocation_metadata`.
+    Both names point at the same function — pick whichever reads
+    naturally at the call site.
     """
     return _invocation_metadata_var.get()
 
@@ -146,10 +145,10 @@ def set_invocation_metadata(**entries: AttributeValue) -> None:
     metadata. Additive: existing keys with the same names are
     overwritten; other keys are preserved.
 
-    Per spec §3.4: affects spans / observations emitted AFTER the
-    call returns. Open observations whose lineage covers the calling
-    context ARE updated in place per proposal 0040 — implementations
-    enqueue a :class:`~openarmature.graph.events.MetadataAugmentationEvent`
+    Affects spans / observations emitted AFTER the call returns. Open
+    observations whose lineage covers the calling context ARE updated
+    in place: implementations enqueue a
+    :class:`~openarmature.graph.events.MetadataAugmentationEvent`
     on the engine's serial observer-delivery queue carrying the
     delta + the calling context's lineage tuple (namespace,
     attempt_index, fan_out_index, branch_name); observers correlate
@@ -169,10 +168,11 @@ def set_invocation_metadata(**entries: AttributeValue) -> None:
     symmetry; users typically call this from inside a node body,
     middleware, or observer where an invocation is already in flight.
 
-    Symmetric with :func:`get_invocation_metadata` (proposal 0048,
-    spec §3.4 v0.40.0) which returns an immutable snapshot of the
-    current async context's view.
+    Symmetric with :func:`get_invocation_metadata`, which returns an
+    immutable snapshot of the current async context's view.
     """
+    # Spec observability §3.4: additive merge, affecting only spans /
+    # observations emitted after this call returns.
     if not entries:
         return
     for key, value in entries.items():
@@ -226,13 +226,14 @@ def validate_invocation_metadata(mapping: object) -> MappingProxyType[str, Attri
     read-only view the engine stashes on the ContextVar.
 
     Public so the engine (`CompiledGraph.invoke`) calls this at the
-    boundary BEFORE any work begins; per spec §3.4 the rejection
-    surfaces as a synchronous error to the caller of ``invoke()``
-    rather than as a backend-emission failure.
+    boundary BEFORE any work begins; the rejection surfaces as a
+    synchronous error to the caller of ``invoke()`` rather than as a
+    backend-emission failure.
 
     Returns the validated read-only mapping. Raises :class:`ValueError`
     on any rule violation (with a message naming the offending key).
     """
+    # Spec observability §3.4: boundary validation, synchronous rejection.
     if mapping is None:
         return _EMPTY_METADATA
     if not isinstance(mapping, dict):

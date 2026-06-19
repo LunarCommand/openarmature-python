@@ -5,12 +5,11 @@
 
 """Unit tests for `tool_choice` validation and wire mapping.
 
-Per spec llm-provider §5 (amended by proposal 0025): `tool_choice`
-is one of `"auto"`, `"required"`, `"none"`, or a `ForceTool` record;
-violations of the three pre-send validation rules (required-with-
-empty-tools, force-specific-with-empty-tools, force-specific-with-
-name-not-in-tools) raise `ProviderInvalidRequest` (§7's existing
-category — no new error category per the proposal's framing).
+`tool_choice` is one of `"auto"`, `"required"`, `"none"`, or a
+`ForceTool` record; violations of the three pre-send validation rules
+(required-with-empty-tools, force-specific-with-empty-tools, force-
+specific-with-name-not-in-tools) raise `ProviderInvalidRequest`
+(an existing category, not a new one).
 """
 
 from __future__ import annotations

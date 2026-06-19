@@ -1,8 +1,8 @@
 """Conformance fixture harness — typed parsing for the four spec capabilities.
 
-Phase 0 (per the implementation plan): every fixture under
+Every fixture under
 ``openarmature-spec/spec/<capability>/conformance/`` lands as a typed pydantic
-config. Phases 1–6 add runtime interpretation under ``harness/runtime/``;
+config. Later stages add runtime interpretation under ``harness/runtime/``;
 they never re-touch parsing.
 
 Public surface:

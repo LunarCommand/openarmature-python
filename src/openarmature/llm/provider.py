@@ -100,8 +100,8 @@ class Provider(Protocol):
                 supplied, the implementation constrains the model's
                 output to the schema and populates ``Response.parsed``
                 with the validated value.
-            tool_choice: Optional tool-choice constraint (spec §5). One
-                of ``"auto"``, ``"required"``, ``"none"``, or a
+            tool_choice: Optional tool-choice constraint. One of
+                ``"auto"``, ``"required"``, ``"none"``, or a
                 :class:`ForceTool` record. When ``None`` (the default)
                 the wire ``tool_choice`` field is omitted and the
                 provider's own default applies. Pre-send validation
@@ -213,9 +213,9 @@ def validate_tool_choice(
     tool_choice: ToolChoice | None,
     tools: Sequence[Tool] | None,
 ) -> None:
-    """Validate ``tool_choice`` against ``tools`` per spec §5.
+    """Validate ``tool_choice`` against ``tools``.
 
-    Raises :class:`ProviderInvalidRequest` (the §7
+    Raises :class:`ProviderInvalidRequest` (the
     ``provider_invalid_request`` category) on:
 
     - ``tool_choice`` supplied as a string that is not one of
@@ -229,11 +229,12 @@ def validate_tool_choice(
     - ``tool_choice=ForceTool(name=X)`` supplied with ``X`` not in the
       supplied tools list.
 
-    No-op when ``tool_choice`` is ``None`` (the default — preserves
-    pre-0025 behavior; the wire field is omitted and the provider's
-    own default applies). ``tool_choice="auto"`` and
-    ``tool_choice="none"`` have no ``tools``-related preconditions.
+    No-op when ``tool_choice`` is ``None`` (the default — the wire
+    field is omitted and the provider's own default applies).
+    ``tool_choice="auto"`` and ``tool_choice="none"`` have no
+    ``tools``-related preconditions.
     """
+    # Spec llm-provider §5 (tool_choice) / §7 (provider_invalid_request).
     if tool_choice is None:
         return
     # Two-layer type defense at the API boundary. Pyright catches the

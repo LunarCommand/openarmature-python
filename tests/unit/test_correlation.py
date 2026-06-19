@@ -1,6 +1,6 @@
 """Cross-backend correlation primitives — no OTel deps.
 
-Verifies the spec observability §3 contract independently of any
+Verifies the cross-backend correlation contract independently of any
 backend mapping. Lives in the unit test root rather than under any
 backend-specific directory because correlation_id is core: it MUST be
 readable from any user code (node bodies, middleware, observers) even
@@ -34,16 +34,16 @@ async def _read_correlation(state: _S) -> dict[str, str]:
 
 async def test_caller_supplied_correlation_id_visible_inside_node() -> None:
     """User code in a node body can read the supplied correlation_id
-    via :func:`current_correlation_id` — the spec's mandated
-    cross-backend join key surface."""
+    via :func:`current_correlation_id`, the cross-backend join key
+    surface."""
     g = GraphBuilder(_S).add_node("read", _read_correlation).add_edge("read", END).set_entry("read").compile()
     final = await g.invoke(_S(), correlation_id="my-business-request-42")
     assert final.captured == "my-business-request-42"
 
 
 async def test_auto_generated_correlation_id_is_uuidv4() -> None:
-    """Per spec §3.1, when the caller does not supply a correlation_id
-    the framework MUST auto-generate a canonical 36-character UUIDv4."""
+    """When the caller does not supply a correlation_id the framework
+    MUST auto-generate a canonical 36-character UUIDv4."""
     g = GraphBuilder(_S).add_node("read", _read_correlation).add_edge("read", END).set_entry("read").compile()
     final = await g.invoke(_S())  # no caller correlation_id
     cid = final.captured
@@ -56,8 +56,8 @@ async def test_auto_generated_correlation_id_is_uuidv4() -> None:
 
 
 async def test_correlation_id_resets_between_invocations() -> None:
-    """Spec §3.1: ``Reset the context after the invocation completes
-    so subsequent invocations get fresh correlation IDs.``"""
+    """The context resets after the invocation completes so subsequent
+    invocations get fresh correlation IDs."""
     # Outside any invocation, correlation_id is None.
     assert current_correlation_id() is None
     g = GraphBuilder(_S).add_node("read", _read_correlation).add_edge("read", END).set_entry("read").compile()
@@ -89,8 +89,8 @@ async def test_correlation_id_isolated_across_concurrent_invocations() -> None:
 
 
 async def test_correlation_id_and_invocation_id_are_structurally_distinct() -> None:
-    """Spec observability §3.2: ``correlation_id`` and
-    ``invocation_id`` serve different purposes and MUST NOT be
+    """``correlation_id`` and ``invocation_id`` serve different
+    purposes and MUST NOT be
     conflated. Drive a real invocation with a checkpointer and read
     both ids from the saved record (deterministic) — plus an in-body
     cross-check via the public ContextVar readers — to verify the
@@ -148,15 +148,15 @@ def test_current_correlation_id_returns_none_outside_invocation() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Phase 5 / §10.4 step 3 + 4 — resume preserves correlation_id, mints new
+# §10.4 step 3 + 4 — resume preserves correlation_id, mints new
 # invocation_id. Already covered in test_checkpoint.py at the record
 # level; here we additionally verify the user-visible ContextVar half.
 # ---------------------------------------------------------------------------
 
 
 async def test_resume_preserves_correlation_id_visible_to_user_code() -> None:
-    """Spec §10.4 step 3: resume MUST preserve the original
-    correlation_id verbatim. The Phase 5 checkpoint test verifies
+    """Resume MUST preserve the original correlation_id verbatim. The
+    conformance checkpoint test verifies
     this at the saved-record level; here we additionally verify it
     propagates to the ContextVar that user code reads from inside
     node bodies during the resumed invocation."""

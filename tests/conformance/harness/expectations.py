@@ -7,12 +7,11 @@ fixture wouldn't have ``span_tree``). Modelling each cleanly catches
 fixture authors mixing keys across capabilities, and gives runtime code
 in :mod:`runtime` typed access to the assertion payload it needs.
 
-Phase 0 typing depth: TOP-LEVEL keys per capability are exhaustively
-typed (catches new directives the spec adds). The nested payload values
+Typing depth: TOP-LEVEL keys per capability are exhaustively
+typed (catches new fixture directives). The nested payload values
 underneath (e.g., individual span tree entries, observer event details)
 are kept loose as ``list[Any]`` / ``dict[str, Any]`` because the runtime
-phases that consume them are the right place to tighten — Phase 1
-will type observer-event entries, Phase 5 will type span_tree, etc.
+code that consumes them is the right place to tighten.
 """
 
 from __future__ import annotations
@@ -35,7 +34,7 @@ class GraphEngineExpected(_ForbidExtras):
     """Expected block for graph-engine fixtures (001–018).
 
     Top-level keys union'd across every fixture in
-    ``spec/graph-engine/conformance/`` at v0.8.0.
+    ``spec/graph-engine/conformance/``.
     """
 
     final_state: dict[str, Any] | None = None
@@ -44,12 +43,12 @@ class GraphEngineExpected(_ForbidExtras):
     # Two shapes seen in fixtures:
     # - dict[observer_name, list[event_dict]] — most fixtures
     # - list[event_dict] flat — pipeline-utilities/011 (single-observer)
-    # Permissive ``Any`` until Phase 1 (engine retrofit) tightens.
+    # Permissive ``Any`` until the engine retrofit tightens.
     observer_events: Any = None
     delivery_order: list[dict[str, Any]] | None = None
     observer_event_invariants: dict[str, Any] | None = None
     # 020 — proposal-0012 fixture: assertions about edge-resolution
-    # failure event shapes. Permissive dict until Phase 1.
+    # failure event shapes. Permissive dict until the engine retrofit.
     # 022–024 (proposal 0010 §6 Drain) — drain-summary invariants
     # (drain_returned_within_timeout, graph_state_intact_after_timeout,
     # drain_waited_for_all_events) ride on the same field.
@@ -90,7 +89,7 @@ class LlmProviderRaisesAssertion(BaseModel):
 
     Permissive — fixtures attach assertion-specific knobs like
     ``retry_after_seconds`` (rate-limit fixture) without restructuring
-    the type. The runtime in Phase 2 validates the keys it reads.
+    the type. The runtime validates the keys it reads.
     """
 
     model_config = ConfigDict(extra="allow")
@@ -130,7 +129,7 @@ class PipelineUtilitiesExpected(_ForbidExtras):
     # Two shapes seen in fixtures:
     # - dict[observer_name, list[event_dict]] — most fixtures
     # - list[event_dict] flat — pipeline-utilities/011 (single-observer)
-    # Permissive ``Any`` until Phase 1 (engine retrofit) tightens.
+    # Permissive ``Any`` until the engine retrofit tightens.
     observer_events: Any = None
     observer_event_invariants: dict[str, Any] | None = None
     # Singular form used by 015 — assert one specific event shape.

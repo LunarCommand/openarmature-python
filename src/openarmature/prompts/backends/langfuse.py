@@ -5,12 +5,13 @@ Fetches prompts from Langfuse's prompt registry through OA's
 module only when ``langfuse`` is installed (``backends/__init__`` does
 not import it, so the base package stays langfuse-free).
 
-Per proposal 0046 (v0.38.0): both Langfuse TEXT and CHAT prompts are
-supported.  Text prompts return a :class:`TextPrompt`; chat prompts
-return a :class:`ChatPrompt` with one :class:`ContentSegment` per
-Langfuse chat message.  Langfuse chat placeholders map to
+Both Langfuse TEXT and CHAT prompts are supported.  Text prompts
+return a :class:`TextPrompt`; chat prompts return a
+:class:`ChatPrompt` with one :class:`ContentSegment` per Langfuse
+chat message.  Langfuse chat placeholders map to
 :class:`PlaceholderSegment` entries.
 """
+# Proposal 0046 (v0.38.0): Langfuse text + chat prompt support.
 
 from __future__ import annotations
 
@@ -227,9 +228,9 @@ def _chat_segments_from_normalized(
     :class:`ChatSegment` entries.  Placeholder segments use
     ``model_construct`` so a Langfuse-stored prompt with a
     malformed placeholder name (e.g., leading-digit) reaches the
-    render path before raising — the spec-normative §11 error
+    render path before raising — the normative render-time error
     trigger.  Content segments go through the normal pydantic
-    constructor since their fields don't carry spec-§11 constraints
+    constructor since their fields don't carry the same constraints
     that hand-built callers would benefit from catching earlier."""
     for entry in entries:
         if entry.get("type") == "placeholder":

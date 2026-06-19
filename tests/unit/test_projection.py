@@ -29,8 +29,8 @@ class ChildNoOverlap(State):
 
 
 def test_project_in_returns_subgraph_defaults() -> None:
-    """Per spec v0.2.0 §2: default projection-in is no projection — subgraph
-    starts from its own field defaults regardless of parent state."""
+    """Default projection-in is no projection — subgraph starts from
+    its own field defaults regardless of parent state."""
 
     proj = FieldNameMatching[Parent, ChildOverlap]()
     sub = proj.project_in(Parent(shared="ignored"), ChildOverlap)
@@ -106,7 +106,7 @@ def test_explicit_mapping_outputs_projects_only_named_pairs() -> None:
 
 
 def test_explicit_mapping_outputs_absent_falls_back_to_field_name_matching() -> None:
-    """`outputs=None` (absent) falls back to spec default field-name matching;
+    """`outputs=None` (absent) falls back to the default field-name matching;
     `outputs={}` (present, empty) projects nothing."""
 
     sub_final = ChildEM(input=1, result=2, note="from-child")

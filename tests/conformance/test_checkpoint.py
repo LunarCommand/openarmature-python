@@ -1,14 +1,15 @@
 """Run every spec checkpoint conformance fixture (024-031, 048-054)
 against the engine.
 
-Phase 5 / proposal-0009 scope: pipeline-utilities §10. Drives the real
-:class:`InMemoryCheckpointer` (with optional fan-out internal save
-batching per §10.11.4) through the engine's save+resume path end-to-end,
+Drives the real :class:`InMemoryCheckpointer` (with optional fan-out
+internal save batching) through the engine's save+resume path
+end-to-end,
 asserting against the fixture's ``saved_record_assertions`` (including
 ``fan_out_progress`` matchers), ``expected.checkpoint_saves``,
 ``invariants``, and resume expectations (including per-instance
 ``instances_executed_during_resume`` / ``instances_skipped_during_resume``
-and per-instance attempt-count assertions from proposal 0009 fixtures).
+and per-instance attempt-count assertions from the per-instance resume
+fixtures).
 
 Fixture-by-fixture status:
 
@@ -17,15 +18,14 @@ Fixture-by-fixture status:
 - 026 record-shape — supported.
 - 027 attempt-index-resets-on-resume — needs a resume-aware
   ``flaky_resume_aware`` test seam in the adapter; deferred.
-- 028 fan-out-atomic-restart — REMOVED in spec v0.18.0 (replaced by
-  per-instance resume contract). The fixture file no longer exists.
+- 028 fan-out-atomic-restart — REMOVED (replaced by the per-instance
+  resume contract). The fixture file no longer exists.
 - 029 subgraph-resume — supported (uses plain ``flaky``).
 - 030 checkpoint-not-found — supported.
 - 031 correlation-id-preserved-across-resume — record-level
   assertions supported here; the OTel span/log assertions are
-  gated until Phase 6 lands the observability mapping.
-- 048-054 per-instance fan-out resume contract (proposal 0009) —
-  supported.
+  gated until the observability mapping lands.
+- 048-054 per-instance fan-out resume contract — supported.
 """
 
 from __future__ import annotations
@@ -130,7 +130,7 @@ class _CapturingCheckpointer:
     in order so the harness can assert against the fixture's
     ``expected.checkpoint_saves`` block. Implements the
     :class:`Checkpointer` Protocol shape AND the optional
-    ``save_fan_out_internal`` hook (per §10.11.4 batching) so the
+    ``save_fan_out_internal`` hook (batching) so the
     engine routes inner-instance saves here.
 
     ``abort_after_instance``: when set, the wrapper raises
@@ -138,8 +138,8 @@ class _CapturingCheckpointer:
     the named instance index from ``not_started`` / ``in_flight`` to
     ``completed``. Simulates a crash at that exact point — used by
     fixture 052 to test collect-mode error-record rollforward, and by
-    the ``crash_injection: {after_fan_out_instance}`` directive (proposal
-    0070). ``abort_after_node``: the same simulated crash AFTER the save
+    the ``crash_injection: {after_fan_out_instance}`` directive.
+    ``abort_after_node``: the same simulated crash AFTER the save
     that records the named node in ``completed_positions`` — the
     ``crash_injection: {after_node}`` boundary.
     """
@@ -317,7 +317,7 @@ def _build_capturing(spec: Mapping[str, Any]) -> _CapturingCheckpointer:
     The fixture's ``checkpointer`` field accepts two shapes:
     - ``"in_memory"``: default no-batching backend.
     - ``{kind: in_memory_batched, fan_out_internal_save_batching: {flush_every: N}}``:
-      the §10.11.4 batched backend with N-save flush interval.
+      the batched backend with N-save flush interval.
 
     The fixture's fan-out node may also carry ``abort_after_instance: N``
     — a harness-level directive that simulates a crash after the named
@@ -818,7 +818,7 @@ async def _run_one_case(spec: Mapping[str, Any], *, top_level: Mapping[str, Any]
         _assert_resume_invariants(invariants_block, final_resume, flaky_per_index_recorders)
 
     # Fixture 031: assert correlation_id preserved + invocation_id
-    # changed. Span/log assertions deferred to Phase 6 — observability
+    # changed. Span/log assertions deferred — observability
     # isn't wired yet. Skip those cleanly here.
     if "correlation_id_assertions" in resume_expected:
         cid_block = cast("Mapping[str, Any]", resume_expected["correlation_id_assertions"])
@@ -913,8 +913,8 @@ def _assert_saved_record_from(
     :func:`_assert_saved_record` but the caller supplies the record
     directly (used for fixtures where the assertion targets the
     loaded record rather than the last in-memory save call —
-    e.g., the §10.11.4 batching case where buffered saves are
-    invisible to ``load``)."""
+    e.g., the batching case where buffered saves are invisible to
+    ``load``)."""
     if "completed_positions" in block:
         expected_positions = cast("list[Mapping[str, Any]]", block["completed_positions"])
         actual = [

@@ -1,6 +1,6 @@
 """Runtime-error categories not exercised by the conformance suite.
 
-Spec §4 defines five runtime categories. The conformance fixtures cover
+There are five runtime-error categories. The conformance fixtures cover
 `node_exception` (009) and `routing_error` (008) directly and reach the
 others incidentally via 001–006. These tests target the three categories no
 fixture triggers: `edge_exception`, `reducer_error`, and
@@ -101,7 +101,7 @@ async def test_state_validation_error_on_unknown_field() -> None:
 
 async def test_subgraph_projection_error_wrapped_as_node_exception() -> None:
     """Errors from a subgraph's projection (project_in / project_out) are
-    NOT spec §4 categories on their own. The engine wraps them as
+    NOT runtime-error categories on their own. The engine wraps them as
     NodeException tagged with the subgraph wrapper's name so callers see
     a uniform error contract."""
 
@@ -158,8 +158,8 @@ async def test_subgraph_projection_error_wrapped_as_node_exception() -> None:
 
 
 async def test_routing_error_lands_on_preceding_node_completed_event() -> None:
-    """Per §3 step 3 (revised) + §6 (revised): a `routing_error` from a
-    conditional edge that returns an undeclared target lands on the
+    """A `routing_error` from a conditional edge that returns an
+    undeclared target lands on the
     preceding node's `completed` event with `error` populated, NOT in a
     separate event pair. The downstream node never fires events."""
     from openarmature.graph import (
@@ -218,8 +218,8 @@ async def test_routing_error_lands_on_preceding_node_completed_event() -> None:
 
 
 async def test_edge_exception_lands_on_preceding_node_completed_event() -> None:
-    """Per §3 step 3 (revised) + §6 (revised): an `edge_exception` from a
-    conditional edge function raising lands on the preceding node's
+    """An `edge_exception` from a conditional edge function raising
+    lands on the preceding node's
     `completed` event with `error` populated, NOT in a separate event
     pair. The downstream node never fires events."""
     from openarmature.graph import (

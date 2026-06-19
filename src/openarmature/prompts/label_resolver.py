@@ -25,10 +25,12 @@ _DEFAULT_KEY = "default"
 class LabelResolver(Protocol):
     """Resolves a prompt name to the label to fetch under.
 
-    Implementations MUST follow the §7 fallback chain in
-    :meth:`resolve`: per-name override > default override > spec
-    fallback ``"production"``.
+    Implementations MUST follow the fallback chain in
+    :meth:`resolve`: per-name override > default override > the
+    ``"production"`` fallback.
     """
+
+    # Spec prompt-management §7: label fallback chain.
 
     def resolve(self, name: str) -> str:
         """Return the label to fetch ``name`` under.

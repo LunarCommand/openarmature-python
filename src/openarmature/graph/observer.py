@@ -22,7 +22,7 @@ This module defines:
 - `_dispatch`: enqueues an event for the worker to deliver.
 - `deliver_loop`: the worker coroutine. Reads items from the queue and
   calls each observer in order, filtering by subscribed phase and
-  isolating exceptions via `warnings.warn` per spec.
+  isolating exceptions via `warnings.warn`.
 """
 
 from __future__ import annotations
@@ -110,16 +110,16 @@ class Observer(Protocol):
       ``fan_out_index``, ``branch_name``) so rich backends can update
       their open observations in place
       (``span.set_attribute(openarmature.user.<key>, v)`` for OTel,
-      ``observation.update(metadata=...)`` for Langfuse). Per spec §6
-      this variant is NOT subject to the ``phases`` filter — every
+      ``observation.update(metadata=...)`` for Langfuse). This variant
+      is NOT subject to the ``phases`` filter — every
       subscribed observer sees it and isinstance-narrows to decide
       whether to act. Simple user observers typically early-return
       after ``isinstance(event, NodeEvent)`` checks.
     - :class:`InvocationStartedEvent` — emitted once per invocation
       before any node fires. Carries the engine-constructed
       ``initial_state`` so Trace-level backends (Langfuse) can
-      populate ``trace.input`` via the proposal 0043 three-lever
-      decision tree. NOT subject to the ``phases`` filter; OTel-only
+      populate ``trace.input`` via the three-lever decision tree. NOT
+      subject to the ``phases`` filter; OTel-only
       observers ignore it via the isinstance gate.
     - :class:`InvocationCompletedEvent` — emitted once per invocation
       after the last node fires (on both the success path and the
@@ -283,10 +283,10 @@ class _QueuedItem:
     without the worker needing to know the graph topology.
 
     ``event`` is the union of ``NodeEvent`` (started / completed /
-    checkpoint phases), ``MetadataAugmentationEvent`` (proposal 0040,
-    side-channel augmentation), and the two invocation-boundary
-    events ``InvocationStartedEvent`` / ``InvocationCompletedEvent``
-    (proposal 0043, Trace-level input/output sourcing). The delivery
+    checkpoint phases), ``MetadataAugmentationEvent`` (side-channel
+    augmentation), and the two invocation-boundary events
+    ``InvocationStartedEvent`` / ``InvocationCompletedEvent``
+    (Trace-level input/output sourcing). The delivery
     worker branches by type to apply the right delivery contract
     (phase-filter for ``NodeEvent``, no filter for the other three).
     """
@@ -344,10 +344,10 @@ class DrainSummary:
     delivered to every subscribed observer before cancellation, and
     `timeout_reached is True`.
 
-    The spec-mandated minimum is these two fields. Implementations MAY
+    These two fields are the required minimum. Implementations MAY
     extend the shape with diagnostic detail (per-observer counts,
-    sampled event metadata) in subsequent versions; v0.19.0 ships the
-    minimum.
+    sampled event metadata) in subsequent versions; this version ships
+    the minimum.
     """
 
     undelivered_count: int
@@ -367,17 +367,17 @@ class _FanOutInstanceState:
     not_started -> in_flight -> completed.
 
     - ``result`` holds the per-instance contribution to the fan-out
-      accumulator, set when ``state == "completed"``. Per spec
-      §10.11 this is "the value contributed to the ``target_field``
-      bucket" (success path) or "the error entry contributed to the
+      accumulator, set when ``state == "completed"``: "the value
+      contributed to the ``target_field`` bucket" (success path) or
+      "the error entry contributed to the
       ``errors_field`` bucket" (collect-mode failure). The harness
       projects this into the frozen ``FanOutInstanceProgress.result``
       verbatim.
     - ``result_is_error`` distinguishes success contributions
       (``False``) from collect-mode error contributions (``True``).
       Internal flag — not exposed on the public
-      ``FanOutInstanceProgress`` shape because the spec presents
-      ``result`` as a single typed entry per the parent state schema.
+      ``FanOutInstanceProgress`` shape because ``result`` is exposed
+      as a single typed entry per the parent state schema.
       ``FanOutNode.run_with_context`` consults this on resume to
       route the rolled-forward contribution through the
       ``errors_field`` bucket rather than ``target_field``.
@@ -385,14 +385,14 @@ class _FanOutInstanceState:
       ``extra_outputs`` mapping (parent-field -> sub-field) so that
       per-instance resume preserves the FULL per-instance contribution
       (not just the ``target_field`` slice). Internal — not exposed on
-      the public ``FanOutInstanceProgress`` shape because the spec
-      describes ``result`` as a single accumulator entry.
+      the public ``FanOutInstanceProgress`` shape because ``result``
+      is a single accumulator entry.
     - ``completed_inner_positions`` accumulates ``NodePosition`` entries
       from inner nodes that complete inside this instance's subgraph
       execution. Captures the instance's progress for observational
       purposes when an in_flight save snapshot fires; not used as a
       resume re-entry point (the instance re-enters at its subgraph's
-      declared entry node per §10.7).
+      declared entry node).
     """
 
     state: Literal["completed", "in_flight", "not_started"] = "not_started"
@@ -570,8 +570,8 @@ class _InvocationContext:
 
     def full_observers(self) -> tuple[SubscribedObserver, ...]:
         """Return the ordered observer list to deliver for events from
-        this depth. Per spec §6: graph-attached (outermost → innermost),
-        then invocation-scoped (passed to the outermost invoke)."""
+        this depth: graph-attached (outermost → innermost), then
+        invocation-scoped (passed to the outermost invoke)."""
         return self.graph_attached + self.invocation_scoped
 
     def descend_into_subgraph(
@@ -593,7 +593,7 @@ class _InvocationContext:
 
         Checkpointing fields propagate unchanged: subgraph-internal
         nodes save to the same backend with the same invocation_id
-        (per spec §10.3; one save per inner-node completion).
+        (one save per inner-node completion).
         """
         return _InvocationContext(
             queue=self.queue,
@@ -638,10 +638,10 @@ class _InvocationContext:
 
         Same shape as ``descend_into_subgraph`` but stamps the fan-out
         index onto the new context so every inner-node event carries it.
-        Per spec §9 the index is the instance's 0-based position.
+        The index is the instance's 0-based position.
 
-        Per pipeline-utilities §10.3 (revised by proposal 0009): fan-out
-        instance internal nodes DO produce checkpoint saves. The
+        Fan-out instance internal nodes DO produce checkpoint saves.
+        The
         checkpointer reference propagates unchanged so an inner node's
         ``completed`` event triggers a save; the engine's save path
         projects the shared ``fan_out_progress_state`` into the record's
@@ -695,8 +695,8 @@ class _InvocationContext:
         """Build the context for one parallel-branches branch's
         subgraph invocation.
 
-        Per pipeline-utilities §11.6 the parallel-branches node looks
-        to outer middleware like a single dispatch; inner-branch
+        The parallel-branches node looks to outer middleware like a
+        single dispatch; inner-branch
         events come from the branch's subgraph execution. Stamps the
         namespace prefix with the parallel-branches node name so
         inner events nest under it (mirrors
@@ -706,11 +706,11 @@ class _InvocationContext:
         the ``observability.correlation._branch_name_var`` ContextVar
         — set inside the branch's task closure so ``copy_context``
         inherits it through the subgraph's execution.  The PER-DEPTH
-        ``branch_name_chain`` (proposal 0045) is extended here on the
+        ``branch_name_chain`` is extended here on the
         context so the engine can drive the chain ContextVar at
         every inner-node execution site.
 
-        Per §11.9 / §10.7 atomic-restart: drops the checkpointer
+        Atomic-restart: drops the checkpointer
         and pending_resume_states (a crash mid-dispatch re-runs the
         whole parallel-branches node from scratch on resume; the
         branches' inner saves wouldn't be useful).
@@ -776,18 +776,18 @@ def _dispatch(
       engine-task scope (e.g., the OTel observer setting
       ``current_active_observer_span`` for the engine to attach into
       the OTel context) can do so before the node body runs.
-    - :class:`MetadataAugmentationEvent` (proposal 0040): a side-
-      channel augmentation event emitted by
+    - :class:`MetadataAugmentationEvent`: a side-channel augmentation
+      event emitted by
       ``set_invocation_metadata`` mid-invocation. Bypasses the
       ``prepare_sync`` branch entirely — the sync-prep contract is
       anchored on ``"started"``, which only ``NodeEvent`` carries.
       Queued onto the same serial worker so observers see it in
       strict order with the surrounding node events.
     - :class:`InvocationStartedEvent` /
-      :class:`InvocationCompletedEvent` (proposal 0043): invocation-
-      boundary events the engine enqueues at invocation entry / exit
-      so Trace-level backends can populate ``trace.input`` /
-      ``trace.output`` via the §8.4.1 three-lever decision tree.
+      :class:`InvocationCompletedEvent`: invocation-boundary events the
+      engine enqueues at invocation entry / exit so Trace-level
+      backends can populate ``trace.input`` / ``trace.output`` via the
+      three-lever decision tree.
       Bypass ``prepare_sync`` (same rationale as
       ``MetadataAugmentationEvent``: not a node-phase event).
 
@@ -883,10 +883,10 @@ async def deliver_loop(
       the event's phase do NOT receive it. Phase filter applies at
       delivery, not dispatch; the engine still produces both events
       for every attempt.
-    - For :class:`MetadataAugmentationEvent` (proposal 0040) and the
-      two invocation-boundary events :class:`InvocationStartedEvent`
-      / :class:`InvocationCompletedEvent` (proposal 0043), the
-      ``phases`` filter is bypassed entirely — none of those are
+    - For :class:`MetadataAugmentationEvent` and the two
+      invocation-boundary events :class:`InvocationStartedEvent` /
+      :class:`InvocationCompletedEvent`, the ``phases`` filter is
+      bypassed entirely — none of those are
       node-phase events, so every subscribed observer receives them
       regardless of ``phases``. Observers ``isinstance``-narrow on
       the first line and choose whether to act.

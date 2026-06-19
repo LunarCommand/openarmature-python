@@ -21,7 +21,7 @@ class PromptGroup(BaseModel):
         group_name: Stable identifier for this group pattern.
         members: Ordered sequence of at least two PromptResult
             instances. Order matches the application's intended call
-            sequence; the spec does not require sequential execution.
+            sequence; sequential execution is not required.
     """
 
     model_config = ConfigDict(extra="forbid")

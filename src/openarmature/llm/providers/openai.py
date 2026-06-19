@@ -370,7 +370,7 @@ class OpenAIProvider:
         class; when supplied as a JSON Schema dict,
         ``Response.parsed`` is the deserialized dict.
 
-        ``tool_choice`` is validated against ``tools`` per spec §5:
+        ``tool_choice`` is validated against ``tools``:
         ``"required"`` and the ``ForceTool`` record both demand
         non-empty ``tools``, and ``ForceTool.name`` must appear in the
         supplied list. Violations raise ``provider_invalid_request``
@@ -589,7 +589,7 @@ class OpenAIProvider:
 
         Sources identity / scoping fields from the calling-node
         ContextVars and outcome fields from the response. Request-side
-        fields (per proposal 0057) are passed through from the
+        fields are passed through from the
         provider's complete() local state — serialized message list,
         the gen_ai.request.* parameter mapping, the RuntimeConfig
         extras, the prompt-context snapshots taken at dispatch time,
@@ -669,17 +669,17 @@ class OpenAIProvider:
         """Construct the typed LlmFailedEvent for the failure path.
 
         Sources identity / scoping fields from the calling-node
-        ContextVars and failure fields from the raised §7 exception.
+        ContextVars and failure fields from the raised exception.
         Field set mirrors LlmCompletionEvent (identity + request-side)
-        plus the three failure-specific fields per proposal 0058.
+        plus the three failure-specific fields.
 
         ``error_type`` defaults to the exception class name — falls
         into the "upstream exception class name" style documented in
-        the spec field table. Providers that have a vendor error code
+        the field table. Providers that have a vendor error code
         available (e.g. ``rate_limit_exceeded`` for OpenAI) can
-        override with vendor-specific detail in a future spec
-        proposal; for now the class name is the safest default since
-        every LlmProviderError subclass carries one.
+        override with vendor-specific detail in a future proposal; for
+        now the class name is the safest default since every
+        LlmProviderError subclass carries one.
         """
 
         namespace = current_namespace_prefix()
@@ -1178,7 +1178,8 @@ def _augment_messages_with_schema_directive(
 
 
 def _message_to_wire(msg: Message) -> dict[str, Any]:
-    """Spec §8.1.1 request mapping for one message."""
+    """Request mapping for one message."""
+    # Spec llm-provider §8.1.1.
     if isinstance(msg, SystemMessage):
         return {"role": "system", "content": msg.content}
     if isinstance(msg, UserMessage):
@@ -1299,14 +1300,14 @@ def _tool_to_wire(tool: Tool) -> dict[str, Any]:
 
 
 def _wire_to_assistant_message(wire: dict[str, Any], *, lenient_args: bool) -> AssistantMessage:
-    """Parse OpenAI-shaped assistant message into spec §3 form.
+    """Parse an OpenAI-shaped assistant message into canonical form.
 
     When ``lenient_args=True`` (i.e. ``finish_reason == "error"``),
     tool calls with unparseable JSON arguments populate
-    ``arguments=None`` instead of raising. Per spec §3 "Validation
-    under finish_reason: error" — degraded responses surface what
-    they can; repair is a caller concern.
+    ``arguments=None`` instead of raising — degraded responses surface
+    what they can; repair is a caller concern.
     """
+    # Spec llm-provider §3: validation under finish_reason "error".
     content_raw = wire.get("content") or ""
     content: str = content_raw if isinstance(content_raw, str) else ""
     raw_tool_calls = cast("list[Any]", wire.get("tool_calls") or [])

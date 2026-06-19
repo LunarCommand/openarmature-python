@@ -522,7 +522,7 @@ def test_usage_negative_token_count_rejected_at_construction() -> None:
 async def test_complete_negative_usage_surfaces_as_invalid_response() -> None:
     """A wire response carrying a negative token count MUST surface as
     ``provider_invalid_response`` rather than silently passing through —
-    spec §6 token counts are non-negative integers."""
+    token counts are non-negative integers."""
 
     def _bad(_req: httpx.Request) -> httpx.Response:
         return httpx.Response(

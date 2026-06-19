@@ -139,14 +139,16 @@ _INVOCATION_ID_RE = re.compile(r"^[A-Za-z0-9._~-]+$")
 def validate_invocation_id(value: object) -> str:
     """Validate a caller-supplied ``invocation_id`` and return it.
 
-    Per observability §5.1 a caller-supplied id MAY be any non-empty
-    URL-safe string. Rejects empty / non-string / non-URL-safe values
-    at the ``invoke()`` boundary so the violation surfaces
-    synchronously to the caller rather than as a downstream trace-id
-    derivation failure. Typed ``object`` (like
-    :func:`validate_invocation_metadata`) so the boundary check guards
-    against untyped callers. Raises :class:`ValueError`.
+    A caller-supplied id MAY be any non-empty URL-safe string. Rejects
+    empty / non-string / non-URL-safe values at the ``invoke()``
+    boundary so the violation surfaces synchronously to the caller
+    rather than as a downstream trace-id derivation failure. Typed
+    ``object`` (like :func:`validate_invocation_metadata`) so the
+    boundary check guards against untyped callers. Raises
+    :class:`ValueError`.
     """
+    # Spec observability §5.1: a caller-supplied invocation_id MAY be
+    # any non-empty URL-safe string.
     if not isinstance(value, str):
         raise ValueError(f"invocation_id must be a string; got {type(value).__name__}")
     if not value:
@@ -161,7 +163,7 @@ def validate_invocation_id(value: object) -> str:
 
 # ---------------------------------------------------------------------------
 # Active observer set — for capability backends emitting from outside the
-# engine's per-step path (llm-provider span hook in Phase 6, future
+# engine's per-step path (llm-provider span hook, future
 # Langfuse/Datadog backends, user-written instrumented capabilities).
 # ---------------------------------------------------------------------------
 
@@ -204,7 +206,7 @@ def _reset_active_observers(token: Token[tuple[SubscribedObserver, ...]]) -> Non
 # Active dispatch hook — queue-mediated event emission from outside the
 # engine's per-step path. The engine sets this ContextVar to a closure
 # over the current invocation's delivery queue + observer chain;
-# capability backends (the LLM provider span hook in Phase 6, future
+# capability backends (the LLM provider span hook, future
 # Langfuse/Datadog instrumentations) call ``current_dispatch()(event)``
 # to enqueue an event for the same delivery worker the engine uses.
 #

@@ -69,10 +69,10 @@ def _fixture_id(path: Path) -> str:
 def _segment_from_fixture(entry: dict[str, Any]) -> Any:
     """Map one ``chat_template`` entry from a fixture YAML to an OA
     ChatSegment.  Uses ``model_construct`` to bypass construction-time
-    §11 validators — the harness exists to test render-time behavior,
+    validators — the harness exists to test render-time behavior,
     including fixtures that intentionally build prompts violating
     construction-time invariants (placeholder regex, role-block
-    compat).  Render-time enforcement (§11 spec-normative trigger)
+    compat).  Render-time enforcement (the normative trigger)
     still runs; only the construction-time ergonomic-only check is
     bypassed.
 
@@ -166,7 +166,7 @@ def _message_from_fixture(entry: dict[str, Any]) -> Message:
     """Map one fixture placeholder-list entry to an OA ``Message``.
 
     Placeholder injection carries caller-supplied ``Message`` lists
-    so all four llm-provider §3 roles are valid here (``system`` /
+    so all four llm-provider roles are valid here (``system`` /
     ``user`` / ``assistant`` / ``tool``).  Unknown or misspelled
     roles raise rather than silently coerce to user — fail-closed
     posture symmetric to the Langfuse backend's mapper.
@@ -546,7 +546,7 @@ def _assert_capture_attrs(capture_name: str, actual: Any, expected: dict[str, An
 
 def _message_to_dict_for_compare(message: Message) -> dict[str, Any]:
     """Dump a Message to a plain dict for structural equality against
-    a fixture YAML expected value.  Mirrors the spec's documented
+    a fixture YAML expected value.  Mirrors the documented
     Message shape: ``{role, content}`` with optional extras."""
     dumped = message.model_dump(exclude_none=True)
     # Normalize content-blocks shape: drop pydantic internal

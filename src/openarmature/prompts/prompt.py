@@ -1,13 +1,13 @@
 """Prompt and PromptResult records.
 
-Per proposal 0046 (prompt-management §3.1): two prompt variants land
-on this module — the existing single-string Text-prompt
-(:class:`TextPrompt`, formerly ``Prompt``) and the new role-tagged
-Chat-prompt (:class:`ChatPrompt`) carrying a list of
+Two prompt variants land on this module — the existing single-string
+Text-prompt (:class:`TextPrompt`, formerly ``Prompt``) and the
+role-tagged Chat-prompt (:class:`ChatPrompt`) carrying a list of
 :class:`ChatSegment` entries.  The user-facing union alias
 :data:`Prompt` covers both; callers ``isinstance``-narrow at the
 consumption point.
 """
+# Proposal 0046 (prompt-management §3.1): Text + Chat prompt variants.
 
 from __future__ import annotations
 
@@ -42,8 +42,8 @@ class SamplingConfig(RuntimeConfig):
 # blocks are assistant-side round-trip content and don't sit on
 # the authored-template surface.
 class TextBlockTemplate(BaseModel):
-    """Text content block template.  Renders to an llm-provider
-    §3.1.1 text block carrying the variable-substituted text."""
+    """Text content block template.  Renders to an llm-provider text
+    block carrying the variable-substituted text."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -53,7 +53,7 @@ class TextBlockTemplate(BaseModel):
 
 class ImageURLBlockTemplate(BaseModel):
     """URL image content block template.  Renders to an llm-provider
-    §3.1.2 URL image block; ``url`` is variable-substituted."""
+    URL image block; ``url`` is variable-substituted."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -64,7 +64,7 @@ class ImageURLBlockTemplate(BaseModel):
 
 class ImageInlineBlockTemplate(BaseModel):
     """Inline base64 image content block template.  Renders to an
-    llm-provider §3.1.2 inline image block; ``base64_data`` and
+    llm-provider inline image block; ``base64_data`` and
     ``media_type`` are variable-substituted."""
 
     model_config = ConfigDict(extra="forbid")
@@ -89,20 +89,19 @@ _PLACEHOLDER_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 class ContentSegment(BaseModel):
     """One role-tagged content segment of a chat prompt.
 
-    Per spec §3.1, ``role`` is one of the three canonical authoring
-    roles from llm-provider §3 (Message shape); the fourth llm-provider
-    §3 role (``"tool"``) is intentionally excluded — tool-result
-    messages have a distinct per-message shape that doesn't map to a
-    template-author surface.  Tool-loop content flows through
-    placeholder segments instead.
+    ``role`` is one of the three canonical authoring roles from the
+    Message shape; the fourth role (``"tool"``) is intentionally
+    excluded — tool-result messages have a distinct per-message shape
+    that doesn't map to a template-author surface.  Tool-loop content
+    flows through placeholder segments instead.
 
     ``content`` is either a single text template (the common case) or
     an ordered non-empty list of :class:`ContentBlockTemplate` entries
     for multimodal user messages (text + image).  Image blocks are
-    user-only per llm-provider §3.1.2 — a non-user role with an
-    image-block-containing list raises ``prompt_render_error`` at
-    render time.  Construction-time validation here surfaces the
-    same condition earlier for ergonomic feedback.
+    user-only — a non-user role with an image-block-containing list
+    raises ``prompt_render_error`` at render time.  Construction-time
+    validation here surfaces the same condition earlier for ergonomic
+    feedback.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -136,7 +135,7 @@ class PlaceholderSegment(BaseModel):
     an empty list injects zero messages (valid; the first-turn case),
     while an absent mapping entry raises ``prompt_render_error``.
 
-    Per spec §3.1 the ``placeholder`` name MUST match
+    The ``placeholder`` name MUST match
     ``[A-Za-z_][A-Za-z0-9_]*`` — ASCII identifier shape — to avoid
     collision with backend placeholder syntax.
     """
@@ -184,7 +183,7 @@ class _PromptBase(BaseModel):
             into ``provider.complete(config=...)`` without translation.
         observability_entities: Optional backend-keyed references to
             first-class entities the prompt has been registered as in
-            observability backends.  Spec-normative key:
+            observability backends.  Recognized key:
             ``langfuse_prompt`` (the Langfuse SDK Prompt-entity ref).
         metadata: Optional backend-supplied metadata.
     """
@@ -205,13 +204,12 @@ class TextPrompt(_PromptBase):
     """An unrendered single-string template plus identity metadata.
 
     Renders to a single :class:`UserMessage` carrying the substituted
-    template text (spec §6.render Text-prompt clause).  Per the
-    proposal 0046 v0.38.0 narrowing, Text-prompts render to exactly
-    one Message with ``role: "user"``; multi-message and multimodal
-    prompts go through :class:`ChatPrompt`.
+    template text.  Text-prompts render to exactly one Message with
+    ``role: "user"``; multi-message and multimodal prompts go through
+    :class:`ChatPrompt`.
 
     ``placeholders`` passed to ``PromptManager.render`` are ignored
-    for Text-prompt rendering per spec §6.
+    for Text-prompt rendering.
     """
 
     kind: Literal["text"] = "text"
@@ -219,8 +217,7 @@ class TextPrompt(_PromptBase):
 
 
 class ChatPrompt(_PromptBase):
-    """A role-tagged, multi-segment chat prompt (spec §3.1
-    *Chat-prompt variant*, proposal 0046 v0.38.0).
+    """A role-tagged, multi-segment chat prompt.
 
     ``chat_template`` is an ordered list of :class:`ChatSegment`
     entries — content segments carrying a role + content (text

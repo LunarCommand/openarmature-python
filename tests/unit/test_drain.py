@@ -6,7 +6,7 @@
 
 """Unit tests for `CompiledGraph.drain(timeout=...)` + `DrainSummary`.
 
-Per spec graph-engine §6 (amended by proposal 0010): drain accepts an
+Drain accepts an
 optional timeout, returns a `DrainSummary` with at least
 `undelivered_count` + `timeout_reached`, MUST cancel workers cleanly
 so the graph remains usable for subsequent invocations.

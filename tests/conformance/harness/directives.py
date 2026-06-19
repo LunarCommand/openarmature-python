@@ -1,6 +1,6 @@
 """Typed directive sub-models — the shapes referenced inside fixtures.
 
-Phase 0 typing strategy: model every key in every fixture, but use
+Typing strategy: model every key in every fixture, but use
 ``dict[str, Any]`` for genuinely polymorphic payloads (notably the inner
 ``state``/``nodes``/``edges`` of recursive subgraph definitions, and the
 update payloads themselves which are arbitrary state-shaped dicts). The
@@ -28,7 +28,7 @@ from pydantic import (
 class _ForbidExtras(BaseModel):
     """Strict — used for the structural skeleton (state schema, node primary
     directive set, edges, observer registration, middleware config split).
-    Catches new directives the spec adds at the load-bearing places."""
+    Catches new fixture directives at the load-bearing places."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -36,9 +36,9 @@ class _ForbidExtras(BaseModel):
 class _AllowExtras(BaseModel):
     """Permissive — used for payload-shape models (mock LLM responses,
     middleware-specific params, flaky/fan-out config). Validates KNOWN
-    keys' types but doesn't reject unknown ones — the spec evolves these
-    payloads frequently and modelling every parameter exhaustively
-    creates churn without proportional value. The Phase 0 strictness
+    keys' types but doesn't reject unknown ones — these payloads evolve
+    frequently and modelling every parameter exhaustively
+    creates churn without proportional value. The strictness
     contract sits at the directive STRUCTURE level (above), not the
     parameter-bag level (here)."""
 
@@ -87,10 +87,10 @@ class StateSchema(_ForbidExtras):
 class EdgeSpec(_AllowExtras):
     """One edge in a graph definition.
 
-    The spec defines static (``from``/``to``) and conditional
-    (``from``/``condition``) edges; observability/011 also uses a
+    Edges come in static (``from``/``to``) and conditional
+    (``from``/``condition``) forms; observability/011 also uses a
     ``when``-shaped predicate. Schema is permissive here so all forms
-    parse — Phase 1 (engine retrofit) interprets each shape against
+    parse — the engine retrofit interprets each shape against
     the engine's edge model.
     """
 
@@ -208,7 +208,7 @@ class UpdateFromFieldSpec(_ForbidExtras):
     """
 
     # Free-form: some fixtures use ``{result: x, multiplier: 2}``, others
-    # ``{score: item}`` with no multiplier. Phase 4 (fan-out runtime) reads
+    # ``{score: item}`` with no multiplier. The fan-out runtime reads
     # whichever keys are present.
     model_config = ConfigDict(extra="allow")
 
@@ -319,12 +319,12 @@ class ParallelBranchSpec(_AllowExtras):
 
 
 class ParallelBranchesSpec(_AllowExtras):
-    """``parallel_branches:`` block on a NodeSpec (pipeline-utilities §11).
+    """``parallel_branches:`` block on a NodeSpec.
 
     Mirrors :class:`FanOutSpec` but topology-driven: M heterogeneous
     branches, each referencing a different compiled subgraph by name
     against the case's top-level ``subgraphs:`` block. Branch insertion
-    order is preserved per §11.8.
+    order is preserved.
     """
 
     branches: dict[str, ParallelBranchSpec]
@@ -333,8 +333,8 @@ class ParallelBranchesSpec(_AllowExtras):
 
 
 class RuntimeConfigSpec(_AllowExtras):
-    """``calls_llm.config`` block — mirrors ``RuntimeConfig`` (llm-provider
-    §6). Used by observability fixtures 016-018 (request-parameter and
+    """``calls_llm.config`` block — mirrors ``RuntimeConfig``. Used by
+    observability fixtures 016-018 (request-parameter and
     extras emission) and by the GenAI semconv set.
 
     Each field maps one-to-one to ``openarmature.llm.response.RuntimeConfig``
@@ -358,7 +358,7 @@ class CallsLlmSpec(_AllowExtras):
     and stores the response (assistant content) in ``stores_response_in``.
     Used by observability fixtures to verify LLM-provider span emission.
 
-    ``config`` (proposal 0024, fixtures 016-018) carries the optional
+    ``config`` (fixtures 016-018) carries the optional
     ``RuntimeConfig`` field set for the call — temperature, max_tokens,
     top_p, seed, and a provider-specific ``extras`` bag.
     """
@@ -396,7 +396,7 @@ class NodeSpec(_ForbidExtras):
       ``error_category``.
     - ``subgraph`` — references a top-level ``subgraph``/``subgraphs``
       definition by name. Companions: ``inputs``, ``outputs`` for explicit
-      mapping (spec v0.2 §2).
+      mapping.
     - ``fan_out`` — see :class:`FanOutSpec`.
     - ``flaky`` and the four ``flaky_*`` variants — harness mocks for
       retry/checkpoint behaviours.
@@ -407,7 +407,7 @@ class NodeSpec(_ForbidExtras):
     - ``emits_log`` — fires a log record with the node's update.
     - ``also_emits_via_global_tracer`` — fires a span on the OTel global
       provider (used to verify isolation).
-    - ``middleware`` — per-node middleware list (spec v0.5 §3).
+    - ``middleware`` — per-node middleware list.
     """
 
     # Primary directives — exactly one of these must be set.
@@ -517,8 +517,8 @@ class TraceRecorderMiddleware(_AllowExtras):
 
 
 class FailureIsolationMiddleware(_AllowExtras):
-    """Canonical failure-isolation middleware (proposal 0050 §6.3,
-    fixtures 058-063). Catches an exception escaping the inner chain and
+    """Canonical failure-isolation middleware (fixtures 058-063).
+    Catches an exception escaping the inner chain and
     returns a configured degraded partial update, emitting a distinct
     ``FailureIsolatedEvent``."""
 
@@ -576,8 +576,8 @@ class MockResponse(_AllowExtras):
 
     Permissive shape because the body's content mirrors OpenAI's wire
     format which is wide and evolving; modelling every field would
-    duplicate the OpenAI schema. The ``llm-provider`` capability's
-    spec.md §8.1 is the authoritative shape.
+    duplicate the OpenAI schema. The OpenAI wire format is the
+    authoritative shape.
     """
 
     status: int | None = None
@@ -617,10 +617,10 @@ class ObserverSpec(_ForbidExtras):
     - ``target`` is ``outer`` (outermost graph) or a subgraph name.
     - ``behavior`` is ``record`` (capture events for assertion) or
       ``raise`` (raise to verify error isolation).
-    - ``phases`` (optional, spec v0.6 §6) — subset of ``{"started",
-      "completed"}`` for per-observer phase subscription.
-    - ``sleep_ms_per_event`` (proposal 0010 §6 Drain conformance) — the
-      slow-observer directive. An int means a constant sleep per
+    - ``phases`` (optional) — subset of ``{"started", "completed"}``
+      for per-observer phase subscription.
+    - ``sleep_ms_per_event`` — the slow-observer directive. An int
+      means a constant sleep per
       event; a dict with ``first_invocation`` / ``subsequent_invocations``
       keys selects per invocation index (used by fixture 024 to slow
       only the first invocation).

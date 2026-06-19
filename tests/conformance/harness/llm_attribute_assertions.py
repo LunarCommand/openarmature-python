@@ -12,7 +12,7 @@
 #   attribute_truncation: {attr: {max_bytes, marker_pattern,
 #                                 utf8_valid,
 #                                 prefix_of_full_serialization}}
-"""Assertion helpers for the v0.17.0 LLM span attribute fixtures."""
+"""Assertion helpers for the LLM span attribute fixtures."""
 
 from __future__ import annotations
 

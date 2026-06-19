@@ -46,8 +46,8 @@ def test_registry_lists_registered_in_order() -> None:
 
 
 def test_registry_rejects_empty_to_version() -> None:
-    """Per spec §10.2 / proposal 0014, empty to_version routes the
-    chain TO the "not declared" sentinel — incoherent. Registration
+    """Empty to_version routes the chain TO the "not declared"
+    sentinel — incoherent. Registration
     MUST reject it. Empty from_version stays valid (documented
     bridging path for pre-declaration records)."""
     registry = MigrationRegistry()
@@ -142,9 +142,9 @@ def test_resolve_chain_picks_shortest_when_unique() -> None:
 
 
 def test_resolve_chain_ambiguous_shortest_paths_raises() -> None:
-    """Diamond with two distinct same-length paths is ambiguous per
-    spec §10.10 / §10.12.2 (proposal 0018). ``resolve_chain``
-    raises the canonical ``CheckpointStateMigrationChainAmbiguous``
+    """Diamond with two distinct same-length paths is ambiguous.
+    ``resolve_chain`` raises the canonical
+    ``CheckpointStateMigrationChainAmbiguous``
     directly — no boundary wrap needed at the resume site; the
     registry's exception contract is one type regardless of when
     ambiguity surfaces (register vs resolve)."""
@@ -160,7 +160,7 @@ def test_resolve_chain_ambiguous_shortest_paths_raises() -> None:
 
 
 def test_chain_ambiguous_category_string() -> None:
-    """The canonical category string per spec §10.10 (proposal 0018)."""
+    """The canonical category string."""
     exc = CheckpointStateMigrationChainAmbiguous("boom")
     assert exc.category == "checkpoint_state_migration_chain_ambiguous"
 

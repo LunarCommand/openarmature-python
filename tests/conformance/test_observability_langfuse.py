@@ -354,9 +354,9 @@ class _MockPromptBackend:
     - ``mock_with_langfuse_reference``: attaches the supplied
       ``langfuse_prompt_reference`` sentinel under
       ``Prompt.observability_entities['langfuse_prompt']``. Verifies
-      §8.4.4 case 1 (Generation linked to Prompt entity).
-    - ``filesystem``: no Langfuse reference attached. Verifies §8.4.4
-      case 2 (metadata-only).
+      the Generation-linked-to-Prompt-entity case.
+    - ``filesystem``: no Langfuse reference attached. Verifies the
+      metadata-only case.
     """
 
     def __init__(self, prompts: dict[str, dict[str, Any]], *, with_langfuse_reference: bool) -> None:
@@ -802,22 +802,22 @@ async def _run_resume_case(
 ) -> None:
     """Two-phase test flow for fixture 037 case 5.
 
-    Phase 1 — first invoke catches the expected NodeException at the
+    Step 1 — first invoke catches the expected NodeException at the
     designated node; the captured Langfuse Trace's input/output match
     ``first_run_expected.langfuse_trace``.  We snapshot the first trace's
     headline fields immediately so the ``first_trace_unchanged`` invariant
     can verify the resumed invoke leaves them untouched.
 
-    Phase 2 — resume invoke runs the same graph with
+    Step 2 — resume invoke runs the same graph with
     ``resume_invocation=first_invocation_id``, completes successfully, and
     the resumed Trace's input/output match ``resume.expected.langfuse_trace``.
 
-    Phase 3 — invariants compare the two traces (distinct trace ids,
+    Step 3 — invariants compare the two traces (distinct trace ids,
     shared correlation_id, the snapshotted first trace's fields unchanged).
     """
     from openarmature.graph.errors import RuntimeGraphError  # noqa: PLC0415
 
-    # ---- Phase 1: first invoke catches expected error
+    # ---- Step 1: first invoke catches expected error
     first_run_expected_error = cast("dict[str, Any]", case.get("first_run_expected_error") or {})
     expected_category = cast("str", first_run_expected_error.get("category", "node_exception"))
     expected_raised_from = cast("str | None", first_run_expected_error.get("raised_from"))
@@ -870,7 +870,7 @@ async def _run_resume_case(
     first_expected_trace = cast("dict[str, Any]", first_run_expected["langfuse_trace"])
     _assert_trace(first_trace, first_expected_trace, expected_invariants={})
 
-    # ---- Phase 2: resume invoke
+    # ---- Step 2: resume invoke
     resume_block = cast("dict[str, Any]", case["resume"])
     # Drop ``correlation_id`` from invoke_kwargs on resume — the engine
     # restores it from the saved record per §3.1.
@@ -883,7 +883,7 @@ async def _run_resume_case(
     await graph.drain()
 
     # Python dicts are insertion-ordered (PEP 468; guaranteed since
-    # 3.7).  Phase 1 added one trace; phase 2 added the resumed trace.
+    # 3.7).  The first invoke added one trace; the resume added another.
     # Reading by position is more deterministic than scanning by
     # not-equal — if a future engine change adds synthetic traces, the
     # scan would silently pick the wrong key, but the position-based
@@ -902,7 +902,7 @@ async def _run_resume_case(
     resume_expected_trace = cast("dict[str, Any]", resume_expected["langfuse_trace"])
     _assert_trace(resumed_trace, resume_expected_trace, expected_invariants={})
 
-    # ---- Phase 3: invariants
+    # ---- Step 3: invariants
     if resume_expected.get("first_trace_unchanged"):
         assert first_trace.input == first_trace_snapshot["input"], (
             f"first_trace_unchanged failed: input was {first_trace_snapshot['input']!r}, "

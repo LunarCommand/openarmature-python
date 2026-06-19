@@ -11,16 +11,15 @@ Each branch's :class:`BranchSpec` carries its own compiled
 subgraph (with potentially different state schema, middleware,
 topology), its own ``inputs`` / ``outputs`` projection mappings,
 and its own optional ``middleware`` wrapping the whole branch
-invocation as a unit (§11.7).
+invocation as a unit.
 
-Buffer-then-apply semantics per §11.4: contributions are
-collected during dispatch and merged deterministically once at
-node completion, using the parent's reducer for each output
-field. Branch insertion order determines both dispatch order
-(§11.8) and merge tie-breaking when two branches write the same
-parent field.
+Buffer-then-apply semantics: contributions are collected during
+dispatch and merged deterministically once at node completion,
+using the parent's reducer for each output field. Branch insertion
+order determines both dispatch order and merge tie-breaking when
+two branches write the same parent field.
 
-Error policies per §11.5:
+Error policies:
 
 - ``fail_fast``: first failure cancels still-running branches;
   the buffered contributions are discarded; the parallel-branches
@@ -31,6 +30,8 @@ Error policies per §11.5:
   branches' contributions merge; failed branches' errors land in
   the optional ``errors_field``.
 """
+# Spec pipeline-utilities §11 (parallel branches): §11.4 buffer-then-
+# apply, §11.5 error policies, §11.7 branch middleware, §11.8 order.
 
 from __future__ import annotations
 
@@ -61,10 +62,10 @@ _log = logging.getLogger(__name__)
 class BranchSpec[ChildT: State]:
     """One entry in a :class:`ParallelBranchesNode`'s branch mapping.
 
-    Branches are heterogeneous: each spec MAY reference a different
+    Branches are heterogeneous: each branch may reference a different
     compiled subgraph with a different state schema. ``inputs`` /
     ``outputs`` follow the same shape as subgraph projection
-    mappings (proposal 0002).
+    mappings.
 
     Validation lives on the builder side
     (``GraphBuilder.add_parallel_branches_node``):
@@ -83,7 +84,7 @@ class BranchSpec[ChildT: State]:
 @dataclass(frozen=True)
 class ParallelBranchesNode[ParentT: State]:
     """A node that dispatches M heterogeneous compiled subgraphs
-    concurrently per spec §11.
+    concurrently.
 
     The Node Protocol contract requires ``name``, ``middleware``,
     and ``run``. Like :class:`FanOutNode`, the engine recognizes
@@ -229,7 +230,7 @@ class ParallelBranchesNode[ParentT: State]:
         tasks: list[tuple[str, asyncio.Task[Mapping[str, Any]]]],
         contributions: dict[str, Mapping[str, Any]],
     ) -> Mapping[str, Any]:
-        """Fail-fast policy per spec §11.5.
+        """Fail-fast policy.
 
         Wait for all branches; on first failure, cancel the rest
         and raise ``ParallelBranchesBranchFailed`` with the failing
@@ -309,7 +310,7 @@ class ParallelBranchesNode[ParentT: State]:
         contributions: dict[str, Mapping[str, Any]],
         errors: list[dict[str, str]],
     ) -> Mapping[str, Any]:
-        """Collect policy per spec §11.5.
+        """Collect policy.
 
         All branches run to completion regardless of individual
         failures. Successful branches' contributions go to the
@@ -346,8 +347,8 @@ class ParallelBranchesNode[ParentT: State]:
     ) -> dict[str, Any]:
         """Flatten per-branch contributions into a single partial.
 
-        Per §11.4 + §11.8: contributions apply in branch insertion
-        order, using each parent field's reducer. The actual reducer
+        Contributions apply in branch insertion order, using each
+        parent field's reducer. The actual reducer
         application happens at ``_merge_partial`` in compiled.py
         when the engine merges this partial into parent state. Here
         we just flatten the per-branch contributions into a dict
@@ -386,7 +387,7 @@ class _MultiContribution:
     """Sentinel for ``_merge_partial`` indicating that multiple
     branches contributed to the same parent field. The engine
     applies the parent's reducer to each value in sequence,
-    preserving branch insertion order per §11.8.
+    preserving branch insertion order.
     """
 
     values: tuple[Any, ...]

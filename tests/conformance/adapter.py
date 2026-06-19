@@ -504,7 +504,7 @@ def _make_flaky_fn(
       031): the engine's first invoke aborts on this node; the
       resumed invoke succeeds. No retry middleware is wrapped around
       these nodes (any wrapping would bypass the resume path), so
-      "fail-once-then-succeed" matches the spec contract directly.
+      "fail-once-then-succeed" matches the resume contract directly.
     """
     sequence = list(flaky.get("failure_sequence", []))
     success_update = dict(flaky.get("success_update", {}))
@@ -600,7 +600,7 @@ class _TracingFanOutNode(FanOutNode[State, State]):
     """Conformance helper: a FanOutNode that appends its name to a shared
     trace list when the engine runs it. Same role as _TracingSubgraphNode
     for subgraphs — a fan-out node is one engine step from the parent's
-    POV (per §9.6), so it should contribute exactly one trace entry."""
+    POV, so it should contribute exactly one trace entry."""
 
     trace_list: list[str] = field(default_factory=list[str])
 
@@ -626,7 +626,7 @@ class _TracingParallelBranchesNode(ParallelBranchesNode[State]):
     """Conformance helper: a ParallelBranchesNode that appends its name
     to the shared trace list once when the engine runs it. The
     parallel-branches dispatcher itself counts as one engine step from
-    the parent's POV per §11.6, mirroring the fan-out tracing wrapper."""
+    the parent's POV, mirroring the fan-out tracing wrapper."""
 
     trace_list: list[str] = field(default_factory=list[str])
 
@@ -694,7 +694,7 @@ def _projection_for(node_spec: Mapping[str, Any]) -> ProjectionStrategy[State, S
     """Pick the projection strategy declared on a subgraph node spec.
 
     `inputs:` and/or `outputs:` in the YAML → `ExplicitMapping`. Both absent →
-    the spec's default `FieldNameMatching`.
+    the default `FieldNameMatching`.
     """
 
     inputs = node_spec.get("inputs")
@@ -726,7 +726,7 @@ def build_graph(
 
     `node_middleware` (mapping node name to ordered middleware list) and
     `graph_middleware` (ordered middleware list applied to every node)
-    are pipeline-utilities §3 hooks. The translation from a fixture's
+    are middleware hooks. The translation from a fixture's
     `middleware:` block into actual instances lives in the
     pipeline-utilities test driver.
 
@@ -868,8 +868,8 @@ class ObserverFixture:
     YAML. None means "no `phases:` key was present" — the harness leaves
     the engine to default to both phases.
 
-    `sleep_ms_per_event` configures the slow-observer directive (proposal
-    0010 §6 Drain conformance). When `None`, the observer runs at full
+    `sleep_ms_per_event` configures the slow-observer directive. When
+    `None`, the observer runs at full
     speed. An int means a constant sleep per event. A dict with
     `first_invocation` / `subsequent_invocations` keys is invocation-
     counter-aware: the first invocation through this observer uses the
@@ -912,7 +912,7 @@ def _record_event(event: NodeEvent) -> dict[str, Any]:
 
 def _resolve_sleep_ms(fixture: ObserverFixture) -> int:
     """Resolve the per-event sleep duration in ms for the slow-observer
-    directive (proposal 0010 §6 Drain). `None` and `0` mean no sleep;
+    directive. `None` and `0` mean no sleep;
     an int form is constant; a dict form selects by `invocation_counter`.
     """
     spec = fixture.sleep_ms_per_event
@@ -942,8 +942,8 @@ def make_observer_fn(
     so the engine's error isolation can be verified by checking that
     subsequent observers/events still get through.
 
-    Honors `fixture.sleep_ms_per_event` per the proposal 0010 slow-
-    observer directive: each event awaits `asyncio.sleep(ms / 1000)`
+    Honors `fixture.sleep_ms_per_event` per the slow-observer
+    directive: each event awaits `asyncio.sleep(ms / 1000)`
     BEFORE recording, so a drain timeout that cancels mid-sleep leaves
     the event unrecorded and the counter shows it as undelivered.
     """
@@ -991,7 +991,7 @@ def _add_fan_out_node(
     - ``state_field_read`` — read an int from a parent state field.
     - ``queue_chunk`` — ``max(1, len(state.<field>) // chunk_size)``.
 
-    These are the only callable shapes the in-scope Phase 3 fixtures
+    These are the only callable shapes the in-scope fan-out fixtures
     use. Adding more is straightforward.
     """
     sub_name = cfg["subgraph"]

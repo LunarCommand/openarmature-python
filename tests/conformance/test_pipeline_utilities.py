@@ -1,10 +1,10 @@
 """Run every spec pipeline-utilities conformance fixture against the engine.
 
-Phase 2 scope (proposal 0004 middleware): fixtures 001-016. Fixtures
+Middleware scope: fixtures 001-016. Fixtures
 017-019 (fan-out) and 020-021 (fan-out + middleware composition) skip
-via `_unsupported_directive` until Phase 3 lands the fan-out runtime.
+via `_unsupported_directive` until the fan-out runtime lands.
 Fixtures 022-031 (fan-out and checkpointing) similarly skip until their
-phases.
+support lands.
 
 The driver translates a fixture's `middleware:` block into actual
 middleware instances, wires up capture sinks per fixture-defined
@@ -58,8 +58,8 @@ CONFORMANCE_DIR = (
 )
 
 
-# Phase 3 lands fan-out (proposal 0005 PU side). Checkpointing
-# (proposal 0008) comes in Phase 5; its fixtures use directives we
+# Fan-out (proposal 0005 PU side) lands later. Checkpointing
+# (proposal 0008) comes later still; its fixtures use directives we
 # don't translate yet.
 _UNSUPPORTED_NODE_DIRECTIVES = frozenset(
     {
@@ -76,9 +76,9 @@ def _load(path: Path) -> dict[str, Any]:
         return yaml.safe_load(f)
 
 
-# Phase 3 target: fan-out (proposal 0005 PU side) covers fixtures 017-023.
-# Phase 5 will pick up the checkpointing fixtures (024-031). PR-5
-# (proposal 0011) drives fixtures 032-038 through this same harness.
+# Fan-out (proposal 0005 PU side) covers fixtures 017-023.
+# The checkpointing fixtures (024-031) come later. Proposal 0011
+# drives fixtures 032-038 through this same harness.
 # State-migration fixtures 039-047 run via a dedicated runner
 # (``test_state_migration.py``); they need a separate driver because
 # the `cases:` shape carries seeded-record + migrations + resume blocks.
@@ -319,7 +319,7 @@ def _translate_parallel_branches_branch_middleware(
     """Walk ``spec.nodes`` for parallel_branches blocks with per-branch
     ``middleware:`` and translate each into a list of Middleware
     instances. Returned map is keyed by parallel-branches node name
-    then branch name (per spec §11.7 branch middleware) and consumed by
+    then branch name (branch middleware) and consumed by
     build_graph's ``parallel_branches_branch_middleware`` kwarg."""
     out: dict[str, dict[str, list[Middleware]]] = {}
     nodes = cast("dict[str, dict[str, Any]]", spec.get("nodes") or {})
@@ -823,7 +823,7 @@ async def _run_one(spec: Mapping[str, Any], monkeypatch: pytest.MonkeyPatch) -> 
 
     # Timing record assertions.
     if "timing_records" in expected:
-        # Two shapes per Phase 0 typed harness: dict-of-lists OR a flat list.
+        # Two shapes the typed harness accepts: dict-of-lists OR a flat list.
         expected_timing = expected["timing_records"]
         if isinstance(expected_timing, list):
             empty: list[TimingRecord] = []
@@ -837,7 +837,7 @@ async def _run_one(spec: Mapping[str, Any], monkeypatch: pytest.MonkeyPatch) -> 
     # Single observer-event assertion (fixture 015 uses singular form).
     if "expected_observer_event" in expected:
         # Fixture 015 has a top-level observer attached; we'd need observer
-        # wiring just for this. For Phase 2's reduced scope, skip the
+        # wiring just for this. For this harness's reduced scope, skip the
         # singular-observer-event check — fixture 015 is gated on retry's
         # per-attempt event behavior, which we test via flaky+retry against
         # final_state/execution_order. The detailed single-event assertion
@@ -849,11 +849,11 @@ def _collect_parallel_branches_errors_fields(spec: Mapping[str, Any]) -> set[str
     """Return the set of parent-state field names used as
     ``errors_field`` on any parallel_branches node in ``spec``.
 
-    Per spec §11.1 ``errors_field`` carries an implementation-defined
-    record shape; the spec only mandates ``branch_name`` + category. The
+    The ``errors_field`` carries an implementation-defined
+    record shape; only ``branch_name`` + category are required. The
     engine's record carries additional engine-defined keys (``message``,
     ``cause_type``). Fixtures asserting against ``errors_field`` records
-    use subset semantics — assert the spec-mandated keys are present
+    use subset semantics — assert the required keys are present
     with the expected values, ignore the rest.
     """
     out: set[str] = set()

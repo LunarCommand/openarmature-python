@@ -1,6 +1,6 @@
 """Unit tests for the observer delivery queue mechanics.
 
-Per spec v0.6.0 §6: delivery is strictly serial, ordered, isolates
+Delivery is strictly serial, ordered, isolates
 observer exceptions, and filters by per-observer phase subscription.
 These tests exercise the queue/worker pair in isolation — no graph
 engine — so behavior bugs surface here rather than inside fixture
