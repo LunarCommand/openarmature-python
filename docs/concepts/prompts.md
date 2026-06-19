@@ -47,6 +47,32 @@ Why two operations instead of one? Three reasons:
 The convenience `get()` operation gives you the single-call
 shape when you want it without removing the separability.
 
+## Refreshing cached prompts: `cache_ttl_seconds`
+
+`fetch` and `get` take an optional `cache_ttl_seconds` that controls how
+fresh a served prompt must be, for backends that maintain a client-side
+cache:
+
+- omitted / `None` keeps the backend's current behavior;
+- `0` forces a fresh read past any cache;
+- `N > 0` serves a cached entry only while it is younger than N seconds,
+  re-reading the source once it ages past N.
+
+A negative value is rejected. It is a read-side control: it governs which
+cached entry may be served for this fetch, not whether or how results are
+cached. Cacheless backends (the bundled filesystem backend) ignore it; the
+bundled Langfuse backend forwards it to the Langfuse SDK's own prompt cache.
+
+```python
+# Always re-read from the backend, bypassing any cache:
+fresh = await manager.fetch("greeting", "production", cache_ttl_seconds=0)
+
+# Serve a cached entry only if it's under five minutes old:
+recent = await manager.get(
+    "greeting", "production", {"user": "Alice"}, cache_ttl_seconds=300
+)
+```
+
 ## Prompt identity
 
 Every `Prompt` carries five identity fields:
