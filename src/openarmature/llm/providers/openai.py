@@ -56,7 +56,7 @@ import json
 import re
 import time
 import uuid
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from typing import TYPE_CHECKING, Any, Literal, cast
 from urllib.parse import urlparse
 
@@ -64,7 +64,11 @@ import httpx
 import jsonschema
 from pydantic import BaseModel, ValidationError
 
-from openarmature.graph.events import LlmCompletionEvent, LlmFailedEvent
+from openarmature.graph.events import (
+    LlmCompletionEvent,
+    LlmFailedEvent,
+    LlmRetryAttemptEvent,
+)
 from openarmature.observability.correlation import (
     current_attempt_index,
     current_branch_name,
@@ -381,9 +385,12 @@ class OpenAIProvider:
         backoff (defaulting to the canonical transient categories with
         exponential jittered backoff). The request is built and
         validated once; pre-send validation errors are never retried.
-        Exactly one observability event fires for the call's terminal
-        outcome regardless of attempt count, and its ``latency_ms``
-        covers the whole call, retries and backoff included. The
+        Exactly one terminal observability event (LlmCompletionEvent or
+        LlmFailedEvent) fires for the call's terminal outcome regardless
+        of attempt count, and its ``latency_ms`` covers the whole call,
+        retries and backoff included. A per-attempt LlmRetryAttemptEvent
+        also fires for each attempt (driving the per-attempt LLM span
+        surface), each carrying just that attempt's latency. The
         ``on_retry`` hook is not exception-isolated (mirroring
         ``RetryMiddleware``); an exception raised by it propagates out
         of the call.
@@ -481,7 +488,38 @@ class OpenAIProvider:
                 include_response_format=(schema_dict is None or not self._force_prompt_augmentation_fallback),
                 tool_choice=tool_choice,
             )
-            response = await self._do_complete_with_retry(body, schema_dict, schema_class, retry)
+
+            # Per-attempt LLM span surface (observability §5.5 under
+            # llm-provider §7.1 call-level retry): dispatch one
+            # LlmRetryAttemptEvent per attempt so the observer can render
+            # one openarmature.llm.complete span per attempt. No-op
+            # outside an invocation (``dispatch`` is None).
+            def emit_attempt(
+                idx: int,
+                attempt_latency_ms: float,
+                attempt_response: Response | None,
+                attempt_exc: LlmProviderError | None,
+            ) -> None:
+                if dispatch is None:
+                    return
+                dispatch(
+                    self._build_llm_retry_attempt_event(
+                        llm_attempt_index=idx,
+                        latency_ms=attempt_latency_ms,
+                        call_id=call_id,
+                        input_messages=serialized_messages,
+                        request_params=request_params,
+                        request_extras=request_extras,
+                        active_prompt=active_prompt,
+                        active_prompt_group=active_prompt_group,
+                        response=attempt_response,
+                        exc=attempt_exc,
+                    ),
+                )
+
+            response = await self._do_complete_with_retry(
+                body, schema_dict, schema_class, retry, emit_attempt
+            )
         except LlmProviderError as exc:
             # Failure path: dispatch a typed LlmFailedEvent per
             # proposal 0058. Only §7 category exceptions
@@ -533,18 +571,30 @@ class OpenAIProvider:
         schema_dict: dict[str, Any] | None,
         schema_class: type[BaseModel] | None,
         retry: RetryConfig | None,
+        emit_attempt: Callable[[int, float, Response | None, LlmProviderError | None], None] | None = None,
     ) -> Response:
         """Run the wire call with optional call-level retry.
 
         Loops the underlying wire call on transient provider errors per
-        the retry config. Intermediate transient attempts are caught
-        here and emit no observability event; only the terminal outcome
-        (success, retry exhaustion, or a non-transient error) reaches
-        ``complete()``'s typed-event dispatch, so exactly one event
-        fires per ``complete()`` call.
+        the retry config. ``emit_attempt`` (when supplied) fires once
+        per attempt with that attempt's index, latency, and outcome
+        (response on success, exception on failure) so the caller can
+        dispatch the per-attempt LLM span event. The terminal outcome
+        (success, retry exhaustion, or a non-transient error) is what
+        reaches ``complete()`` for the single terminal typed event, so
+        exactly one terminal event still fires per ``complete()`` call.
         """
         if retry is None:
-            return await self._do_complete(body, schema_dict, schema_class)
+            attempt_start = time.perf_counter()
+            try:
+                response = await self._do_complete(body, schema_dict, schema_class)
+            except LlmProviderError as exc:
+                if emit_attempt is not None:
+                    emit_attempt(0, (time.perf_counter() - attempt_start) * 1000.0, None, exc)
+                raise
+            if emit_attempt is not None:
+                emit_attempt(0, (time.perf_counter() - attempt_start) * 1000.0, response, None)
+            return response
         # Lazy import avoids a module-load cycle: graph.middleware.retry
         # imports llm.errors. Resolve None config fields to the canonical
         # defaults, mirroring RetryMiddleware.
@@ -557,9 +607,15 @@ class OpenAIProvider:
         backoff = retry.backoff or exponential_jitter_backoff
         attempt = 0
         while True:
+            attempt_start = time.perf_counter()
             try:
-                return await self._do_complete(body, schema_dict, schema_class)
+                response = await self._do_complete(body, schema_dict, schema_class)
             except LlmProviderError as exc:
+                # Per-attempt event fires for every attempt, including
+                # this failed one (the terminal failed attempt's span
+                # carries the final category).
+                if emit_attempt is not None:
+                    emit_attempt(attempt, (time.perf_counter() - attempt_start) * 1000.0, None, exc)
                 # No graph state at the call boundary; pass None (the
                 # default classifier ignores it). Re-raise on exhaustion
                 # or a non-transient category so complete() emits the
@@ -572,6 +628,10 @@ class OpenAIProvider:
                     await retry.on_retry(exc, attempt)
                 await asyncio.sleep(backoff(attempt))
                 attempt += 1
+                continue
+            if emit_attempt is not None:
+                emit_attempt(attempt, (time.perf_counter() - attempt_start) * 1000.0, response, None)
+            return response
 
     def _build_llm_completion_event(
         self,
@@ -705,6 +765,87 @@ class OpenAIProvider:
             active_prompt=active_prompt,
             active_prompt_group=active_prompt_group,
             call_id=call_id,
+            error_category=exc.category,
+            error_type=type(exc).__name__,
+            error_message=str(exc),
+            caller_invocation_metadata=caller_metadata,
+        )
+
+    def _build_llm_retry_attempt_event(
+        self,
+        *,
+        llm_attempt_index: int,
+        latency_ms: float,
+        call_id: str,
+        input_messages: list[dict[str, Any]],
+        request_params: dict[str, Any],
+        request_extras: dict[str, Any],
+        active_prompt: Any,
+        active_prompt_group: Any,
+        response: Response | None = None,
+        exc: LlmProviderError | None = None,
+    ) -> LlmRetryAttemptEvent:
+        """Construct an LlmRetryAttemptEvent for one in-call attempt.
+
+        Identity / scoping + request-side fields mirror the terminal
+        events; the outcome comes from ``response`` (a successful
+        attempt) or ``exc`` (a failed attempt). Exactly one of the two
+        is supplied. ``llm_attempt_index`` is the call-level retry
+        index, distinct from the node-level ``attempt_index`` sourced
+        from the ContextVar.
+        """
+        namespace = current_namespace_prefix()
+        node_name = namespace[-1] if namespace else ""
+        invocation_id = current_invocation_id() or ""
+        caller_metadata: Mapping[str, AttributeValue] | None = None
+        if self._populate_caller_metadata:
+            caller_metadata = dict(current_invocation_metadata())
+        if response is not None:
+            return LlmRetryAttemptEvent(
+                invocation_id=invocation_id,
+                correlation_id=current_correlation_id(),
+                node_name=node_name,
+                namespace=namespace,
+                attempt_index=current_attempt_index(),
+                fan_out_index=current_fan_out_index(),
+                branch_name=current_branch_name(),
+                provider=self._genai_system,
+                model=self.model,
+                call_id=call_id,
+                llm_attempt_index=llm_attempt_index,
+                latency_ms=latency_ms,
+                input_messages=input_messages,
+                request_params=request_params,
+                request_extras=request_extras,
+                active_prompt=active_prompt,
+                active_prompt_group=active_prompt_group,
+                response_id=response.response_id,
+                response_model=response.response_model,
+                usage=response.usage,
+                finish_reason=response.finish_reason,
+                output_content=response.message.content or None,
+                caller_invocation_metadata=caller_metadata,
+            )
+        if exc is None:
+            raise ValueError("_build_llm_retry_attempt_event requires response or exc")
+        return LlmRetryAttemptEvent(
+            invocation_id=invocation_id,
+            correlation_id=current_correlation_id(),
+            node_name=node_name,
+            namespace=namespace,
+            attempt_index=current_attempt_index(),
+            fan_out_index=current_fan_out_index(),
+            branch_name=current_branch_name(),
+            provider=self._genai_system,
+            model=self.model,
+            call_id=call_id,
+            llm_attempt_index=llm_attempt_index,
+            latency_ms=latency_ms,
+            input_messages=input_messages,
+            request_params=request_params,
+            request_extras=request_extras,
+            active_prompt=active_prompt,
+            active_prompt_group=active_prompt_group,
             error_category=exc.category,
             error_type=type(exc).__name__,
             error_message=str(exc),

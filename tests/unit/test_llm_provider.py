@@ -20,7 +20,7 @@ import httpx
 import pytest
 from pydantic import ValidationError
 
-from openarmature.graph.events import LlmCompletionEvent, LlmFailedEvent, NodeEvent
+from openarmature.graph.events import LlmCompletionEvent, LlmFailedEvent, LlmRetryAttemptEvent, NodeEvent
 from openarmature.graph.middleware import RetryConfig, deterministic_backoff
 from openarmature.graph.observer import ObserverEvent
 from openarmature.llm import (
@@ -1959,14 +1959,15 @@ async def test_llm_completion_event_request_id_none_when_response_omits_id() -> 
     assert typed.response_id is None
 
 
-async def test_complete_success_emits_typed_event_as_single_emission() -> None:
-    # v0.13.0 dropped the success-side sentinel emission, so the
-    # provider's success-path emission window is now a single typed
-    # event — no within-emission ordering question remains. This test
-    # locks the single-emission shape so a regression that re-adds a
-    # sentinel NodeEvent on success would surface here. Spec fixture
-    # 056 pins the broader bracketing (typed event arrives between
-    # the CALLING NODE's started/completed pair) end-to-end.
+async def test_complete_success_emits_per_attempt_then_terminal_typed_event() -> None:
+    # A successful no-retry complete() emits two typed events: a
+    # per-attempt LlmRetryAttemptEvent (attempt 0, driving the OTel
+    # per-attempt span surface) followed by the terminal
+    # LlmCompletionEvent. Both are typed — this locks the no-sentinel
+    # shape so a regression re-adding a sentinel NodeEvent on success
+    # would surface here as an extra NodeEvent. Spec fixture 056 pins
+    # the terminal event's bracketing (it arrives between the CALLING
+    # NODE's started/completed pair) end-to-end.
     events, token = _collecting_dispatch()
     transport = _make_openai_response_with_usage(
         {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
@@ -1978,8 +1979,11 @@ async def test_complete_success_emits_typed_event_as_single_emission() -> None:
         await provider.aclose()
         _release_dispatch(token)
 
-    assert len(events) == 1
-    assert isinstance(events[0], LlmCompletionEvent)
+    assert [type(e).__name__ for e in events] == ["LlmRetryAttemptEvent", "LlmCompletionEvent"]
+    first, terminal = events
+    assert isinstance(first, LlmRetryAttemptEvent)
+    assert first.llm_attempt_index == 0
+    assert isinstance(terminal, LlmCompletionEvent)
 
 
 async def test_llm_completion_event_sources_node_identity_from_calling_context() -> None:

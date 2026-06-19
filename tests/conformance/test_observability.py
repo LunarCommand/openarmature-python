@@ -2948,6 +2948,12 @@ class _TypedEventCollector:
         self.events: list[Any] = []
 
     async def __call__(self, event: Any) -> None:
+        # LlmRetryAttemptEvent is python-internal (it drives the OTel
+        # per-attempt span surface), not a spec-normative observer
+        # event, so the conformance collector excludes it from the
+        # captured stream that spec fixtures assert against.
+        if type(event).__name__ == "LlmRetryAttemptEvent":
+            return
         if self.filter_event_type is not None:
             if type(event).__name__ != self.filter_event_type:
                 return

@@ -35,6 +35,7 @@ from openarmature.graph.events import (
     InvocationStartedEvent,
     LlmCompletionEvent,
     LlmFailedEvent,
+    LlmRetryAttemptEvent,
     MetadataAugmentationEvent,
     NodeEvent,
 )
@@ -368,6 +369,7 @@ class LangfuseObserver:
             | InvocationCompletedEvent
             | LlmCompletionEvent
             | LlmFailedEvent
+            | LlmRetryAttemptEvent
             | FailureIsolatedEvent
         ),
     ) -> None:
@@ -376,6 +378,12 @@ class LangfuseObserver:
             return
         if isinstance(event, InvocationCompletedEvent):
             self._handle_invocation_completed(event)
+            return
+        # Proposal 0050 per-attempt LLM events are OTel-span-only: the
+        # Langfuse mapping renders one Generation per call from the
+        # terminal LlmCompletionEvent / LlmFailedEvent, so the
+        # per-attempt event is ignored here.
+        if isinstance(event, LlmRetryAttemptEvent):
             return
         # Proposal 0049 typed LlmCompletionEvent (success path). Drives
         # the §5.5 Generation observation lifecycle for successful

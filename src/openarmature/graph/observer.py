@@ -40,6 +40,7 @@ from .events import (
     InvocationStartedEvent,
     LlmCompletionEvent,
     LlmFailedEvent,
+    LlmRetryAttemptEvent,
     MetadataAugmentationEvent,
     NodeEvent,
 )
@@ -55,6 +56,9 @@ from .state import State
 # typed LLM provider call event, dispatched on every successful LLM
 # completion), LlmFailedEvent (proposal 0058 typed LLM failure event,
 # dispatched alongside the §7 exception when provider.complete raises),
+# LlmRetryAttemptEvent (proposal 0050 per-attempt LLM span event,
+# python-internal, dispatched once per in-call attempt under call-level
+# retry to drive the per-attempt OTel span surface),
 # and FailureIsolatedEvent (proposal 0050 §6.3 framework-emitted event,
 # dispatched by FailureIsolationMiddleware when it catches an exception
 # escaping the inner chain and substitutes a degraded partial update).
@@ -65,6 +69,7 @@ ObserverEvent = (
     | InvocationCompletedEvent
     | LlmCompletionEvent
     | LlmFailedEvent
+    | LlmRetryAttemptEvent
     | FailureIsolatedEvent
 )
 

@@ -103,6 +103,7 @@ from openarmature.graph.events import (
     InvocationStartedEvent,
     LlmCompletionEvent,
     LlmFailedEvent,
+    LlmRetryAttemptEvent,
     MetadataAugmentationEvent,
     NodeEvent,
 )
@@ -594,6 +595,7 @@ class OTelObserver:
             | InvocationCompletedEvent
             | LlmCompletionEvent
             | LlmFailedEvent
+            | LlmRetryAttemptEvent
             | FailureIsolatedEvent
         ),
     ) -> None:
@@ -603,6 +605,12 @@ class OTelObserver:
         # payload field). No-op gates here; isinstance early-return
         # before any node-specific logic runs.
         if isinstance(event, InvocationStartedEvent | InvocationCompletedEvent):
+            return
+        # Proposal 0050 per-attempt LLM span surface (LlmRetryAttemptEvent):
+        # the per-attempt openarmature.llm.complete span render lands in a
+        # follow-up step; ignored here for now so the terminal
+        # LlmCompletionEvent / LlmFailedEvent keep driving the span.
+        if isinstance(event, LlmRetryAttemptEvent):
             return
         # Proposal 0049 typed LlmCompletionEvent (success path).
         # Drives the openarmature.llm.complete span lifecycle for
