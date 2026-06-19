@@ -839,19 +839,34 @@ async def test_llm_error_path_emits_error_span_from_typed_failed_event() -> None
     assert attrs.get("openarmature.error.category") == "provider_rate_limit"
 
 
-async def test_call_level_retry_emits_one_llm_span_per_attempt() -> None:
-    # Proposal 0050 §7.1 / observability §5.5: a complete(retry=...) that
-    # fails transiently then succeeds emits TWO openarmature.llm.complete
-    # spans — attempt_index 0 (ERROR, provider_unavailable) and 1 (OK).
-    # Validates the per-attempt span surface end to end: the provider
-    # dispatches one LlmRetryAttemptEvent per attempt and the observer
-    # renders one span per event. In production the engine's serial
-    # queue carries the events; here they are captured then replayed.
+@pytest.mark.parametrize(
+    "fixture_id",
+    [
+        "056-call-level-retry-transient",
+        "057-call-level-retry-exhaustion",
+        "058-call-level-retry-non-transient-no-retry",
+    ],
+)
+async def test_call_level_retry_fixture_per_attempt_spans(fixture_id: str) -> None:
+    # Proposal 0050 §7.1 / observability §5.5: drive each spec
+    # call-level-retry fixture (spec/llm-provider/conformance/) through
+    # the provider + an OTel observer and assert its per-attempt
+    # openarmature.llm.complete spans. These fixtures assert SPANS, so
+    # they are activated here (otel-gated, with an observer) rather than
+    # the generic llm-provider harness, which has no observer. The
+    # provider dispatches one LlmRetryAttemptEvent per attempt and the
+    # observer renders one span per event; in production the engine's
+    # serial queue carries them, here they are captured then replayed.
+    import json
+    from pathlib import Path
+
     import httpx
+    import yaml
     from opentelemetry.trace import StatusCode
 
     from openarmature.graph.events import LlmRetryAttemptEvent
     from openarmature.graph.middleware import RetryConfig, deterministic_backoff
+    from openarmature.llm.errors import LlmProviderError
     from openarmature.llm.messages import UserMessage
     from openarmature.llm.providers.openai import OpenAIProvider
     from openarmature.observability.correlation import (
@@ -861,45 +876,55 @@ async def test_call_level_retry_emits_one_llm_span_per_attempt() -> None:
         _set_invocation_id,
     )
 
-    calls = {"n": 0}
+    fixture_dir = (
+        Path(__file__).resolve().parents[2] / "openarmature-spec" / "spec" / "llm-provider" / "conformance"
+    )
+    spec = cast("dict[str, Any]", yaml.safe_load((fixture_dir / f"{fixture_id}.yaml").read_text()))
+    responses = cast("list[dict[str, Any]]", spec["mock_provider"]["responses"])
+    call = cast("dict[str, Any]", spec["call"])
+    expected = cast("dict[str, Any]", spec["expected"])
+
+    response_iter = iter(responses)
 
     def handler(_request: httpx.Request) -> httpx.Response:
-        calls["n"] += 1
-        if calls["n"] == 1:
-            return httpx.Response(503, json={"error": {"message": "service down"}})
-        return httpx.Response(
-            200,
-            json={
-                "id": "cc-056",
-                "object": "chat.completion",
-                "model": "gpt-test",
-                "choices": [
-                    {"index": 0, "message": {"role": "assistant", "content": "ok"}, "finish_reason": "stop"}
-                ],
-                "usage": {"prompt_tokens": 4, "completion_tokens": 1, "total_tokens": 5},
-            },
-        )
+        entry = next(response_iter)
+        body = entry.get("body")
+        content = json.dumps(body).encode() if body is not None else b""
+        return httpx.Response(int(entry.get("status", 200)), content=content)
+
+    retry_cfg = cast("dict[str, Any]", call["retry"])
+    backoff_seconds = float(cast("dict[str, Any]", retry_cfg.get("backoff") or {}).get("seconds", 0.0))
+    retry = RetryConfig(
+        max_attempts=int(retry_cfg["max_attempts"]),
+        backoff=deterministic_backoff(backoff_seconds),
+    )
+    messages = [
+        UserMessage(content=cast("str", m["content"])) for m in cast("list[dict[str, Any]]", call["messages"])
+    ]
 
     captured: list[Any] = []
     disp_token = _set_active_dispatch(lambda e: captured.append(e))
-    inv_token = _set_invocation_id("inv-retry")
+    inv_token = _set_invocation_id("inv-clr")
     provider = OpenAIProvider(
         base_url="http://test", model="gpt-test", api_key="k", transport=httpx.MockTransport(handler)
     )
     try:
-        result = await provider.complete(
-            [UserMessage(content="go")],
-            retry=RetryConfig(max_attempts=2, backoff=deterministic_backoff(0.0)),
-        )
+        if "raises" in expected:
+            with pytest.raises(LlmProviderError) as excinfo:
+                await provider.complete(messages, retry=retry)
+            assert excinfo.value.category == expected["raises"]["category"]
+        else:
+            result = await provider.complete(messages, retry=retry)
+            expected_content = cast("dict[str, Any]", expected["response"]["message"])["content"]
+            assert result.message.content == expected_content
     finally:
         await provider.aclose()
         _reset_invocation_id(inv_token)
         _reset_active_dispatch(disp_token)
-    assert result.message.content == "ok"
 
     exporter = InMemorySpanExporter()
     observer = OTelObserver(span_processor=SimpleSpanProcessor(exporter))
-    inv_token2 = _set_invocation_id("inv-retry")
+    inv_token2 = _set_invocation_id("inv-clr")
     try:
         for event in captured:
             if isinstance(event, LlmRetryAttemptEvent):
@@ -908,16 +933,21 @@ async def test_call_level_retry_emits_one_llm_span_per_attempt() -> None:
         _reset_invocation_id(inv_token2)
     observer.shutdown()
 
-    llm_spans = [s for s in exporter.get_finished_spans() if s.name == "openarmature.llm.complete"]
-    assert len(llm_spans) == 2
-    spans_by_index = {dict(s.attributes or {})["openarmature.llm.attempt_index"]: s for s in llm_spans}
-    assert set(spans_by_index) == {0, 1}
-    s0 = spans_by_index[0]
-    assert s0.status.status_code == StatusCode.ERROR
-    assert dict(s0.attributes or {})["openarmature.error.category"] == "provider_unavailable"
-    s1 = spans_by_index[1]
-    assert s1.status.status_code == StatusCode.OK
-    assert dict(s1.attributes or {}).get("openarmature.llm.finish_reason") == "stop"
+    spans = [s for s in exporter.get_finished_spans() if s.name == "openarmature.llm.complete"]
+    expected_spans = cast("list[dict[str, Any]]", expected["llm_spans"])
+    assert len(spans) == len(expected_spans)
+    spans_by_index = {dict(s.attributes or {})["openarmature.llm.attempt_index"]: s for s in spans}
+    for exp_span in expected_spans:
+        idx = exp_span["attempt_index"]
+        span = spans_by_index[idx]
+        span_attrs = dict(span.attributes or {})
+        for key, val in cast("dict[str, Any]", exp_span.get("attributes") or {}).items():
+            assert span_attrs.get(key) == val, f"attempt {idx}: {key}={span_attrs.get(key)!r} != {val!r}"
+        if exp_span.get("error_category"):
+            assert span.status.status_code == StatusCode.ERROR
+            assert span_attrs.get("openarmature.error.category") == exp_span["error_category"]
+        else:
+            assert span.status.status_code == StatusCode.OK
 
 
 # ---------------------------------------------------------------------------
