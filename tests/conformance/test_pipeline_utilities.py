@@ -95,7 +95,7 @@ _LAST_DRIVEN_FIXTURE = 38
 # by test_checkpoint.py, which also owns fixture 067, hence the gap at 67).
 # 071 (fan-out degrade strict-reducer-raise, proposal 0069 coverage,
 # spec v0.63.1) is an FI-degrade fixture this runner drives.
-_FAILURE_ISOLATION_FIXTURES = frozenset(range(58, 67)) | {68, 69, 71}
+_FAILURE_ISOLATION_FIXTURES = frozenset(range(58, 67)) | {68, 69, 71, 72}
 
 
 def _fixture_paths() -> list[Path]:
@@ -447,7 +447,8 @@ def _build_isolation_predicate(
 
 def _build_failure_isolation(config: Mapping[str, Any], sinks: CaptureSinks) -> Middleware:
     """Build the canonical FailureIsolationMiddleware from a fixture
-    ``failure_isolation`` config (fixtures 058-063)."""
+    ``failure_isolation`` config (fixtures 058-063; the ``catch`` category
+    gate is fixture 072)."""
     degraded_raw = config["degraded_update"]
     degraded: DegradedUpdate
     if isinstance(degraded_raw, dict):
@@ -493,6 +494,7 @@ def _build_failure_isolation(config: Mapping[str, Any], sinks: CaptureSinks) -> 
     return FailureIsolationMiddleware(
         degraded_update=degraded,
         event_name=cast("str", config["event_name"]),
+        catch=cast("list[str] | None", config.get("catch")),
         predicate=_build_isolation_predicate(cast("Mapping[str, Any] | None", config.get("predicate"))),
         on_caught=on_caught,
     )
