@@ -24,6 +24,20 @@ def test_spec_version_matches_pyproject() -> None:
     assert openarmature.__spec_version__ == pyproject_spec_version
 
 
+def test_conformance_spec_pin_matches_spec_version() -> None:
+    # conformance.toml's [manifest].spec_pin is a fourth pin-sync point
+    # (alongside __spec_version__, pyproject, and the submodule changelog)
+    # that no other check covered, so it silently drifted across the
+    # v0.15.0 pin bumps. Assert it tracks __spec_version__ (the manifest
+    # value carries a ``v`` prefix) so it can't drift again.
+    conformance_path = Path(__file__).resolve().parent.parent / "conformance.toml"
+    manifest = tomllib.loads(conformance_path.read_text())
+    spec_pin = manifest["manifest"]["spec_pin"]
+    assert spec_pin == f"v{openarmature.__spec_version__}", (
+        f"conformance.toml [manifest].spec_pin is {spec_pin!r}, expected v{openarmature.__spec_version__}"
+    )
+
+
 # Keep a Changelog heading: ``## [0.15.0]`` (with optional trailing
 # date). The ``[Unreleased]`` entry uses a non-numeric tag and is
 # skipped by this pattern.
