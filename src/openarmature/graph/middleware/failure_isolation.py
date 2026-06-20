@@ -54,7 +54,7 @@ from ._core import NextCall
 
 if TYPE_CHECKING:
     # Annotation-only import; classify_cause_chain is imported lazily on the
-    # catch path to keep cause_chain (and its events / errors imports) off the
+    # catch path to keep cause_chain (and its errors import) off the
     # middleware module-load path.
     from openarmature.graph.cause_chain import CaughtException
 
@@ -79,8 +79,8 @@ class FailureIsolationMiddleware:
       downstream telemetry strictly worse.
     - ``catch`` (optional): a set of error categories. When supplied, an
       exception is caught only if the derived category of its cause chain
-      (the outermost non-carrier link's category, resolving through
-      ``node_exception`` carriers, the value reported as
+      (the category of the outermost non-carrier link that carries one,
+      resolving through ``node_exception`` carriers, the value reported as
       ``caught_exception.category``) is in the set. Composes with
       ``predicate`` as a conjunction; both default permissive (both unset
       catches every ``Exception``). The recommended gate for
@@ -112,7 +112,12 @@ class FailureIsolationMiddleware:
     ) -> None:
         self.degraded_update = degraded_update
         self.event_name = event_name
-        self.catch = catch
+        if isinstance(catch, str):
+            raise TypeError(
+                "catch must be a collection of category strings, not a single "
+                f"str (got {catch!r}); pass e.g. [{catch!r}]"
+            )
+        self.catch: frozenset[str] | None = frozenset(catch) if catch is not None else None
         self.predicate = predicate
         self.on_caught = on_caught
 

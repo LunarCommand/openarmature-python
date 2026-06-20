@@ -240,8 +240,8 @@ Configuration:
   construction site, where the context to name it well is available.
 - **`catch`** is an optional set of error categories. When supplied, an
   exception is caught only if the *derived category* of its cause chain
-  is in the set: the outermost non-carrier link's category, resolved
-  *through* the engine's `node_exception` carriers (the same value the
+  is in the set: the category of the outermost non-carrier link that
+  carries one, resolved *through* the engine's `node_exception` carriers (the same value the
   event reports as `caught_exception.category`). This is the recommended
   gate for category-scoped degradation. At a wrapping placement (a
   subgraph, a fan-out instance, a branch) the engine wraps the real
@@ -294,7 +294,7 @@ carrier-wrapped failure the same way the framework does:
 from openarmature.graph import classify_cause_chain
 
 result = classify_cause_chain(exc)
-result.category   # derived category (outermost non-carrier link), or None
+result.category   # derived category (outermost non-carrier link with a category), or None
 result.message    # the message that category came from
 result.chain      # the ordered CauseLink chain, carriers flagged
 ```

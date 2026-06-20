@@ -539,6 +539,17 @@ async def test_catch_rejection_short_circuits_predicate() -> None:
     assert consulted == []
 
 
+def test_catch_rejects_bare_str() -> None:
+    # A bare str is a Collection[str]; accepting it would substring-match the
+    # characters. Construction rejects it so the footgun fails loudly.
+    with pytest.raises(TypeError, match="collection of category strings"):
+        FailureIsolationMiddleware(
+            degraded_update={"result": []},
+            event_name="iso",
+            catch="provider_rate_limit",
+        )
+
+
 # ---------------------------------------------------------------------------
 # classify_cause_chain public primitive (proposal 0074 §6.4)
 # ---------------------------------------------------------------------------
