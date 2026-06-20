@@ -900,6 +900,19 @@ class LangfuseObserver:
             for key, observation in inv_state.open_observations.items():
                 if key[0] == prefix:
                     return observation.handle.id
+        # Proposal 0075: a callable parallel-branch's event sits at the pb
+        # NODE's own namespace (branch_name set, no parallel_branches_config),
+        # so it IS the unit — render it as a single observation parented under
+        # the NODE observation. The strict-ancestor fallback above misses the
+        # same-namespace NODE, so resolve it explicitly here.
+        if (
+            event.branch_name is not None
+            and event.parallel_branches_config is None
+            and event.namespace in inv_state.parallel_branches_parent_node_name
+        ):
+            for key, observation in inv_state.open_observations.items():
+                if key[0] == event.namespace and key[3] is None:
+                    return observation.handle.id
         return None
 
     def _trace_id_for(
@@ -989,6 +1002,19 @@ class LangfuseObserver:
                 and prefix in inv_state.fan_out_parent_node_name
             ):
                 self._open_fan_out_instance_dispatch_observation(inv_state, correlation_id, prefix, event)
+                continue
+            # A parallel-branches or fan-out NODE prefix already has its own
+            # leaf observation (from the NODE's own started event), unlike a
+            # transparent subgraph wrapper. Don't synthesize a duplicate
+            # subgraph wrapper observation over it; inner branch / instance
+            # events parent under the NODE observation via the
+            # _resolve_parent_observation_id leaf fallback. Mirrors the OTel
+            # observer's same guard (it skips the synthetic subgraph span at a
+            # pb / fan-out NODE depth for the same reason).
+            if (
+                prefix in inv_state.parallel_branches_parent_node_name
+                or prefix in inv_state.fan_out_parent_node_name
+            ):
                 continue
             # Plain non-detached subgraph dispatch.
             self._open_subgraph_observation(inv_state, correlation_id, prefix, event)

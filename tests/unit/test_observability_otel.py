@@ -3341,3 +3341,86 @@ async def test_nested_fan_out_augmentation_reaches_outer_instance_dispatch_span(
     assert "openarmature.user.group" not in dict(inv_spans[0].attributes or {}), (
         "invocation span MUST NOT receive augmenter's key when inside a fan-out instance"
     )
+
+
+# ---------------------------------------------------------------------------
+# Callable parallel branches (proposal 0075, observability §5.7). Mirrors
+# spec conformance fixture 110 (otel-callable-branch-span), which is not yet
+# in the pinned submodule: a callable branch renders as ONE per-branch
+# dispatch span keyed by branch_name with NO inner-node spans; a when-skipped
+# branch emits no span.
+# ---------------------------------------------------------------------------
+
+
+class _CallableBranchState(State):
+    run_vector: bool = False
+    vector_result: int = 0
+    fts_result: int = 0
+    keyword_result: int = 0
+
+
+async def test_callable_branch_renders_one_dispatch_span_skipped_emits_none() -> None:
+    from openarmature.graph import BranchSpec
+
+    async def vector(_s: _CallableBranchState) -> dict[str, int]:
+        return {"vector_result": 1}
+
+    async def fts(_s: _CallableBranchState) -> dict[str, int]:
+        return {"fts_result": 2}
+
+    async def keyword(_s: _CallableBranchState) -> dict[str, int]:
+        return {"keyword_result": 3}
+
+    exporter = InMemorySpanExporter()
+    observer = OTelObserver(span_processor=SimpleSpanProcessor(exporter))
+    g = (
+        GraphBuilder(_CallableBranchState)
+        .set_entry("retrieve")
+        .add_parallel_branches_node(
+            "retrieve",
+            branches={
+                "vector": BranchSpec(call=vector, when=lambda s: s.run_vector),
+                "fts": BranchSpec(call=fts),
+                "keyword": BranchSpec(call=keyword),
+            },
+            error_policy="fail_fast",
+        )
+        .add_edge("retrieve", END)
+        .compile()
+    )
+    g.attach_observer(observer)
+    await cast("Any", g).invoke(_CallableBranchState())  # run_vector False -> vector skipped
+    await cast("Any", g).drain()
+
+    spans = exporter.get_finished_spans()
+
+    def _sid(span: ReadableSpan) -> int:
+        ctx = span.context
+        assert ctx is not None
+        return ctx.span_id
+
+    def _children(span: ReadableSpan) -> list[ReadableSpan]:
+        return [s for s in spans if s.parent is not None and s.parent.span_id == _sid(span)]
+
+    node_spans = [s for s in spans if s.name == "retrieve"]
+    assert len(node_spans) == 1
+    node = node_spans[0]
+
+    # The skipped `vector` branch emits NO span.
+    assert [s for s in spans if s.name == "vector"] == []
+
+    # Each dispatched callable branch -> exactly one dispatch span keyed by
+    # branch_name, carrying parent_node_name, parented under the NODE span,
+    # with NO inner-node spans (children == []).
+    for branch in ("fts", "keyword"):
+        branch_spans = [s for s in spans if s.name == branch]
+        assert len(branch_spans) == 1, f"branch {branch!r}: expected one span, got {len(branch_spans)}"
+        bs = branch_spans[0]
+        attrs = dict(bs.attributes or {})
+        assert attrs.get("openarmature.node.branch_name") == branch
+        assert attrs.get("openarmature.parallel_branches.parent_node_name") == "retrieve"
+        assert bs.parent is not None and bs.parent.span_id == _sid(node)
+        assert _children(bs) == []
+
+    # The NODE span's children are exactly the two dispatched branch spans.
+    assert sorted(c.name for c in _children(node)) == ["fts", "keyword"]

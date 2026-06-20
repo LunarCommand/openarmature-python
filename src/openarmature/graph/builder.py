@@ -29,6 +29,7 @@ from .errors import (
     MappingReferencesUndeclaredField,
     MultipleOutgoingEdges,
     NoDeclaredEntry,
+    ParallelBranchesInvalidBranchSpec,
     ParallelBranchesNoBranches,
     UnreachableNode,
 )
@@ -316,8 +317,11 @@ class GraphBuilder[StateT: State]:
 
         - ``branches`` non-empty (raises ``ParallelBranchesNoBranches``).
         - Each branch name is a non-empty string (raises ``ValueError``).
-        - Each branch's ``inputs`` / ``outputs`` refer only to declared
-          fields on the (parent, branch-subgraph) state schemas
+        - Each branch gives its work as exactly one of ``subgraph`` /
+          ``call``, and a callable branch declares no ``inputs`` /
+          ``outputs`` (raises ``ParallelBranchesInvalidBranchSpec``).
+        - Each subgraph branch's ``inputs`` / ``outputs`` refer only to
+          declared fields on the (parent, branch-subgraph) state schemas
           (raises ``MappingReferencesUndeclaredField``).
         - ``errors_field`` (when set) is a declared parent-state field.
         """
@@ -337,6 +341,27 @@ class GraphBuilder[StateT: State]:
         for branch_name, spec in branches.items():
             if not branch_name:
                 raise ValueError(f"parallel-branches node {name!r}: branch_name MUST be non-empty")
+            # A branch's work is exactly one of subgraph / call (§11.1.1).
+            # Both or neither is parallel_branches_invalid_branch_spec.
+            if (spec.subgraph is None) == (spec.call is None):
+                raise ParallelBranchesInvalidBranchSpec(
+                    name,
+                    branch_name,
+                    "must give its work as exactly one of subgraph / call",
+                )
+            # A callable branch reads parent state and returns parent-shaped
+            # fields directly, so inputs/outputs projection is meaningless.
+            if spec.call is not None:
+                if spec.inputs or spec.outputs:
+                    raise ParallelBranchesInvalidBranchSpec(
+                        name,
+                        branch_name,
+                        "is a callable branch and must not declare inputs / outputs",
+                    )
+                continue
+            # Subgraph branch: validate its inputs/outputs against the
+            # (parent, subgraph) state schemas.
+            assert spec.subgraph is not None
             sub_fields = spec.subgraph.state_cls.model_fields
             for sub_field, parent_field in spec.inputs.items():
                 if sub_field not in sub_fields:

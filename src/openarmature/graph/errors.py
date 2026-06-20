@@ -154,6 +154,25 @@ class ParallelBranchesNoBranches(CompileError):
         self.node_name = node_name
 
 
+class ParallelBranchesInvalidBranchSpec(CompileError):
+    """Raised at registration when a branch spec's work is not given by
+    exactly one of ``subgraph`` / ``call``.
+
+    A branch is either a compiled ``subgraph`` (with optional
+    ``inputs`` / ``outputs`` projection) or an inline ``call`` (an async
+    function over the parent state). Declaring both, neither, or
+    ``inputs`` / ``outputs`` on a callable branch (which reads parent
+    state and returns parent-shaped fields directly, so projection is
+    meaningless) is invalid. Non-transient."""
+
+    category = "parallel_branches_invalid_branch_spec"
+
+    def __init__(self, node_name: str, branch_name: str, reason: str) -> None:
+        super().__init__(f"parallel-branches node {node_name!r}: branch {branch_name!r} {reason}")
+        self.node_name = node_name
+        self.branch_name = branch_name
+
+
 # ===== Runtime errors =====
 
 

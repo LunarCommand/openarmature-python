@@ -678,6 +678,16 @@ class OTelObserver:
             return
         open_span = inv_state.open_spans.get(self._key_for(event))
         if open_span is None:
+            # Proposal 0075: a callable parallel-branch has no leaf — its span
+            # is the per-branch dispatch span opened in ``_open_started_span``.
+            # Publish that so a provider call inside the callable nests under
+            # the branch span.
+            if event.branch_name is not None and event.parallel_branches_config is None:
+                dispatch = inv_state.parallel_branches_branch_spans.get(
+                    event.namespace + (event.branch_name,)
+                )
+                if dispatch is not None:
+                    _set_active_observer_span(dispatch.span)
             return
         # Publish the span to the engine via the ContextVar. Discard
         # the Token — last-writer-wins is the documented contract
@@ -751,6 +761,28 @@ class OTelObserver:
         # prefix that doesn't have one yet (per observability §4.5).
         # Also closes subgraph spans we've left.
         self._sync_subgraph_spans(inv_state, invocation_id, correlation_id, event)
+
+        # Proposal 0075 (observability §5.7): a callable parallel-branch emits
+        # its started/completed pair at the pb NODE's own namespace, tagged
+        # with branch_name and (unlike the NODE's own events) no
+        # parallel_branches_config. It IS the unit, so render it as the
+        # branch's per-branch dispatch span (keyed by branch_name, parented
+        # under the NODE span) with NO inner-node leaf. A subgraph branch's
+        # inner-node events are always one level deeper, so this never
+        # misfires for them. The dispatch span is closed when the NODE's own
+        # completed event fires (children-before-parents), like any branch
+        # dispatch span; this branch's completed event is then a no-op pop.
+        if (
+            event.branch_name is not None
+            and event.parallel_branches_config is None
+            and event.namespace in inv_state.parallel_branches_parent_node_name
+        ):
+            branch_key = event.namespace + (event.branch_name,)
+            if branch_key not in inv_state.parallel_branches_branch_spans:
+                self._open_parallel_branches_branch_dispatch_span(
+                    inv_state, correlation_id, event.namespace, event
+                )
+            return
 
         parent_ctx = self._resolve_parent_context(inv_state, invocation_id, event)
         span = self._tracer.start_span(
