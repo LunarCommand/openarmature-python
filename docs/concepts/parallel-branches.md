@@ -76,6 +76,61 @@ order**: first the branch declared first in the `branches` dict,
 then the next, and so on. This is deterministic regardless of which
 branch's inner work finishes first.
 
+## Lightweight callable branches
+
+Not every branch needs a compiled subgraph. When a branch is really
+just *"call this one async function over the shared state"*, give its
+work as `call` instead of `subgraph`: an async function that reads the
+parent state and returns a parent-shaped partial update. No subgraph,
+no state schema, no `inputs` / `outputs` projection.
+
+```python
+async def vector_recall(state: SearchState) -> dict[str, object]:
+    hits = await vector_store.query(state.query)
+    return {"vector_hits": hits}
+
+async def keyword_recall(state: SearchState) -> dict[str, object]:
+    hits = await fts_index.search(state.query)
+    return {"keyword_hits": hits}
+
+builder.add_parallel_branches_node(
+    "recall",
+    branches={
+        "vector": BranchSpec(call=vector_recall),
+        "keyword": BranchSpec(call=keyword_recall),
+    },
+)
+```
+
+This is the right form for hybrid recall (vector plus full-text),
+paired reads, and other *"M heterogeneous lightweight calls over
+shared state, each independently failure-isolated"* shapes. Each
+branch returns parent fields directly, so the returned partial is the
+branch's contribution as-is: it merges via the parent's reducers in
+branch insertion order, exactly like a subgraph branch's projected
+outputs, with no projection step.
+
+A branch gives its work as **exactly one** of `subgraph` or `call`.
+Declaring both, neither, or `inputs` / `outputs` on a callable branch
+(which has no subgraph state to project against) is a compile-time
+`ParallelBranchesInvalidBranchSpec`. A single parallel-branches node
+may freely mix subgraph branches and callable branches.
+
+Per-leg failure isolation works the same on a callable branch: wrap it
+in a `FailureIsolationMiddleware` via the branch's `middleware` (see
+[Branch middleware](#branch-middleware) below). A failing callable
+that degrades to its configured update "succeeds" from the node's view,
+so it contributes the degraded update and does not trip `fail_fast`.
+
+Because a callable branch has no inner nodes, the branch itself is the
+unit of work: it emits one `started` / `completed` observer pair keyed
+by its `branch_name`, so per-branch observability comes from the branch
+as a whole. The bundled OTel observer renders it as a single per-branch
+dispatch span keyed by `branch_name`, with no inner-node spans beneath
+it (a subgraph branch, by contrast, spans its inner nodes under the
+dispatch span); the Langfuse observer renders it as a single observation
+under the node. A `when`-skipped branch produces no span at all.
+
 ## Error policy
 
 - **`"fail_fast"`** (default): the first branch failure cancels
@@ -113,6 +168,44 @@ Branch middleware is independent across branches: branch A may
 have `[retry, timing]`; branch B may have `[]`; branch C may have
 some custom breaker. Each branch's chain composes in isolation.
 
+## Conditional branches
+
+Any branch (subgraph or callable) may carry an optional `when`
+predicate over the parent state. It is evaluated **once at dispatch**,
+against the state the parallel-branches node received:
+
+```python
+builder.add_parallel_branches_node(
+    "recall",
+    branches={
+        # Only run the vector leg when the query carries an embedding.
+        "vector": BranchSpec(call=vector_recall, when=lambda s: s.embedding is not None),
+        "keyword": BranchSpec(call=keyword_recall),
+    },
+)
+```
+
+- `when` absent (default): the branch always dispatches.
+- `when` returns `True`: the branch dispatches normally.
+- `when` returns `False`: the branch is **skipped** entirely. It is
+  not dispatched, runs no work, contributes nothing to parent state,
+  and emits no observer events or span. It simply does not appear in
+  the run.
+
+This expresses *"skip this leg when it does not apply"* directly,
+without an always-run self-no-op branch cluttering the trace. The
+`branches` mapping and its insertion order are unchanged; skipping is
+a runtime decision over the declared set, and the branches that do
+dispatch keep their insertion-order determinism. If **every** branch
+is skipped, the node completes as a valid no-op (it contributes
+nothing), distinct from the compile-time `ParallelBranchesNoBranches`
+that an empty declared mapping raises.
+
+Keep `when` a deterministic function of the dispatch-time parent
+state so repeated runs skip the same set; a `when` that consults
+nondeterministic sources carries the same caveat as a conditional
+middleware.
+
 ## Composition with other constructs
 
 Parallel branches compose with the rest of the engine the way
@@ -144,8 +237,10 @@ Per-branch progress is not individually persisted in v1.
   this subgraph for each item in a list," reach for
   [fan-out](fan-out.md).
 - **Not a router.** A router is a conditional-edge pattern that
-  picks one branch based on state. Parallel branches runs *all*
-  branches concurrently.
+  picks one path based on state. Parallel branches runs all the
+  branches that dispatch concurrently; a branch's `when` can skip an
+  individual branch, but it gates each branch independently rather
+  than selecting exactly one.
 - **Not a coordinator.** Branches don't communicate with each other
   during execution; if branch B's work depends on branch A's
   output, you want a linear pipeline (A → B), not parallel branches.

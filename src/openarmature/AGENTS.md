@@ -1,6 +1,6 @@
 # OpenArmature — Agent documentation
 
-*This is the agent guide bundled with the openarmature Python package, version 0.14.0 (spec v0.65.0). For the full docs site see [openarmature.ai](https://openarmature.ai). For the canonical spec text see [openarmature.org/capabilities](https://openarmature.org/capabilities/). For project-specific conventions for the code you're editing, see the host project's `AGENTS.md` or `CLAUDE.md`.*
+*This is the agent guide bundled with the openarmature Python package, version 0.14.0 (spec v0.66.1). For the full docs site see [openarmature.ai](https://openarmature.ai). For the canonical spec text see [openarmature.org/capabilities](https://openarmature.org/capabilities/). For project-specific conventions for the code you're editing, see the host project's `AGENTS.md` or `CLAUDE.md`.*
 
 ## TL;DR
 
@@ -10,7 +10,7 @@ OpenArmature is a workflow framework for LLM pipelines and tool-calling agents: 
 
 ## Capability contracts
 
-_Sourced from openarmature-spec v0.65.0. Each entry below reproduces §1 (Purpose) and §2 (Concepts) of the capability's `spec.md` verbatim — including additions from accepted proposals that this Python implementation may not yet ship. For per-proposal implementation status (implemented / partial / textual-only / not-yet), see the `conformance.toml` manifest at the repo root. For the full spec text (execution model, error semantics, determinism, observer hooks, etc.) see the linked docs site._
+_Sourced from openarmature-spec v0.66.1. Each entry below reproduces §1 (Purpose) and §2 (Concepts) of the capability's `spec.md` verbatim — including additions from accepted proposals that this Python implementation may not yet ship. For per-proposal implementation status (implemented / partial / textual-only / not-yet), see the `conformance.toml` manifest at the repo root. For the full spec text (execution model, error semantics, determinism, observer hooks, etc.) see the linked docs site._
 
 ### Capability: `graph-engine`
 
@@ -1523,7 +1523,7 @@ _Runnable example programs shipped in the source tree at `examples/`. The full c
 - **`examples/multimodal-prompt/main.py`** — openarmature demo: two independent analyses of a lunar-mission photograph using versioned prompt templates, a fallback prompt backend, and a multimodal user message.
 - **`examples/nested-subgraphs/main.py`** — openarmature demo: question answering against a tiny document corpus, with two levels of subgraph nesting.
 - **`examples/observer-hooks/main.py`** — openarmature demo: observer hooks for structured logging, per-call metrics, and OTel spans.
-- **`examples/parallel-branches/main.py`** — openarmature demo: enrich a lunar-mission news article with three independent analyses running concurrently.
+- **`examples/parallel-branches/main.py`** — openarmature demo: enrich a lunar-mission news article with several independent analyses running concurrently.
 - **`examples/production-observability/main.py`** — openarmature demo: production observability with dual OTel + Langfuse observers, caller hooks for trace.input/output, and the canonical TimingMiddleware.
 - **`examples/routing-and-subgraphs/main.py`** — openarmature demo: conditional routing + subgraph with a custom projection.
 - **`examples/tool-use/main.py`** — openarmature demo: a lunar-mission assistant that calls local Python functions as tools to answer fact and physics questions about Apollo / Artemis missions.

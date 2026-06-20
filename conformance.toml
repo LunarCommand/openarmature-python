@@ -32,7 +32,7 @@
 
 [manifest]
 implementation = "openarmature-python"
-spec_pin = "v0.65.0"
+spec_pin = "v0.66.1"
 
 # Status values:
 #   implemented   — shipped behavior matches the proposal's contract
@@ -726,3 +726,8 @@ note = "Governance + observability §5.5 rationale change: reconciles the gen_ai
 status = "implemented"
 since = "0.15.0"
 note = "FailureIsolationMiddleware gains an optional `catch` set of error categories (§6.3): an exception is caught only if the DERIVED category of its cause chain (the outermost non-carrier link, resolved THROUGH node_exception carriers -- the same value reported as caught_exception.category) is in the set, composing with `predicate` as a conjunction (both default permissive, both unset = catch-all; a null derived category never matches a non-empty set). This classifies a carrier-wrapped failure correctly at a wrapping placement where a surface check sees only the carrier. The §6.4 cause-chain classification walk is promoted to a public primitive classify_cause_chain(exc) -> CaughtException (the existing failure-isolation record: chain + derived category + message) in openarmature.graph, shared by the catch gate, the emitted event, and any consumer. §6.1: the default retry classifier's single-level depth is documented as deliberate (re-run granularity vs §6.3 full-chain degrade); no behavior change. Fixture 072 (catch matches through an instance-placement carrier and degrades; a non-matching catch propagates with no event). The optional native-exception-type catch sugar (spec MAY) is not shipped."
+
+[proposals."0075"]
+status = "implemented"
+since = "0.15.0"
+note = "ParallelBranchesNode gains two additive branch forms. (1) Inline-callable branches (§11.1.1): a BranchSpec may give its work as `call` (an async function over the parent state returning a parent-shaped partial update) instead of a compiled `subgraph` + inputs/outputs projection; the contribution is the returned partial directly, merged via the parent reducer with no projection (§11.4). Exactly one of subgraph/call per branch, and a callable branch declares no inputs/outputs, else parallel_branches_invalid_branch_spec (a new compile-time category); a node MAY mix subgraph and callable branches. Per-leg failure isolation on a callable branch is the existing §11.7 branch-middleware contract (wrap the callable in FailureIsolationMiddleware). (2) Conditional branches (§11.10): a BranchSpec may carry an optional `when` predicate (parent_state) -> bool, evaluated once at dispatch; false skips the branch entirely (no dispatch, contribution, observer events, or span). All-branches-skipped is a valid no-op, distinct from the compile-time parallel_branches_no_branches (empty declared mapping). graph-engine §6 / observability §5.7: a callable branch is the unit -- it emits one started/completed pair keyed by branch_name (rendered as a branch span via the existing §5.7 machinery), a skipped branch emits nothing. Fixtures 073 (two callable branches merge to disjoint fields), 074 (when false skips / true dispatches), 075 (callable branch + FailureIsolationMiddleware degrades, sibling completes, category resolves through the chain)."

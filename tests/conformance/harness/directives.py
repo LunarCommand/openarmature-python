@@ -308,11 +308,18 @@ class FanOutSpec(_AllowExtras):
 class ParallelBranchSpec(_AllowExtras):
     """One entry inside a ``parallel_branches.branches`` mapping.
 
-    Permissive on extras because fixtures may carry extra knobs
-    (e.g., per-branch annotations the harness ignores).
+    A branch's work is given by exactly one of ``subgraph`` (a compiled
+    subgraph referenced by name, with optional ``inputs`` / ``outputs``)
+    or ``call`` (an inline node-behavior directive — ``update`` / ``flaky``
+    / ``raises`` — run as a function over the parent state, proposal 0075).
+    An optional ``when`` directive (``{field: <name>}``) skips the branch
+    at dispatch. Permissive on extras because fixtures may carry extra
+    knobs (e.g., per-branch annotations the harness ignores).
     """
 
-    subgraph: str
+    subgraph: str | None = None
+    call: dict[str, Any] | None = None
+    when: dict[str, Any] | None = None
     inputs: dict[str, str] | None = None
     outputs: dict[str, str] | None = None
     middleware: list[MiddlewareSpec] | None = None

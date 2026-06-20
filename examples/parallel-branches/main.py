@@ -1,16 +1,17 @@
-"""openarmature demo: enrich a lunar-mission news article with three
+"""openarmature demo: enrich a lunar-mission news article with several
 independent analyses running concurrently.
 
-**Use case:** Given a news article about a lunar mission, produce three
+**Use case:** Given a news article about a lunar mission, produce
 side-by-side outputs: a one-sentence summary, an overall sentiment label,
-and a short list of topic tags. The three analyses don't depend on each
-other, so dispatch them in parallel. Each analysis is its own subgraph
-with its own state schema (the summary subgraph doesn't care about
-sentiment, the topic extractor doesn't care about either); which is
-exactly the shape parallel-branches is for.
+a short list of topic tags, an estimated reading time, and an optional
+translation. The analyses don't depend on each other, so dispatch them
+in parallel. Some are full subgraphs with their own state schema
+(summary, sentiment, topics); one is a lightweight inline function over
+the shared article (reading time); and one runs only when asked for
+(translation). That mix is exactly the shape parallel-branches is for.
 
 Where fan-out (the fan-out-with-retry example) runs N copies of ONE subgraph against
-different inputs, parallel-branches runs M heterogeneous subgraphs
+different inputs, parallel-branches runs M heterogeneous branches
 against the same input. Different schemas, different middleware,
 different topologies per branch; one dispatch.
 
@@ -18,16 +19,29 @@ different topologies per branch; one dispatch.
 
 - ``GraphBuilder.add_parallel_branches_node`` registers M
   ``BranchSpec``s under named keys (``summary``, ``sentiment``,
-  ``topics`` here). Each spec carries its own compiled subgraph,
-  its own input/output projection, and optionally its own middleware.
+  ``topics``, ``reading_time``, ``translation`` here). A branch gives
+  its work as either a compiled ``subgraph`` (with input/output
+  projection) or an inline ``call``, and may carry its own middleware
+  and an optional ``when`` predicate.
+- A branch can be a whole subgraph OR a single function. The summary,
+  sentiment, and topics branches are ``subgraph=...`` branches, each
+  with its own state schema and a projection mapping the parent's
+  ``article`` into the branch's input field. The reading-time branch is
+  a ``call=...`` branch: an inline async function over the parent state
+  that returns parent fields directly, no subgraph or projection. Reach
+  for ``call`` when a leg is really just "run this one function."
+- The translation branch carries a ``when`` predicate and runs only
+  when ``target_language`` is set on the state. With it unset (the
+  default here) the branch is skipped entirely: no dispatch, no
+  contribution, no observer events. Flip ``target_language`` to run it.
 - The branches have DIFFERENT state schemas. The summary subgraph's
   state has a ``summary`` field; the sentiment subgraph's has a
   ``label`` field; the topics subgraph's has a ``tags`` list. Each is
   scoped to its job. The projection mapping translates the parent's
   ``article`` into each branch's input field name.
 - The sentiment branch wraps its subgraph in ``RetryMiddleware`` to
-  show per-branch middleware composition. The other two branches run
-  bare. Per-branch middleware is heterogeneous; branch A may have
+  show per-branch middleware composition. The other branches run bare.
+  Per-branch middleware is heterogeneous; branch A may have
   retry + timing, branch B nothing, branch C something custom.
 - Branch insertion order determines fan-in order: when two branches
   contribute to the same parent field, the parent's reducer applies
@@ -128,12 +142,19 @@ ARTICLE = (
 
 
 class ArticleState(State):
-    """Outer: an article goes in, three enrichment fields come out."""
+    """Outer: an article goes in, the enrichment fields come out.
+
+    ``target_language`` is an input flag: set it to enable the optional
+    translation branch (a ``when`` predicate gates that branch on it).
+    """
 
     article: str = ""
+    target_language: str = ""
     summary: str = ""
     sentiment: str = ""
     topics: list[str] = Field(default_factory=list)
+    reading_time_seconds: int = 0
+    translation: str = ""
     trace: Annotated[list[str], append] = Field(default_factory=list)
 
 
@@ -228,6 +249,31 @@ def build_topics_subgraph() -> CompiledGraph[TopicsState]:
 
 
 # ---------------------------------------------------------------------------
+# Callable branches; each is just a function over the parent state. No
+# subgraph, no state schema, no projection: the function reads the article
+# off the parent state and returns parent-shaped fields directly.
+# ---------------------------------------------------------------------------
+
+
+async def estimate_reading_time(s: ArticleState) -> Mapping[str, Any]:
+    """A lightweight branch that needs no LLM and no subgraph: estimate
+    reading time from the word count at ~200 words per minute. The kind
+    of leg that the subgraph form would be too heavy for."""
+    words = len(s.article.split())
+    return {"reading_time_seconds": round(words / 200 * 60)}
+
+
+async def translate_article(s: ArticleState) -> Mapping[str, Any]:
+    """An LLM branch that runs only when a target language is requested
+    (gated by a ``when`` predicate on its BranchSpec)."""
+    content = await _chat(
+        system=(f"Translate the article into {s.target_language}. Output only the translation, no preamble."),
+        user=s.article,
+    )
+    return {"translation": content}
+
+
+# ---------------------------------------------------------------------------
 # Outer graph
 # ---------------------------------------------------------------------------
 
@@ -243,20 +289,22 @@ async def present(s: ArticleState) -> Mapping[str, Any]:
 
 
 async def branch_attribution_observer(event: ObserverEvent) -> None:
-    """Print which branch each inner-node event came from.
+    """Print which branch each event came from.
 
-    NodeEvent carries ``branch_name`` on events from nodes that
-    execute INSIDE a parallel-branches branch; it's the per-event
-    attribution that says "this came from branch X." Outermost-graph
-    nodes (receive, enrich, present) carry no branch_name. The
-    observer skips events with no branch attribution and prints
-    ``(branch=…) node_name`` for the rest.
+    NodeEvent carries ``branch_name`` on every event from inside a
+    parallel-branches branch: the inner nodes of a subgraph branch, and
+    the single branch-unit event of a callable branch. It's the per-event
+    attribution that says "this came from branch X." Outermost-graph nodes
+    (receive, enrich, present) carry no branch_name. A skipped ``when``
+    branch emits no events, so it never appears here. The observer skips
+    events with no branch attribution and prints ``(branch=…) node_name``
+    for the rest.
     """
     if not isinstance(event, NodeEvent):
         return
     if event.branch_name is None or event.phase != "started":
         return
-    print(f"  [observer] (branch={event.branch_name}) inner node {event.node_name!r} started")
+    print(f"  [observer] (branch={event.branch_name}) node {event.node_name!r} started")
 
 
 def build_graph() -> CompiledGraph[ArticleState]:
@@ -297,6 +345,16 @@ def build_graph() -> CompiledGraph[ArticleState]:
                     inputs={"text": "article"},
                     outputs={"topics": "tags"},
                 ),
+                # A callable branch: an inline function over the parent
+                # state, no subgraph / projection. Its return value IS the
+                # contribution.
+                "reading_time": BranchSpec(call=estimate_reading_time),
+                # A conditional callable branch: skipped at dispatch unless
+                # a target language is requested.
+                "translation": BranchSpec(
+                    call=translate_article,
+                    when=lambda s: bool(s.target_language),
+                ),
             },
         )
         .add_node("present", present)
@@ -318,7 +376,7 @@ async def main() -> None:
     graph.attach_observer(branch_attribution_observer)
 
     print("=" * 72)
-    print("Lunar-mission article enrichment; three independent analyses in parallel")
+    print("Lunar-mission article enrichment; independent analyses in parallel")
     print("=" * 72)
     print()
     print(f"Article ({len(ARTICLE)} chars):")
@@ -328,20 +386,29 @@ async def main() -> None:
 
     wall_start = time.monotonic()
     try:
+        # target_language is unset, so the translation branch's `when`
+        # predicate is false and that branch is skipped. Set it (e.g.
+        # ArticleState(article=ARTICLE, target_language="Spanish")) to run it.
         final = await graph.invoke(ArticleState(article=ARTICLE))
         wall_ms = (time.monotonic() - wall_start) * 1000.0
         print("=" * 72)
         print("Enrichment results")
         print("=" * 72)
         print()
-        print(f"  summary:   {final.summary}")
-        print(f"  sentiment: {final.sentiment}")
-        print(f"  topics:    {final.topics}")
+        print(f"  summary:      {final.summary}")
+        print(f"  sentiment:    {final.sentiment}")
+        print(f"  topics:       {final.topics}")
+        print(f"  reading time: {final.reading_time_seconds}s")
+        translation = final.translation or "(skipped by `when`; set target_language to enable)"
+        print(f"  translation:  {translation}")
         print()
         print(f"  wall-clock: {wall_ms:7.1f} ms")
         print()
-        print("The three branches ran in parallel; wall-clock is closer to the")
-        print("slowest single branch than to the sum of all three.")
+        print("The branches ran in parallel; wall-clock is closer to the slowest")
+        print("single branch than to the sum of them all. The subgraph branches")
+        print("(summary, sentiment, topics) and the inline-callable reading-time")
+        print("branch all contributed; the translation branch was skipped by its")
+        print("`when` predicate, so it did no work and emitted no events.")
     finally:
         await graph.drain()
         if _provider_instance is not None:
