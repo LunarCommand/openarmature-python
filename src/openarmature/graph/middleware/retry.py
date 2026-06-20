@@ -57,6 +57,14 @@ def default_classifier(exc: Exception, _state: Any) -> bool:
     unused" while keeping the signature stable for user-supplied
     state-aware classifiers.
     """
+    # Single-level by design (pipeline-utilities §6.1, proposal 0074): retry
+    # RE-RUNS the wrapped target, so it classifies at re-attempt granularity --
+    # the surface category and its immediate cause, NOT the full carrier-skipped
+    # chain §6.3 isolation derives (isolation degrades, which is depth-
+    # independent). A transient buried two or more carriers deep is the inner
+    # scope's to retry; a caller needing outer full-chain retry classification
+    # supplies a custom classifier built on classify_cause_chain (the §6.4
+    # primitive).
     direct = getattr(exc, "category", None)
     if isinstance(direct, str) and direct in TRANSIENT_CATEGORIES:
         return True

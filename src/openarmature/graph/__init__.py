@@ -10,6 +10,7 @@ seams, and the canonical compile-time and runtime error categories.
 """
 
 from .builder import GraphBuilder
+from .cause_chain import CaughtException, CauseLink, classify_cause_chain
 from .compiled import CompiledGraph
 from .edges import END, ConditionalEdge, EndSentinel, StaticEdge
 from .errors import (
@@ -37,8 +38,6 @@ from .errors import (
     UnreachableNode,
 )
 from .events import (
-    CaughtException,
-    CauseLink,
     FailureIsolatedEvent,
     InvocationCompletedEvent,
     InvocationStartedEvent,
@@ -135,6 +134,7 @@ __all__ = [
     "TimingRecord",
     "UnreachableNode",
     "append",
+    "classify_cause_chain",
     "concat_flatten",
     "default_classifier",
     "deterministic_backoff",

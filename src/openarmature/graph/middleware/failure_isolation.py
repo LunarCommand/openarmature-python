@@ -36,7 +36,7 @@ defeating retry entirely.
 from __future__ import annotations
 
 import warnings
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Collection, Mapping
 from typing import TYPE_CHECKING, Any
 
 from openarmature.observability.correlation import (
@@ -53,71 +53,15 @@ from openarmature.observability.correlation import (
 from ._core import NextCall
 
 if TYPE_CHECKING:
-    # Annotation-only import; the runtime construction in ``_build_cause_chain``
-    # uses a deferred local import to keep ``events`` off the module-load path.
-    from openarmature.graph.events import CauseLink
+    # Annotation-only import; classify_cause_chain is imported lazily on the
+    # catch path to keep cause_chain (and its events / errors imports) off the
+    # middleware module-load path.
+    from openarmature.graph.cause_chain import CaughtException
 
 # A degraded update is either a static partial-update mapping or a
 # callable resolving one from the pre-call state. Resolved at catch
 # time; the callable form covers input-state-dependent degraded shapes.
 DegradedUpdate = Mapping[str, Any] | Callable[[Any], Mapping[str, Any]]
-
-
-def _build_cause_chain(exc: Exception) -> tuple[CauseLink, ...]:
-    # Cause chain (proposal 0068 / §6.3, superseding 0065's single
-    # "originating cause" prose). Walk the ``__cause__`` chain from the caught
-    # exception (outermost) to the originating raise (innermost), recording one
-    # ``CauseLink`` per exception. A graph-engine §4 ``node_exception`` carrier
-    # (``NodeException`` and subtypes such as ``ParallelBranchesBranchFailed``)
-    # the engine applies at a non-node placement (§9.7 instance, §11.7 branch,
-    # §9.6 / §11.6 parent-node middleware) is flagged ``carrier=True``. Traverse
-    # only BaseException instances (a non-exception ``__cause__`` ends the walk,
-    # per §6.3) and guard against a cyclic ``__cause__`` chain so a malformed
-    # chain can't hang or crash the degrade path. The local imports keep
-    # ``errors`` / ``events`` off the middleware module-load path, matching the
-    # deferred imports in ``_emit_event``.
-    from openarmature.graph.errors import NodeException
-    from openarmature.graph.events import CauseLink
-
-    links: list[CauseLink] = []
-    current: BaseException | None = exc
-    seen: set[int] = set()
-    while isinstance(current, BaseException) and id(current) not in seen:
-        seen.add(id(current))
-        category = getattr(current, "category", None)
-        links.append(
-            CauseLink(
-                category=category if isinstance(category, str) and category else None,
-                message=str(current),
-                carrier=isinstance(current, NodeException),
-            )
-        )
-        current = current.__cause__
-    return tuple(links)
-
-
-def _derive_cause(chain: tuple[CauseLink, ...]) -> tuple[str | None, str]:
-    # Derived single ``category`` / ``message`` (proposal 0068 / §6.3): the
-    # OUTERMOST non-carrier link whose ``category`` is a non-empty string — so a
-    # deliberately re-categorized surface error wins, while an uncategorized
-    # surface error resolves to the categorized cause beneath it (the same chain
-    # §6.1's default classifier consults, so the reported category agrees with
-    # what retry acted on). When no non-carrier link carries a category, the
-    # category is null and the message is the outermost non-carrier link's (the
-    # surface error). Reproduces 0065's single-carrier results. The all-carrier
-    # fallback is defensive — failure isolation always catches a non-carrier or
-    # wraps one, so a chain with no non-carrier link should not arise.
-    surface: CauseLink | None = None
-    for link in chain:
-        if link.carrier:
-            continue
-        if surface is None:
-            surface = link
-        if isinstance(link.category, str) and link.category:
-            return link.category, link.message
-    if surface is not None:
-        return None, surface.message
-    return None, chain[0].message if chain else ""
 
 
 class FailureIsolationMiddleware:
@@ -133,9 +77,21 @@ class FailureIsolationMiddleware:
       site; surfaces on the ``FailureIsolatedEvent``. No default —
       useful values are node-specific, and a generic default would make
       downstream telemetry strictly worse.
-    - ``predicate`` (optional): ``Exception -> bool``. When supplied,
-      only exceptions where ``predicate(exc)`` is true are caught;
-      others propagate. Defaults to catching every ``Exception``.
+    - ``catch`` (optional): a set of error categories. When supplied, an
+      exception is caught only if the derived category of its cause chain
+      (the outermost non-carrier link's category, resolving through
+      ``node_exception`` carriers, the value reported as
+      ``caught_exception.category``) is in the set. Composes with
+      ``predicate`` as a conjunction; both default permissive (both unset
+      catches every ``Exception``). The recommended gate for
+      category-scoped degradation.
+    - ``predicate`` (optional): ``Exception -> bool`` over the SURFACE
+      (caught) exception. When supplied, only exceptions where
+      ``predicate(exc)`` is true are caught; others propagate. Defaults to
+      always-true. A predicate inspecting the exception directly sees the
+      ``node_exception`` carrier at a wrapping placement, not the
+      originating failure; use ``catch`` for category gating, or classify
+      the chain via ``classify_cause_chain``.
     - ``on_caught`` (optional): an async ``Exception -> Awaitable[None]``
       hook fired on a caught exception, for caller-specific telemetry
       beyond the framework event. It runs inline before the degraded
@@ -150,11 +106,13 @@ class FailureIsolationMiddleware:
         *,
         degraded_update: DegradedUpdate,
         event_name: str,
+        catch: Collection[str] | None = None,
         predicate: Callable[[Exception], bool] | None = None,
         on_caught: Callable[[Exception], Awaitable[None]] | None = None,
     ) -> None:
         self.degraded_update = degraded_update
         self.event_name = event_name
+        self.catch = catch
         self.predicate = predicate
         self.on_caught = on_caught
 
@@ -173,6 +131,27 @@ class FailureIsolationMiddleware:
                 # BaseException (cancellation) never enters here — it
                 # extends BaseException, not Exception. Same rule as
                 # RetryMiddleware: cancellation MUST propagate.
+                #
+                # Classify once (proposal 0074 / §6.4): the ``catch`` gate and
+                # the emitted event both need the cause-chain derivation, so
+                # compute it here and thread it through. The local import keeps
+                # cause_chain (and its events / errors imports) off the
+                # middleware module-load path.
+                from openarmature.graph.cause_chain import classify_cause_chain
+
+                classification = classify_cause_chain(exc)
+                # Catch gate (§6.3): caught iff the derived category is in
+                # ``catch`` (or ``catch`` is unset) AND ``predicate`` admits the
+                # surface exception, a conjunction with both gates permissive by
+                # default (both unset stays catch-all). ``catch`` is checked first
+                # and short-circuits, matching the spec's ``catch_gate(exc) and
+                # predicate(exc)``, so ``predicate`` is not invoked once ``catch``
+                # has rejected. ``catch`` classifies THROUGH carriers (the derived
+                # category, == caught_exception.category); a null derived category
+                # never matches a non-empty set, so a bare uncategorized error
+                # propagates. ``predicate`` sees the surface exception.
+                if self.catch is not None and classification.category not in self.catch:
+                    raise
                 if self.predicate is not None and not self.predicate(exc):
                     raise
                 # Resolve the degraded update once, at catch time, and
@@ -183,7 +162,7 @@ class FailureIsolationMiddleware:
                 # preserved below; resolving here first only populates
                 # post_state.
                 degraded = self._resolve_degraded(state)
-                self._emit_event(state, exc, degraded)
+                self._emit_event(state, classification, degraded)
                 if self.on_caught is not None:
                     try:
                         await self.on_caught(exc)
@@ -208,7 +187,7 @@ class FailureIsolationMiddleware:
             return self.degraded_update(state)
         return self.degraded_update
 
-    def _emit_event(self, state: Any, exc: Exception, degraded: Mapping[str, Any]) -> None:
+    def _emit_event(self, state: Any, classification: CaughtException, degraded: Mapping[str, Any]) -> None:
         dispatch = current_dispatch()
         # current_dispatch() is None outside an invocation (no observers
         # in scope, e.g. unit-testing the middleware directly) — the
@@ -219,17 +198,14 @@ class FailureIsolationMiddleware:
         # Local import mirrors set_invocation_metadata's 0040 emit: it
         # keeps the event-type import off the middleware module-load
         # path and defers it until the first catch.
-        from openarmature.graph.events import CaughtException, FailureIsolatedEvent
+        from openarmature.graph.events import FailureIsolatedEvent
 
-        # Cause chain + derivation (proposal 0068 / §6.3). ``_build_cause_chain``
-        # records every link from the caught exception to the originating raise
-        # (carriers flagged); ``_derive_cause`` resolves the single reported
-        # ``category`` / ``message`` from it — the outermost non-carrier link
-        # carrying a category, NOT the masking ``node_exception``. Both ride on
-        # ``caught_exception`` so a simple consumer reads one value while the
-        # full provenance stays visible in the chain.
-        chain = _build_cause_chain(exc)
-        category, message = _derive_cause(chain)
+        # The §6.4 classification (computed once at catch, in __call__) is a
+        # CaughtException: the full cause chain (carriers flagged) plus the
+        # derived single category / message -- the outermost non-carrier link's,
+        # NOT the masking node_exception. It is the event's caught_exception
+        # record directly, so the reported category equals the value the
+        # ``catch`` gate matched on.
         # ``attempt_index`` is the wrapped node's final / exhausting
         # attempt (proposal 0050 §6.3: "the same lineage tuple NodeEvent
         # carries, for correlation with the wrapped node's other events").
@@ -254,7 +230,7 @@ class FailureIsolationMiddleware:
                 branch_name=current_branch_name(),
                 pre_state=state,
                 post_state=degraded,
-                caught_exception=CaughtException(category=category, message=message, chain=chain),
+                caught_exception=classification,
             )
         )
 

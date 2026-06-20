@@ -27,6 +27,7 @@ from openarmature.graph import (
     RetryMiddleware,
     State,
     append,
+    classify_cause_chain,
     deterministic_backoff,
 )
 from openarmature.graph.errors import NodeException, ParallelBranchesBranchFailed
@@ -444,6 +445,122 @@ async def test_no_event_outside_invocation() -> None:
     mw = FailureIsolationMiddleware(degraded_update={"result": []}, event_name="x_failed")
     out = await mw("s", _raises(ValueError("boom")))
     assert out == {"result": []}
+
+
+# ---------------------------------------------------------------------------
+# catch gate (proposal 0074)
+# ---------------------------------------------------------------------------
+
+
+async def test_catch_matches_carrier_wrapped_category_and_degrades() -> None:
+    # The catch set matches the DERIVED category through the node_exception
+    # carrier, where a surface category check would see only the carrier and
+    # miss it (the degrade->crash footgun the catch gate closes).
+    carrier = NodeException(node_name="work", cause=_TransientError("rate limited"), recoverable_state={})
+    mw = FailureIsolationMiddleware(
+        degraded_update={"result": []},
+        event_name="iso",
+        catch=["provider_rate_limit"],
+    )
+    assert await mw("s", _raises(carrier)) == {"result": []}
+
+
+async def test_catch_non_matching_category_propagates() -> None:
+    # The derived category (provider_rate_limit) is not in the catch set, so
+    # the gate rejects and the carrier propagates.
+    carrier = NodeException(node_name="work", cause=_TransientError("rate limited"), recoverable_state={})
+    mw = FailureIsolationMiddleware(
+        degraded_update={"result": []},
+        event_name="iso",
+        catch=["provider_unavailable"],
+    )
+    with pytest.raises(NodeException):
+        await mw("s", _raises(carrier))
+
+
+async def test_catch_null_derived_category_propagates() -> None:
+    # A bare uncategorized error has a null derived category, which never
+    # matches a non-empty catch set.
+    mw = FailureIsolationMiddleware(
+        degraded_update={"result": []},
+        event_name="iso",
+        catch=["provider_rate_limit"],
+    )
+    with pytest.raises(ValueError, match="plain"):
+        await mw("s", _raises(ValueError("plain")))
+
+
+async def test_catch_and_predicate_compose_as_conjunction() -> None:
+    # Both gates must admit: catch matches the derived category AND predicate
+    # admits the surface exception. A matching catch with a false predicate
+    # still propagates.
+    caught = FailureIsolationMiddleware(
+        degraded_update={"result": []},
+        event_name="iso",
+        catch=["provider_rate_limit"],
+        predicate=lambda e: isinstance(e, _TransientError),
+    )
+    assert await caught("s", _raises(_TransientError("rate limited"))) == {"result": []}
+
+    rejected = FailureIsolationMiddleware(
+        degraded_update={"result": []},
+        event_name="iso",
+        catch=["provider_rate_limit"],
+        predicate=lambda _e: False,
+    )
+    with pytest.raises(_TransientError):
+        await rejected("s", _raises(_TransientError("rate limited")))
+
+
+async def test_catch_unset_remains_catch_all() -> None:
+    # catch unset preserves the catch-everything default.
+    mw = FailureIsolationMiddleware(degraded_update={"result": []}, event_name="iso")
+    assert await mw("s", _raises(ValueError("anything"))) == {"result": []}
+
+
+async def test_catch_rejection_short_circuits_predicate() -> None:
+    # The gate matches the spec's ``catch and predicate`` short-circuit: when
+    # catch rejects, predicate is not consulted.
+    consulted: list[Exception] = []
+    carrier = NodeException(node_name="work", cause=_TransientError("rate limited"), recoverable_state={})
+
+    def predicate(exc: Exception) -> bool:
+        consulted.append(exc)
+        return True
+
+    mw = FailureIsolationMiddleware(
+        degraded_update={"result": []},
+        event_name="iso",
+        catch=["provider_unavailable"],  # does not match the derived provider_rate_limit
+        predicate=predicate,
+    )
+    with pytest.raises(NodeException):
+        await mw("s", _raises(carrier))
+    assert consulted == []
+
+
+# ---------------------------------------------------------------------------
+# classify_cause_chain public primitive (proposal 0074 §6.4)
+# ---------------------------------------------------------------------------
+
+
+def test_classify_cause_chain_derives_category_through_carrier() -> None:
+    carrier = NodeException(node_name="work", cause=_TransientError("rate limited"), recoverable_state={})
+    result = classify_cause_chain(carrier)
+    assert result.category == "provider_rate_limit"
+    assert result.message == "rate limited"
+    assert [(link.category, link.carrier) for link in result.chain] == [
+        ("node_exception", True),
+        ("provider_rate_limit", False),
+    ]
+
+
+def test_classify_cause_chain_bare_exception_is_null() -> None:
+    result = classify_cause_chain(ValueError("plain"))
+    assert result.category is None
+    assert result.message == "plain"
+    assert len(result.chain) == 1
+    assert result.chain[0].carrier is False
 
 
 # ---------------------------------------------------------------------------
