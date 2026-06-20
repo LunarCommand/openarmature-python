@@ -32,7 +32,7 @@
 
 [manifest]
 implementation = "openarmature-python"
-spec_pin = "v0.60.0"
+spec_pin = "v0.64.0"
 
 # Status values:
 #   implemented   — shipped behavior matches the proposal's contract
@@ -712,3 +712,10 @@ note = "The Langfuse observer promotes a recognized userId caller-metadata key t
 status = "implemented"
 since = "0.15.0"
 note = "PromptBackend.fetch / PromptManager.fetch / get gain an optional cache_ttl_seconds read-side control (absent / None = current behavior; 0 = force a fresh read past any cache; N > 0 = bound a served entry's staleness to N seconds; negative is rejected). It governs only which cached entry MAY be served for this fetch, not whether / how the result is cached. python's bundled backends (filesystem, in-memory) are cacheless and treat it as a no-op; the manager threads it through the §9 fallback chain and rejects negatives. render is unchanged. The TTL semantics are exercised by a caching prompt-backend conformance-harness primitive (§6.8: caches by (name, label), source_read_count, advance_clock controllable clock); fixtures 033/034 pass. No production caching backend ships (per §5, cacheless backends no-op). The v0.63.1 pin also wires pipeline-utilities coverage fixtures 070/071 (already-implemented 0069/0070 behavior; no new proposal)."
+
+# Spec v0.64.0 (proposal 0073).  GenAI semconv adoption reconciliation
+# (GOVERNANCE External-dependency adoption + observability §5.5 rationale).
+[proposals."0073"]
+status = "textual-only"
+since = "0.15.0"
+note = "Governance + observability §5.5 rationale change: reconciles the gen_ai.* adoption with upstream reality (the whole GenAI semconv surface is at Development status, and gen_ai.system was removed upstream in favor of gen_ai.provider.name). Adds a GenAI-scoped de-facto-interoperability carve-out (OA adopts the recognized core gen_ai.* names directly even at Development; peripheral attributes are mirrored to openarmature.*) and a post-adoption RETENTION rule (an adopted name is kept through an upstream rename / removal). No emitted-attribute change and no conformance-expectation change: python already emits the recognized core gen_ai.* set (including gen_ai.system, now RETAINED despite the upstream rename), so the existing gen_ai.* observability fixtures (e.g. 019-021) stand as the retention regression coverage. No python code and no new fixtures. The gen_ai.system -> gen_ai.provider.name migration is a deferred follow-on."
