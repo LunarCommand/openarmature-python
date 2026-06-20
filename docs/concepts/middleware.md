@@ -238,9 +238,26 @@ Configuration:
   like `"failure_isolated"` collapses every degraded path into one
   indistinguishable bucket in a dashboard, so the name is forced at the
   construction site, where the context to name it well is available.
-- **`predicate`** is an optional `Exception -> bool`. When supplied,
-  only exceptions where it returns true are caught; everything else
-  propagates. The default catches every `Exception`.
+- **`catch`** is an optional set of error categories. When supplied, an
+  exception is caught only if the *derived category* of its cause chain
+  is in the set: the category of the outermost non-carrier link that
+  carries one, resolved *through* the engine's `node_exception` carriers (the same value the
+  event reports as `caught_exception.category`). This is the recommended
+  gate for category-scoped degradation. At a wrapping placement (a
+  subgraph, a fan-out instance, a branch) the engine wraps the real
+  failure in a carrier, so a check on the surface exception sees only the
+  carrier and misses it; `catch` classifies through the carrier and
+  matches the originating category. A bare uncategorized error has no
+  derived category and is not matched, so it propagates.
+- **`predicate`** is an optional `Exception -> bool` over the *surface*
+  (caught) exception. When supplied, only exceptions where it returns true
+  are caught; everything else propagates. The default is always-true. It
+  composes with `catch` as a conjunction (both must admit), and both
+  default permissive, so the both-unset default catches every
+  `Exception`. Because `predicate` sees the surface exception, it
+  misclassifies a carrier-wrapped failure at a wrapping placement; reach
+  for `catch` for category gating, or classify the chain yourself with
+  `classify_cause_chain` (below).
 - **`on_caught`** is an optional async hook `Exception -> None`, fired
   when the middleware catches. Use it to pump the caught exception to
   caller-specific telemetry beyond the framework event. It fires inline
@@ -266,6 +283,30 @@ and Langfuse observers render it as a marker span / observation so the
 catch shows up alongside the node's own span. The default emission path
 is the observer stream only, with no logging-library dependency;
 `on_caught` is the escape hatch for anything else.
+
+### Cause-chain classification
+
+The walk behind `catch` and `caught_exception` is exposed as a public
+primitive, `classify_cause_chain`, so any consumer classifies a
+carrier-wrapped failure the same way the framework does:
+
+```python
+from openarmature.graph import classify_cause_chain
+
+result = classify_cause_chain(exc)
+result.category   # derived category (outermost non-carrier link with a category), or None
+result.message    # the message that category came from
+result.chain      # the ordered CauseLink chain, carriers flagged
+```
+
+It returns a `CaughtException` (the same record the failure-isolated
+event's `caught_exception` field holds) carrying the ordered `chain` (one
+`CauseLink` per exception, carriers flagged), the derived `category`, and
+its `message`. Use it in a custom `predicate` that needs to see through
+carriers, in a router or metric keyed on the originating category, or in a
+retry classifier that wants full-chain depth (the default retry classifier
+is deliberately single-level, classifying at re-attempt granularity rather
+than walking the full chain).
 
 ### Composing with RetryMiddleware
 
