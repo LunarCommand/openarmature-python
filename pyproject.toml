@@ -63,7 +63,7 @@ Specification = "https://github.com/LunarCommand/openarmature-spec"
 openarmature = "openarmature.cli:main"
 
 [tool.openarmature]
-spec_version = "0.64.0"
+spec_version = "0.65.0"
 
 [dependency-groups]
 dev = [

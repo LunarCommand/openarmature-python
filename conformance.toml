@@ -32,7 +32,7 @@
 
 [manifest]
 implementation = "openarmature-python"
-spec_pin = "v0.64.0"
+spec_pin = "v0.65.0"
 
 # Status values:
 #   implemented   — shipped behavior matches the proposal's contract
@@ -719,3 +719,10 @@ note = "PromptBackend.fetch / PromptManager.fetch / get gain an optional cache_t
 status = "textual-only"
 since = "0.15.0"
 note = "Governance + observability §5.5 rationale change: reconciles the gen_ai.* adoption with upstream reality (the whole GenAI semconv surface is at Development status, and gen_ai.system was removed upstream in favor of gen_ai.provider.name). Adds a GenAI-scoped de-facto-interoperability carve-out (OA adopts the recognized core gen_ai.* names directly even at Development; peripheral attributes are mirrored to openarmature.*) and a post-adoption RETENTION rule (an adopted name is kept through an upstream rename / removal). No emitted-attribute change and no conformance-expectation change: python already emits the recognized core gen_ai.* set (including gen_ai.system, now RETAINED despite the upstream rename), so the existing gen_ai.* observability fixtures (e.g. 019-021) stand as the retention regression coverage. No python code and no new fixtures. The gen_ai.system -> gen_ai.provider.name migration is a deferred follow-on."
+
+# Spec v0.65.0 (proposal 0074).  Failure-isolation `catch` cause-chain category
+# gate (§6.3) + public cause-chain classification primitive (§6.4).
+[proposals."0074"]
+status = "implemented"
+since = "0.15.0"
+note = "FailureIsolationMiddleware gains an optional `catch` set of error categories (§6.3): an exception is caught only if the DERIVED category of its cause chain (the outermost non-carrier link, resolved THROUGH node_exception carriers -- the same value reported as caught_exception.category) is in the set, composing with `predicate` as a conjunction (both default permissive, both unset = catch-all; a null derived category never matches a non-empty set). This classifies a carrier-wrapped failure correctly at a wrapping placement where a surface check sees only the carrier. The §6.4 cause-chain classification walk is promoted to a public primitive classify_cause_chain(exc) -> CaughtException (the existing failure-isolation record: chain + derived category + message) in openarmature.graph, shared by the catch gate, the emitted event, and any consumer. §6.1: the default retry classifier's single-level depth is documented as deliberate (re-run granularity vs §6.3 full-chain degrade); no behavior change. Fixture 072 (catch matches through an instance-placement carrier and degrades; a non-matching catch propagates with no event). The optional native-exception-type catch sugar (spec MAY) is not shipped."
