@@ -2097,28 +2097,28 @@ class CompiledGraph[StateT: State]:
         attempt_counter: list[int] = [0]
         deferred_info: list[tuple[int, StateT, StateT] | None] = [None]
 
-        # Per proposal 0044 (observability §5.7, v0.36.0): the
-        # resolved parallel-branches configuration is static at
-        # compile time (no count / concurrency resolvers like fan-out
-        # has), so build the event config once here and ship it on
-        # both started + completed events. ``branch_names`` mirrors
-        # the dispatch order ParallelBranchesNode uses internally
-        # (insertion order of the ``branches`` dict per pipeline-
-        # utilities §11.1).
-        #
-        # Python dicts preserve insertion order (PEP 468; guaranteed
-        # since 3.7), and YAML / direct-dict-literal ``branches``
-        # construction at the call site preserves the source order
-        # through into the dict's keys().  Spec §11.1 ties branch
-        # declaration order to dispatch order, so this tuple IS the
-        # declaration order observers should see.
+        # Per proposal 0044 (observability §5.7) + proposal 0075:
+        # ``branch_names`` is the full DECLARED set in insertion order
+        # (PEP 468 dict ordering; §11.1 ties declaration order to dispatch
+        # order, so this tuple IS the declaration order observers see).
+        # ``branch_count`` is the number of branches that DISPATCH for the
+        # dispatch-time state — ``when``-skipped branches (§11.10) are
+        # excluded, so the count matches the per-branch dispatch spans
+        # rendered. The two answer different questions ("what was declared"
+        # vs "how many ran"). Build the config inside ``innermost`` (where
+        # the dispatch-time state is in hand) and stash it so the completed
+        # event reuses the same value; ``when`` is pure (§11.10), so the
+        # dispatch set here equals the one ``run_with_context`` computes.
         branch_names: tuple[str, ...] = tuple(node.branches.keys())
-        parallel_branches_event_config = ParallelBranchesEventConfig(
-            branch_names=branch_names,
-            branch_count=len(branch_names),
-            error_policy=node.error_policy,
-            parent_node_name=current,
-        )
+        config_box: list[ParallelBranchesEventConfig] = []
+
+        def _build_pb_config(s: Any) -> ParallelBranchesEventConfig:
+            return ParallelBranchesEventConfig(
+                branch_names=branch_names,
+                branch_count=len(node.dispatched_branches(s)),
+                error_policy=node.error_policy,
+                parent_node_name=current,
+            )
 
         async def innermost(s: Any) -> Mapping[str, Any]:
             attempt_counter[0] += 1
@@ -2126,6 +2126,7 @@ class CompiledGraph[StateT: State]:
             # ``innermost`` for the v0.16.1 propagation rule.
             attempt_index = current_attempt_index()
 
+            config_box[:] = [_build_pb_config(s)]
             self._dispatch_started(
                 context,
                 current,
@@ -2133,7 +2134,7 @@ class CompiledGraph[StateT: State]:
                 step,
                 s,
                 attempt_index=attempt_index,
-                parallel_branches_config=parallel_branches_event_config,
+                parallel_branches_config=config_box[0],
             )
             otel_token = _attach_active_observer_span()
             try:
@@ -2148,7 +2149,7 @@ class CompiledGraph[StateT: State]:
                         s,
                         error=e,
                         attempt_index=attempt_index,
-                        parallel_branches_config=parallel_branches_event_config,
+                        parallel_branches_config=config_box[0],
                     )
                     raise
                 except Exception as e:
@@ -2161,7 +2162,7 @@ class CompiledGraph[StateT: State]:
                         s,
                         error=wrapped,
                         attempt_index=attempt_index,
-                        parallel_branches_config=parallel_branches_event_config,
+                        parallel_branches_config=config_box[0],
                     )
                     raise wrapped from e
             finally:
@@ -2179,7 +2180,7 @@ class CompiledGraph[StateT: State]:
                     s,
                     error=e,
                     attempt_index=attempt_index,
-                    parallel_branches_config=parallel_branches_event_config,
+                    parallel_branches_config=config_box[0],
                 )
                 raise
 
@@ -2238,7 +2239,7 @@ class CompiledGraph[StateT: State]:
                     final_pre_state,
                     post_state=final_merged,
                     attempt_index=final_attempt_index,
-                    parallel_branches_config=parallel_branches_event_config,
+                    parallel_branches_config=config_box[0],
                 )
             else:
                 self._dispatch_completed(
@@ -2249,7 +2250,7 @@ class CompiledGraph[StateT: State]:
                     final_pre_state,
                     error=edge_error,
                     attempt_index=final_attempt_index,
-                    parallel_branches_config=parallel_branches_event_config,
+                    parallel_branches_config=config_box[0],
                 )
 
         return _StepResult(state=merged_outer, finalize_completed=finalize_completed)

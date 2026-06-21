@@ -1,17 +1,20 @@
 # Spec: realizes pipeline-utilities §11 (parallel branches).
 
-"""Parallel branches: concurrent dispatch of M heterogeneous compiled subgraphs.
+"""Parallel branches: concurrent dispatch of M heterogeneous branches.
 
 Counterpart to :mod:`.fan_out`. Fan-out is data-driven (N items,
 one subgraph, instantiated N times); parallel branches is
-topology-driven (M heterogeneous compiled subgraphs declared
-statically, run concurrently within a single parent invocation).
+topology-driven (M heterogeneous branches declared statically, run
+concurrently within a single parent invocation).
 
-Each branch's :class:`BranchSpec` carries its own compiled
-subgraph (with potentially different state schema, middleware,
-topology), its own ``inputs`` / ``outputs`` projection mappings,
-and its own optional ``middleware`` wrapping the whole branch
-invocation as a unit.
+Each branch's :class:`BranchSpec` gives its work as exactly one of a
+compiled ``subgraph`` (with its own state schema, middleware, topology,
+and ``inputs`` / ``outputs`` projection) or an inline ``call`` (an async
+function over the parent state returning a parent-shaped partial update,
+no subgraph / projection — the lightweight form). A branch may also carry
+its own optional ``middleware`` wrapping the whole branch as a unit, and
+an optional ``when`` predicate that skips the branch at dispatch when it
+returns false.
 
 Buffer-then-apply semantics: contributions are collected during
 dispatch and merged deterministically once at node completion,
@@ -38,16 +41,17 @@ from __future__ import annotations
 import asyncio
 import contextvars
 import logging
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 from openarmature.observability.correlation import (
     _reset_branch_name,
     _set_branch_name,
+    current_attempt_index,
 )
 
-from .errors import ParallelBranchesBranchFailed
+from .errors import NodeException, ParallelBranchesBranchFailed
 from .middleware import ChainCall, Middleware, compose_chain
 from .state import State
 
@@ -58,24 +62,43 @@ if TYPE_CHECKING:
 _log = logging.getLogger(__name__)
 
 
+# A callable branch's work: an async function over the PARENT state
+# returning a parent-shaped partial update directly (no subgraph, no
+# state schema, no inputs/outputs projection).
+BranchCallable = Callable[[Any], Awaitable[Mapping[str, Any]]]
+
+
 @dataclass(frozen=True)
 class BranchSpec[ChildT: State]:
     """One entry in a :class:`ParallelBranchesNode`'s branch mapping.
 
-    Branches are heterogeneous: each branch may reference a different
-    compiled subgraph with a different state schema. ``inputs`` /
-    ``outputs`` follow the same shape as subgraph projection
-    mappings.
+    A branch's work is given by exactly one of:
+
+    - ``subgraph`` — a compiled subgraph (the heterogeneous-subgraph
+      form): each branch may reference a different compiled subgraph
+      with a different state schema, with ``inputs`` / ``outputs``
+      following the same shape as subgraph projection mappings.
+    - ``call`` — an inline async function over the parent state
+      returning a parent-shaped partial update (the lightweight form):
+      no subgraph, no state schema, no ``inputs`` / ``outputs``. The
+      function reads the parent state directly and returns parent fields.
+
+    An optional ``when`` predicate over the parent state, evaluated once
+    at dispatch, skips the branch entirely when it returns false.
 
     Validation lives on the builder side
-    (``GraphBuilder.add_parallel_branches_node``):
-    ``mapping_references_undeclared_field`` for inputs/outputs
-    referencing undeclared fields; ``parallel_branches_no_branches``
-    for empty ``branches`` maps; ``ValueError`` for empty-string
-    branch names.
+    (``GraphBuilder.add_parallel_branches_node``): exactly one of
+    ``subgraph`` / ``call`` and no ``inputs`` / ``outputs`` on a
+    callable branch (``parallel_branches_invalid_branch_spec``);
+    ``mapping_references_undeclared_field`` for subgraph-branch
+    inputs/outputs referencing undeclared fields;
+    ``parallel_branches_no_branches`` for empty ``branches`` maps;
+    ``ValueError`` for empty-string branch names.
     """
 
-    subgraph: CompiledGraph[ChildT]
+    subgraph: CompiledGraph[ChildT] | None = None
+    call: BranchCallable | None = None
+    when: Callable[[Any], bool] | None = None
     inputs: Mapping[str, str] = field(default_factory=dict[str, str])
     outputs: Mapping[str, str] = field(default_factory=dict[str, str])
     middleware: tuple[Middleware, ...] = ()
@@ -116,6 +139,21 @@ class ParallelBranchesNode[ParentT: State]:
             "compiled.invoke)."
         )
 
+    def dispatched_branches(self, state: Any) -> list[tuple[str, BranchSpec[Any]]]:
+        """Return the branches that dispatch for ``state``, in insertion
+        order: every declared branch whose ``when`` predicate is absent or
+        returns true (§11.10).
+
+        ``when`` MUST be a pure function of the dispatch-time parent state,
+        so this is deterministic and safe to evaluate both here (the
+        dispatch set) and at the NODE event's ``branch_count`` (the count of
+        branches that dispatch, which excludes ``when``-skipped branches)."""
+        return [
+            (branch_name, spec)
+            for branch_name, spec in self.branches.items()
+            if spec.when is None or spec.when(state)
+        ]
+
     async def run_with_context(
         self,
         state: ParentT,
@@ -148,6 +186,17 @@ class ParallelBranchesNode[ParentT: State]:
             # task body — not in the dispatcher loop.
             token = _set_branch_name(branch_name)
             try:
+                # A callable branch (§11.1.1) IS the unit of work: run the
+                # inline function (wrapped in its branch middleware) and
+                # return its parent-shaped partial directly — no subgraph,
+                # no inputs/outputs projection. The builder guarantees
+                # exactly one of ``call`` / ``subgraph`` per branch.
+                if spec.call is not None:
+                    return await self._dispatch_callable_branch(
+                        branch_name, spec.call, spec.middleware, state, context
+                    )
+                assert spec.subgraph is not None  # builder: exactly one of call/subgraph
+                subgraph = spec.subgraph
                 # Per §11.2 projection in: subgraph fields not in
                 # ``inputs`` use the subgraph's declared defaults;
                 # named subgraph fields are initialized from the
@@ -156,17 +205,17 @@ class ParallelBranchesNode[ParentT: State]:
                 init: dict[str, Any] = {}
                 for sub_field, parent_field in spec.inputs.items():
                     init[sub_field] = parent_dump[parent_field]
-                initial = spec.subgraph.state_cls(**init)
+                initial = subgraph.state_cls(**init)
 
                 child_context = context.descend_into_parallel_branch(
                     parallel_branches_node_name=self.name,
                     parent_state=state,
-                    sub_attached=tuple(spec.subgraph._attached_observers),  # noqa: SLF001
+                    sub_attached=tuple(subgraph._attached_observers),  # noqa: SLF001
                     branch_name=branch_name,
                 )
 
                 async def innermost(s: Any) -> Mapping[str, Any]:
-                    final_branch_state = await spec.subgraph._invoke(s, child_context)  # noqa: SLF001
+                    final_branch_state = await subgraph._invoke(s, child_context)  # noqa: SLF001
                     # Branch middleware wraps the subgraph invocation
                     # (§11.7), so the chain operates in the branch
                     # subgraph's state space. Surface the ``outputs``
@@ -206,14 +255,29 @@ class ParallelBranchesNode[ParentT: State]:
             finally:
                 _reset_branch_name(token)
 
-        # Spawn one task per branch, in insertion order. Per §11.8
-        # the dispatch order is the branches dict's insertion order;
-        # ``started`` events from the inner subgraphs interleave
-        # arbitrarily but the branch-level dispatch ordering is
-        # deterministic.
+        # Conditional branches (§11.10): the branches that dispatch are
+        # those whose ``when`` admits the parent state the node received;
+        # a skipped branch runs no work, contributes nothing, and emits no
+        # observer events / span.
+        dispatching = self.dispatched_branches(state)
+
+        # All branches skipped (§11.10): a valid no-op — the node
+        # contributes nothing. Distinct from the compile-time
+        # ``parallel_branches_no_branches`` (an empty DECLARED mapping).
+        # Return early; ``asyncio.wait([])`` would raise.
+        if not dispatching:
+            if self.error_policy == "collect" and self.errors_field is not None:
+                return {self.errors_field: []}
+            return {}
+
+        # Spawn one task per dispatching branch, in insertion order. Per
+        # §11.8 the dispatch order is the branches dict's insertion order
+        # (over the branches that dispatch); ``started`` events from the
+        # inner subgraphs interleave arbitrarily but the branch-level
+        # dispatch ordering is deterministic.
         ctx = contextvars.copy_context()
         tasks: list[tuple[str, asyncio.Task[Mapping[str, Any]]]] = []
-        for branch_name, spec in self.branches.items():
+        for branch_name, spec in dispatching:
             task = asyncio.create_task(
                 run_branch(branch_name, spec),
                 context=ctx.copy(),
@@ -223,6 +287,91 @@ class ParallelBranchesNode[ParentT: State]:
         if self.error_policy == "fail_fast":
             return await self._fail_fast(state, tasks, contributions)
         return await self._collect(state, tasks, contributions, errors)
+
+    async def _dispatch_callable_branch(
+        self,
+        branch_name: str,
+        call: BranchCallable,
+        middleware: tuple[Middleware, ...],
+        state: Any,
+        context: _InvocationContext,
+    ) -> Mapping[str, Any]:
+        """Run one inline-callable branch and return its contribution.
+
+        The callable reads the parent state and returns a parent-shaped
+        partial update directly — no subgraph, no ``inputs`` / ``outputs``
+        projection (§11.4). Branch ``middleware`` (e.g. a per-leg
+        ``FailureIsolationMiddleware``, §11.7) wraps the callable.
+
+        A callable branch has no inner nodes, so it IS the unit of work:
+        it emits one ``started`` / ``completed`` observer pair keyed by its
+        ``branch_name`` (graph-engine §6), which the observers render as the
+        branch's per-branch dispatch span with NO inner-node span beneath it
+        (observability §5.7). To render that way the pair is emitted at the
+        parallel-branches NODE's own namespace (not a descended branch
+        namespace), tagged with ``branch_name`` (set on the ContextVar in
+        ``run_branch``): an event at a pb-node's own namespace carrying a
+        ``branch_name`` and no ``parallel_branches_config`` is unambiguously
+        a callable branch, since a subgraph branch's inner-node events are
+        always one level deeper. A ``when``-skipped branch never reaches
+        here, so it emits nothing.
+        """
+        # Reuse the engine's NodeEvent construction (the static dispatch
+        # helpers) so a callable branch's §6 events carry the same lineage
+        # as the NODE's own events. Function-scope import keeps the textual
+        # cycle off the module graph (compiled.py imports parallel_branches
+        # at function scope too, so neither loads the other at import time).
+        from .compiled import CompiledGraph
+
+        node_namespace = context.namespace_prefix + (self.name,)
+        step = context.take_step()
+        # The pair carries the parallel-branches NODE's active attempt index
+        # (the same value the NODE's own event uses), so under node-level retry
+        # the §6 keying tuple and the Langfuse observation metadata report the
+        # right attempt. Read once at dispatch entry — before the branch chain,
+        # which may run its own retries — so the started/completed pair shares
+        # one value. Without retry this is 0 (the var's baseline).
+        attempt_index = current_attempt_index()
+        CompiledGraph._dispatch_started(  # noqa: SLF001
+            context, branch_name, node_namespace, step, state, attempt_index=attempt_index
+        )
+        try:
+            # ``call`` is the chain's innermost. Its public type returns the
+            # broad ``Awaitable``; ``compose_chain`` wants the coroutine-
+            # returning ``ChainCall`` (the NextCall protocol shape). The two
+            # are await-compatible at runtime, so cast across the gap.
+            chain: ChainCall = compose_chain(middleware, cast("ChainCall", call))
+            partial = await chain(state)
+        except Exception as exc:
+            # The callable (or its middleware) raised unrecovered. Wrap as
+            # a NodeException (mirroring the subgraph form, where the inner
+            # ``_invoke`` wraps node raises) so the completed event carries
+            # a RuntimeGraphError and ``collect`` classifies it the same as
+            # a subgraph branch. The node's error policy then wraps this in
+            # ParallelBranchesBranchFailed (fail_fast) or records it
+            # (collect) — exactly as for a subgraph branch.
+            wrapped = NodeException(node_name=branch_name, cause=exc, recoverable_state=state)
+            CompiledGraph._dispatch_completed(  # noqa: SLF001
+                context, branch_name, node_namespace, step, state, error=wrapped, attempt_index=attempt_index
+            )
+            raise wrapped from exc
+        # Success path — including a degraded update from a branch
+        # FailureIsolationMiddleware (§11.7), which "succeeds" from the
+        # node's view. The contribution is the returned partial directly
+        # (parent-shaped, no projection). ``post_state`` shows this
+        # branch's local effect on its input; the authoritative reducer
+        # merge across siblings is the NODE's completed event.
+        post_state = state.model_copy(update=dict(partial))
+        CompiledGraph._dispatch_completed(  # noqa: SLF001
+            context,
+            branch_name,
+            node_namespace,
+            step,
+            state,
+            post_state=post_state,
+            attempt_index=attempt_index,
+        )
+        return partial
 
     async def _fail_fast(
         self,

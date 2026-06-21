@@ -97,6 +97,13 @@ _LAST_DRIVEN_FIXTURE = 38
 # spec v0.63.1) is an FI-degrade fixture this runner drives.
 _FAILURE_ISOLATION_FIXTURES = frozenset(range(58, 67)) | {68, 69, 71, 72}
 
+# Inline-callable parallel branches + conditional ``when`` (proposal 0075,
+# spec v0.66.0). These extend the parallel-branches harness (032-038) with
+# the ``call`` / ``when`` branch directives; 073 (two callable branches),
+# 074 (cases: when false skips / true dispatches), 075 (callable branch +
+# FailureIsolationMiddleware degrade).
+_CALLABLE_BRANCH_FIXTURES = frozenset({73, 74, 75})
+
 
 def _fixture_paths() -> list[Path]:
     paths = sorted(CONFORMANCE_DIR.glob("[0-9][0-9][0-9]-*.yaml"))
@@ -106,7 +113,11 @@ def _fixture_paths() -> list[Path]:
             number = int(p.stem.split("-", 1)[0])
         except ValueError:
             continue
-        if number <= _LAST_DRIVEN_FIXTURE or number in _FAILURE_ISOLATION_FIXTURES:
+        if (
+            number <= _LAST_DRIVEN_FIXTURE
+            or number in _FAILURE_ISOLATION_FIXTURES
+            or number in _CALLABLE_BRANCH_FIXTURES
+        ):
             out.append(p)
     return out
 

@@ -1057,6 +1057,44 @@ def _add_fan_out_node(
     )
 
 
+def _build_call_fn(
+    branch_name: str,
+    call_cfg: Mapping[str, Any],
+) -> Callable[[Any], Awaitable[Mapping[str, Any]]]:
+    """Translate a callable branch's ``call:`` directive (proposal 0075)
+    into an async function over the parent state.
+
+    Reuses the node-behavior factories (``update`` / ``flaky`` /
+    ``raises``) keyed by the same directive shape a plain node uses — a
+    callable branch IS just a function. The callable's own trace
+    recording is discarded into a throwaway sink: a parallel-branches
+    node records as a single dispatch step, so callable-branch bodies
+    must not appear in ``execution_order``.
+    """
+    sink: list[str] = []
+    if "update" in call_cfg:
+        return _make_update_fn(branch_name, call_cfg["update"], sink)
+    if "flaky" in call_cfg:
+        return _make_flaky_fn(branch_name, call_cfg["flaky"], sink)
+    if "raises" in call_cfg:
+        return _make_raising_fn(branch_name, call_cfg["raises"], sink)
+    raise ValueError(f"callable branch {branch_name!r}: unsupported call directive {dict(call_cfg)!r}")
+
+
+def _build_when_predicate(when_cfg: Mapping[str, Any]) -> Callable[[Any], bool]:
+    """Translate a branch ``when:`` directive (proposal 0075 §11.10) into
+    a parent-state predicate. Supports ``{field: <name>}`` — a truthy
+    check on a parent-state field at dispatch time."""
+    if "field" in when_cfg:
+        field_name = cast("str", when_cfg["field"])
+
+        def predicate(state: Any) -> bool:
+            return bool(getattr(state, field_name))
+
+        return predicate
+    raise ValueError(f"unsupported when directive: {dict(when_cfg)!r}")
+
+
 def _add_parallel_branches_node(
     builder: GraphBuilder[Any],
     node_name: str,
@@ -1069,20 +1107,31 @@ def _add_parallel_branches_node(
     """Translate a fixture's ``parallel_branches:`` block into a
     ``builder.add_parallel_branches_node`` call.
 
-    Each branch's ``subgraph`` name resolves against the shared
-    ``subgraphs`` registry (built from the fixture's top-level
-    ``subgraphs:`` block). ``branch_middleware`` maps branch-name to a
-    pre-translated middleware list; the test driver populates it from
-    each branch's ``middleware:`` block.
+    A branch is either a ``subgraph`` (name resolved against the shared
+    ``subgraphs`` registry, with optional ``inputs`` / ``outputs``) or an
+    inline ``call`` (proposal 0075), and may carry a ``when`` predicate.
+    ``branch_middleware`` maps branch-name to a pre-translated middleware
+    list; the test driver populates it from each branch's ``middleware:``
+    block.
     """
     branches_cfg = cast("dict[str, dict[str, Any]]", cfg["branches"])
     branches: dict[str, BranchSpec[Any]] = {}
     for branch_name, branch_cfg in branches_cfg.items():
+        when_cfg = branch_cfg.get("when")
+        when = _build_when_predicate(cast("Mapping[str, Any]", when_cfg)) if when_cfg is not None else None
+        if "call" in branch_cfg:
+            branches[branch_name] = BranchSpec(
+                call=_build_call_fn(branch_name, cast("Mapping[str, Any]", branch_cfg["call"])),
+                when=when,
+                middleware=tuple(branch_middleware.get(branch_name, ())),
+            )
+            continue
         sub_compiled = subgraphs[branch_cfg["subgraph"]]
         branches[branch_name] = BranchSpec(
             subgraph=sub_compiled,
             inputs=dict(branch_cfg.get("inputs") or {}),
             outputs=dict(branch_cfg.get("outputs") or {}),
+            when=when,
             middleware=tuple(branch_middleware.get(branch_name, ())),
         )
 

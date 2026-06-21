@@ -31,9 +31,13 @@ from openarmature.graph import (
     END,
     BranchSpec,
     CompiledGraph,
+    FailureIsolatedEvent,
     GraphBuilder,
     MappingReferencesUndeclaredField,
+    NodeEvent,
+    ObserverEvent,
     ParallelBranchesBranchFailed,
+    ParallelBranchesInvalidBranchSpec,
     ParallelBranchesNoBranches,
     State,
     append,
@@ -67,6 +71,12 @@ class ParentState(State):
     alpha_result: int = 0
     beta_result: int = 0
     gamma_result: int = 0
+
+
+class ConditionalState(State):
+    run_vector: bool = False
+    alpha_result: int = 0
+    beta_result: int = 0
 
 
 def _build_alpha_succeeds() -> CompiledGraph[AlphaState]:
@@ -629,3 +639,443 @@ async def test_fail_fast_cancellation_drain_absorbs_residual_exceptions() -> Non
     # picks deterministically from the FIRST_EXCEPTION wait — one of
     # the two branches surfaces.
     assert excinfo.value.branch_name in {"alpha", "beta"}
+
+
+# ---------------------------------------------------------------------------
+# Inline-callable branches + conditional ``when`` (proposal 0075, §11.1.1 /
+# §11.4 / §11.10)
+# ---------------------------------------------------------------------------
+
+
+class _CategorizedError(RuntimeError):
+    """A test exception carrying a ``category`` so the cause-chain
+    classifier (and a branch FailureIsolationMiddleware's ``catch``)
+    resolves it the way the framework resolves engine-categorized errors."""
+
+    def __init__(self, message: str, category: str) -> None:
+        super().__init__(message)
+        self.category = category
+
+
+async def _capture_events(events: list[ObserverEvent]) -> Any:
+    """Build an observer that appends every delivered event to ``events``."""
+
+    async def observe(event: ObserverEvent) -> None:
+        events.append(event)
+
+    return observe
+
+
+async def test_callable_branches_merge_to_disjoint_parent_fields() -> None:
+    # §11.1.1 / §11.4: two inline-callable branches (no subgraph, no
+    # projection) run concurrently; each returns a parent-shaped partial
+    # that merges into a disjoint parent field via the parent reducer.
+    async def vector(_state: ParentState) -> Mapping[str, Any]:
+        return {"alpha_result": 1}
+
+    async def fts(_state: ParentState) -> Mapping[str, Any]:
+        return {"beta_result": 2}
+
+    compiled = (
+        GraphBuilder(ParentState)
+        .set_entry("retrieve")
+        .add_parallel_branches_node(
+            "retrieve",
+            branches={
+                "vector": BranchSpec(call=vector),
+                "fts": BranchSpec(call=fts),
+            },
+        )
+        .add_edge("retrieve", END)
+        .compile()
+    )
+    final = await compiled.invoke(ParentState())
+    await compiled.drain()
+    assert final.alpha_result == 1
+    assert final.beta_result == 2
+
+
+async def test_callable_branch_emits_one_started_completed_pair_keyed_by_branch_name() -> None:
+    # graph-engine §6 / observability §5.7: a callable branch has no inner
+    # nodes, so it IS the unit — it emits exactly one started/completed pair
+    # keyed by its branch_name (node_name == branch_name), not the per-node
+    # stream a subgraph branch produces.
+    events: list[ObserverEvent] = []
+
+    async def vector(_state: ParentState) -> Mapping[str, Any]:
+        return {"alpha_result": 7}
+
+    compiled = (
+        GraphBuilder(ParentState)
+        .set_entry("retrieve")
+        .add_parallel_branches_node("retrieve", branches={"vector": BranchSpec(call=vector)})
+        .add_edge("retrieve", END)
+        .compile()
+    )
+    compiled.attach_observer(await _capture_events(events))
+    await compiled.invoke(ParentState())
+    await compiled.drain()
+
+    branch_events = [e for e in events if isinstance(e, NodeEvent) and e.branch_name == "vector"]
+    assert [e.phase for e in branch_events] == ["started", "completed"]
+    assert all(e.node_name == "vector" for e in branch_events)
+    # Emitted at the pb NODE's own namespace (not a descended branch
+    # namespace), carrying no parallel_branches_config — that shape (a
+    # branch_name at the node's namespace, no config) is what identifies a
+    # callable branch to the observers, which render it as the branch's
+    # single dispatch span with no inner-node span.
+    assert all(e.namespace == ("retrieve",) for e in branch_events)
+    assert all(e.parallel_branches_config is None for e in branch_events)
+    completed = branch_events[1]
+    assert completed.error is None
+    assert isinstance(completed.post_state, ParentState)
+    assert completed.post_state.alpha_result == 7
+
+
+async def test_node_event_branch_count_excludes_when_skipped_branches() -> None:
+    # Proposal 0075: the NODE event's parallel_branches_config.branch_count is
+    # the number of branches that DISPATCH (when-skipped branches excluded),
+    # while branch_names stays the full declared set. The two answer different
+    # questions ("how many ran" vs "what was declared").
+    events: list[ObserverEvent] = []
+
+    async def vector(_state: ConditionalState) -> Mapping[str, Any]:
+        return {"alpha_result": 1}
+
+    async def fts(_state: ConditionalState) -> Mapping[str, Any]:
+        return {"beta_result": 2}
+
+    compiled = (
+        GraphBuilder(ConditionalState)
+        .set_entry("retrieve")
+        .add_parallel_branches_node(
+            "retrieve",
+            branches={
+                "vector": BranchSpec(call=vector, when=lambda s: s.run_vector),
+                "fts": BranchSpec(call=fts),
+            },
+        )
+        .add_edge("retrieve", END)
+        .compile()
+    )
+    compiled.attach_observer(await _capture_events(events))
+    await compiled.invoke(ConditionalState(run_vector=False))  # vector skipped
+    await compiled.drain()
+
+    node_started = next(
+        e
+        for e in events
+        if isinstance(e, NodeEvent)
+        and e.node_name == "retrieve"
+        and e.phase == "started"
+        and e.parallel_branches_config is not None
+    )
+    config = node_started.parallel_branches_config
+    assert config is not None
+    assert config.branch_count == 1  # only fts dispatched
+    assert config.branch_names == ("vector", "fts")  # full declared set, insertion order
+
+
+async def test_callable_branch_event_attempt_index_tracks_node_retry() -> None:
+    # PR #175 review: under node-level retry the callable branch's
+    # started/completed pair carries the NODE's active attempt index (the same
+    # value the NODE's own event uses), not a hardcoded 0. A flaky callable
+    # fails the first node attempt and succeeds on the retry.
+    events: list[ObserverEvent] = []
+    calls = {"n": 0}
+
+    async def flaky(_state: ParentState) -> Mapping[str, Any]:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("transient")
+        return {"alpha_result": 1}
+
+    node_retry = RetryMiddleware(
+        RetryConfig(
+            max_attempts=2,
+            classifier=lambda _exc, _state: True,  # retry any failure
+            backoff=deterministic_backoff(0.0),
+        )
+    )
+    compiled = (
+        GraphBuilder(ParentState)
+        .set_entry("retrieve")
+        .add_parallel_branches_node(
+            "retrieve",
+            branches={"vector": BranchSpec(call=flaky)},
+            middleware=[node_retry],
+        )
+        .add_edge("retrieve", END)
+        .compile()
+    )
+    compiled.attach_observer(await _capture_events(events))
+    final = await compiled.invoke(ParentState())
+    await compiled.drain()
+
+    assert final.alpha_result == 1  # succeeded on the second node attempt
+    branch_started = [
+        e for e in events if isinstance(e, NodeEvent) and e.branch_name == "vector" and e.phase == "started"
+    ]
+    assert [e.attempt_index for e in branch_started] == [0, 1]
+
+
+async def test_when_false_skips_branch_no_contribution_no_event() -> None:
+    # §11.10: a branch whose ``when`` returns false is skipped entirely —
+    # not dispatched, no contribution (its field stays at the default), and
+    # no observer events. The sibling with no ``when`` runs normally.
+    events: list[ObserverEvent] = []
+
+    async def vector(_state: ParentState) -> Mapping[str, Any]:
+        return {"alpha_result": 1}
+
+    async def fts(_state: ParentState) -> Mapping[str, Any]:
+        return {"beta_result": 2}
+
+    compiled = (
+        GraphBuilder(ParentState)
+        .set_entry("retrieve")
+        .add_parallel_branches_node(
+            "retrieve",
+            branches={
+                "vector": BranchSpec(call=vector, when=lambda _s: False),
+                "fts": BranchSpec(call=fts),
+            },
+        )
+        .add_edge("retrieve", END)
+        .compile()
+    )
+    compiled.attach_observer(await _capture_events(events))
+    final = await compiled.invoke(ParentState())
+    await compiled.drain()
+
+    assert final.alpha_result == 0  # skipped -> no contribution -> default
+    assert final.beta_result == 2
+    assert [e for e in events if isinstance(e, NodeEvent) and e.branch_name == "vector"] == []
+
+
+async def test_when_true_dispatches_branch() -> None:
+    # §11.10: a ``when`` reading dispatch-time parent state; true dispatches.
+    async def vector(_state: ConditionalState) -> Mapping[str, Any]:
+        return {"alpha_result": 1}
+
+    compiled = (
+        GraphBuilder(ConditionalState)
+        .set_entry("retrieve")
+        .add_parallel_branches_node(
+            "retrieve",
+            branches={"vector": BranchSpec(call=vector, when=lambda s: s.run_vector)},
+        )
+        .add_edge("retrieve", END)
+        .compile()
+    )
+    final = await compiled.invoke(ConditionalState(run_vector=True))
+    await compiled.drain()
+    assert final.alpha_result == 1
+
+
+async def test_callable_branch_failure_isolation_degrades_and_emits_event() -> None:
+    # §11.7: per-leg failure isolation on a callable branch is the existing
+    # branch-middleware contract. A callable that raises a categorized error
+    # is caught by its FailureIsolationMiddleware, degrades to the configured
+    # update, and emits a FailureIsolatedEvent whose category resolves to the
+    # originating error; the degraded branch "succeeds", so fail_fast is NOT
+    # triggered and the sibling completes.
+    events: list[ObserverEvent] = []
+
+    async def vector(_state: ParentState) -> Mapping[str, Any]:
+        raise _CategorizedError("vector store down", "provider_unavailable")
+
+    async def fts(_state: ParentState) -> Mapping[str, Any]:
+        return {"beta_result": 2}
+
+    isolation = FailureIsolationMiddleware(
+        degraded_update={"alpha_result": -1},
+        event_name="vector_isolated",
+    )
+    compiled = (
+        GraphBuilder(ParentState)
+        .set_entry("retrieve")
+        .add_parallel_branches_node(
+            "retrieve",
+            branches={
+                "vector": BranchSpec(call=vector, middleware=(isolation,)),
+                "fts": BranchSpec(call=fts),
+            },
+            error_policy="fail_fast",
+        )
+        .add_edge("retrieve", END)
+        .compile()
+    )
+    compiled.attach_observer(await _capture_events(events))
+    final = await compiled.invoke(ParentState())
+    await compiled.drain()
+
+    assert final.alpha_result == -1
+    assert final.beta_result == 2
+    iso = [e for e in events if isinstance(e, FailureIsolatedEvent)]
+    assert len(iso) == 1
+    assert iso[0].event_name == "vector_isolated"
+    assert iso[0].caught_exception.category == "provider_unavailable"
+
+
+async def test_mixed_subgraph_and_callable_branches() -> None:
+    # §11.1.1: a node MAY mix subgraph branches and callable branches freely.
+    async def fts(_state: ParentState) -> Mapping[str, Any]:
+        return {"beta_result": 2}
+
+    compiled = (
+        GraphBuilder(ParentState)
+        .set_entry("retrieve")
+        .add_parallel_branches_node(
+            "retrieve",
+            branches={
+                "alpha": BranchSpec(
+                    subgraph=_build_alpha_succeeds(),
+                    outputs={"alpha_result": "a_out"},
+                ),
+                "fts": BranchSpec(call=fts),
+            },
+        )
+        .add_edge("retrieve", END)
+        .compile()
+    )
+    final = await compiled.invoke(ParentState())
+    await compiled.drain()
+    assert final.alpha_result == 1
+    assert final.beta_result == 2
+
+
+async def test_all_branches_skipped_is_noop() -> None:
+    # §11.10: all-skipped is a valid no-op — the node contributes nothing
+    # and the parent state is unchanged. Distinct from the compile-time
+    # parallel_branches_no_branches (an empty DECLARED mapping).
+    async def vector(_state: ParentState) -> Mapping[str, Any]:
+        return {"alpha_result": 1}
+
+    compiled = (
+        GraphBuilder(ParentState)
+        .set_entry("retrieve")
+        .add_parallel_branches_node(
+            "retrieve",
+            branches={"vector": BranchSpec(call=vector, when=lambda _s: False)},
+        )
+        .add_edge("retrieve", END)
+        .compile()
+    )
+    final = await compiled.invoke(ParentState(alpha_result=99))
+    await compiled.drain()
+    assert final.alpha_result == 99  # untouched no-op
+
+
+async def test_all_branches_skipped_collect_sets_empty_errors_field() -> None:
+    # §11.10 under collect: an all-skipped node still completes; with an
+    # errors_field declared, no branch ran so the field is the empty list.
+    async def vector(_state: ParentWithErrors) -> Mapping[str, Any]:
+        return {"alpha_result": 1}
+
+    compiled = (
+        GraphBuilder(ParentWithErrors)
+        .set_entry("retrieve")
+        .add_parallel_branches_node(
+            "retrieve",
+            branches={"vector": BranchSpec(call=vector, when=lambda _s: False)},
+            error_policy="collect",
+            errors_field="branch_errors",
+        )
+        .add_edge("retrieve", END)
+        .compile()
+    )
+    final = await compiled.invoke(ParentWithErrors())
+    await compiled.drain()
+    assert final.alpha_result == 0
+    assert final.branch_errors == []
+
+
+async def test_callable_branch_unisolated_failure_fail_fast() -> None:
+    # A callable branch that raises with no isolating middleware propagates
+    # like a subgraph branch: wrapped as ParallelBranchesBranchFailed
+    # carrying the branch_name, with the originating error in the chain.
+    async def vector(_state: ParentState) -> Mapping[str, Any]:
+        raise _CategorizedError("boom", "provider_unavailable")
+
+    compiled = (
+        GraphBuilder(ParentState)
+        .set_entry("retrieve")
+        .add_parallel_branches_node(
+            "retrieve",
+            branches={"vector": BranchSpec(call=vector)},
+            error_policy="fail_fast",
+        )
+        .add_edge("retrieve", END)
+        .compile()
+    )
+    with pytest.raises(ParallelBranchesBranchFailed) as excinfo:
+        await compiled.invoke(ParentState())
+    await compiled.drain()
+    assert excinfo.value.branch_name == "vector"
+
+
+async def test_callable_branch_failure_collect_records_error() -> None:
+    # Under collect, a failing callable branch records into errors_field
+    # exactly like a subgraph branch (node_exception category over the wrap),
+    # and the sibling's contribution still merges.
+    async def vector(_state: ParentWithErrors) -> Mapping[str, Any]:
+        raise _CategorizedError("boom", "provider_unavailable")
+
+    async def fts(_state: ParentWithErrors) -> Mapping[str, Any]:
+        return {"beta_result": 2}
+
+    compiled = (
+        GraphBuilder(ParentWithErrors)
+        .set_entry("retrieve")
+        .add_parallel_branches_node(
+            "retrieve",
+            branches={
+                "vector": BranchSpec(call=vector),
+                "fts": BranchSpec(call=fts),
+            },
+            error_policy="collect",
+            errors_field="branch_errors",
+        )
+        .add_edge("retrieve", END)
+        .compile()
+    )
+    final = await compiled.invoke(ParentWithErrors())
+    await compiled.drain()
+    assert final.beta_result == 2
+    assert len(final.branch_errors) == 1
+    assert final.branch_errors[0]["branch_name"] == "vector"
+
+
+# --- builder validation: exactly one of subgraph / call (§11.1.1) ---
+
+
+def test_branch_with_both_subgraph_and_call_rejected() -> None:
+    async def vector(_state: ParentState) -> Mapping[str, Any]:
+        return {"alpha_result": 1}
+
+    builder: GraphBuilder[ParentState] = GraphBuilder(ParentState)
+    with pytest.raises(ParallelBranchesInvalidBranchSpec) as excinfo:
+        builder.add_parallel_branches_node(
+            "retrieve",
+            branches={"vector": BranchSpec(subgraph=_build_alpha_succeeds(), call=vector)},
+        )
+    assert excinfo.value.category == "parallel_branches_invalid_branch_spec"
+
+
+def test_branch_with_neither_subgraph_nor_call_rejected() -> None:
+    builder: GraphBuilder[ParentState] = GraphBuilder(ParentState)
+    with pytest.raises(ParallelBranchesInvalidBranchSpec):
+        builder.add_parallel_branches_node("retrieve", branches={"vector": BranchSpec()})
+
+
+def test_callable_branch_with_inputs_or_outputs_rejected() -> None:
+    async def vector(_state: ParentState) -> Mapping[str, Any]:
+        return {"alpha_result": 1}
+
+    builder: GraphBuilder[ParentState] = GraphBuilder(ParentState)
+    with pytest.raises(ParallelBranchesInvalidBranchSpec):
+        builder.add_parallel_branches_node(
+            "retrieve",
+            branches={"vector": BranchSpec(call=vector, outputs={"alpha_result": "x"})},
+        )

@@ -1152,6 +1152,49 @@ async def test_failure_path_final_state_is_outer_type_when_parallel_branch_raise
     assert captured_output_state[0].outer_a_done is True
 
 
+async def test_parallel_branches_node_renders_no_duplicate_observation() -> None:
+    # Regression: a parallel-branches NODE emits its own started/completed
+    # pair, so it already has a leaf observation. The observer MUST NOT also
+    # synthesize a duplicate subgraph-wrapper observation at the node's
+    # namespace (the bug the OTel observer already guards against, now
+    # mirrored here). Each callable branch (proposal 0075) renders as a
+    # single observation parented under the one NODE observation.
+    from openarmature.graph import BranchSpec
+
+    async def vector(_s: _S) -> Any:
+        return {"trail": ["vector"]}
+
+    async def keyword(_s: _S) -> Any:
+        return {"trail": ["keyword"]}
+
+    graph = (
+        GraphBuilder(_S)
+        .add_parallel_branches_node(
+            "recall",
+            branches={
+                "vector": BranchSpec(call=vector),
+                "keyword": BranchSpec(call=keyword),
+            },
+        )
+        .add_edge("recall", END)
+        .set_entry("recall")
+        .compile()
+    )
+    graph, client, _ = _attach(graph)
+    await graph.invoke(_S())
+    await graph.drain()
+
+    trace = next(iter(client.traces.values()))
+    recall_obs = [o for o in trace.observations if o.name == "recall"]
+    assert len(recall_obs) == 1, f"expected one 'recall' observation, got {len(recall_obs)}"
+    node_id = recall_obs[0].id
+    for branch in ("vector", "keyword"):
+        branch_obs = [o for o in trace.observations if o.name == branch]
+        assert len(branch_obs) == 1, f"branch {branch!r}: expected one observation, got {len(branch_obs)}"
+        assert branch_obs[0].parent_observation_id == node_id
+        assert (branch_obs[0].metadata or {}).get("branch_name") == branch
+
+
 # Spec §8.4.1 / proposal 0052: implementation attribution rows on
 # every Langfuse Trace. The two rows source from the §5.1
 # attributes; the always-emit invariant inherits from §5.1 so the
