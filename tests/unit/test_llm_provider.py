@@ -1337,6 +1337,68 @@ async def test_complete_failure_emits_typed_llm_failed_event_only() -> None:
     assert failed_events[0].error_type == "ProviderUnavailable"
 
 
+async def test_complete_populates_output_tool_calls_on_typed_events() -> None:
+    # Proposal 0076: provider.complete() populates output_tool_calls
+    # (the ToolCall records) on BOTH the terminal LlmCompletionEvent and
+    # the per-attempt LlmRetryAttemptEvent — the source the OTel
+    # observer renders the §5.5.1 / §5.5.10 output tool-call attributes
+    # from. The per-attempt event drives the LLM span; the terminal
+    # event carries the field for spec-conformance + the Langfuse path.
+    def _tool_call_response(_req: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "id": "cc-0076",
+                "object": "chat.completion",
+                "created": 1700000000,
+                "model": "m",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": None,
+                            "tool_calls": [
+                                {
+                                    "id": "call_a",
+                                    "type": "function",
+                                    "function": {"name": "get_weather", "arguments": '{"city": "NYC"}'},
+                                },
+                                {
+                                    "id": "call_b",
+                                    "type": "function",
+                                    "function": {"name": "get_time", "arguments": '{"tz": "EST"}'},
+                                },
+                            ],
+                        },
+                        "finish_reason": "tool_calls",
+                    }
+                ],
+                "usage": {"prompt_tokens": 8, "completion_tokens": 12, "total_tokens": 20},
+            },
+        )
+
+    events, token = _collecting_dispatch()
+    provider = OpenAIProvider(
+        base_url="http://test", model="m", api_key="k", transport=httpx.MockTransport(_tool_call_response)
+    )
+    try:
+        await provider.complete([UserMessage(content="weather and time?")])
+    finally:
+        await provider.aclose()
+        _release_dispatch(token)
+
+    completion = next(e for e in events if isinstance(e, LlmCompletionEvent))
+    attempt = next(e for e in events if isinstance(e, LlmRetryAttemptEvent))
+    # output_content is None on a tool-call-only response; the calls
+    # live in output_tool_calls instead.
+    assert completion.output_content is None
+    for ev in (completion, attempt):
+        assert [tc.name for tc in ev.output_tool_calls] == ["get_weather", "get_time"]
+        assert [tc.id for tc in ev.output_tool_calls] == ["call_a", "call_b"]
+        assert ev.output_tool_calls[0].arguments == {"city": "NYC"}
+
+
 # ---------------------------------------------------------------------------
 # Call-level retry (proposal 0050)
 # ---------------------------------------------------------------------------

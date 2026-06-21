@@ -765,6 +765,106 @@ async def test_llm_span_duration_matches_typed_event_latency() -> None:
     assert abs(duration_ms - latency_ms) < 1.0
 
 
+async def _drive_llm_span_with_tool_calls(
+    tool_calls: list[Any],
+    *,
+    disable_provider_payload: bool = True,
+) -> dict[str, Any]:
+    """Drive one per-attempt LLM event carrying ``output_tool_calls``
+    through the OTel observer; return the openarmature.llm.complete
+    span's attribute dict. ``disable_provider_payload`` mirrors the
+    observer's default-on payload gate (the OTel span renders from the
+    per-attempt LlmRetryAttemptEvent)."""
+    from openarmature.observability.correlation import (
+        _reset_invocation_id,
+        _set_invocation_id,
+    )
+    from tests._helpers.typed_event import make_retry_attempt_event
+
+    exporter = InMemorySpanExporter()
+    observer = OTelObserver(
+        span_processor=SimpleSpanProcessor(exporter),
+        disable_provider_payload=disable_provider_payload,
+    )
+    token = _set_invocation_id("inv-tool-calls")
+    try:
+        await observer(
+            make_retry_attempt_event(
+                finish_reason="tool_calls" if tool_calls else "stop",
+                output_tool_calls=tool_calls,
+            )
+        )
+    finally:
+        _reset_invocation_id(token)
+    observer.shutdown()
+    llm_spans = [s for s in exporter.get_finished_spans() if s.name == "openarmature.llm.complete"]
+    assert len(llm_spans) == 1
+    return dict(llm_spans[0].attributes or {})
+
+
+async def test_llm_span_emits_output_tool_call_identity_projections() -> None:
+    # Proposal 0076 §5.5.10 (mirrors fixture 085): a completion
+    # requesting two tools emits count / names / ids on the span,
+    # index-aligned and in request order. The default payload-off
+    # posture applies, so the gated full serialization is absent.
+    from openarmature.llm.messages import ToolCall
+
+    attrs = await _drive_llm_span_with_tool_calls(
+        [
+            ToolCall(id="call_a", name="get_weather", arguments={"city": "NYC"}),
+            ToolCall(id="call_b", name="get_time", arguments={"tz": "EST"}),
+        ]
+    )
+    assert attrs.get("openarmature.llm.output.tool_calls.count") == 2
+    assert list(attrs.get("openarmature.llm.output.tool_calls.names") or ()) == ["get_weather", "get_time"]
+    assert list(attrs.get("openarmature.llm.output.tool_calls.ids") or ()) == ["call_a", "call_b"]
+    assert "openarmature.llm.output.tool_calls" not in attrs
+
+
+async def test_llm_span_omits_output_tool_calls_when_none_requested() -> None:
+    # Proposal 0076 (mirrors fixture 086): a completion with no tool
+    # calls emits NONE of the family — absence means "no tools
+    # requested", distinct from count = 0 / empty arrays.
+    attrs = await _drive_llm_span_with_tool_calls([])
+    for name in (
+        "openarmature.llm.output.tool_calls",
+        "openarmature.llm.output.tool_calls.count",
+        "openarmature.llm.output.tool_calls.names",
+        "openarmature.llm.output.tool_calls.ids",
+    ):
+        assert name not in attrs
+
+
+async def test_llm_span_output_tool_calls_payload_gating() -> None:
+    # Proposal 0076 §5.5.1 / §5.5.10 (mirrors fixture 087): the identity
+    # projections are ungated (render with payload off); the gated full
+    # [{id, name, arguments}] serialization is suppressed with payload
+    # off and present (carrying the arguments) with payload on.
+    import json
+
+    from openarmature.llm.messages import ToolCall
+
+    calls = [ToolCall(id="call_x", name="search_db", arguments={"q": "secret query"})]
+
+    off = await _drive_llm_span_with_tool_calls(calls, disable_provider_payload=True)
+    assert off.get("openarmature.llm.output.tool_calls.count") == 1
+    assert list(off.get("openarmature.llm.output.tool_calls.names") or ()) == ["search_db"]
+    assert list(off.get("openarmature.llm.output.tool_calls.ids") or ()) == ["call_x"]
+    assert "openarmature.llm.output.tool_calls" not in off
+
+    on = await _drive_llm_span_with_tool_calls(calls, disable_provider_payload=False)
+    assert on.get("openarmature.llm.output.tool_calls.count") == 1
+    assert list(on.get("openarmature.llm.output.tool_calls.names") or ()) == ["search_db"]
+    assert list(on.get("openarmature.llm.output.tool_calls.ids") or ()) == ["call_x"]
+    serialized = on.get("openarmature.llm.output.tool_calls")
+    assert isinstance(serialized, str)
+    # Parses to the §5.5.5 [{id, name, arguments}] encoding (structure,
+    # not bytewise — _serialize_for_attribute sorts keys).
+    assert json.loads(serialized) == [
+        {"id": "call_x", "name": "search_db", "arguments": {"q": "secret query"}}
+    ]
+
+
 async def test_llm_span_zero_duration_when_latency_missing() -> None:
     # When the typed event omits latency_ms (None), the handler falls
     # back to a zero-duration span at end_time rather than guessing

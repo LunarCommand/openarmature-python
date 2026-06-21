@@ -78,6 +78,7 @@ from openarmature.observability.correlation import (
     current_invocation_id,
     current_namespace_prefix,
 )
+from openarmature.observability.llm_event import serialize_tool_calls
 from openarmature.observability.metadata import AttributeValue, current_invocation_metadata
 
 # ``current_prompt_group`` / ``current_prompt_result`` are imported
@@ -706,6 +707,9 @@ class OpenAIProvider:
             finish_reason=response.finish_reason,
             input_messages=input_messages,
             output_content=output_content,
+            # Proposal 0076: the model's output tool calls, populated
+            # unconditionally (empty list on a no-tool completion).
+            output_tool_calls=list(response.message.tool_calls or []),
             request_params=request_params,
             request_extras=request_extras,
             active_prompt=active_prompt,
@@ -830,6 +834,10 @@ class OpenAIProvider:
                 usage=response.usage,
                 finish_reason=response.finish_reason,
                 output_content=response.message.content or None,
+                # Proposal 0076: the attempt's output tool calls — the
+                # OTel observer renders the output tool-call span
+                # attributes from this per-attempt event.
+                output_tool_calls=list(response.message.tool_calls or []),
             )
         if exc is None:
             raise ValueError("_build_llm_retry_attempt_event requires response or exc")
@@ -1689,9 +1697,7 @@ def _serialize_messages_for_payload(messages: Sequence[Message]) -> list[dict[st
         elif isinstance(msg, AssistantMessage):
             entry: dict[str, Any] = {"role": "assistant", "content": msg.content}
             if msg.tool_calls:
-                entry["tool_calls"] = [
-                    {"id": tc.id, "name": tc.name, "arguments": tc.arguments} for tc in msg.tool_calls
-                ]
+                entry["tool_calls"] = serialize_tool_calls(msg.tool_calls)
             out.append(entry)
         else:  # ToolMessage
             out.append({"role": "tool", "content": msg.content, "tool_call_id": msg.tool_call_id})

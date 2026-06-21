@@ -108,6 +108,7 @@ from openarmature.graph.events import (
     NodeEvent,
 )
 from openarmature.observability.lineage import is_strict_prefix
+from openarmature.observability.llm_event import serialize_tool_calls
 
 # Span-stack key shape:
 # ``(namespace, attempt_index, fan_out_index, branch_name)`` — these
@@ -1359,6 +1360,37 @@ class OTelObserver:
         if not self.disable_provider_payload and event.output_content:
             attrs_out = _truncate_for_attribute(event.output_content, self.payload_max_bytes)
             span.set_attribute("openarmature.llm.output.content", attrs_out)
+        # §5.5.10 ungated tool-call identity + §5.5.1 gated full
+        # serialization (proposal 0076). The identity projections
+        # (count / names / ids) are identifiers, not payload, so they
+        # render regardless of disable_provider_payload; the full
+        # [{id, name, arguments}] serialization carries the arguments and
+        # is gated. The whole family emits only on a tool-calling
+        # completion (>= 1 call) — absence means "no tools requested",
+        # per the §5.5 omit-when-empty convention.
+        output_tool_calls = event.output_tool_calls
+        if output_tool_calls:
+            # .count / .names / .ids are identity, NOT payload, so they
+            # are deliberately untruncated: truncating would break the
+            # count == len(.names) invariant and the .names/.ids index-
+            # alignment, or sever a .id from its downstream tool execution.
+            # The backstop for a pathological call count is the OTel SDK's
+            # own SpanLimits, applied uniformly across all attributes.
+            span.set_attribute("openarmature.llm.output.tool_calls.count", len(output_tool_calls))
+            span.set_attribute(
+                "openarmature.llm.output.tool_calls.names",
+                [tc.name for tc in output_tool_calls],
+            )
+            span.set_attribute(
+                "openarmature.llm.output.tool_calls.ids",
+                [tc.id for tc in output_tool_calls],
+            )
+            if not self.disable_provider_payload:
+                serialized_calls = _serialize_for_attribute(serialize_tool_calls(output_tool_calls))
+                span.set_attribute(
+                    "openarmature.llm.output.tool_calls",
+                    _truncate_for_attribute(serialized_calls, self.payload_max_bytes),
+                )
         span.set_status(Status(StatusCode.OK))
         self._run_enrichers(span, event)
         span.end(end_time=end_time_ns)

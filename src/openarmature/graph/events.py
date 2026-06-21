@@ -30,6 +30,7 @@ from .state import State
 # plus a string annotation on LlmCompletionEvent.usage avoids the
 # circular runtime import while keeping pyright type-safe.
 if TYPE_CHECKING:
+    from openarmature.llm.messages import ToolCall
     from openarmature.llm.response import Usage
 
 # Sentinel empty metadata mapping for events constructed without a
@@ -512,6 +513,11 @@ class LlmCompletionEvent:
       from the response. ``None`` on tool-call-only responses
       (the structured-response and tool-call paths are mutually
       exclusive at the response level).
+    - ``output_tool_calls``: the assistant message's output tool
+      calls (the ``ToolCall`` records). Populated unconditionally;
+      empty list when the response carried no tool calls. The output
+      tool calls live here rather than in ``output_content`` (which
+      is the response text and is empty on a tool-call-only response).
     - ``request_params``: the GenAI request-parameter set the
       caller supplied. Absence-is-meaningful: only caller-supplied
       keys appear; empty mapping when none supplied. Keys are the
@@ -576,6 +582,17 @@ class LlmCompletionEvent:
     active_prompt_group: Any
     call_id: str
     caller_invocation_metadata: Mapping[str, AttributeValue] | None = None
+    # Proposal 0076 (spec v0.67.0): the assistant message's output tool
+    # calls in typed-event-native form (the ToolCall records, not a
+    # pre-serialized shape — they carry no inline-image bytes, so the
+    # input_messages redaction-driven pre-serialization doesn't apply).
+    # Populated unconditionally by the provider; empty list when the
+    # response carried no tool calls. Source for the §5.5.1 gated
+    # ``openarmature.llm.output.tool_calls`` serialization + the §5.5.10
+    # ungated ``.count`` / ``.names`` / ``.ids`` identity projections.
+    # Defaulted (default_factory) so existing kwargs-constructors that
+    # predate this field keep working; the provider always populates it.
+    output_tool_calls: list["ToolCall"] = field(default_factory=list["ToolCall"])
 
 
 # Spec: realizes proposal 0058's second spec-normatively-typed event
@@ -688,8 +705,11 @@ class LlmRetryAttemptEvent:
       ``request_extras`` / ``active_prompt`` / ``active_prompt_group``)
       mirror :class:`LlmCompletionEvent`, carried on every attempt.
     - response side (``response_id`` / ``response_model`` / ``usage`` /
-      ``finish_reason`` / ``output_content``): populated on a successful
-      attempt; ``None`` on a failed attempt.
+      ``finish_reason`` / ``output_content`` / ``output_tool_calls``):
+      populated on a successful attempt; ``None`` / empty list on a
+      failed attempt. ``output_tool_calls`` is the source the OTel
+      observer renders the §5.5.1 / §5.5.10 output tool-call attributes
+      from (this is the per-attempt event that drives the LLM span).
     - failure side (``error_category`` / ``error_message`` /
       ``error_type``): populated on a failed attempt; ``None`` on a
       successful one.
@@ -721,6 +741,12 @@ class LlmRetryAttemptEvent:
     error_message: str | None = None
     error_type: str | None = None
     caller_invocation_metadata: Mapping[str, AttributeValue] | None = None
+    # Proposal 0076: the attempt's output tool calls (ToolCall records),
+    # mirroring LlmCompletionEvent.output_tool_calls. Populated on a
+    # successful attempt; empty list on a failed one (no response). The
+    # OTel observer renders the output tool-call span attributes from
+    # this field (the per-attempt event is the LLM-span source).
+    output_tool_calls: list["ToolCall"] = field(default_factory=list["ToolCall"])
 
 
 # Spec: realizes pipeline-utilities §6.3 failure-isolation middleware
