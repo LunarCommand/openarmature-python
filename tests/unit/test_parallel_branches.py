@@ -776,6 +776,49 @@ async def test_node_event_branch_count_excludes_when_skipped_branches() -> None:
     assert config.branch_names == ("vector", "fts")  # full declared set, insertion order
 
 
+async def test_callable_branch_event_attempt_index_tracks_node_retry() -> None:
+    # PR #175 review: under node-level retry the callable branch's
+    # started/completed pair carries the NODE's active attempt index (the same
+    # value the NODE's own event uses), not a hardcoded 0. A flaky callable
+    # fails the first node attempt and succeeds on the retry.
+    events: list[ObserverEvent] = []
+    calls = {"n": 0}
+
+    async def flaky(_state: ParentState) -> Mapping[str, Any]:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("transient")
+        return {"alpha_result": 1}
+
+    node_retry = RetryMiddleware(
+        RetryConfig(
+            max_attempts=2,
+            classifier=lambda _exc, _state: True,  # retry any failure
+            backoff=deterministic_backoff(0.0),
+        )
+    )
+    compiled = (
+        GraphBuilder(ParentState)
+        .set_entry("retrieve")
+        .add_parallel_branches_node(
+            "retrieve",
+            branches={"vector": BranchSpec(call=flaky)},
+            middleware=[node_retry],
+        )
+        .add_edge("retrieve", END)
+        .compile()
+    )
+    compiled.attach_observer(await _capture_events(events))
+    final = await compiled.invoke(ParentState())
+    await compiled.drain()
+
+    assert final.alpha_result == 1  # succeeded on the second node attempt
+    branch_started = [
+        e for e in events if isinstance(e, NodeEvent) and e.branch_name == "vector" and e.phase == "started"
+    ]
+    assert [e.attempt_index for e in branch_started] == [0, 1]
+
+
 async def test_when_false_skips_branch_no_contribution_no_event() -> None:
     # §11.10: a branch whose ``when`` returns false is skipped entirely —
     # not dispatched, no contribution (its field stays at the default), and

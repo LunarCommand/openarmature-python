@@ -48,6 +48,7 @@ from typing import TYPE_CHECKING, Any, Literal, cast
 from openarmature.observability.correlation import (
     _reset_branch_name,
     _set_branch_name,
+    current_attempt_index,
 )
 
 from .errors import NodeException, ParallelBranchesBranchFailed
@@ -324,8 +325,15 @@ class ParallelBranchesNode[ParentT: State]:
 
         node_namespace = context.namespace_prefix + (self.name,)
         step = context.take_step()
+        # The pair carries the parallel-branches NODE's active attempt index
+        # (the same value the NODE's own event uses), so under node-level retry
+        # the §6 keying tuple and the Langfuse observation metadata report the
+        # right attempt. Read once at dispatch entry — before the branch chain,
+        # which may run its own retries — so the started/completed pair shares
+        # one value. Without retry this is 0 (the var's baseline).
+        attempt_index = current_attempt_index()
         CompiledGraph._dispatch_started(  # noqa: SLF001
-            context, branch_name, node_namespace, step, state, attempt_index=0
+            context, branch_name, node_namespace, step, state, attempt_index=attempt_index
         )
         try:
             # ``call`` is the chain's innermost. Its public type returns the
@@ -344,7 +352,7 @@ class ParallelBranchesNode[ParentT: State]:
             # (collect) — exactly as for a subgraph branch.
             wrapped = NodeException(node_name=branch_name, cause=exc, recoverable_state=state)
             CompiledGraph._dispatch_completed(  # noqa: SLF001
-                context, branch_name, node_namespace, step, state, error=wrapped, attempt_index=0
+                context, branch_name, node_namespace, step, state, error=wrapped, attempt_index=attempt_index
             )
             raise wrapped from exc
         # Success path — including a degraded update from a branch
@@ -355,7 +363,13 @@ class ParallelBranchesNode[ParentT: State]:
         # merge across siblings is the NODE's completed event.
         post_state = state.model_copy(update=dict(partial))
         CompiledGraph._dispatch_completed(  # noqa: SLF001
-            context, branch_name, node_namespace, step, state, post_state=post_state, attempt_index=0
+            context,
+            branch_name,
+            node_namespace,
+            step,
+            state,
+            post_state=post_state,
+            attempt_index=attempt_index,
         )
         return partial
 
