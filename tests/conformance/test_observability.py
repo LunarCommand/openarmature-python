@@ -158,6 +158,14 @@ _SUPPORTED_FIXTURES = frozenset(
         # run; session-bound cases 1/5 defer until the sessions capability
         # (0020) supplies openarmature.session_id.
         "084-langfuse-session-user-promotion",
+        # v0.67.0 — proposal 0076 (tool-call request observability on the
+        # LLM span). The model's output tool calls surface as ungated
+        # identity (count / names / ids) plus a gated full serialization
+        # on openarmature.llm.complete. Driven through the generic
+        # LLM-payload fixture runner.
+        "085-llm-tool-call-request-attributes",
+        "086-llm-tool-call-request-absent",
+        "087-llm-tool-call-request-survives-payload-gating",
     }
 )
 
@@ -267,6 +275,9 @@ async def test_observability_fixture(fixture_path: Path) -> None:
         "025-otel-llm-request-params-extended",
         "026-otel-caller-supplied-metadata",
         "057-llm-attempt-index-single-attempt-default",
+        "085-llm-tool-call-request-attributes",
+        "086-llm-tool-call-request-absent",
+        "087-llm-tool-call-request-survives-payload-gating",
     }:
         await _run_llm_payload_fixture(spec)
     else:
@@ -2937,6 +2948,17 @@ def _check_payload_span_tree(
             absent = entry.get("attributes_absent")
             if absent:
                 assert_attributes_absent(attrs, cast("list[str]", absent))
+            # ``attributes_present:`` list of names that MUST appear
+            # (presence-only, value not asserted). Fixture 087 case 2
+            # uses this for the gated openarmature.llm.output.tool_calls,
+            # whose serialized value is checked structurally in the
+            # mirror unit test rather than bytewise here.
+            present = entry.get("attributes_present")
+            if present:
+                for attr_name in cast("list[str]", present):
+                    assert attr_name in attrs, (
+                        f"span {name!r} MUST carry attribute {attr_name!r}; got {sorted(attrs)}"
+                    )
             # ``attribute_parses_as_messages:`` shape assertion.
             parses_as_messages = entry.get("attribute_parses_as_messages")
             if parses_as_messages:
