@@ -739,13 +739,19 @@ observer = OTelObserver(
 )
 ```
 
-This surfaces three attributes:
+This surfaces four attributes:
 
 - `openarmature.llm.input.messages`: JSON-encoded message array
   (the spec §3 message shape: `{role, content, tool_calls?, …}`).
 - `openarmature.llm.output.content`: the assistant's response
   content string verbatim. Omitted for tool-call-only responses
   with empty content.
+- `openarmature.llm.output.tool_calls`: JSON-encoded `[{id, name,
+  arguments}]` array of the tool calls the model requested (the same
+  encoding `tool_calls` uses inside `input.messages`). This is the
+  output-side home for the request, including the call arguments, so
+  it is payload-gated. Emitted only when the response requests tool
+  calls.
 - `openarmature.llm.request.extras`: JSON-encoded `RuntimeConfig`
   extras bag (provider-specific pass-through fields like
   `repetition_penalty` for vLLM, or `top_k` for HuggingFace
@@ -756,6 +762,29 @@ hasn't audited; opting in is a separate decision from opting into
 observability. The flag name keeps symmetry with `disable_llm_spans`:
 the default value (`True`) reads as "the observer disables payload
 emission by default."
+
+#### Output tool-call identity (ungated)
+
+The full `openarmature.llm.output.tool_calls` carries the arguments, so
+it is payload-gated. But *which* tools the model asked for (their
+names and ids) is identity, not payload, the same class as
+`openarmature.llm.model`. So three identity projections render
+**regardless** of `disable_provider_payload`, surfacing the request
+under the default payload-off posture and queryable without parsing
+JSON:
+
+- `openarmature.llm.output.tool_calls.count`: the number of tool calls
+  requested (an int, equal to the length of `.names`).
+- `openarmature.llm.output.tool_calls.names`: the requested tool names,
+  in request order.
+- `openarmature.llm.output.tool_calls.ids`: the requested `ToolCall`
+  ids, index-aligned with `.names` (`names[i]` / `ids[i]` describe the
+  same call), the linkage to a downstream tool execution.
+
+The whole family (these three plus the gated full serialization) is
+emitted **only** on a tool-calling completion. A completion that
+requests no tools emits none of them; absence means "no tools
+requested", distinct from `count = 0`.
 
 #### Truncation
 

@@ -305,6 +305,7 @@ of:
               finish_reason=response.finish_reason,
               input_messages=serialized_messages,
               output_content=response.message.content or None,
+              output_tool_calls=list(response.message.tool_calls or []),
               request_params=request_params,
               request_extras=request_extras,
               active_prompt=None,

@@ -32,7 +32,7 @@
 
 [manifest]
 implementation = "openarmature-python"
-spec_pin = "v0.66.1"
+spec_pin = "v0.67.0"
 
 # Status values:
 #   implemented   — shipped behavior matches the proposal's contract
@@ -731,3 +731,11 @@ note = "FailureIsolationMiddleware gains an optional `catch` set of error catego
 status = "implemented"
 since = "0.15.0"
 note = "ParallelBranchesNode gains two additive branch forms. (1) Inline-callable branches (§11.1.1): a BranchSpec may give its work as `call` (an async function over the parent state returning a parent-shaped partial update) instead of a compiled `subgraph` + inputs/outputs projection; the contribution is the returned partial directly, merged via the parent reducer with no projection (§11.4). Exactly one of subgraph/call per branch, and a callable branch declares no inputs/outputs, else parallel_branches_invalid_branch_spec (a new compile-time category); a node MAY mix subgraph and callable branches. Per-leg failure isolation on a callable branch is the existing §11.7 branch-middleware contract (wrap the callable in FailureIsolationMiddleware). (2) Conditional branches (§11.10): a BranchSpec may carry an optional `when` predicate (parent_state) -> bool, evaluated once at dispatch; false skips the branch entirely (no dispatch, contribution, observer events, or span). All-branches-skipped is a valid no-op, distinct from the compile-time parallel_branches_no_branches (empty declared mapping). graph-engine §6 / observability §5.7: a callable branch is the unit -- it emits one started/completed pair keyed by branch_name (rendered as a branch span via the existing §5.7 machinery), a skipped branch emits nothing. Fixtures 073 (two callable branches merge to disjoint fields), 074 (when false skips / true dispatches), 075 (callable branch + FailureIsolationMiddleware degrades, sibling completes, category resolves through the chain)."
+
+# Spec v0.67.0 (proposal 0076).  Tool-call request observability on the
+# LLM completion span (observability §5.5.1 / §5.5.10 / §5.5.5,
+# graph-engine §6).
+[proposals."0076"]
+status = "implemented"
+since = "0.15.0"
+note = "The model's output tool calls get an output-side home on the openarmature.llm.complete span. observability §5.5.10 adds the UNGATED identity projections openarmature.llm.output.tool_calls.count / .names / .ids (the class of openarmature.llm.model / attempt_index; emitted only on a tool-calling completion, omitted entirely otherwise -- not count=0); .names and .ids are index-aligned in request order, .count equals their length. §5.5.1 adds the GATED openarmature.llm.output.tool_calls, the full [{id, name, arguments}] serialization (reusing the §5.5.5 input tool-call encoding) carrying the arguments, suppressed under disable_provider_payload and subject to the truncation contract. graph-engine §6: LlmCompletionEvent gains an output_tool_calls field (the ToolCall records, populated unconditionally). python carries the field on BOTH the terminal LlmCompletionEvent (spec-conformance + the Langfuse/consumer path) and the python-internal per-attempt LlmRetryAttemptEvent, and the OTel observer renders the span attributes from the per-attempt event (the LLM-span source since 0050) -- mirroring how output_content already works. OA-namespace, no gen_ai.* mirror (the attempt_index precedent). Langfuse request-side mapping is OUT OF SCOPE (proposal defers it as future work); no Langfuse change. Fixtures 085 (two calls -> count/names/ids), 086 (no calls -> family absent), 087 (payload-gating: identity survives off, gated full present only on)."

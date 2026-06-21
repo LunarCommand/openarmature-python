@@ -35,9 +35,14 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, ConfigDict, Field
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
+
+    from openarmature.llm.messages import ToolCall
 
 # Sentinel namespace the LLM provider emits to signal "this is an LLM
 # event, not a regular node event." Backend mappings (the OTel observer
@@ -142,4 +147,19 @@ class LlmEventPayload(BaseModel):
     caller_invocation_metadata: dict[str, Any] = Field(default_factory=dict)
 
 
-__all__ = ["LLM_NAMESPACE", "LlmEventPayload"]
+def serialize_tool_calls(tool_calls: Sequence[ToolCall]) -> list[dict[str, Any]]:
+    """The observability §5.5.5 tool-call serialization,
+    ``[{id, name, arguments}, ...]``.
+
+    The single home for the encoding, shared by the input-message
+    payload (the provider's ``input.messages`` serialization, where the
+    model's tool calls appear inside replayed assistant history) and the
+    output tool-call attribute (the OTel observer's gated
+    ``openarmature.llm.output.tool_calls``). Lives here rather than in a
+    provider or observer module so both sides import one definition and
+    the encoding can't drift between them.
+    """
+    return [{"id": tc.id, "name": tc.name, "arguments": tc.arguments} for tc in tool_calls]
+
+
+__all__ = ["LLM_NAMESPACE", "LlmEventPayload", "serialize_tool_calls"]
