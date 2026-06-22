@@ -865,6 +865,192 @@ async def test_llm_span_output_tool_calls_payload_gating() -> None:
     ]
 
 
+# ---------------------------------------------------------------------------
+# Proposal 0067 — GenAI metrics (observability §11)
+# ---------------------------------------------------------------------------
+
+
+def _collect_metric_points(reader: Any) -> list[tuple[str, float, int, dict[str, Any]]]:
+    """Flatten an InMemoryMetricReader's collected data into
+    ``(instrument_name, point_sum, point_count, point_attributes)``
+    tuples. Histogram observations with identical attribute sets
+    aggregate into one data point (sum + count), so per-attempt tests
+    assert on ``count``, not point cardinality."""
+    data = reader.get_metrics_data()
+    points: list[tuple[str, float, int, dict[str, Any]]] = []
+    if data is None:
+        return points
+    for resource_metric in data.resource_metrics:
+        for scope_metric in resource_metric.scope_metrics:
+            for metric in scope_metric.metrics:
+                for pt in metric.data.data_points:
+                    points.append((metric.name, pt.sum, pt.count, dict(pt.attributes)))
+    return points
+
+
+async def _drive_metrics_events(
+    events: list[Any],
+    *,
+    enable_metrics: bool = True,
+    disable_llm_spans: bool = False,
+) -> tuple[list[tuple[str, float, int, dict[str, Any]]], list[Any]]:
+    """Feed LlmRetryAttemptEvents through an OTelObserver wired to a
+    private MeterProvider + InMemoryMetricReader; return the captured
+    ``(metric_points, llm_complete_spans)``."""
+    from opentelemetry.sdk.metrics import MeterProvider as SdkMeterProvider
+    from opentelemetry.sdk.metrics.export import InMemoryMetricReader
+
+    from openarmature.observability.correlation import (
+        _reset_invocation_id,
+        _set_invocation_id,
+    )
+
+    reader = InMemoryMetricReader()
+    meter_provider = SdkMeterProvider(metric_readers=[reader])
+    exporter = InMemorySpanExporter()
+    observer = OTelObserver(
+        span_processor=SimpleSpanProcessor(exporter),
+        enable_metrics=enable_metrics,
+        disable_llm_spans=disable_llm_spans,
+        meter_provider=meter_provider,
+    )
+    token = _set_invocation_id("inv-metrics")
+    try:
+        for event in events:
+            await observer(event)
+    finally:
+        _reset_invocation_id(token)
+    observer.shutdown()
+    llm_spans = [s for s in exporter.get_finished_spans() if s.name == "openarmature.llm.complete"]
+    return _collect_metric_points(reader), llm_spans
+
+
+async def test_metrics_records_token_and_duration() -> None:
+    # Proposal 0067 §11 (mirrors fixture 088): a successful LLM attempt
+    # with usage {input 5, output 1} records two token.usage observations
+    # (input + output) and one duration observation, with the §11.3
+    # dimensions. Duration value is not asserted (§11.4).
+    from openarmature.llm.response import Usage
+    from tests._helpers.typed_event import make_retry_attempt_event
+
+    event = make_retry_attempt_event(
+        model="test-model",
+        provider="openai",
+        latency_ms=12.0,
+        usage=Usage(prompt_tokens=5, completion_tokens=1, total_tokens=6),
+    )
+    points, _ = await _drive_metrics_events([event])
+    token_points = [p for p in points if p[0] == "openarmature.gen_ai.client.token.usage"]
+    duration_points = [p for p in points if p[0] == "openarmature.gen_ai.client.operation.duration"]
+    by_type = {p[3]["openarmature.gen_ai.token.type"]: p for p in token_points}
+    assert by_type["input"][1] == 5
+    assert by_type["output"][1] == 1
+    for ttype in ("input", "output"):
+        dims = by_type[ttype][3]
+        assert dims["openarmature.gen_ai.operation"] == "chat"
+        assert dims["gen_ai.request.model"] == "test-model"
+        assert dims["gen_ai.system"] == "openai"
+    assert len(duration_points) == 1
+    ddims = duration_points[0][3]
+    assert ddims["openarmature.gen_ai.operation"] == "chat"
+    assert ddims["gen_ai.request.model"] == "test-model"
+    assert ddims["gen_ai.system"] == "openai"
+    assert "error.type" not in ddims
+
+
+async def test_metrics_records_duration_with_error_type_on_failure() -> None:
+    # Proposal 0067 §11.2 / §11.3 (mirrors fixture 090): a failed attempt
+    # records a duration observation carrying error.type, and NO
+    # token.usage observation (a failed attempt returned no usage).
+    from tests._helpers.typed_event import make_retry_attempt_event
+
+    event = make_retry_attempt_event(
+        model="test-model",
+        provider="openai",
+        latency_ms=8.0,
+        finish_reason=None,
+        usage=None,
+        error_category="provider_unavailable",
+        error_type="ProviderUnavailable",
+        error_message="down",
+    )
+    points, _ = await _drive_metrics_events([event])
+    token_points = [p for p in points if p[0] == "openarmature.gen_ai.client.token.usage"]
+    duration_points = [p for p in points if p[0] == "openarmature.gen_ai.client.operation.duration"]
+    assert token_points == []
+    assert len(duration_points) == 1
+    assert duration_points[0][3]["error.type"] == "provider_unavailable"
+    assert duration_points[0][3]["openarmature.gen_ai.operation"] == "chat"
+
+
+async def test_metrics_disabled_records_nothing() -> None:
+    # Proposal 0067 §11.1 (mirrors fixture 091): enable_metrics off (the
+    # default) creates no instrument and records nothing.
+    from openarmature.llm.response import Usage
+    from tests._helpers.typed_event import make_retry_attempt_event
+
+    event = make_retry_attempt_event(usage=Usage(prompt_tokens=5, completion_tokens=1, total_tokens=6))
+    points, _ = await _drive_metrics_events([event], enable_metrics=False)
+    assert points == []
+
+
+async def test_metrics_independent_of_disable_llm_spans() -> None:
+    # Proposal 0067 §11.1: metrics record even with spans disabled — the
+    # disable_llm_spans flag governs span emission only.
+    from openarmature.llm.response import Usage
+    from tests._helpers.typed_event import make_retry_attempt_event
+
+    event = make_retry_attempt_event(usage=Usage(prompt_tokens=5, completion_tokens=1, total_tokens=6))
+    points, llm_spans = await _drive_metrics_events([event], disable_llm_spans=True)
+    assert llm_spans == []
+    assert any(p[0] == "openarmature.gen_ai.client.operation.duration" for p in points)
+    assert any(p[0] == "openarmature.gen_ai.client.token.usage" for p in points)
+
+
+async def test_metrics_record_once_per_attempt_under_retry() -> None:
+    # Proposal 0067 §11.2 "Call-level retry": the duration histogram
+    # records once per attempt (failed attempts carry error.type), and
+    # token.usage only for an attempt that returned usage. Two failed
+    # attempts + one success -> 3 duration observations (2 with
+    # error.type), 2 token.usage observations (the success's input +
+    # output). Observations with identical dimensions aggregate into one
+    # data point, so this asserts on histogram counts.
+    from openarmature.llm.response import Usage
+    from tests._helpers.typed_event import make_retry_attempt_event
+
+    failed = [
+        make_retry_attempt_event(
+            llm_attempt_index=i,
+            latency_ms=5.0,
+            finish_reason=None,
+            usage=None,
+            error_category="provider_unavailable",
+            error_type="ProviderUnavailable",
+            error_message="down",
+        )
+        for i in range(2)
+    ]
+    success = make_retry_attempt_event(
+        llm_attempt_index=2,
+        latency_ms=7.0,
+        usage=Usage(prompt_tokens=5, completion_tokens=1, total_tokens=6),
+    )
+    points, _ = await _drive_metrics_events([*failed, success])
+    duration_points = [p for p in points if p[0] == "openarmature.gen_ai.client.operation.duration"]
+    token_points = [p for p in points if p[0] == "openarmature.gen_ai.client.token.usage"]
+    # 3 duration observations total: 2 share the error dims (one
+    # aggregated point, count 2), the success is a separate point.
+    assert sum(p[2] for p in duration_points) == 3
+    error_duration = [p for p in duration_points if p[3].get("error.type") == "provider_unavailable"]
+    assert sum(p[2] for p in error_duration) == 2
+    success_duration = [p for p in duration_points if "error.type" not in p[3]]
+    assert sum(p[2] for p in success_duration) == 1
+    # token.usage only from the success attempt: one input, one output.
+    by_type = {p[3]["openarmature.gen_ai.token.type"]: p for p in token_points}
+    assert by_type["input"][1] == 5 and by_type["input"][2] == 1
+    assert by_type["output"][1] == 1 and by_type["output"][2] == 1
+
+
 async def test_llm_span_zero_duration_when_latency_missing() -> None:
     # When the typed event omits latency_ms (None), the handler falls
     # back to a zero-duration span at end_time rather than guessing

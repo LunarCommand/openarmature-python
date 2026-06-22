@@ -81,7 +81,9 @@ from dataclasses import dataclass, field
 from typing import Any, cast
 
 from opentelemetry import context as otel_context
+from opentelemetry import metrics as otel_metrics
 from opentelemetry import trace as otel_trace
+from opentelemetry.metrics import Histogram, Meter, MeterProvider
 from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace import SpanProcessor, TracerProvider
 from opentelemetry.sdk.trace.id_generator import RandomIdGenerator
@@ -140,6 +142,44 @@ _PAYLOAD_MIN_BYTES = 256
 # default. Implementations MAY configure; ours sits on a constructor
 # field.
 _PAYLOAD_DEFAULT_BYTES = 65536
+
+
+# §11.2 (proposal 0067) explicit bucket-boundary advisories for the two
+# GenAI metric histograms, mirroring the upstream gen_ai.client.* bucket
+# advisories so a future stable cutover is a mechanical prefix-strip.
+# Token usage in {token}; operation duration in seconds.
+_TOKEN_USAGE_BUCKETS: list[float] = [
+    1,
+    4,
+    16,
+    64,
+    256,
+    1024,
+    4096,
+    16384,
+    65536,
+    262144,
+    1048576,
+    4194304,
+    16777216,
+    67108864,
+]
+_DURATION_BUCKETS: list[float] = [
+    0.01,
+    0.02,
+    0.04,
+    0.08,
+    0.16,
+    0.32,
+    0.64,
+    1.28,
+    2.56,
+    5.12,
+    10.24,
+    20.48,
+    40.96,
+    81.92,
+]
 
 
 def _read_spec_version() -> str:
@@ -469,6 +509,21 @@ class OTelObserver:
     # LLM-aware backends (Langfuse, Phoenix, Honeycomb's LLM lens)
     # render correctly out of the box, which keys off gen_ai.*.
     disable_genai_semconv: bool = False
+    # Proposal 0067 (observability §11): opt-in GenAI metrics. Default
+    # off; the flag name is normative. When True, __post_init__ creates
+    # the two histogram instruments and provider-call events record token
+    # + duration measurements. Independent of span emission (§11.1) — the
+    # disable_llm_spans / disable_provider_payload / disable_genai_semconv
+    # flags govern spans only.
+    enable_metrics: bool = False
+    # The MeterProvider the metric instruments are obtained from. None
+    # (default) falls back to the configured OTel global MeterProvider,
+    # which is the no-op meter when none is set up (§11.1: recording is a
+    # silent no-op, never raises). Injectable so tests (and callers who
+    # keep a private MeterProvider) can capture measurements without
+    # mutating the OTel global. Unlike the span side's private
+    # TracerProvider, metrics use the *configured* provider per §11.1.
+    meter_provider: MeterProvider | None = None
     # Per-attribute byte cap for the §5.5.1 payload attributes. Default
     # 64 KiB; minimum 256 bytes (§5.5.5), validated in __post_init__.
     payload_max_bytes: int = _PAYLOAD_DEFAULT_BYTES
@@ -498,6 +553,11 @@ class OTelObserver:
     # Internal state, populated in __post_init__ and during invocation.
     _provider: TracerProvider = field(init=False, repr=False)
     _tracer: otel_trace.Tracer = field(init=False, repr=False)
+    # §11 metric instruments — created in __post_init__ only when
+    # enable_metrics is True; None otherwise (and recording is skipped).
+    _meter: Meter | None = field(init=False, repr=False, default=None)
+    _token_histogram: Histogram | None = field(init=False, repr=False, default=None)
+    _duration_histogram: Histogram | None = field(init=False, repr=False, default=None)
     # Per-invocation_id span state — concurrent invocations on a
     # shared observer each get their own ``_InvState`` so internal
     # maps never collide.
@@ -539,6 +599,26 @@ class OTelObserver:
         for proc in processors:
             self._provider.add_span_processor(proc)
         self._tracer = self._provider.get_tracer("openarmature")
+        # §11.1 metrics: opt-in. When enabled, obtain a Meter from the
+        # configured MeterProvider (injected, else the OTel global, which
+        # is the no-op meter when none is set up) and create the two
+        # histograms with the §11.2 explicit bucket advisories. When
+        # disabled, no instrument is created and nothing records.
+        if self.enable_metrics:
+            meter_provider = (
+                self.meter_provider if self.meter_provider is not None else otel_metrics.get_meter_provider()
+            )
+            self._meter = meter_provider.get_meter("openarmature")
+            self._token_histogram = self._meter.create_histogram(
+                "openarmature.gen_ai.client.token.usage",
+                unit="{token}",
+                explicit_bucket_boundaries_advisory=_TOKEN_USAGE_BUCKETS,
+            )
+            self._duration_histogram = self._meter.create_histogram(
+                "openarmature.gen_ai.client.operation.duration",
+                unit="s",
+                explicit_bucket_boundaries_advisory=_DURATION_BUCKETS,
+            )
 
     # ------------------------------------------------------------------
     # Enricher invocation (friction-roundup #7p2)
@@ -612,6 +692,10 @@ class OTelObserver:
         # LlmRetryAttemptEvent — one span per attempt under call-level
         # retry (attempt_index 0..N-1), one for a no-retry call.
         if isinstance(event, LlmRetryAttemptEvent):
+            # §11 metrics record per attempt, independent of span emission
+            # (§11.1) — so this runs regardless of disable_llm_spans.
+            if self.enable_metrics:
+                self._record_llm_metrics(event)
             if not self.disable_llm_spans:
                 self._handle_typed_llm_retry_attempt(event)
             return
@@ -1214,6 +1298,51 @@ class OTelObserver:
     # active_prompt_group snapshots taken at dispatch time — NOT the
     # ContextVar. The dispatch worker's task-local Context doesn't see
     # node-body ContextVar writes.
+    def _record_llm_metrics(self, event: LlmRetryAttemptEvent) -> None:
+        """Record the §11 GenAI metric observations for one LLM-call
+        attempt.
+
+        Duration is recorded for every attempt (including a failed one,
+        carrying ``error.type``); token usage only when the attempt
+        returned a usage record (a failed attempt has none). Sourced from
+        the per-attempt ``LlmRetryAttemptEvent`` — one duration sample per
+        attempt under call-level retry, matching the per-attempt span
+        model. The attempt index is deliberately not a dimension (§11.2
+        cardinality).
+        """
+        if self._duration_histogram is None or self._token_histogram is None:
+            return
+        # §11.3 dimensions shared by both instruments. operation is "chat"
+        # for an LLM completion; gen_ai.request.model / gen_ai.system are
+        # the recognized-core de-facto-standard keys used directly.
+        base_dims: dict[str, str] = {
+            "openarmature.gen_ai.operation": "chat",
+            "gen_ai.request.model": event.model,
+            "gen_ai.system": event.provider,
+        }
+        # Duration (seconds): every attempt. error.type carries the §7
+        # category on a failed attempt; absent on success.
+        if event.latency_ms is not None:
+            duration_dims = dict(base_dims)
+            if event.error_category is not None:
+                duration_dims["error.type"] = event.error_category
+            self._duration_histogram.record(event.latency_ms / 1000.0, duration_dims)
+        # Token usage: only when a usage record is present (a failed
+        # attempt has none). Two observations for an LLM completion —
+        # input + output — each only when its count was reported.
+        usage = event.usage
+        if usage is not None:
+            if usage.prompt_tokens is not None:
+                self._token_histogram.record(
+                    usage.prompt_tokens,
+                    {**base_dims, "openarmature.gen_ai.token.type": "input"},
+                )
+            if usage.completion_tokens is not None:
+                self._token_histogram.record(
+                    usage.completion_tokens,
+                    {**base_dims, "openarmature.gen_ai.token.type": "output"},
+                )
+
     def _handle_typed_llm_retry_attempt(self, event: LlmRetryAttemptEvent) -> None:
         """Open + close one ``openarmature.llm.complete`` span from a
         per-attempt LlmRetryAttemptEvent.
