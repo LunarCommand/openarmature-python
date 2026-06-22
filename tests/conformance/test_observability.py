@@ -3264,18 +3264,21 @@ def _assert_langfuse_observation_tree(
     observation list (linked by parent_observation_id). type + name are
     matched exactly; level / input / output exactly when present;
     metadata is subset-matched."""
-    actual_children = trace.children_of(parent_id)
+    # Mutable copy: each matched observation is consumed so two
+    # same-shape expected siblings can't both bind to one actual.
+    remaining = list(trace.children_of(parent_id))
     for exp in expected:
         exp_type = cast("str", exp["type"])
         exp_name = cast("str | None", exp.get("name"))
         match = next(
-            (o for o in actual_children if o.type == exp_type and (exp_name is None or o.name == exp_name)),
+            (o for o in remaining if o.type == exp_type and (exp_name is None or o.name == exp_name)),
             None,
         )
         assert match is not None, (
             f"no {exp_type!r} observation named {exp_name!r} under parent {parent_id!r}; "
-            f"got {[(o.type, o.name) for o in actual_children]}"
+            f"got {[(o.type, o.name) for o in remaining]}"
         )
+        remaining.remove(match)
         if "level" in exp:
             assert match.level == exp["level"], f"{exp_name!r}: level {match.level!r} != {exp['level']!r}"
         if "input" in exp:

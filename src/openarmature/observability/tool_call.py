@@ -31,16 +31,6 @@ from contextlib import contextmanager
 from typing import Any
 
 
-# Sentinel distinguishing "the caller never reported a result" from "the
-# tool returned None" -- a forgotten set_result() resolves to a null
-# result rather than masquerading as a real one.
-class _Unset:
-    pass
-
-
-_UNSET = _Unset()
-
-
 class ToolCallScope:
     """Handle yielded by :func:`with_tool_call`.
 
@@ -54,7 +44,10 @@ class ToolCallScope:
 
     def __init__(self, call_id: str) -> None:
         self.call_id = call_id
-        self._result: Any = _UNSET
+        # Defaults to None: a forgotten set_result() and a tool that
+        # genuinely returns None both emit a null result, which is
+        # correct (a tool may legitimately return None).
+        self._result: Any = None
 
     def set_result(self, value: Any) -> None:
         """Report the tool's return value to the scope."""
@@ -149,7 +142,6 @@ def with_tool_call(
         raise
     latency_ms = (time.perf_counter() - start) * 1000.0
     if dispatch is not None:
-        result = None if isinstance(scope._result, _Unset) else scope._result
         dispatch(
             ToolCallEvent(
                 invocation_id=invocation_id,
@@ -163,7 +155,7 @@ def with_tool_call(
                 tool_name=tool_name,
                 tool_call_id=tool_call_id,
                 arguments=arguments,
-                result=result,
+                result=scope._result,
                 latency_ms=latency_ms,
                 caller_invocation_metadata=caller_metadata,
             )

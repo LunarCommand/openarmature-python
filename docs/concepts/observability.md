@@ -905,7 +905,8 @@ The events render on both backends:
   sets ERROR status with the standard `error.type` attribute.
 - Langfuse: a dedicated `Tool` observation (not a Generation) under the
   node's Span observation, with the arguments / result as input / output and
-  the tool name / call id in metadata; a failure renders at ERROR level.
+  the tool name and `tool_call_id` in metadata; a failure renders at ERROR
+  level.
 
 The arguments and result are payload, gated by `disable_provider_payload`
 exactly like the LLM payload attributes (default off keeps tool inputs and
