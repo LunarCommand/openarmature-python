@@ -69,6 +69,12 @@ def _parse_type(s: str) -> Any:
     # collect_field gets a null entry, so the element type must permit None.
     if s == "any":
         return Any
+    # proposal-0063 tool fixtures (092-098): ``record`` is the state slot
+    # a tool result is stored in — an opaque, language-idiomatic value
+    # (often a mapping) with a ``null`` default. ``Any`` admits both the
+    # null default and whatever shape the tool produced.
+    if s == "record":
+        return Any
     # Unparameterized container types — parallel-branches fixtures
     # 034/035/037 use ``dict`` and ``list<dict>`` as state-field types
     # for accumulator slots (branch_errors, merged_dict, collected_labels)

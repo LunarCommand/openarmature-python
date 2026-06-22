@@ -32,7 +32,7 @@
 
 [manifest]
 implementation = "openarmature-python"
-spec_pin = "v0.68.0"
+spec_pin = "v0.69.0"
 
 # Status values:
 #   implemented   — shipped behavior matches the proposal's contract
@@ -705,6 +705,14 @@ note = "Descriptive catalog of the failure-mock family (flaky + failure_sequence
 status = "implemented"
 since = "0.15.0"
 note = "The OTel observer synthesizes an openarmature.invocation span at the root of each detached trace (a detached subgraph + each detached fan-out instance), carrying the parent's SHARED invocation_id (detached mode is observer-side trace rendering, not a new run) and the detached unit's own entry_node; the detached subgraph / instance span nests under it. A raising detached subgraph surfaces ERROR + the category + an OTel exception event on BOTH the parent dispatch span and the detached invocation span. Observer-side only -- no graph-engine change; the Langfuse observer is unchanged (its Trace entity already plays the invocation-level-container role). Fixtures 008 (rewritten) and 058 (newly wired) run in test_observability."
+
+# Spec v0.69.0 (proposal 0063).  Tool-execution observability (graph-engine
+# §6 instrumentation scope + two typed events; observability §5.5.11 OTel tool
+# span + §8.4.6 Langfuse Tool observation).
+[proposals."0063"]
+status = "implemented"
+since = "0.15.0"
+note = "A node-body tool-call instrumentation scope (with_tool_call, a sync context manager modelled on with_active_prompt) the caller wraps a tool execution in; OA observes (does NOT run / select / loop / feed back). On result it dispatches ToolCallEvent; on raise it dispatches ToolCallFailedEvent and RE-RAISES (observe, don't swallow). The two typed §6 events carry identity/scoping + tool_name / tool_call_id (links back to LlmCompletionEvent.output_tool_calls, null for a standalone instrumented function) / arguments / latency_ms / call_id; ToolCallEvent adds result, ToolCallFailedEvent adds error_type + error_message and deliberately NO error_category (tool code has no closed §7 taxonomy). OTel: an openarmature.tool.call span (note .call, not .complete) parented under the calling node, OA-namespace openarmature.tool.{name,call.id,call.arguments,call.result} attrs + standard error.type on failure (ERROR status + exception event); the Development gen_ai.tool.* / execute_tool surface is mirrored, NOT emitted in v1. Langfuse: the dedicated Tool observation (asType=tool) -- python's first non-Span/Generation observation type -- input=arguments, output=result, tool_name/tool_call_id in metadata, ERROR level + error fields on failure. arguments/result are payload, gated by disable_provider_payload (no new flag); disable_llm_spans does not gate the tool span. v1 ships the inline bracketing form; the deferred start/complete split is a spec MAY, not yet needed. Fixtures 092-098 run in test_observability (092-095 typed-event-collector, 096/097 OTel span_tree, 098 Langfuse Tool observation)."
 
 # Spec v0.62.0 (proposal 0064).  Langfuse trace.sessionId / trace.userId
 # population (observability §8.4.1 / §8.10).

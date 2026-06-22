@@ -334,6 +334,24 @@ _DEFERRED_FIXTURES: dict[str, str] = {
     "observability/056-llm-completion-event-strict-serial-ordering": (
         "Proposal 0049 typed LLM completion event; queued for v0.13.0"
     ),
+    # Proposal 0063 (tool-execution observability, v0.69.0) — the
+    # typed-collector fixtures share the ``expected.observers`` shape of
+    # 050-056 (which the harness schema models loosely, hence the same
+    # parser-deferral); they still RUN via test_observability. The
+    # OTel-span (096/097) and Langfuse (098) tool fixtures parse fine and
+    # are not deferred.
+    "observability/092-tool-call-event-dispatch": (
+        "Proposal 0063 typed-event-collector shape; runs in test_observability"
+    ),
+    "observability/093-tool-call-failed-event-dispatch": (
+        "Proposal 0063 typed-event-collector shape; runs in test_observability"
+    ),
+    "observability/094-tool-call-event-mutual-exclusion": (
+        "Proposal 0063 typed-event-collector shape; runs in test_observability"
+    ),
+    "observability/095-tool-call-id-links-to-llm-request": (
+        "Proposal 0063 typed-event-collector shape; runs in test_observability"
+    ),
     # Proposal 0057 (LlmCompletionEvent field-set extension, v0.51.0)
     # — fixtures 060-068 share the same ``typed_observers`` directive
     # shape as 050-056 and inherit the same parser-deferral status

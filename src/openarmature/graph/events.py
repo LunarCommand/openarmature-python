@@ -794,6 +794,116 @@ class FailureIsolatedEvent:
     caught_exception: CaughtException
 
 
+# Spec: realizes graph-engine §6 tool-execution observer events
+# (proposal 0063, spec v0.69.0), the success+failure pair the
+# tool-call instrumentation scope (``with_tool_call``) dispatches around
+# a caller's tool execution. OA observes the execution; it does NOT run,
+# select, loop, or feed back tools (llm-provider §1). Mirrors the
+# 0049/0058 LLM completion/failure pairing and the §6 dispatch treatment
+# (no ``phase`` discriminator, not subject to the ``phases`` filter;
+# observers filter by type discrimination). ``arguments`` / ``result``
+# are payload-bearing: populated unconditionally here, observer-side
+# gating applies at rendering per observability §5.5.4
+# (``disable_provider_payload``).
+@dataclass(frozen=True)
+class ToolCallEvent:
+    """A successful tool execution delivered to observers.
+
+    Dispatched by the tool-call instrumentation scope when a caller's
+    tool execution returns a result. Observer code filters by type
+    discrimination (``isinstance(event, ToolCallEvent)``).
+
+    Field set:
+
+    - ``invocation_id`` / ``correlation_id`` / ``node_name`` /
+      ``namespace`` / ``attempt_index`` / ``fan_out_index`` /
+      ``branch_name``: the scope-entry identity of the node that ran
+      the tool (captured when the scope was entered).
+    - ``call_id``: per-execution disambiguator minted when the scope is
+      entered. Always present; distinct from ``tool_call_id`` (this is
+      OA's own correlation token for the execution).
+    - ``tool_name``: the name of the tool / function executed.
+    - ``tool_call_id``: the ``ToolCall.id`` of the
+      ``LlmCompletionEvent.output_tool_calls`` entry this execution
+      satisfies (the linkage back to the requesting LLM call); ``None``
+      when the instrumented function did not originate from an LLM tool
+      request.
+    - ``arguments``: the arguments the tool was invoked with; ``None``
+      when the tool takes no arguments. Payload-bearing.
+    - ``result``: the tool's return value as the tool produced it
+      (pre-serialization, language-idiomatic; opaque to OA).
+      Payload-bearing.
+    - ``latency_ms``: wall-clock latency measured at the scope boundary,
+      in milliseconds; ``None`` when not measured.
+    - ``caller_invocation_metadata``: optional snapshot of caller-
+      supplied invocation metadata, same opt-in semantics as on
+      :class:`LlmCompletionEvent`.
+    """
+
+    invocation_id: str
+    correlation_id: str | None
+    node_name: str
+    namespace: tuple[str, ...]
+    attempt_index: int
+    fan_out_index: int | None
+    branch_name: str | None
+    call_id: str
+    tool_name: str
+    tool_call_id: str | None
+    arguments: Mapping[str, Any] | None
+    result: Any
+    latency_ms: float | None
+    caller_invocation_metadata: Mapping[str, AttributeValue] | None = None
+
+
+# Spec: the failure variant (proposal 0063). Mirrors ToolCallEvent's
+# identity / scoping / request-side fields with ``result`` absent and
+# two failure fields. DELIBERATELY carries NO ``error_category``: tool
+# execution is arbitrary user / third-party code with no closed
+# llm-provider §7 failure taxonomy (the departure from LlmFailedEvent /
+# EmbeddingFailedEvent). Mutually exclusive with ToolCallEvent per
+# execution; dispatched ALONGSIDE the re-raised exception, not in place
+# of it.
+@dataclass(frozen=True)
+class ToolCallFailedEvent:
+    """A failed tool execution delivered to observers.
+
+    Dispatched by the tool-call instrumentation scope when a caller's
+    tool execution raises (the exception then re-raises out of the
+    scope; the event is dispatched alongside it, not in place of it).
+    Observer code filters by type discrimination.
+
+    Field set: the identity / scoping / request-side fields of
+    :class:`ToolCallEvent` (``tool_name`` / ``tool_call_id`` /
+    ``arguments`` / ``latency_ms`` / ``call_id``), the success-only
+    ``result`` absent, plus:
+
+    - ``error_type``: the exception class name (e.g. ``"TimeoutError"``)
+      or a tool-defined error code; ``None`` when no type is available.
+    - ``error_message``: the message from the raised exception; always
+      present (empty string when the exception carried no message).
+
+    There is no ``error_category`` (the deliberate departure from the
+    provider failure events).
+    """
+
+    invocation_id: str
+    correlation_id: str | None
+    node_name: str
+    namespace: tuple[str, ...]
+    attempt_index: int
+    fan_out_index: int | None
+    branch_name: str | None
+    call_id: str
+    tool_name: str
+    tool_call_id: str | None
+    arguments: Mapping[str, Any] | None
+    latency_ms: float | None
+    error_type: str | None
+    error_message: str
+    caller_invocation_metadata: Mapping[str, AttributeValue] | None = None
+
+
 __all__ = [
     "FailureIsolatedEvent",
     "FanOutEventConfig",
@@ -805,4 +915,6 @@ __all__ = [
     "MetadataAugmentationEvent",
     "NodeEvent",
     "ParallelBranchesEventConfig",
+    "ToolCallEvent",
+    "ToolCallFailedEvent",
 ]

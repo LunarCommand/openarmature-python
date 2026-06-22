@@ -56,9 +56,15 @@ from .metadata import (
     set_invocation_metadata,
 )
 
+# v0.15.0 (proposal 0063): the tool-call instrumentation scope users
+# wrap a tool execution in from inside a node body, so OA emits the
+# ToolCallEvent / ToolCallFailedEvent around it.
+from .tool_call import ToolCallScope, with_tool_call
+
 __all__ = [
     "LLM_NAMESPACE",
     "LlmEventPayload",
+    "ToolCallScope",
     "current_active_observers",
     "current_attempt_index",
     "current_correlation_id",
@@ -69,4 +75,5 @@ __all__ = [
     "current_namespace_prefix",
     "get_invocation_metadata",
     "set_invocation_metadata",
+    "with_tool_call",
 ]

@@ -174,6 +174,17 @@ _SUPPORTED_FIXTURES = frozenset(
         "088-llm-metrics-token-and-duration",
         "090-metrics-error-type-on-duration",
         "091-metrics-disabled-no-measurements",
+        # v0.69.0 — proposal 0063 (tool-execution observability). A
+        # calls_tool node enters the with_tool_call scope; the typed
+        # ToolCallEvent / ToolCallFailedEvent drive the OTel tool span +
+        # the Langfuse Tool observation.
+        "092-tool-call-event-dispatch",
+        "093-tool-call-failed-event-dispatch",
+        "094-tool-call-event-mutual-exclusion",
+        "095-tool-call-id-links-to-llm-request",
+        "096-tool-call-payload-gating",
+        "097-otel-tool-span-attributes",
+        "098-langfuse-tool-observation",
     }
 )
 
@@ -302,6 +313,16 @@ async def test_observability_fixture(fixture_path: Path) -> None:
         "091-metrics-disabled-no-measurements",
     }:
         await _run_metrics_fixture(spec)
+    elif fixture_id in {
+        "092-tool-call-event-dispatch",
+        "093-tool-call-failed-event-dispatch",
+        "094-tool-call-event-mutual-exclusion",
+        "095-tool-call-id-links-to-llm-request",
+        "096-tool-call-payload-gating",
+        "097-otel-tool-span-attributes",
+        "098-langfuse-tool-observation",
+    }:
+        await _run_tool_fixture(spec)
     else:
         raise AssertionError(f"no driver for supported fixture {fixture_id!r}")
 
@@ -3121,6 +3142,251 @@ def _assert_metric_points(
 
 
 # ---------------------------------------------------------------------------
+# Proposal 0063 — tool-execution observability fixtures (092-098)
+# ---------------------------------------------------------------------------
+#
+# A calls_tool node enters the with_tool_call instrumentation scope around a
+# mock tool (returns -> ToolCallEvent; raises -> ToolCallFailedEvent +
+# re-raise). One graph builder serves all three assertion shapes:
+# typed-event-collector (092-095), OTel span_tree (096/097), and the Langfuse
+# Tool observation tree (098). Dispatch is by which expected.* key appears.
+
+
+def _make_tool_node_body(spec: Mapping[str, Any]) -> Any:
+    from openarmature.observability import with_tool_call
+
+    tool_name = cast("str", spec["tool_name"])
+    arguments = cast("dict[str, Any] | None", spec.get("arguments"))
+    tool_call_id = cast("str | None", spec.get("tool_call_id"))
+    stores_in = cast("str | None", spec.get("stores_result_in"))
+    mock = cast("dict[str, Any]", spec["mock_tool"])
+
+    async def body(_state: Any) -> Mapping[str, Any]:
+        with with_tool_call(tool_name, arguments, tool_call_id=tool_call_id) as scope:
+            raises = cast("dict[str, Any] | None", mock.get("raises"))
+            if raises is not None:
+                # Synthesize an exception whose class name == error_type
+                # so the event captures the fixture's error_type verbatim.
+                exc_type = cast("str", raises.get("error_type", "ToolError"))
+                exc_cls = type(exc_type, (Exception,), {})
+                raise exc_cls(cast("str", raises.get("message", "")))
+            result = mock.get("returns")
+            scope.set_result(result)
+        return {stores_in: result} if stores_in else {}
+
+    return body
+
+
+def _make_tool_fixture_llm_body(spec: Mapping[str, Any], provider: Any) -> Any:
+    from openarmature.llm import UserMessage
+
+    stores_in = cast("str", spec.get("stores_response_in", "msg"))
+    messages = [
+        UserMessage(content=cast("str", m["content"]))
+        for m in cast("list[dict[str, Any]]", spec.get("messages", []))
+        if m.get("role") == "user"
+    ]
+
+    async def body(_state: Any) -> Mapping[str, str]:
+        response = await provider.complete(messages)
+        return {stores_in: response.message.content or ""}
+
+    return body
+
+
+def _build_tool_graph(case: Mapping[str, Any]) -> tuple[Any, type[Any], list[Any]]:
+    """Build a graph whose nodes are calls_tool / calls_llm / update.
+    Returns (compiled_graph, state_cls, providers-to-close)."""
+    import json
+
+    import httpx
+
+    from openarmature.graph import END, GraphBuilder
+    from openarmature.llm import OpenAIProvider
+
+    from .adapter import build_state_cls
+
+    state_cls = build_state_cls(
+        "ToolFixtureState", cast("dict[str, dict[str, Any]]", case["state"]["fields"])
+    )
+    builder = GraphBuilder(state_cls)
+    providers: list[Any] = []
+    mock_responses = list(cast("list[dict[str, Any]]", case.get("mock_llm") or []))
+
+    def _handler(_request: httpx.Request) -> httpx.Response:
+        if not mock_responses:
+            raise AssertionError("mock_llm queue exhausted")
+        spec_resp = mock_responses.pop(0)
+        body = cast("dict[str, Any]", spec_resp.get("body") or {})
+        return httpx.Response(
+            int(spec_resp.get("status", 200)),
+            content=json.dumps(body).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+        )
+
+    nodes = cast("dict[str, Any]", case["nodes"])
+    for node_name, node_spec in nodes.items():
+        nd = cast("dict[str, Any]", node_spec)
+        if "calls_tool" in nd:
+            builder.add_node(node_name, _make_tool_node_body(cast("dict[str, Any]", nd["calls_tool"])))
+        elif "calls_llm" in nd:
+            provider = OpenAIProvider(
+                base_url="http://mock-llm.test",
+                model="test-model",
+                api_key="test",
+                transport=httpx.MockTransport(_handler),
+            )
+            providers.append(provider)
+            builder.add_node(
+                node_name, _make_tool_fixture_llm_body(cast("dict[str, Any]", nd["calls_llm"]), provider)
+            )
+        elif "update" in nd:
+            update_block = cast("dict[str, Any]", nd["update"])
+
+            async def _update_body(_s: Any, _payload: dict[str, Any] = update_block) -> dict[str, Any]:
+                return dict(_payload)
+
+            builder.add_node(node_name, _update_body)
+        else:
+            raise AssertionError(f"tool fixture node {node_name!r} has no recognized directive")
+
+    for edge in cast("list[dict[str, str]]", case["edges"]):
+        target = END if edge["to"] == "END" else edge["to"]
+        builder.add_edge(edge["from"], target)
+    builder.set_entry(cast("str", case["entry"]))
+    return builder.compile(), state_cls, providers
+
+
+def _assert_langfuse_observation_tree(
+    trace: Any, expected: list[dict[str, Any]], parent_id: str | None = None
+) -> None:
+    """Recursively match expected observations against the trace's flat
+    observation list (linked by parent_observation_id). type + name are
+    matched exactly; level / input / output exactly when present;
+    metadata is subset-matched."""
+    # Mutable copy: each matched observation is consumed so two
+    # same-shape expected siblings can't both bind to one actual.
+    remaining = list(trace.children_of(parent_id))
+    for exp in expected:
+        exp_type = cast("str", exp["type"])
+        exp_name = cast("str | None", exp.get("name"))
+        match = next(
+            (o for o in remaining if o.type == exp_type and (exp_name is None or o.name == exp_name)),
+            None,
+        )
+        assert match is not None, (
+            f"no {exp_type!r} observation named {exp_name!r} under parent {parent_id!r}; "
+            f"got {[(o.type, o.name) for o in remaining]}"
+        )
+        remaining.remove(match)
+        if "level" in exp:
+            assert match.level == exp["level"], f"{exp_name!r}: level {match.level!r} != {exp['level']!r}"
+        if "input" in exp:
+            assert match.input == exp["input"], f"{exp_name!r}: input {match.input!r} != {exp['input']!r}"
+        if "output" in exp:
+            assert match.output == exp["output"], (
+                f"{exp_name!r}: output {match.output!r} != {exp['output']!r}"
+            )
+        for key, val in cast("dict[str, Any]", exp.get("metadata") or {}).items():
+            assert match.metadata.get(key) == val, (
+                f"{exp_name!r}: metadata.{key} {match.metadata.get(key)!r} != {val!r}"
+            )
+        children = cast("list[dict[str, Any]] | None", exp.get("children"))
+        if children:
+            _assert_langfuse_observation_tree(trace, children, parent_id=match.id)
+
+
+async def _run_tool_fixture(spec: Mapping[str, Any]) -> None:
+    cases = cast("list[dict[str, Any]]", spec["cases"])
+    for case in cases:
+        try:
+            await _run_tool_case(case)
+        except AssertionError as e:
+            raise AssertionError(f"case {case.get('name')!r}: {e}") from e
+
+
+async def _run_tool_case(case: Mapping[str, Any]) -> None:
+    from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import (
+        InMemorySpanExporter,
+    )
+
+    from openarmature.graph import NodeException
+    from openarmature.observability.langfuse import InMemoryLangfuseClient, LangfuseObserver
+
+    from .harness.llm_attribute_assertions import (
+        assert_attribute_does_not_contain,
+        assert_attribute_parses_as_messages,
+        assert_attribute_parses_as_object,
+        assert_attribute_truncation,
+        assert_attributes_absent,
+    )
+
+    expected = cast("dict[str, Any]", case["expected"])
+    expected_error = cast("dict[str, Any] | None", case.get("expected_error"))
+    graph, state_cls, providers = _build_tool_graph(case)
+    state = _make_state_instance(case, state_cls)
+
+    collectors: dict[str, _TypedEventCollector] = {}
+    exporter: Any = None
+    otel_observer: Any = None
+    langfuse_client: Any = None
+    if "observers" in expected:
+        collectors, _ = _parse_typed_observers(case)
+        for collector in collectors.values():
+            graph.attach_observer(collector)
+    if "span_tree" in expected:
+        exporter = InMemorySpanExporter()
+        otel_kwargs: dict[str, Any] = {"span_processor": SimpleSpanProcessor(exporter)}
+        if "disable_provider_payload" in case:
+            otel_kwargs["disable_provider_payload"] = bool(case["disable_provider_payload"])
+        otel_observer = OTelObserver(**otel_kwargs)
+        graph.attach_observer(otel_observer)
+    if "langfuse_trace" in expected:
+        langfuse_client = InMemoryLangfuseClient()
+        lf_kwargs: dict[str, Any] = {"client": langfuse_client}
+        if "disable_provider_payload" in case:
+            lf_kwargs["disable_provider_payload"] = bool(case["disable_provider_payload"])
+        graph.attach_observer(LangfuseObserver(**lf_kwargs))
+
+    try:
+        if expected_error is not None:
+            with pytest.raises(NodeException):
+                await graph.invoke(state)
+        else:
+            await graph.invoke(state)
+        await graph.drain()
+    finally:
+        for provider in providers:
+            await provider.aclose()
+        if otel_observer is not None:
+            otel_observer.shutdown()
+
+    if "observers" in expected:
+        for obs_name, obs_spec in cast("dict[str, Any]", expected["observers"]).items():
+            _assert_observer_expectations(obs_name, collectors[obs_name], cast("dict[str, Any]", obs_spec))
+    if "span_tree" in expected and exporter is not None:
+        _check_payload_span_tree(
+            exporter.get_finished_spans(),
+            cast("list[dict[str, Any]]", expected["span_tree"]),
+            full_input_serialization=None,
+            assert_attributes_absent=assert_attributes_absent,
+            assert_attribute_parses_as_messages=assert_attribute_parses_as_messages,
+            assert_attribute_parses_as_object=assert_attribute_parses_as_object,
+            assert_attribute_does_not_contain=assert_attribute_does_not_contain,
+            assert_attribute_truncation=assert_attribute_truncation,
+        )
+    if "langfuse_trace" in expected and langfuse_client is not None:
+        assert len(langfuse_client.traces) == 1, (
+            f"expected 1 Langfuse trace; got {sorted(langfuse_client.traces)}"
+        )
+        trace = next(iter(langfuse_client.traces.values()))
+        _assert_langfuse_observation_tree(
+            trace, cast("list[dict[str, Any]]", expected["langfuse_trace"].get("observations") or [])
+        )
+
+
+# ---------------------------------------------------------------------------
 # Proposal 0049 — typed LlmCompletionEvent fixtures (050-056)
 # ---------------------------------------------------------------------------
 #
@@ -3348,6 +3614,9 @@ _OBSERVER_ASSERTION_KEYS = frozenset(
         "contains_exactly_one_event_of_type",
         "contains_event_of_type",
         "contains_exactly_n_events_of_type",
+        # proposal 0063 (092-094) spelling for an exact-count assertion,
+        # same shape as contains_exactly_n_events_of_type.
+        "event_count",
         "does_not_contain_event_of_type",
         "captured_event_field_values_cover",
         "every_captured_event_has",
@@ -3391,6 +3660,14 @@ def _assert_observer_expectations(
         assert len(matching) >= 1, f"observer {name!r}: expected at least one {type_name} event; got 0"
     if "contains_exactly_n_events_of_type" in spec:
         sub = cast("dict[str, Any]", spec["contains_exactly_n_events_of_type"])
+        type_name = cast("str", sub["event_type"])
+        expected_count = int(cast("int", sub["count"]))
+        matching = [e for e in events if type(e).__name__ == type_name]
+        assert len(matching) == expected_count, (
+            f"observer {name!r}: expected exactly {expected_count} {type_name} events; got {len(matching)}"
+        )
+    if "event_count" in spec:
+        sub = cast("dict[str, Any]", spec["event_count"])
         type_name = cast("str", sub["event_type"])
         expected_count = int(cast("int", sub["count"]))
         matching = [e for e in events if type(e).__name__ == type_name]

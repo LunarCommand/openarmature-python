@@ -108,6 +108,8 @@ from openarmature.graph.events import (
     LlmRetryAttemptEvent,
     MetadataAugmentationEvent,
     NodeEvent,
+    ToolCallEvent,
+    ToolCallFailedEvent,
 )
 from openarmature.observability.lineage import is_strict_prefix
 from openarmature.observability.llm_event import serialize_tool_calls
@@ -303,8 +305,15 @@ def _span_chain_on_path(
 # v0.17.0 — conformance fixtures use parse-shape assertions, not
 # bytewise equality.
 def _serialize_for_attribute(value: Any) -> str:
-    """JSON-encode ``value`` for emission as an OTel string attribute."""
-    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    """JSON-encode ``value`` for emission as an OTel string attribute.
+
+    ``default=str`` is a safety net so a value JSON can't natively encode
+    renders via its ``str()`` rather than raising inside the observer
+    (which would lose the whole span). It is a no-op for the
+    already-encodable payloads (messages, params); it matters for the
+    proposal 0063 tool ``result``, which is an opaque, language-idiomatic
+    value the tool produced (a model, dataclass, datetime, ...)."""
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False, default=str)
 
 
 # §5.5.5 truncation algorithm:
@@ -532,7 +541,19 @@ class OTelObserver:
     # close sites (subgraph dispatch, detached root, fan-out instance,
     # invocation span, shutdown drain).
     attribute_enrichers: Sequence[
-        Callable[[Span, NodeEvent | LlmCompletionEvent | LlmFailedEvent | LlmRetryAttemptEvent | None], None]
+        Callable[
+            [
+                Span,
+                NodeEvent
+                | LlmCompletionEvent
+                | LlmFailedEvent
+                | LlmRetryAttemptEvent
+                | ToolCallEvent
+                | ToolCallFailedEvent
+                | None,
+            ],
+            None,
+        ]
     ] = ()
     # Read from the package's ``__spec_version__`` (one of the three
     # places the spec version is pinned per CLAUDE.md). Bumping the
@@ -630,7 +651,15 @@ class OTelObserver:
     # ``event`` is None on synthetic close sites (subgraph dispatch,
     # detached root, fan-out instance, invocation span, orphan drain).
     def _run_enrichers(
-        self, span: Span, event: NodeEvent | LlmCompletionEvent | LlmFailedEvent | LlmRetryAttemptEvent | None
+        self,
+        span: Span,
+        event: NodeEvent
+        | LlmCompletionEvent
+        | LlmFailedEvent
+        | LlmRetryAttemptEvent
+        | ToolCallEvent
+        | ToolCallFailedEvent
+        | None,
     ) -> None:
         """Invoke configured enrichers against ``span`` before
         ``span.end()`` is called."""
@@ -678,6 +707,8 @@ class OTelObserver:
             | LlmFailedEvent
             | LlmRetryAttemptEvent
             | FailureIsolatedEvent
+            | ToolCallEvent
+            | ToolCallFailedEvent
         ),
     ) -> None:
         # Proposal 0043 invocation-boundary events: OTel has no
@@ -704,6 +735,13 @@ class OTelObserver:
         # the queue for the Langfuse mapping and payload/latency
         # consumers, so the OTel observer ignores them here.
         if isinstance(event, LlmCompletionEvent | LlmFailedEvent):
+            return
+        # Proposal 0063 tool-execution observability: emit the
+        # openarmature.tool.call span from the typed tool events.
+        # Independent of disable_llm_spans (that flag is scoped to LLM
+        # completion spans per §5.5.4).
+        if isinstance(event, ToolCallEvent | ToolCallFailedEvent):
+            self._handle_tool_call(event)
             return
         # Proposal 0050 §6.3 framework-emitted failure-isolation event.
         if isinstance(event, FailureIsolatedEvent):
@@ -1521,6 +1559,90 @@ class OTelObserver:
                     _truncate_for_attribute(serialized_calls, self.payload_max_bytes),
                 )
         span.set_status(Status(StatusCode.OK))
+        self._run_enrichers(span, event)
+        span.end(end_time=end_time_ns)
+
+    def _handle_tool_call(self, event: ToolCallEvent | ToolCallFailedEvent) -> None:
+        """Emit an ``openarmature.tool.call`` span for a tool execution
+        (proposal 0063), parented under the calling node.
+
+        A ``ToolCallEvent`` renders OK with the result attribute; a
+        ``ToolCallFailedEvent`` renders ERROR with the standard OTel
+        ``error.type`` attribute + an exception event carrying the
+        message. ``arguments`` / ``result`` are payload, gated by
+        ``disable_provider_payload`` (§5.5.4) + the §5.5.5 truncation
+        contract. The OA-namespace ``openarmature.tool.*`` attributes
+        mirror the Development ``gen_ai.tool.*`` surface, which is NOT
+        emitted in v1. ``disable_llm_spans`` does not gate this span.
+        """
+        from openarmature.observability.correlation import (
+            current_correlation_id,
+            current_invocation_id,
+        )
+
+        invocation_id = current_invocation_id()
+        if invocation_id is None:
+            return
+        inv_state = self._inv_state_for(invocation_id)
+        # Back-date start_time by latency_ms so the span duration reflects
+        # the scope-boundary measurement, mirroring the LLM span.
+        end_time_ns = time.time_ns()
+        if event.latency_ms is not None:
+            start_time_ns = end_time_ns - int(event.latency_ms * 1_000_000)
+        else:
+            start_time_ns = end_time_ns
+        parent_ctx = self._resolve_llm_parent(
+            inv_state,
+            invocation_id,
+            calling_namespace_prefix=event.namespace,
+            calling_attempt_index=event.attempt_index,
+            calling_fan_out_index=event.fan_out_index,
+            calling_branch_name=event.branch_name,
+        )
+        attrs: dict[str, Any] = {"openarmature.tool.name": event.tool_name}
+        if event.tool_call_id is not None:
+            attrs["openarmature.tool.call.id"] = event.tool_call_id
+        cid = current_correlation_id()
+        if cid is not None:
+            attrs["openarmature.correlation_id"] = cid
+        if event.caller_invocation_metadata is not None:
+            _apply_caller_metadata(attrs, event.caller_invocation_metadata)
+        # §5.5.4 payload gating: arguments (both variants) + result
+        # (success only) are payload. No gen_ai.tool.* (mirrored,
+        # Development); disable_genai_semconv is not applicable.
+        if not self.disable_provider_payload:
+            if event.arguments is not None:
+                serialized_args = _serialize_for_attribute(event.arguments)
+                attrs["openarmature.tool.call.arguments"] = _truncate_for_attribute(
+                    serialized_args, self.payload_max_bytes
+                )
+            if isinstance(event, ToolCallEvent):
+                serialized_result = _serialize_for_attribute(event.result)
+                attrs["openarmature.tool.call.result"] = _truncate_for_attribute(
+                    serialized_result, self.payload_max_bytes
+                )
+        span = self._tracer.start_span(
+            name="openarmature.tool.call",
+            context=cast("Any", parent_ctx),
+            kind=SpanKind.INTERNAL,
+            attributes=attrs,
+            start_time=start_time_ns,
+        )
+        if isinstance(event, ToolCallFailedEvent):
+            # §4.2 ERROR mapping via the standard OTel error.type +
+            # an exception event carrying the message.
+            if event.error_type is not None:
+                span.set_attribute("error.type", event.error_type)
+            span.add_event(
+                "exception",
+                attributes={
+                    "exception.type": event.error_type or "",
+                    "exception.message": event.error_message,
+                },
+            )
+            span.set_status(Status(StatusCode.ERROR, description=event.error_message or event.error_type))
+        else:
+            span.set_status(Status(StatusCode.OK))
         self._run_enrichers(span, event)
         span.end(end_time=end_time_ns)
 

@@ -1520,3 +1520,181 @@ async def test_typed_failed_event_parents_under_branch_calling_node() -> None:
     assert len(error_gens) == 1
     assert error_gens[0].parent_observation_id == fast_handle.id
     assert error_gens[0].parent_observation_id != slow_handle.id
+
+
+# ---------------------------------------------------------------------------
+# Proposal 0063 — tool-execution Tool observation (asType "tool")
+# ---------------------------------------------------------------------------
+
+
+async def test_tool_call_event_renders_dedicated_tool_observation() -> None:
+    # A ToolCallEvent renders a dedicated Tool observation (type "tool",
+    # NOT generation), DEFAULT level, with input / output populated
+    # (payload on) and tool_name / tool_call_id in metadata.
+    from openarmature.graph.events import ToolCallEvent
+    from openarmature.observability.correlation import (
+        _reset_invocation_id,
+        _set_invocation_id,
+    )
+
+    client = InMemoryLangfuseClient()
+    observer = LangfuseObserver(client=client, disable_provider_payload=False)
+    token = _set_invocation_id("inv-tool-1")
+    try:
+        await observer(
+            ToolCallEvent(
+                invocation_id="inv-tool-1",
+                correlation_id=None,
+                node_name="run_tool",
+                namespace=("run_tool",),
+                attempt_index=0,
+                fan_out_index=None,
+                branch_name=None,
+                call_id="cc-1",
+                tool_name="get_weather",
+                tool_call_id="call_abc123",
+                arguments={"city": "Paris"},
+                result={"temperature_c": 20},
+                latency_ms=5.0,
+            )
+        )
+    finally:
+        _reset_invocation_id(token)
+
+    trace = client.traces["inv-tool-1"]
+    tools = [o for o in trace.observations if o.type == "tool"]
+    assert len(tools) == 1
+    assert [o for o in trace.observations if o.type == "generation"] == []
+    obs = tools[0]
+    assert obs.name == "openarmature.tool.call"
+    assert obs.level == "DEFAULT"
+    assert obs.input == {"city": "Paris"}
+    assert obs.output == {"temperature_c": 20}
+    assert obs.metadata.get("openarmature_tool_name") == "get_weather"
+    assert obs.metadata.get("openarmature_tool_call_id") == "call_abc123"
+    assert obs.ended is True
+
+
+async def test_tool_call_failed_event_renders_error_level() -> None:
+    # A ToolCallFailedEvent renders the Tool observation at ERROR level
+    # with error_type / error_message in metadata and as the status
+    # message.
+    from openarmature.graph.events import ToolCallFailedEvent
+    from openarmature.observability.correlation import (
+        _reset_invocation_id,
+        _set_invocation_id,
+    )
+
+    client = InMemoryLangfuseClient()
+    observer = LangfuseObserver(client=client, disable_provider_payload=False)
+    token = _set_invocation_id("inv-tool-2")
+    try:
+        await observer(
+            ToolCallFailedEvent(
+                invocation_id="inv-tool-2",
+                correlation_id=None,
+                node_name="run_tool",
+                namespace=("run_tool",),
+                attempt_index=0,
+                fan_out_index=None,
+                branch_name=None,
+                call_id="cc-2",
+                tool_name="get_weather",
+                tool_call_id="call_def456",
+                arguments={"city": "Paris"},
+                latency_ms=3.0,
+                error_type="TimeoutError",
+                error_message="tool timed out",
+            )
+        )
+    finally:
+        _reset_invocation_id(token)
+
+    obs = next(o for o in client.traces["inv-tool-2"].observations if o.type == "tool")
+    assert obs.level == "ERROR"
+    assert obs.status_message == "tool timed out"
+    assert obs.metadata.get("error_type") == "TimeoutError"
+    assert obs.metadata.get("error_message") == "tool timed out"
+    assert obs.metadata.get("openarmature_tool_name") == "get_weather"
+
+
+async def test_tool_call_payload_gated_off_by_default() -> None:
+    # With disable_provider_payload at its default (True), the Tool
+    # observation's input / output are suppressed; metadata still carries
+    # the identity.
+    from openarmature.graph.events import ToolCallEvent
+    from openarmature.observability.correlation import (
+        _reset_invocation_id,
+        _set_invocation_id,
+    )
+
+    client = InMemoryLangfuseClient()
+    observer = LangfuseObserver(client=client)
+    token = _set_invocation_id("inv-tool-3")
+    try:
+        await observer(
+            ToolCallEvent(
+                invocation_id="inv-tool-3",
+                correlation_id=None,
+                node_name="run_tool",
+                namespace=("run_tool",),
+                attempt_index=0,
+                fan_out_index=None,
+                branch_name=None,
+                call_id="cc-3",
+                tool_name="get_weather",
+                tool_call_id="call_abc123",
+                arguments={"city": "Paris"},
+                result={"temperature_c": 20},
+                latency_ms=5.0,
+            )
+        )
+    finally:
+        _reset_invocation_id(token)
+
+    obs = next(o for o in client.traces["inv-tool-3"].observations if o.type == "tool")
+    assert obs.input is None
+    assert obs.output is None
+    assert obs.metadata.get("openarmature_tool_name") == "get_weather"
+
+
+async def test_tool_call_non_json_result_does_not_crash_observer() -> None:
+    # Proposal 0063: the tool result is opaque. A value json.dumps can't
+    # natively encode MUST NOT crash the observer's serialization (which
+    # would lose the Tool observation); the observation is still emitted.
+    from openarmature.graph.events import ToolCallEvent
+    from openarmature.observability.correlation import (
+        _reset_invocation_id,
+        _set_invocation_id,
+    )
+
+    class _Opaque:
+        def __str__(self) -> str:
+            return "OPAQUE-RESULT"
+
+    client = InMemoryLangfuseClient()
+    observer = LangfuseObserver(client=client, disable_provider_payload=False)
+    token = _set_invocation_id("inv-tool-opaque")
+    try:
+        await observer(
+            ToolCallEvent(
+                invocation_id="inv-tool-opaque",
+                correlation_id=None,
+                node_name="run_tool",
+                namespace=("run_tool",),
+                attempt_index=0,
+                fan_out_index=None,
+                branch_name=None,
+                call_id="cc-4",
+                tool_name="get_weather",
+                tool_call_id="call_abc123",
+                arguments={"city": "Paris"},
+                result=_Opaque(),
+                latency_ms=5.0,
+            )
+        )
+    finally:
+        _reset_invocation_id(token)
+
+    tools = [o for o in client.traces["inv-tool-opaque"].observations if o.type == "tool"]
+    assert len(tools) == 1

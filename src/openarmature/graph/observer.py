@@ -43,6 +43,8 @@ from .events import (
     LlmRetryAttemptEvent,
     MetadataAugmentationEvent,
     NodeEvent,
+    ToolCallEvent,
+    ToolCallFailedEvent,
 )
 from .state import State
 
@@ -71,6 +73,8 @@ ObserverEvent = (
     | LlmFailedEvent
     | LlmRetryAttemptEvent
     | FailureIsolatedEvent
+    | ToolCallEvent
+    | ToolCallFailedEvent
 )
 
 
