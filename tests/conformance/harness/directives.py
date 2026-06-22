@@ -375,6 +375,31 @@ class CallsLlmSpec(_AllowExtras):
     config: RuntimeConfigSpec | None = None
 
 
+class MockToolSpec(_AllowExtras):
+    """The mock tool a ``calls_tool`` node runs inside the
+    instrumentation scope: ``returns`` (a result -> ToolCallEvent) XOR
+    ``raises`` (``{error_type, message}`` -> ToolCallFailedEvent +
+    re-raise)."""
+
+    returns: Any = None
+    raises: dict[str, Any] | None = None
+
+
+class CallsToolSpec(_AllowExtras):
+    """Tool-using node (proposal 0063): the node body enters the
+    ``with_tool_call`` instrumentation scope, runs the ``mock_tool``, and
+    OA emits the ToolCallEvent / ToolCallFailedEvent. ``tool_call_id`` is
+    optional (null = a standalone instrumented function);
+    ``stores_result_in`` is optional (absent on the failure fixtures
+    where the node lets the exception propagate)."""
+
+    tool_name: str
+    mock_tool: MockToolSpec
+    arguments: dict[str, Any] | None = None
+    tool_call_id: str | None = None
+    stores_result_in: str | None = None
+
+
 class CallsEmbedSpec(_AllowExtras):
     """Embedding-using node: sends ``input`` to a mock embedding provider
     and stores the result in ``stores_response_in``. Used by the
@@ -447,6 +472,7 @@ class NodeSpec(_ForbidExtras):
     flaky_resume_aware: FlakyResumeAwareSpec | None = None
     calls_llm: CallsLlmSpec | None = None
     calls_embed: CallsEmbedSpec | None = None
+    calls_tool: CallsToolSpec | None = None
 
     # Companions — additive.
     inputs: dict[str, str] | None = None
@@ -480,6 +506,7 @@ class NodeSpec(_ForbidExtras):
         "flaky_resume_aware",
         "calls_llm",
         "calls_embed",
+        "calls_tool",
     )
 
     @model_validator(mode="after")

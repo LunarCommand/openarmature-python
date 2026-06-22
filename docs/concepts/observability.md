@@ -871,6 +871,49 @@ The instrument names are OA-namespaced, mirroring the upstream
 cutover is a mechanical prefix-strip. Metrics target OTel only; there is
 no Langfuse mapping.
 
+### Tool-execution observability (`with_tool_call`)
+
+A model requests tools in its completion (the `output_tool_calls` above);
+the *caller* executes them in node-body code. OpenArmature does not run,
+choose, loop, or feed back tools (that orchestration stays in your graph),
+but it can observe a tool execution you wrap in the `with_tool_call`
+instrumentation scope:
+
+```python
+from openarmature.observability import with_tool_call
+
+async def run_tools(state: AgentState) -> dict:
+    with with_tool_call("get_weather", {"city": "Paris"}, tool_call_id="call_abc") as scope:
+        result = await get_weather(city="Paris")
+        scope.set_result(result)
+    return {"weather": result}
+```
+
+`with_tool_call` is a context manager (like `with_active_prompt`): you run
+the tool inside it and report the outcome with `scope.set_result(...)`. On a
+clean exit it dispatches a `ToolCallEvent`; if the tool raises, it dispatches
+a `ToolCallFailedEvent` and re-raises (it observes, it does not swallow, so
+your node body still sees the exception). `tool_call_id` links the execution
+back to the `output_tool_calls` entry that requested it, or is omitted for a
+standalone instrumented function.
+
+The events render on both backends:
+
+- OTel: an `openarmature.tool.call` span parented under the calling node,
+  carrying `openarmature.tool.name`, `openarmature.tool.call.id`, and (when
+  payload is on) `openarmature.tool.call.arguments` / `.result`. A failure
+  sets ERROR status with the standard `error.type` attribute.
+- Langfuse: a dedicated `Tool` observation (not a Generation) under the
+  node's Span observation, with the arguments / result as input / output and
+  the tool name / call id in metadata; a failure renders at ERROR level.
+
+The arguments and result are payload, gated by `disable_provider_payload`
+exactly like the LLM payload attributes (default off keeps tool inputs and
+outputs out of traces). `disable_llm_spans` does not affect tool spans. The
+`openarmature.tool.*` attribute names mirror the upstream Development
+`gen_ai.tool.*` surface, which OpenArmature does not emit in v1, so a future
+cutover is a prefix swap.
+
 ### Identifying the service: `Resource`
 
 Pass an `opentelemetry.sdk.resources.Resource` to set
@@ -1044,7 +1087,8 @@ appear dropped. Two workarounds:
 A second sibling observer maps the same `NodeEvent` stream onto
 Langfuse's native Trace + Observation data model: Traces at the
 top, Span observations for graph nodes, Generation observations for
-LLM calls. Use it instead of (or alongside) the OTel observer when
+LLM calls, and Tool observations for instrumented tool executions.
+Use it instead of (or alongside) the OTel observer when
 your trace UI is Langfuse and you want first-class Generation
 rendering without going through Langfuse's OTLP ingest.
 
@@ -1106,7 +1150,7 @@ for a runnable demo.
 
     Earlier SDK versions (v2.x, v3.x) are NOT supported. Projects on
     those versions either upgrade to v4 or supply their own adapter
-    matching the `LangfuseClient` Protocol's four methods.
+    matching the `LangfuseClient` Protocol.
 
     A runtime `isinstance(adapter, LangfuseClient)` check ships in
     the unit suite, so if a future v4 patch breaks the Protocol's
