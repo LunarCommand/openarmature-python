@@ -166,6 +166,14 @@ _SUPPORTED_FIXTURES = frozenset(
         "085-llm-tool-call-request-attributes",
         "086-llm-tool-call-request-absent",
         "087-llm-tool-call-request-survives-payload-gating",
+        # v0.68.0 — proposal 0067 (GenAI metrics, observability §11). The
+        # LLM-path fixtures: token + duration histograms (088), error.type
+        # on duration (090), and the enable_metrics-off no-op (091).
+        # Captured via a private MeterProvider + InMemoryMetricReader (the
+        # §6.9 metric-capture primitive). 089 (embeddings) is deferred.
+        "088-llm-metrics-token-and-duration",
+        "090-metrics-error-type-on-duration",
+        "091-metrics-disabled-no-measurements",
     }
 )
 
@@ -174,6 +182,14 @@ _DEFERRED_FIXTURES: dict[str, str] = {
     # Proposal 0045 (nested-lineage augmentation, v0.37.0) — engine
     # + observer work lands in PR 11.
     "039-nested-lineage-augmentation": ("Proposal 0045 not yet implemented (PR 11)"),
+    # Proposal 0067 (GenAI metrics, v0.68.0) — the embedding metrics
+    # fixture sources from an embedding call, but the embedding capability
+    # (proposal 0059, observability §5.5.8 / §5.5.9) is unimplemented in
+    # python until v0.16.0, so there is no embedding event or provider to
+    # record from. The LLM-path metric fixtures (088 / 090 / 091) run.
+    "089-embedding-metrics-token-and-duration": (
+        "Embedding capability (proposal 0059) unimplemented until v0.16.0"
+    ),
 }
 
 
@@ -280,6 +296,12 @@ async def test_observability_fixture(fixture_path: Path) -> None:
         "087-llm-tool-call-request-survives-payload-gating",
     }:
         await _run_llm_payload_fixture(spec)
+    elif fixture_id in {
+        "088-llm-metrics-token-and-duration",
+        "090-metrics-error-type-on-duration",
+        "091-metrics-disabled-no-measurements",
+    }:
+        await _run_metrics_fixture(spec)
     else:
         raise AssertionError(f"no driver for supported fixture {fixture_id!r}")
 
@@ -2988,6 +3010,114 @@ def _check_payload_span_tree(
                 _walk(children)
 
     _walk(expected_tree)
+
+
+# ---------------------------------------------------------------------------
+# Proposal 0067 — GenAI metrics fixtures (088 / 090 / 091)
+# ---------------------------------------------------------------------------
+#
+# The §6.9 metric-capture primitive: a private MeterProvider with an
+# InMemoryMetricReader, injected into the OTelObserver so recorded
+# measurements can be asserted. The driver reuses ``_build_simple_llm_graph``
+# (mock transport + provider) and asserts ``expected.metrics`` against the
+# recorded data points. Duration values + bucket assignment are not asserted
+# (§11.4); token.usage values are (the fixed-usage mock).
+
+
+async def _run_metrics_fixture(spec: Mapping[str, Any]) -> None:
+    cases = cast("list[dict[str, Any]]", spec["cases"])
+    for case in cases:
+        try:
+            await _run_metrics_case(case)
+        except AssertionError as e:
+            raise AssertionError(f"case {case.get('name')!r}: {e}") from e
+
+
+async def _run_metrics_case(case: Mapping[str, Any]) -> None:
+    from opentelemetry.sdk.metrics import MeterProvider as SdkMeterProvider
+    from opentelemetry.sdk.metrics.export import InMemoryMetricReader
+    from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import (
+        InMemorySpanExporter,
+    )
+
+    from openarmature.graph import NodeException
+
+    graph, state_cls, provider = _build_simple_llm_graph(case, populate_caller_metadata=False)
+
+    reader = InMemoryMetricReader()
+    meter_provider = SdkMeterProvider(metric_readers=[reader])
+    exporter = InMemorySpanExporter()
+    observer = OTelObserver(
+        span_processor=SimpleSpanProcessor(exporter),
+        enable_metrics=bool(case.get("enable_metrics", False)),
+        meter_provider=meter_provider,
+    )
+    graph.attach_observer(observer)
+
+    state = _make_state_instance(case, state_cls)
+    expected_error = cast("dict[str, Any] | None", case.get("expected_error"))
+    try:
+        if expected_error is not None:
+            # A failed provider call raises (LlmFailedEvent dispatched
+            # alongside per 0058); the failed-attempt event is still
+            # enqueued before the raise, so the duration metric records.
+            with pytest.raises(NodeException):
+                await graph.invoke(state)
+        else:
+            await graph.invoke(state)
+        await graph.drain()
+    finally:
+        await provider.aclose()
+        observer.shutdown()
+
+    points = _collect_metric_points(reader)
+    expected_metrics = cast("list[dict[str, Any]]", case["expected"].get("metrics") or [])
+    _assert_metric_points(points, expected_metrics)
+
+
+def _collect_metric_points(reader: Any) -> list[tuple[str, float, int, dict[str, Any]]]:
+    """Flatten an InMemoryMetricReader's data into
+    ``(instrument_name, point_sum, point_count, point_attributes)``
+    tuples. Observations with identical attribute sets aggregate into one
+    histogram data point (sum + count)."""
+    data = reader.get_metrics_data()
+    points: list[tuple[str, float, int, dict[str, Any]]] = []
+    if data is None:
+        return points
+    for resource_metric in data.resource_metrics:
+        for scope_metric in resource_metric.scope_metrics:
+            for metric in scope_metric.metrics:
+                for pt in metric.data.data_points:
+                    points.append((metric.name, pt.sum, pt.count, dict(pt.attributes)))
+    return points
+
+
+def _assert_metric_points(
+    points: list[tuple[str, float, int, dict[str, Any]]],
+    expected_metrics: list[dict[str, Any]],
+) -> None:
+    """Match each ``expected.metrics`` entry (instrument + exact
+    dimensions, plus value for token.usage) against a recorded data
+    point. An empty expected list asserts no measurements (fixture
+    091)."""
+    if not expected_metrics:
+        assert points == [], f"expected no measurements; got {points}"
+        return
+    for expected in expected_metrics:
+        instrument = cast("str", expected["instrument"])
+        exp_dims = cast("dict[str, Any]", expected.get("dimensions") or {})
+        candidates = [p for p in points if p[0] == instrument and p[3] == exp_dims]
+        assert candidates, (
+            f"no {instrument!r} observation with dimensions {exp_dims}; "
+            f"recorded: {[(p[0], p[3]) for p in points]}"
+        )
+        # token.usage asserts the recorded value (from the fixed-usage
+        # mock); duration asserts presence + dimensions only (§11.4).
+        if "value" in expected:
+            assert candidates[0][1] == expected["value"], (
+                f"{instrument!r} {exp_dims} value: expected {expected['value']}, got sum {candidates[0][1]}"
+            )
 
 
 # ---------------------------------------------------------------------------

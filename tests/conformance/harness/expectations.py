@@ -202,6 +202,10 @@ class ObservabilityExpected(_ForbidExtras):
     # multi-invocation grouping case's per-trace list.
     langfuse_trace: dict[str, Any] | None = None
     langfuse_traces: list[dict[str, Any]] | None = None
+    # GenAI metrics (proposal 0067, fixtures 088-091): the expected metric
+    # observations, each ``{instrument, dimensions, value?}``. An empty
+    # list asserts that no measurements were recorded (fixture 091).
+    metrics: list[dict[str, Any]] | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -248,6 +252,8 @@ _OBSERVABILITY_KEYS = frozenset(
         # proposal 0064 (fixture 084) Langfuse Trace-level expectations
         "langfuse_trace",
         "langfuse_traces",
+        # proposal 0067 (fixtures 088-091) GenAI metric observations.
+        "metrics",
     }
 )
 

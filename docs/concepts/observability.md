@@ -828,6 +828,49 @@ form, so custom observers consuming
 cannot accidentally leak raw bytes regardless of how they're
 written.
 
+### GenAI metrics (`enable_metrics`)
+
+Spans answer "what happened on this one call"; metrics answer "what is
+the token throughput and latency across all calls". The OTel observer
+can emit two histogram instruments over provider calls. Opt in with
+`enable_metrics=True` (default off):
+
+```python
+observer = OTelObserver(
+    span_processor=SimpleSpanProcessor(exporter),
+    enable_metrics=True,
+)
+```
+
+When enabled, the observer obtains a `Meter` from the configured
+`MeterProvider`. Pass `meter_provider=...` to use a private one;
+otherwise it falls back to the OTel global, and recording is a silent
+no-op when no provider is configured. The two instruments:
+
+- `openarmature.gen_ai.client.token.usage` (unit `{token}`). Per LLM
+  completion it records two observations: the input-token count, tagged
+  `openarmature.gen_ai.token.type="input"`, and the output-token count,
+  tagged `"output"`, sourced from the response usage record. Recorded
+  only when the call returned usage.
+- `openarmature.gen_ai.client.operation.duration` (unit `s`). The
+  provider-call wall-clock duration, one observation per attempt. A
+  failed attempt records too, carrying `error.type`.
+
+Both carry `openarmature.gen_ai.operation` (`"chat"`),
+`gen_ai.request.model`, and `gen_ai.system`. Under call-level retry the
+duration instrument records once per attempt; the token instrument
+records only for attempts that returned usage.
+
+**Metrics are independent of spans.** `enable_metrics` is orthogonal to
+the `disable_llm_spans` / `disable_provider_payload` flags: you can
+record metrics with spans off, or emit spans with metrics off. Both draw
+from the same event stream.
+
+The instrument names are OA-namespaced, mirroring the upstream
+`gen_ai.client.*` instruments (still at Development status), so a future
+cutover is a mechanical prefix-strip. Metrics target OTel only; there is
+no Langfuse mapping.
+
 ### Identifying the service: `Resource`
 
 Pass an `opentelemetry.sdk.resources.Resource` to set
