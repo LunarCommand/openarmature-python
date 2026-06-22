@@ -32,7 +32,7 @@
 
 [manifest]
 implementation = "openarmature-python"
-spec_pin = "v0.67.0"
+spec_pin = "v0.68.0"
 
 # Status values:
 #   implemented   — shipped behavior matches the proposal's contract
@@ -639,6 +639,13 @@ since = "0.14.0"
 [proposals."0066"]
 status = "implemented"
 since = "0.14.0"
+
+# Spec v0.68.0 (proposal 0067).  OTel GenAI metrics (observability §11 new
+# Metrics section + conformance-adapter §6.9 metric-capture primitive).
+[proposals."0067"]
+status = "partial"
+since = "0.15.0"
+note = "OTel GenAI metrics (observability §11): an opt-in enable_metrics flag (default off, normative name) on the bundled OTelObserver, independent of span emission (§11.1). When on, two OA-namespaced histograms record per provider-call ATTEMPT from the python-internal LlmRetryAttemptEvent (the per-attempt LLM-span source since 0050): openarmature.gen_ai.client.token.usage ({token}; two observations -- input + output token counts from the response usage record, openarmature.gen_ai.token.type dim) and openarmature.gen_ai.client.operation.duration (s; once per attempt INCLUDING failed attempts, error.type dim on failure), both configured with the §11.2 explicit bucket advisories. Dimensions: openarmature.gen_ai.operation ('chat'), gen_ai.request.model + gen_ai.system (recognized-core, used directly), openarmature.gen_ai.token.type, error.type. The Meter comes from the configured MeterProvider (injectable; falls back to the OTel global, which is the no-op meter when none is set). PARTIAL: the embedding-call metrics (the §11 embedding path, fixture 089) are deferred -- the embedding capability (proposal 0059, observability §5.5.8 / §5.5.9) is unimplemented in python until v0.16.0, so there is no embedding event/provider to record from. The LLM path (fixtures 088 / 090 / 091) is implemented and wired via a private MeterProvider + InMemoryMetricReader (the §6.9 metric-capture primitive). No Langfuse change (metrics are OTel-only). Streaming / server / rerank metrics + the cutover to the upstream gen_ai.client.* instrument names are out of scope per the proposal."
 
 # Spec v0.57.0 (proposal 0068).  Failure-isolation event structured cause
 # chain (pipeline-utilities §6.3).  ``caught_exception`` gains a ``chain`` of

@@ -375,6 +375,18 @@ class CallsLlmSpec(_AllowExtras):
     config: RuntimeConfigSpec | None = None
 
 
+class CallsEmbedSpec(_AllowExtras):
+    """Embedding-using node: sends ``input`` to a mock embedding provider
+    and stores the result in ``stores_response_in``. Used by the
+    GenAI-metrics embedding fixture (089). The embedding capability
+    (proposal 0059) is unimplemented in python until v0.16.0, so 089 is
+    deferred at the runner; this directive is modelled here only so the
+    fixture parses + round-trips through the harness schema."""
+
+    input: list[str]
+    stores_response_in: str
+
+
 class EmitsLogSpec(_AllowExtras):
     """Additive companion: the node emits a log record alongside its
     state update. Verified by observability fixture 010 (Logs Bridge)."""
@@ -408,6 +420,8 @@ class NodeSpec(_ForbidExtras):
     - ``flaky`` and the four ``flaky_*`` variants — harness mocks for
       retry/checkpoint behaviours.
     - ``calls_llm`` — see :class:`CallsLlmSpec`.
+    - ``calls_embed`` — see :class:`CallsEmbedSpec` (embedding fixture 089,
+      deferred at the runner; modelled so the fixture parses).
 
     Companion modifiers (additive, may combine with most primaries):
 
@@ -432,6 +446,7 @@ class NodeSpec(_ForbidExtras):
     flaky_instance_only: FlakyInstanceOnlySpec | None = None
     flaky_resume_aware: FlakyResumeAwareSpec | None = None
     calls_llm: CallsLlmSpec | None = None
+    calls_embed: CallsEmbedSpec | None = None
 
     # Companions — additive.
     inputs: dict[str, str] | None = None
@@ -464,6 +479,7 @@ class NodeSpec(_ForbidExtras):
         "flaky_instance_only",
         "flaky_resume_aware",
         "calls_llm",
+        "calls_embed",
     )
 
     @model_validator(mode="after")
