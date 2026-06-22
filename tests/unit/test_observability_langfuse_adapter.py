@@ -210,6 +210,52 @@ def test_adapter_generation_routes_back_dated_calls_via_otel_tracer(monkeypatch:
     assert captured_otel_kwargs.get("name") == "g"
 
 
+def test_adapter_tool_routes_back_dated_calls_via_otel_tracer(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Proposal 0063: the Tool observation back-dates the same way
+    # generation() does — via the private _otel_tracer (the public
+    # start_observation rejects start_time=). Mirrors the generation
+    # back-dating test, and additionally verifies LangfuseTool constructs
+    # cleanly on the back-dated path.
+    from datetime import UTC, datetime
+    from unittest.mock import MagicMock
+
+    client = _dummy_client()
+    captured_otel_kwargs: dict[str, Any] = {}
+
+    def _otel_spy(**kwargs: Any) -> MagicMock:
+        captured_otel_kwargs.update(kwargs)
+        span = MagicMock()
+        span.get_span_context.return_value = MagicMock(
+            trace_id=int("a" * 32, 16),
+            span_id=int("b" * 16, 16),
+        )
+        return span
+
+    def _start_observation_should_not_be_called(**_kwargs: Any) -> None:
+        raise AssertionError(
+            "start_observation MUST NOT be called on the back-dated tool path; "
+            "v4 SDK rejects start_time= and the adapter should route via _otel_tracer"
+        )
+
+    monkeypatch.setattr(client._otel_tracer, "start_span", _otel_spy)  # noqa: SLF001
+    monkeypatch.setattr(client, "start_observation", _start_observation_should_not_be_called)
+    adapter = LangfuseSDKAdapter(client)
+    adapter.trace(id="trace-tool-ts", name="t")
+
+    start = datetime(2026, 6, 8, 12, 0, 0, tzinfo=UTC)
+    adapter.tool(
+        trace_id="trace-tool-ts",
+        name="openarmature.tool.call",
+        input={"city": "Paris"},
+        output={"temperature_c": 20},
+        start_time=start,
+    )
+
+    expected_ns = int(start.timestamp() * 1_000_000_000)
+    assert captured_otel_kwargs.get("start_time") == expected_ns
+    assert captured_otel_kwargs.get("name") == "openarmature.tool.call"
+
+
 def test_adapter_generation_without_start_time_uses_public_api(monkeypatch: pytest.MonkeyPatch) -> None:
     # Companion to the back-dated test: when ``start_time`` is NOT
     # supplied, the adapter falls back to the v4 SDK's public

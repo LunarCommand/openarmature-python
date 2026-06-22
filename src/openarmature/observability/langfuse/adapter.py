@@ -387,7 +387,10 @@ class LangfuseSDKAdapter:
             # This is the only path to a back-dated Generation in
             # v4.7; the live-account integration test catches a future
             # SDK break.
-            obs = self._start_back_dated_generation(
+            from langfuse._client.span import LangfuseGeneration
+
+            obs = self._start_back_dated_observation(
+                LangfuseGeneration,
                 trace_id=trace_id,
                 name=name,
                 metadata=metadata,
@@ -410,8 +413,56 @@ class LangfuseSDKAdapter:
             )
         return _SpanHandle(obs)
 
-    def _start_back_dated_generation(
+    def tool(
         self,
+        *,
+        trace_id: str,
+        name: str | None = None,
+        metadata: dict[str, Any] | None = None,
+        parent_observation_id: str | None = None,
+        level: ObservationLevel = "DEFAULT",
+        status_message: str | None = None,
+        input: Any = None,
+        output: Any = None,
+        start_time: datetime | None = None,
+    ) -> LangfuseSpanHandle:
+        # v4 unifies observations under start_observation(as_type=); a
+        # Tool observation routes through as_type="tool" (proposal 0063).
+        # When start_time is supplied, back-date via the private OTel
+        # tracer (the public API can't), exactly as generation() does —
+        # so the Tool observation's duration reflects the tool latency.
+        extra_kwargs: dict[str, Any] = {"input": input, "output": output}
+        present_extra = {k: v for k, v in extra_kwargs.items() if v is not None}
+        if start_time is not None:
+            from langfuse._client.span import LangfuseTool
+
+            obs = self._start_back_dated_observation(
+                LangfuseTool,
+                trace_id=trace_id,
+                name=name,
+                metadata=metadata,
+                parent_observation_id=parent_observation_id,
+                level=level,
+                status_message=status_message,
+                start_time=start_time,
+                **present_extra,
+            )
+        else:
+            obs = self._start_observation(
+                as_type="tool",
+                trace_id=trace_id,
+                name=name,
+                metadata=metadata,
+                parent_observation_id=parent_observation_id,
+                level=level,
+                status_message=status_message,
+                **present_extra,
+            )
+        return _SpanHandle(obs)
+
+    def _start_back_dated_observation(
+        self,
+        observation_cls: type[Any],
         *,
         trace_id: str,
         name: str | None,
@@ -422,11 +473,11 @@ class LangfuseSDKAdapter:
         start_time: datetime,
         **extra: Any,
     ) -> Any:
-        """Open a LangfuseGeneration at a back-dated timestamp by going
-        through the private OTel tracer rather than the public
-        ``start_observation`` API (which doesn't accept ``start_time``
-        in v4.7). Mirrors the SDK's ``create_event`` precedent."""
-        from langfuse._client.span import LangfuseGeneration
+        """Open a back-dated observation of ``observation_cls`` (e.g.
+        ``LangfuseGeneration`` / ``LangfuseTool``) by going through the
+        private OTel tracer rather than the public ``start_observation``
+        API (which doesn't accept ``start_time`` in v4.7). Mirrors the
+        SDK's ``create_event`` precedent."""
         from opentelemetry import trace as otel_trace_api
 
         trace_entry = self._trace_info.get(trace_id)
@@ -459,17 +510,17 @@ class LangfuseSDKAdapter:
                 name=name or "observation",
                 start_time=start_time_ns,
             )
-            generation_kwargs: dict[str, Any] = {
+            obs_kwargs: dict[str, Any] = {
                 "otel_span": otel_span,
                 "langfuse_client": self._client,
                 "metadata": metadata,
             }
             if level != "DEFAULT":
-                generation_kwargs["level"] = level
+                obs_kwargs["level"] = level
             if status_message is not None:
-                generation_kwargs["status_message"] = status_message
-            generation_kwargs.update(extra)
-            return LangfuseGeneration(**generation_kwargs)
+                obs_kwargs["status_message"] = status_message
+            obs_kwargs.update(extra)
+            return observation_cls(**obs_kwargs)
 
     def force_flush(self, timeout_ms: int = 30_000) -> bool:
         """Best-effort flush of the underlying Langfuse client.

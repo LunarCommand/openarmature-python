@@ -45,6 +45,8 @@ if TYPE_CHECKING:
         LlmRetryAttemptEvent,
         MetadataAugmentationEvent,
         NodeEvent,
+        ToolCallEvent,
+        ToolCallFailedEvent,
     )
     from openarmature.graph.observer import SubscribedObserver
 
@@ -230,6 +232,8 @@ _active_dispatch_var: ContextVar[
             | LlmFailedEvent
             | LlmRetryAttemptEvent
             | FailureIsolatedEvent
+            | ToolCallEvent
+            | ToolCallFailedEvent
         ],
         None,
     ]
@@ -248,6 +252,8 @@ def current_dispatch() -> (
             | LlmFailedEvent
             | LlmRetryAttemptEvent
             | FailureIsolatedEvent
+            | ToolCallEvent
+            | ToolCallFailedEvent
         ],
         None,
     ]
@@ -277,6 +283,8 @@ def _set_active_dispatch(
             | LlmFailedEvent
             | LlmRetryAttemptEvent
             | FailureIsolatedEvent
+            | ToolCallEvent
+            | ToolCallFailedEvent
         ],
         None,
     ],
@@ -291,6 +299,8 @@ def _set_active_dispatch(
             | LlmFailedEvent
             | LlmRetryAttemptEvent
             | FailureIsolatedEvent
+            | ToolCallEvent
+            | ToolCallFailedEvent
         ],
         None,
     ]
@@ -313,6 +323,8 @@ def _reset_active_dispatch(
                 | LlmFailedEvent
                 | LlmRetryAttemptEvent
                 | FailureIsolatedEvent
+                | ToolCallEvent
+                | ToolCallFailedEvent
             ],
             None,
         ]

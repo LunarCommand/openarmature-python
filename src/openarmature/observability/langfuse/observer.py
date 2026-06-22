@@ -38,6 +38,8 @@ from openarmature.graph.events import (
     LlmRetryAttemptEvent,
     MetadataAugmentationEvent,
     NodeEvent,
+    ToolCallEvent,
+    ToolCallFailedEvent,
 )
 from openarmature.observability.lineage import is_strict_prefix
 
@@ -46,6 +48,7 @@ from .client import (
     LangfuseGenerationHandle,
     LangfuseSpanHandle,
     LangfuseUsage,
+    ObservationLevel,
 )
 
 # §5.5.5 / §8.7 truncation: when the serialized payload exceeds the
@@ -381,6 +384,8 @@ class LangfuseObserver:
             | LlmFailedEvent
             | LlmRetryAttemptEvent
             | FailureIsolatedEvent
+            | ToolCallEvent
+            | ToolCallFailedEvent
         ),
     ) -> None:
         if isinstance(event, InvocationStartedEvent):
@@ -408,6 +413,12 @@ class LangfuseObserver:
         if isinstance(event, LlmFailedEvent):
             if not self.disable_llm_spans:
                 self._handle_typed_llm_failed(event)
+            return
+        # Proposal 0063 tool-execution observability: render the dedicated
+        # Langfuse Tool observation (asType "tool") under the calling
+        # node's Span observation.
+        if isinstance(event, ToolCallEvent | ToolCallFailedEvent):
+            self._handle_tool_call(event)
             return
         # Proposal 0050 §6.3 framework-emitted failure-isolation event.
         if isinstance(event, FailureIsolatedEvent):
@@ -1585,6 +1596,75 @@ class LangfuseObserver:
             status_message=event.error_category,
         )
 
+    def _handle_tool_call(self, event: ToolCallEvent | ToolCallFailedEvent) -> None:
+        """Open + close a dedicated Tool observation (Langfuse
+        ``asType="tool"``, proposal 0063) under the calling node's Span
+        observation. DEFAULT level on a ToolCallEvent; ERROR (with
+        ``error_type`` / ``error_message`` in metadata and as the status
+        message) on a ToolCallFailedEvent. ``input`` (arguments) /
+        ``output`` (result) are payload-gated per ``disable_provider_payload``.
+        """
+        from openarmature.observability.correlation import (
+            current_correlation_id,
+            current_invocation_id,
+        )
+
+        invocation_id = current_invocation_id()
+        if invocation_id is None:
+            return
+        correlation_id = current_correlation_id()
+        if invocation_id not in self._inv_states:
+            self._open_trace_for_typed_event(invocation_id, correlation_id, event)
+        inv_state = self._inv_states[invocation_id]
+        end_time = datetime.now(UTC)
+        if event.latency_ms is not None:
+            start_time = end_time - timedelta(milliseconds=event.latency_ms)
+        else:
+            start_time = end_time
+        parent_observation_id = self._resolve_llm_parent_observation_id(
+            inv_state,
+            calling_namespace_prefix=event.namespace,
+            calling_attempt_index=event.attempt_index,
+            calling_fan_out_index=event.fan_out_index,
+            calling_branch_name=event.branch_name,
+        )
+        # §8.4.6 metadata: tool name always, tool_call_id when present.
+        metadata: dict[str, Any] = {"openarmature_tool_name": event.tool_name}
+        if event.tool_call_id is not None:
+            metadata["openarmature_tool_call_id"] = event.tool_call_id
+        input_value: Any = None
+        output_value: Any = None
+        if not self.disable_provider_payload:
+            if event.arguments is not None:
+                input_value = self._maybe_truncate_for_input(event.arguments)
+            if isinstance(event, ToolCallEvent):
+                # The tool result is a structured value (not a plain
+                # string like output_content), so reuse the structured
+                # truncator: native value when it fits, marker string
+                # otherwise.
+                output_value = self._maybe_truncate_for_input(event.result)
+        level: ObservationLevel = "DEFAULT"
+        status_message: str | None = None
+        if isinstance(event, ToolCallFailedEvent):
+            level = "ERROR"
+            if event.error_type is not None:
+                metadata["error_type"] = event.error_type
+            metadata["error_message"] = event.error_message
+            status_message = event.error_message
+        target_trace_id = self._trace_id_for(inv_state, event.namespace, event.fan_out_index)
+        handle = self.client.tool(
+            trace_id=target_trace_id,
+            name="openarmature.tool.call",
+            input=input_value,
+            output=output_value,
+            metadata=metadata,
+            parent_observation_id=parent_observation_id,
+            level=level,
+            status_message=status_message,
+            start_time=start_time,
+        )
+        handle.end(end_time=end_time)
+
     def _resolve_llm_parent_observation_id(
         self,
         inv_state: _InvState,
@@ -1696,12 +1776,15 @@ class LangfuseObserver:
         return cast("dict[str, Any]", entities).get("langfuse_prompt")
 
     def _open_trace_for_typed_event(
-        self, invocation_id: str, correlation_id: str | None, event: LlmCompletionEvent | LlmFailedEvent
+        self,
+        invocation_id: str,
+        correlation_id: str | None,
+        event: LlmCompletionEvent | LlmFailedEvent | ToolCallEvent | ToolCallFailedEvent,
     ) -> None:
-        """Trace open path for a typed LLM event (LlmCompletionEvent or
-        LlmFailedEvent) arriving before any node-started event reached
+        """Trace open path for a typed event (LLM completion / failure or
+        tool execution) arriving before any node-started event reached
         this observer. Synthesizes the minimal trace shape from the
-        typed event's scoping fields."""
+        typed event's scoping fields (all read generically)."""
         if event.namespace:
             entry_node = event.namespace[0]
         else:
@@ -1757,7 +1840,10 @@ class LangfuseObserver:
     def _serialize_payload_value(value: Any) -> str:
         # Mirrors observability/otel/observer.py's _serialize_for_attribute
         # so both observers see the same string under the same cap.
-        return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+        # ``default=str`` is the same safety net: an opaque tool result
+        # JSON can't natively encode renders via str() rather than
+        # raising inside the observer (no-op for the encodable payloads).
+        return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False, default=str)
 
 
 def _truncate(serialized: str, cap_bytes: int) -> str | None:

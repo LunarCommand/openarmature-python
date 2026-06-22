@@ -3710,3 +3710,144 @@ async def test_callable_branch_renders_one_dispatch_span_skipped_emits_none() ->
 
     # The NODE span's children are exactly the two dispatched branch spans.
     assert sorted(c.name for c in _children(node)) == ["fts", "keyword"]
+
+
+# ---------------------------------------------------------------------------
+# Proposal 0063 — tool-execution span (openarmature.tool.call)
+# ---------------------------------------------------------------------------
+
+
+async def _drive_tool_span(event: Any, *, disable_provider_payload: bool = True) -> Any:
+    """Feed a ToolCallEvent / ToolCallFailedEvent through the OTel
+    observer; return the single openarmature.tool.call ReadableSpan."""
+    from openarmature.observability.correlation import (
+        _reset_invocation_id,
+        _set_invocation_id,
+    )
+
+    exporter = InMemorySpanExporter()
+    observer = OTelObserver(
+        span_processor=SimpleSpanProcessor(exporter),
+        disable_provider_payload=disable_provider_payload,
+    )
+    token = _set_invocation_id("inv-tool")
+    try:
+        await observer(event)
+    finally:
+        _reset_invocation_id(token)
+    observer.shutdown()
+    tool_spans = [s for s in exporter.get_finished_spans() if s.name == "openarmature.tool.call"]
+    assert len(tool_spans) == 1
+    return tool_spans[0]
+
+
+def _tool_call_event(**overrides: Any) -> Any:
+    from openarmature.graph.events import ToolCallEvent
+
+    base: dict[str, Any] = {
+        "invocation_id": "inv-tool",
+        "correlation_id": None,
+        "node_name": "run_tool",
+        "namespace": ("run_tool",),
+        "attempt_index": 0,
+        "fan_out_index": None,
+        "branch_name": None,
+        "call_id": "cc-1",
+        "tool_name": "get_weather",
+        "tool_call_id": "call_abc",
+        "arguments": {"city": "Paris"},
+        "result": {"temperature_c": 20},
+        "latency_ms": 5.0,
+    }
+    base.update(overrides)
+    return ToolCallEvent(**base)
+
+
+async def test_tool_span_emits_oa_namespace_attributes_not_gen_ai() -> None:
+    # Proposal 0063 §5.5 (mirrors fixture 097): the tool span uses
+    # OA-namespace openarmature.tool.* attributes; the Development
+    # gen_ai.tool.* surface is NOT emitted in v1. Payload on.
+    import json
+
+    span = await _drive_tool_span(_tool_call_event(), disable_provider_payload=False)
+    attrs = dict(span.attributes or {})
+    assert attrs["openarmature.tool.name"] == "get_weather"
+    assert attrs["openarmature.tool.call.id"] == "call_abc"
+    assert json.loads(attrs["openarmature.tool.call.arguments"]) == {"city": "Paris"}
+    assert json.loads(attrs["openarmature.tool.call.result"]) == {"temperature_c": 20}
+    for absent in (
+        "gen_ai.tool.name",
+        "gen_ai.tool.call.id",
+        "gen_ai.tool.call.arguments",
+        "gen_ai.tool.call.result",
+        "gen_ai.operation.name",
+    ):
+        assert absent not in attrs
+
+
+async def test_tool_span_payload_gated_off_by_default() -> None:
+    # Proposal 0063 §5.5.4 (mirrors fixture 096): arguments + result are
+    # payload, suppressed under disable_provider_payload (default True);
+    # the identity attributes still render.
+    span = await _drive_tool_span(_tool_call_event())
+    attrs = dict(span.attributes or {})
+    assert attrs["openarmature.tool.name"] == "get_weather"
+    assert attrs["openarmature.tool.call.id"] == "call_abc"
+    assert "openarmature.tool.call.arguments" not in attrs
+    assert "openarmature.tool.call.result" not in attrs
+
+
+async def test_tool_span_omits_call_id_for_standalone() -> None:
+    # tool_call_id None (a standalone instrumented function) -> the
+    # openarmature.tool.call.id attribute is omitted entirely.
+    span = await _drive_tool_span(_tool_call_event(tool_call_id=None), disable_provider_payload=False)
+    attrs = dict(span.attributes or {})
+    assert "openarmature.tool.call.id" not in attrs
+    assert attrs["openarmature.tool.name"] == "get_weather"
+
+
+async def test_tool_failed_span_renders_error_status() -> None:
+    # Proposal 0063: a ToolCallFailedEvent renders ERROR with the
+    # standard OTel error.type + an exception event; no result attribute.
+    from opentelemetry.trace import StatusCode
+
+    from openarmature.graph.events import ToolCallFailedEvent
+
+    event = ToolCallFailedEvent(
+        invocation_id="inv-tool",
+        correlation_id=None,
+        node_name="run_tool",
+        namespace=("run_tool",),
+        attempt_index=0,
+        fan_out_index=None,
+        branch_name=None,
+        call_id="cc-1",
+        tool_name="get_weather",
+        tool_call_id="call_def",
+        arguments={"city": "Paris"},
+        latency_ms=3.0,
+        error_type="TimeoutError",
+        error_message="tool timed out",
+    )
+    span = await _drive_tool_span(event, disable_provider_payload=False)
+    attrs = dict(span.attributes or {})
+    assert span.status.status_code == StatusCode.ERROR
+    assert attrs["error.type"] == "TimeoutError"
+    assert "openarmature.tool.call.result" not in attrs
+    exception_events = [e for e in span.events if e.name == "exception"]
+    assert len(exception_events) == 1
+    assert dict(exception_events[0].attributes or {})["exception.message"] == "tool timed out"
+
+
+async def test_tool_span_serializes_non_json_result_via_str_fallback() -> None:
+    # Proposal 0063: the tool result is opaque (any language-idiomatic
+    # value). A value json.dumps can't natively encode MUST NOT crash the
+    # observer (which would lose the whole span); it renders via str().
+    class _Opaque:
+        def __str__(self) -> str:
+            return "OPAQUE-RESULT"
+
+    span = await _drive_tool_span(_tool_call_event(result=_Opaque()), disable_provider_payload=False)
+    attrs = dict(span.attributes or {})
+    assert "openarmature.tool.call.result" in attrs
+    assert "OPAQUE-RESULT" in attrs["openarmature.tool.call.result"]
