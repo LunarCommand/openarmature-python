@@ -1782,6 +1782,86 @@ async def test_llm_completion_event_output_content_none_on_tool_call_response() 
     assert typed.finish_reason == "tool_calls"
 
 
+async def test_llm_completion_event_active_prompt_populated_from_context() -> None:
+    # Proposal 0057 active_prompt: complete() invoked inside a
+    # with_active_prompt block stamps the active PromptResult onto the
+    # typed event (the provider reads current_prompt_result()). Covers
+    # conformance fixture 064 -- the populated record on the EVENT, not
+    # just the observer's span rendering of an injected field.
+    from datetime import UTC, datetime
+
+    from openarmature.prompts import PromptResult, with_active_prompt
+
+    now = datetime.now(UTC)
+    pr = PromptResult(
+        name="greeting",
+        version="1",
+        label="production",
+        template_hash="sha256:tmpl",
+        rendered_hash="sha256:rendered",
+        messages=[UserMessage(content="hi")],
+        variables={"user": "Alice"},
+        fetched_at=now,
+        rendered_at=now,
+    )
+    events, token = _collecting_dispatch()
+    transport = _make_openai_response_with_usage(
+        {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+    )
+    provider = OpenAIProvider(base_url="http://test", model="m", api_key="k", transport=transport)
+    try:
+        with with_active_prompt(pr):
+            await provider.complete([UserMessage(content="hi")])
+    finally:
+        await provider.aclose()
+        _release_dispatch(token)
+
+    typed = next(e for e in events if isinstance(e, LlmCompletionEvent))
+    assert typed.active_prompt == pr
+
+
+async def test_llm_completion_event_active_prompt_group_populated_from_context() -> None:
+    # Proposal 0057 active_prompt_group: complete() inside a
+    # with_active_prompt_group block stamps the active PromptGroup onto
+    # the typed event (the provider reads current_prompt_group()). Covers
+    # conformance fixture 066.
+    from datetime import UTC, datetime
+
+    from openarmature.prompts import PromptGroup, PromptResult, with_active_prompt_group
+
+    now = datetime.now(UTC)
+
+    def _pr(name: str) -> PromptResult:
+        return PromptResult(
+            name=name,
+            version="1",
+            label="production",
+            template_hash="sha256:tmpl",
+            rendered_hash="sha256:rendered",
+            messages=[UserMessage(content="hi")],
+            variables={"user": "Alice"},
+            fetched_at=now,
+            rendered_at=now,
+        )
+
+    # PromptGroup requires N>=2 members.
+    group = PromptGroup(group_name="greetings", members=[_pr("greeting"), _pr("farewell")])
+    events, token = _collecting_dispatch()
+    transport = _make_openai_response_with_usage(
+        {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+    )
+    provider = OpenAIProvider(base_url="http://test", model="m", api_key="k", transport=transport)
+    try:
+        with with_active_prompt_group(group):
+            await provider.complete([UserMessage(content="hi")])
+    finally:
+        await provider.aclose()
+        _release_dispatch(token)
+
+    typed = next(e for e in events if isinstance(e, LlmCompletionEvent))
+    assert typed.active_prompt_group == group
+
+
 async def test_llm_completion_event_request_params_only_carries_supplied_keys() -> None:
     # Proposal 0057 request_params shape: absence-is-meaningful. Only
     # caller-supplied gen_ai.request.* keys appear; unset RuntimeConfig
