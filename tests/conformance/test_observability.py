@@ -185,6 +185,10 @@ _SUPPORTED_FIXTURES = frozenset(
         "096-tool-call-payload-gating",
         "097-otel-tool-span-attributes",
         "098-langfuse-tool-observation",
+        # v0.70.1 — proposal 0075 callable-branch span shape (observability
+        # §5.7). The ORIGINAL fixture 110 (span shape + skip-emits-no-span);
+        # the branch_count assertion arrives with the v0.73.1 pin (v0.16.0).
+        "110-otel-callable-branch-span",
     }
 )
 
@@ -192,6 +196,10 @@ _SUPPORTED_FIXTURES = frozenset(
 _EMBEDDING_DEFER = (
     "embedding capability (proposal 0059) unimplemented until v0.16.0; "
     "no embedding event/provider to record from"
+)
+
+_RERANK_DEFER = (
+    "rerank capability (proposal 0060) unimplemented until v0.16.0; no rerank event/provider to record from"
 )
 
 
@@ -226,6 +234,24 @@ _DEFERRED_FIXTURES: dict[str, str] = {
             "082-otel-embedding-span-attributes",
             "083-langfuse-embedding-observation",
             "089-embedding-metrics-token-and-duration",
+        )
+    },
+    # Rerank observability (proposal 0060, v0.70.0). The rerank protocol is
+    # unshipped in python until v0.16.0; no rerank provider/event exists.
+    **{
+        fixture_id: _RERANK_DEFER
+        for fixture_id in (
+            "099-rerank-event-dispatch",
+            "100-rerank-failure-event-dispatch-on-provider-unavailable",
+            "101-rerank-event-mutual-exclusion",
+            "102-rerank-event-call-id-distinct",
+            "103-rerank-event-query-and-documents-populated",
+            "104-rerank-event-request-params-populated",
+            "105-rerank-event-top-k-and-result-count-populated",
+            "106-rerank-event-active-prompt-populated",
+            "107-otel-rerank-span-attributes",
+            "108-langfuse-rerank-observation",
+            "109-rerank-metrics-token-and-duration",
         )
     },
 }
@@ -429,6 +455,8 @@ async def test_observability_fixture(fixture_path: Path) -> None:
         await _run_fixture_028(spec)
     elif fixture_id == "038-otel-parallel-branches-dispatch-span":
         await _run_fixture_038(spec)
+    elif fixture_id == "110-otel-callable-branch-span":
+        await _run_fixture_110(spec)
     elif fixture_id in {
         "040-llm-cache-attribute-emission",
         "041-llm-cache-attribute-absence",
@@ -1921,6 +1949,59 @@ def _assert_span_tree_matches(
                 s for s in all_spans if s.parent is not None and s.parent.span_id == matched_span_id
             ]
             _assert_span_tree_matches(all_spans, actual_children, expected_children)
+
+
+async def _run_fixture_110(spec: Mapping[str, Any]) -> None:
+    # Proposal 0075 callable-branch span shape (observability §5.7): an
+    # inline-callable parallel branch renders as ONE per-branch dispatch span
+    # keyed by openarmature.node.branch_name with NO inner-node spans; a
+    # when-skipped branch emits no span. Bundled OTel observer (default config),
+    # as for fixtures 038 / 082.
+    for case in cast("list[dict[str, Any]]", spec["cases"]):
+        case_name = cast("str", case["name"])
+        try:
+            await _run_fixture_110_case(case)
+        except AssertionError as e:
+            raise AssertionError(f"case {case_name!r}: {e}") from e
+
+
+async def _run_fixture_110_case(case: Mapping[str, Any]) -> None:
+    observer, exporter = _build_observer()
+    final = await _run_graph(case, observer)
+    observer.shutdown()
+
+    # ---- final_state: the dispatched callable branches applied their
+    # updates; the when-skipped branch contributed nothing.
+    expected_final = cast("dict[str, Any]", case["expected"].get("final_state") or {})
+    for field_name, expected_value in expected_final.items():
+        actual = getattr(final, field_name)
+        assert actual == expected_value, f"final_state.{field_name}: {actual!r} != {expected_value!r}"
+
+    spans = exporter.get_finished_spans()
+    expected_tree = cast("list[dict[str, Any]]", case["expected"]["span_tree"])
+    inv_root = next((s for s in spans if s.name == "openarmature.invocation" and s.parent is None), None)
+    assert inv_root is not None, f"invocation root span missing; got {[s.name for s in spans]}"
+    _assert_span_tree_matches(spans, [inv_root], expected_tree)
+
+    # ---- when-skipped branches emit NO span. The span_tree match is
+    # subset-based, so assert the skip explicitly: any declared branch absent
+    # from the (dispatched) span_tree must have produced no span.
+    def _names(nodes: list[dict[str, Any]]) -> set[str]:
+        out: set[str] = set()
+        for n in nodes:
+            out.add(cast("str", n["name"]))
+            out |= _names(cast("list[dict[str, Any]]", n.get("children") or []))
+        return out
+
+    dispatched = _names(expected_tree)
+    nodes = cast("dict[str, Any]", case["nodes"])
+    pb_node = next((ns for ns in nodes.values() if "parallel_branches" in ns), None)
+    if pb_node is not None:
+        declared = set(cast("dict[str, Any]", pb_node["parallel_branches"]["branches"]).keys())
+        for branch in declared - dispatched:
+            assert [s for s in spans if s.name == branch] == [], (
+                f"when-skipped branch {branch!r} MUST emit no span"
+            )
 
 
 async def _run_fixture_008(spec: Mapping[str, Any]) -> None:

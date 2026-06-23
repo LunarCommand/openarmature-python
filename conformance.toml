@@ -32,7 +32,7 @@
 
 [manifest]
 implementation = "openarmature-python"
-spec_pin = "v0.69.0"
+spec_pin = "v0.70.1"
 
 # Status values:
 #   implemented   — shipped behavior matches the proposal's contract
@@ -608,6 +608,16 @@ since = "0.13.0"
 # §5.5.4 rename touches existing LLM-payload gating, so it lands with
 # the pin even though the embedding capability does not).
 [proposals."0059"]
+status = "not-yet"
+
+# Spec v0.70.0 (proposal 0060).  Retrieval-provider rerank protocol — the
+# ``RerankProvider`` surface + ``RerankEvent`` / ``RerankFailedEvent`` typed
+# variants + OTel ``openarmature.rerank.complete`` span / Langfuse Retriever
+# observation / rerank metrics.  Sibling to the embedding surface (0059);
+# python has not shipped retrieval-provider, so rerank is not-yet.  Crossed by
+# the v0.70.1 pin (adopted for fixture 110 / 0075); the 11 rerank observability
+# fixtures (099-109) defer with it.
+[proposals."0060"]
 status = "not-yet"
 
 # Spec v0.55.0 (proposal 0065; repo pins v0.55.1).  Failure-isolation
