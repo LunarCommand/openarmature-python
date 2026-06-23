@@ -8,7 +8,7 @@ import openarmature
 
 
 def test_package_versions() -> None:
-    assert openarmature.__version__ == "0.14.0"
+    assert openarmature.__version__ == "0.15.0rc1"
     assert openarmature.__spec_version__ == "0.70.1"
 
 
