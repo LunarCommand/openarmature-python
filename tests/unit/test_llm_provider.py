@@ -1817,7 +1817,7 @@ async def test_llm_completion_event_active_prompt_populated_from_context() -> No
         _release_dispatch(token)
 
     typed = next(e for e in events if isinstance(e, LlmCompletionEvent))
-    assert typed.active_prompt is pr
+    assert typed.active_prompt == pr
 
 
 async def test_llm_completion_event_active_prompt_group_populated_from_context() -> None:
@@ -1859,7 +1859,7 @@ async def test_llm_completion_event_active_prompt_group_populated_from_context()
         _release_dispatch(token)
 
     typed = next(e for e in events if isinstance(e, LlmCompletionEvent))
-    assert typed.active_prompt_group is group
+    assert typed.active_prompt_group == group
 
 
 async def test_llm_completion_event_request_params_only_carries_supplied_keys() -> None:
