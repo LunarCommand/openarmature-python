@@ -1979,7 +1979,8 @@ async def _run_fixture_110_case(case: Mapping[str, Any]) -> None:
 
     spans = exporter.get_finished_spans()
     expected_tree = cast("list[dict[str, Any]]", case["expected"]["span_tree"])
-    inv_root = next(s for s in spans if s.name == "openarmature.invocation" and s.parent is None)
+    inv_root = next((s for s in spans if s.name == "openarmature.invocation" and s.parent is None), None)
+    assert inv_root is not None, f"invocation root span missing; got {[s.name for s in spans]}"
     _assert_span_tree_matches(spans, [inv_root], expected_tree)
 
     # ---- when-skipped branches emit NO span. The span_tree match is
