@@ -523,6 +523,40 @@ _DEFERRED_FIXTURES: dict[str, str] = {
     ),
     "observability/082-otel-embedding-span-attributes": "Proposal 0059 embedding events; not implemented",
     "observability/083-langfuse-embedding-observation": "Proposal 0059 embedding events; not implemented",
+    # Proposal 0060 (retrieval-provider rerank, v0.70.0): the rerank
+    # observability fixtures (099-109) model the RerankEvent /
+    # RerankFailedEvent + rerank span / Langfuse Retriever / rerank-metrics
+    # surface, which python does not implement (0060 is not-yet; rerank lands
+    # with the embedding capability in v0.16.0). Sibling to embeddings (074-083).
+    "observability/099-rerank-event-dispatch": "Proposal 0060 rerank events; not implemented",
+    "observability/100-rerank-failure-event-dispatch-on-provider-unavailable": (
+        "Proposal 0060 rerank events; not implemented"
+    ),
+    "observability/101-rerank-event-mutual-exclusion": "Proposal 0060 rerank events; not implemented",
+    "observability/102-rerank-event-call-id-distinct": "Proposal 0060 rerank events; not implemented",
+    "observability/103-rerank-event-query-and-documents-populated": (
+        "Proposal 0060 rerank events; not implemented"
+    ),
+    "observability/104-rerank-event-request-params-populated": (
+        "Proposal 0060 rerank events; not implemented"
+    ),
+    "observability/105-rerank-event-top-k-and-result-count-populated": (
+        "Proposal 0060 rerank events; not implemented"
+    ),
+    "observability/106-rerank-event-active-prompt-populated": (
+        "Proposal 0060 rerank events; not implemented"
+    ),
+    "observability/107-otel-rerank-span-attributes": "Proposal 0060 rerank events; not implemented",
+    "observability/108-langfuse-rerank-observation": "Proposal 0060 rerank events; not implemented",
+    "observability/109-rerank-metrics-token-and-duration": "Proposal 0060 rerank events; not implemented",
+    # Proposal 0075 (callable-branch span, fixture 110 added v0.70.1): the case
+    # mixes a graph-style ``expected.final_state`` with the observability
+    # ``span_tree``; the cross-capability parser's ObservabilityExpected model
+    # forbids final_state. RUNS via _run_fixture_110 in test_observability (the
+    # same defer-from-parse-but-runs pattern as fixture 038).
+    "observability/110-otel-callable-branch-span": (
+        "Cross-capability parser doesn't model final_state + span_tree together; runs in test_observability"
+    ),
 }
 
 
