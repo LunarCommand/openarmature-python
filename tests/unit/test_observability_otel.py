@@ -1665,6 +1665,89 @@ async def test_concurrent_fan_out_no_lifo_violation() -> None:
     assert len(double_spans) == 5, f"expected 5 per-instance node spans; got {len(double_spans)}"
 
 
+async def test_detached_fan_out_instance_error_status_on_both_spans() -> None:
+    # Proposal 0061 / §4.2 (v0.15.0 release-review item 2): when a DETACHED
+    # fan-out instance's subgraph raises, ERROR surfaces on BOTH the parent's
+    # fan-out node span (parent trace) and the detached instance's invocation
+    # span (its own trace, carrying the §4 category + an OTel exception event).
+    # This is the fan-out analog of the detached-subgraph case (conformance
+    # fixture 008 case 3 covers only the subgraph path).
+    from opentelemetry.trace import StatusCode
+
+    from openarmature.graph import RuntimeGraphError
+
+    class _ParentState(State):
+        items: list[int] = Field(default_factory=list[int])
+        results: list[int] = Field(default_factory=list[int])
+
+    class _ChildState(State):
+        item: int = 0
+        out: int = 0
+
+    async def _raise(_s: _ChildState) -> dict[str, int]:
+        raise RuntimeError("boom")
+
+    inner = (
+        GraphBuilder(_ChildState)
+        .add_node("compute", _raise)
+        .add_edge("compute", END)
+        .set_entry("compute")
+        .compile()
+    )
+    parent = (
+        GraphBuilder(_ParentState)
+        .add_fan_out_node(
+            "score",
+            subgraph=inner,
+            collect_field="out",
+            target_field="results",
+            items_field="items",
+            item_field="item",
+        )
+        .add_edge("score", END)
+        .set_entry("score")
+        .compile()
+    )
+    exporter = InMemorySpanExporter()
+    observer = OTelObserver(
+        span_processor=SimpleSpanProcessor(exporter),
+        detached_fan_outs=frozenset({"score"}),
+    )
+    parent.attach_observer(observer)
+    with pytest.raises(RuntimeGraphError):
+        await parent.invoke(_ParentState(items=[5]))
+    await parent.drain()
+    observer.shutdown()
+
+    spans = exporter.get_finished_spans()
+    # The detached instance trace is the one containing the raising inner
+    # node (`score` appears in BOTH traces -- the parent fan-out node span
+    # and the detached instance's own root span -- so key off `compute`).
+    compute = next(s for s in spans if s.name == "compute")
+    assert compute.context is not None
+    detached_trace_id = compute.context.trace_id
+    # §4.2: the detached instance's invocation span is its own trace's
+    # authoritative carrier -- ERROR + the §4 category + an OTel exception
+    # event (mirroring the detached-subgraph case).
+    detached_inv = next(
+        s
+        for s in spans
+        if s.name == "openarmature.invocation"
+        and s.context is not None
+        and s.context.trace_id == detached_trace_id
+    )
+    assert detached_inv.status.status_code == StatusCode.ERROR
+    assert dict(detached_inv.attributes or {}).get("openarmature.error.category") == "node_exception"
+    assert any(e.name == "exception" for e in detached_inv.events)
+    # And the parent-trace fan-out node span (the §4.4 Link carrier) is ERROR.
+    parent_score = next(
+        s
+        for s in spans
+        if s.name == "score" and s.context is not None and s.context.trace_id != detached_trace_id
+    )
+    assert parent_score.status.status_code == StatusCode.ERROR
+
+
 async def test_concurrent_fan_out_llm_spans_parent_under_calling_instance() -> None:
     """Under concurrent fan-out: each instance's
     ``openarmature.llm.complete`` span MUST parent under that
