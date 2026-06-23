@@ -24,7 +24,7 @@ your environment can reach:
    sessions opening the project find the bundled docs automatically.
 """
 
-__version__ = "0.15.0rc1"
+__version__ = "0.15.0"
 __spec_version__ = "0.70.1"
 # Proposal 0052 (spec observability §5.1 / §8.4.1): canonical
 # package-registry name for this implementation. Surfaces on every
