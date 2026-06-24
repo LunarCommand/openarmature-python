@@ -2839,6 +2839,16 @@ async def _run_invocation_id_case(case: Mapping[str, Any]) -> None:
             actual = trace.id
         assert actual == val, f"trace.metadata.{key} {actual!r} != {val!r}"
 
+    # The fixture's top-level verbatim invocation_id clause (the §5.1
+    # caller_invocation_id_verbatim_on_attribute invariant): on the OTel side it
+    # is the openarmature.invocation_id span attribute; in the Langfuse runner
+    # the verbatim id surfaces as the in-memory recorder's raw trace.id.
+    expected_invocation_id = cast("dict[str, Any]", case["expected"]).get("invocation_id")
+    if expected_invocation_id is not None:
+        assert trace.id == expected_invocation_id, (
+            f"verbatim invocation_id: raw trace.id {trace.id!r} != {expected_invocation_id!r}"
+        )
+
 
 async def _run_langfuse_generation_fixture(spec: Mapping[str, Any]) -> None:
     """Driver for the Langfuse Generation fixtures (023 generation rendering +
@@ -3867,6 +3877,23 @@ def _assert_langfuse_generation_fields(
         )
 
 
+def _obs_selection_matches(obs: Any, exp_metadata: Mapping[str, Any]) -> bool:
+    """Read-only disambiguator for same-(type, name) sibling observations: an
+    actual is a candidate when its scalar expected-metadata values match.
+
+    Only scalars (str / int / float / bool) are used: placeholder tokens are
+    shared across siblings (correlation_id) so they don't disambiguate, and
+    running the value-matcher here would fire its binding side effects during
+    selection; sequences (namespace) are left to the value-matcher's list/tuple
+    handling. fan_out_index / step are the fields that actually distinguish.
+    """
+    for key, val in exp_metadata.items():
+        is_placeholder = isinstance(val, str) and val.startswith("<") and val.endswith(">")
+        if isinstance(val, (str, int, float)) and not is_placeholder and obs.metadata.get(key) != val:
+            return False
+    return True
+
+
 def _assert_langfuse_observation_tree(
     trace: Any,
     expected: list[dict[str, Any]],
@@ -3888,8 +3915,18 @@ def _assert_langfuse_observation_tree(
     for exp in expected:
         exp_type = cast("str", exp["type"])
         exp_name = cast("str | None", exp.get("name"))
+        # Disambiguate same-(type, name) siblings (e.g. 032's per-instance
+        # "process" spans) by their scalar metadata, not list/emission order, so
+        # the assertions can't bind the wrong sibling if emission order shifts.
+        exp_meta = cast("dict[str, Any]", exp.get("metadata") or {})
         match = next(
-            (o for o in remaining if o.type == exp_type and (exp_name is None or o.name == exp_name)),
+            (
+                o
+                for o in remaining
+                if o.type == exp_type
+                and (exp_name is None or o.name == exp_name)
+                and _obs_selection_matches(o, exp_meta)
+            ),
             None,
         )
         assert match is not None, (
