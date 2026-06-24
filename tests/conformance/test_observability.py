@@ -2753,9 +2753,11 @@ async def _run_langfuse_trace_case(case: Mapping[str, Any]) -> None:
     compiled = built.builder.compile()
     compiled.attach_observer(observer)
     initial_state = built.initial_state(case.get("initial_state", {}))
-    await compiled.invoke(initial_state)
-    await compiled.drain()
-    observer.shutdown()
+    try:
+        await compiled.invoke(initial_state)
+        await compiled.drain()
+    finally:
+        observer.shutdown()
 
     assert len(client.traces) == 1, f"expected 1 Langfuse trace; got {len(client.traces)}"
     trace = next(iter(client.traces.values()))
@@ -2789,13 +2791,15 @@ async def _run_invocation_id_case(case: Mapping[str, Any]) -> None:
 
     graph, state_cls, provider = _build_simple_llm_graph(case, populate_caller_metadata=False)
     client = InMemoryLangfuseClient()
-    graph.attach_observer(LangfuseObserver(client=client))
+    observer = LangfuseObserver(client=client)
+    graph.attach_observer(observer)
     state = _make_state_instance(case, state_cls)
     caller_id = cast("str", case["caller_invocation_id"])
     try:
         await graph.invoke(state, invocation_id=caller_id)
         await graph.drain()
     finally:
+        observer.shutdown()
         await provider.aclose()
 
     assert len(client.traces) == 1, f"expected 1 Langfuse trace; got {len(client.traces)}"
@@ -3768,7 +3772,7 @@ def _assert_langfuse_observation_tree(
     # Mutable copy: each matched observation is consumed so two
     # same-shape expected siblings can't both bind to one actual.
     remaining = list(trace.children_of(parent_id))
-    use_matcher = bindings is not None or params is not None
+    use_matcher = bindings is not None and params is not None
     for exp in expected:
         exp_type = cast("str", exp["type"])
         exp_name = cast("str | None", exp.get("name"))
