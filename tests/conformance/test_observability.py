@@ -284,13 +284,15 @@ _DEFERRED_FIXTURES: dict[str, str] = {
 # sibling conformance runner tests/conformance/test_observability_langfuse.py
 # (NOT unit tests). They are skipped here and asserted there; the coverage guard
 # counts them as accounted. 035/036 (invocation-id) + 059 (attribution) were
-# relocated here from this file by the fixture-harness catch-up.
+# relocated here from this file by the fixture-harness catch-up; 029 (fan-out
+# per-instance) was un-deferred into the sibling runner the same way.
 _LANGFUSE_HARNESS_FIXTURES: frozenset[str] = frozenset(
     {
         "022-langfuse-basic-trace",
         "023-langfuse-generation-rendering",
         "024-langfuse-prompt-linkage",
         "027-langfuse-caller-supplied-metadata",
+        "029-caller-metadata-fan-out-per-instance",
         "031-langfuse-subgraph-span-hierarchy",
         "032-langfuse-fan-out-per-instance-spans",
         "033-langfuse-detached-trace-mode",
@@ -311,13 +313,9 @@ _UNIT_TESTED_FIXTURES: dict[str, str] = {
     for fixture_ids, reason in (
         # The Langfuse-mapping fixtures are fixture-tested by the sibling
         # conformance runner test_observability_langfuse.py -- see
-        # _LANGFUSE_HARNESS_FIXTURES, NOT here (they are not unit-only). 029/030
-        # stay below: deferred in that file (harness gaps), unit-tested for now.
-        (
-            ("029-caller-metadata-fan-out-per-instance",),
-            "proposal 0040 fan-out per-instance caller metadata; unit-tested; "
-            "deferred in test_observability_langfuse.py",
-        ),
+        # _LANGFUSE_HARNESS_FIXTURES, NOT here (they are not unit-only). 030 stays
+        # below: deferred in that file (needs a LangfuseObserver per-branch
+        # dispatch-span src change), unit-tested for now.
         (
             ("030-caller-metadata-parallel-branches-per-branch",),
             "proposal 0040 per-branch caller metadata; covered by "
