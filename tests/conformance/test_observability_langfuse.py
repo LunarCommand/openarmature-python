@@ -1270,8 +1270,9 @@ def _assert_trace(
     # real SDK derives trace.id and preserves the raw in metadata; the in-memory
     # recorder keeps the raw AS trace.id, so recover it from there.
     if "invocation_id" in expected_metadata and "invocation_id" not in trace.metadata:
-        assert trace.id == expected_metadata.pop("invocation_id"), (
-            f"trace.metadata.invocation_id: raw trace.id {trace.id!r} != expected"
+        expected_invocation_id = expected_metadata.pop("invocation_id")
+        assert trace.id == expected_invocation_id, (
+            f"trace.metadata.invocation_id: raw trace.id {trace.id!r} != {expected_invocation_id!r}"
         )
     _assert_metadata_subset("trace.metadata", trace.metadata, expected_metadata)
     # Proposal 0043 (§8.4.1 trace.input/output sourcing).  Fixtures that
