@@ -251,12 +251,17 @@ def _synthesize_fan_out_aggregation(spec: dict[str, Any]) -> None:
         fan_out_cfg.setdefault("collect_field", collect_field)
         fan_out_cfg.setdefault("target_field", sink)
         # items_field mode also requires item_field (where the engine places
-        # each item in the inner state). Seed an explicit inner state block --
-        # the inferred response fields plus the item slot -- so
-        # _build_inner_subgraph_with_llm uses it. The augment middleware reads
-        # the item back out of this slot at runtime.
+        # each item in the inner state). The augment middleware reads the item
+        # back out of this slot at runtime.
         fan_out_cfg.setdefault("item_field", item_field)
-        sub_spec.setdefault("state", {"fields": {**inferred, item_field: {"type": "dict", "default": {}}}})
+        # Ensure the inner state declares item_field (+ the inferred response
+        # fields) whether or not the subgraph shipped its own state block --
+        # State is strict, so the engine's write to item_field needs it declared.
+        sub_state = cast("dict[str, Any]", sub_spec.setdefault("state", {}))
+        sub_fields = cast("dict[str, Any]", sub_state.setdefault("fields", {}))
+        for fname, fdef in inferred.items():
+            sub_fields.setdefault(fname, fdef)
+        sub_fields.setdefault(item_field, {"type": "dict", "default": {}})
         state_fields[sink] = {"type": "list", "reducer": "append", "default": []}
         # The items_field source (e.g. products) must be declared on the outer
         # state; 029 ships it only via initial_state, so declare it here.
@@ -300,6 +305,10 @@ def _build_augment_middlewares(
             augment_field_map = cast("dict[str, str] | None", fan_out_cfg.get("augment_metadata_from_field"))
             if augment_field_map:
                 item_field = cast("str | None", fan_out_cfg.get("item_field"))
+                if item_field is None:
+                    raise ValueError(
+                        f"fan-out node {node_name!r}: augment_metadata_from_field requires item_field"
+                    )
                 fan_out_mw[node_name] = [_make_augment_instance_middleware(augment_field_map, item_field)]
         pb_cfg = cast("dict[str, Any] | None", node_spec.get("parallel_branches"))
         if pb_cfg is not None:
@@ -314,7 +323,7 @@ def _build_augment_middlewares(
     return fan_out_mw, branch_mw
 
 
-def _make_augment_instance_middleware(field_map: dict[str, str], item_field: str | None) -> Any:
+def _make_augment_instance_middleware(field_map: dict[str, str], item_field: str) -> Any:
     """Per-instance fan-out middleware that reads the instance's own item from
     the ``item_field`` slot of its subgraph state and calls
     ``set_invocation_metadata`` with the mapped entries."""
@@ -332,7 +341,7 @@ def _make_augment_instance_middleware(field_map: dict[str, str], item_field: str
                 set_invocation_metadata,
             )
 
-            item = getattr(state, item_field, None) if item_field else None
+            item = getattr(state, item_field, None)
             if isinstance(item, Mapping):
                 item_map = cast("Mapping[str, Any]", item)
                 entries = {key: item_map[field_path] for key, field_path in field_map.items()}
