@@ -54,6 +54,8 @@ from .adapter import build_graph  # noqa: E402
 if TYPE_CHECKING:
     from opentelemetry.sdk.trace import ReadableSpan
 
+    from openarmature.llm.response import RuntimeConfig
+
 
 # OTel SDK 1.x makes ``set_tracer_provider`` one-shot: once a non-default
 # provider is set, subsequent calls are no-ops (the SDK logs a warning
@@ -2961,7 +2963,6 @@ async def _run_llm_payload_case(case: Mapping[str, Any]) -> None:
 
     from openarmature.graph import END, GraphBuilder
     from openarmature.llm import OpenAIProvider
-    from openarmature.llm.response import RuntimeConfig
 
     from .adapter import build_state_cls
     from .harness.llm_attribute_assertions import (
@@ -3864,7 +3865,7 @@ def _make_mock_transport(case: Mapping[str, Any]) -> Any:
     return httpx.MockTransport(_handler)
 
 
-def _build_runtime_config(config_spec: Mapping[str, Any] | None) -> Any:
+def _build_runtime_config(config_spec: Mapping[str, Any] | None) -> RuntimeConfig | None:
     """Build a RuntimeConfig from a fixture's ``calls_llm.config`` block, or
     None when absent.
     """
@@ -3894,6 +3895,18 @@ def _build_runtime_config(config_spec: Mapping[str, Any] | None) -> Any:
     return RuntimeConfig(**kwargs)
 
 
+def _require_text_content(role: object, content: object) -> str:
+    """Assert a fixture message's ``content`` is a present, non-empty string and
+    return it (the system/user roles require this).
+    """
+    # Assert with the role + value rather than coercing, so a fixture mistake
+    # surfaces on the real field instead of a downstream model ValueError.
+    assert isinstance(content, str) and content != "", (
+        f"{role} message content MUST be a present non-empty string; got {content!r}"
+    )
+    return content
+
+
 def _materialize_typed_messages(messages_spec: Sequence[Mapping[str, Any]]) -> list[Any]:
     """Build typed Message objects from a fixture's ``calls_llm.messages`` list,
     for the system / user / assistant roles the typed-event fixtures use.
@@ -3905,13 +3918,14 @@ def _materialize_typed_messages(messages_spec: Sequence[Mapping[str, Any]]) -> l
     out: list[Any] = []
     for m in messages_spec:
         role = m.get("role")
-        content = cast("str", m.get("content") or "")
+        content = m.get("content")
         if role == "system":
-            out.append(SystemMessage(content=content))
+            out.append(SystemMessage(content=_require_text_content(role, content)))
         elif role == "user":
-            out.append(UserMessage(content=content))
+            out.append(UserMessage(content=_require_text_content(role, content)))
         elif role == "assistant":
-            out.append(AssistantMessage(content=content))
+            # Assistant content is optional (tool-call-only messages carry none).
+            out.append(AssistantMessage(content=cast("str", content or "")))
         else:
             raise AssertionError(f"unsupported message role in typed-event fixture: {role!r}")
     return out
@@ -3921,11 +3935,10 @@ def _render_prompt_result(case: Mapping[str, Any], prompt_name: str) -> Any:
     """Build a PromptResult from ``prompt_backend.prompts.<name>`` rendered
     against ``render_variables``.
     """
-    import hashlib
     from datetime import UTC, datetime
 
-    from openarmature.llm import UserMessage
-    from openarmature.prompts import PromptResult
+    from openarmature.llm import Message, UserMessage
+    from openarmature.prompts import PromptResult, compute_rendered_hash
 
     # The renders_prompt: directive (064): the 5-field identity (name / version
     # / label / template_hash / rendered_hash) is what the event's active_prompt
@@ -3937,15 +3950,15 @@ def _render_prompt_result(case: Mapping[str, Any], prompt_name: str) -> Any:
     rendered = template
     for key, value in variables.items():
         rendered = rendered.replace("{{" + key + "}}", str(value)).replace("{{ " + key + " }}", str(value))
-    rendered_hash = "sha256:" + hashlib.sha256(rendered.encode("utf-8")).hexdigest()[:32]
+    messages: list[Message] = [UserMessage(content=rendered)]
     now = datetime.now(UTC)
     return PromptResult(
         name=cast("str", entry["name"]),
         version=cast("str", entry["version"]),
         label=cast("str", entry["label"]),
         template_hash=cast("str", entry["template_hash"]),
-        rendered_hash=rendered_hash,
-        messages=[UserMessage(content=rendered)],
+        rendered_hash=compute_rendered_hash(messages),
+        messages=messages,
         variables=variables,
         fetched_at=now,
         rendered_at=now,
