@@ -86,6 +86,14 @@ _LANGFUSE_FIXTURES = frozenset(
         # ``_DEFERRED_CASES`` rather than at the fixture level so the
         # four other cases run.
         "037-langfuse-trace-input-output",
+        # 035/036 — proposal 0039 caller-invocation-id -> trace.id derivation
+        # (UUID hex dashes-stripped / sha256-first-16 for a non-UUID). 059 —
+        # proposal 0052 implementation-attribution rows on trace.metadata.
+        # Wired here (the Langfuse conformance home) by the fixture-harness
+        # catch-up; previously unit-only.
+        "035-caller-invocation-id-uuid",
+        "036-caller-invocation-id-non-uuid",
+        "059-implementation-attribution-langfuse",
         # 029 + 030 stay deferred in v0.11.0:
         # - 029 (fan-out per-instance): fixture omits ``collect_field``
         #   and ``target_field`` on the fan_out cfg, plus the inner
@@ -757,6 +765,11 @@ async def _run_case(case: Mapping[str, Any]) -> None:
     caller_metadata = cast("dict[str, Any] | None", case.get("caller_metadata"))
     if caller_metadata is not None:
         invoke_kwargs["metadata"] = caller_metadata
+    # Fixtures 035/036: caller-supplied invocation_id drives the trace.id
+    # derivation (UUID hex dashes-stripped / sha256-first-16 for a non-UUID).
+    caller_invocation_id = cast("str | None", case.get("caller_invocation_id"))
+    if caller_invocation_id is not None:
+        invoke_kwargs["invocation_id"] = caller_invocation_id
 
     # Resume cases run a two-phase flow (first invoke catches expected
     # error → resume invoke completes), then assert against both traces
@@ -1237,10 +1250,29 @@ def _assert_trace(
     *,
     expected_invariants: dict[str, Any],
 ) -> None:
-    _assert_string_or_placeholder("trace.id", trace.id, expected.get("id"))
+    expected_id = expected.get("id")
+    if expected_id is not None and not _is_placeholder(expected_id):
+        # Fixtures 035/036: a LITERAL trace.id is the DERIVED Langfuse id; the
+        # in-memory recorder keys by the raw invocation_id, so bridge via the
+        # impl's langfuse_trace_id (the derivation the real SDK adapter uses).
+        from openarmature.observability.langfuse import langfuse_trace_id  # noqa: PLC0415
+
+        derived = langfuse_trace_id(trace.id)
+        assert derived == expected_id, (
+            f"trace.id: derived {derived!r} (from raw {trace.id!r}) != {expected_id!r}"
+        )
+    else:
+        _assert_string_or_placeholder("trace.id", trace.id, expected_id)
     if "name" in expected:
         _assert_string_or_placeholder("trace.name", trace.name, expected.get("name"))
-    expected_metadata = cast("dict[str, Any]", expected.get("metadata") or {})
+    expected_metadata = dict(cast("dict[str, Any]", expected.get("metadata") or {}))
+    # Fixture 036 asserts the raw invocation_id as metadata.invocation_id. The
+    # real SDK derives trace.id and preserves the raw in metadata; the in-memory
+    # recorder keeps the raw AS trace.id, so recover it from there.
+    if "invocation_id" in expected_metadata and "invocation_id" not in trace.metadata:
+        assert trace.id == expected_metadata.pop("invocation_id"), (
+            f"trace.metadata.invocation_id: raw trace.id {trace.id!r} != expected"
+        )
     _assert_metadata_subset("trace.metadata", trace.metadata, expected_metadata)
     # Proposal 0043 (§8.4.1 trace.input/output sourcing).  Fixtures that
     # opt in supply these as YAML maps; older fixtures leave them absent.
@@ -1395,6 +1427,25 @@ def _is_placeholder(value: Any) -> bool:
     return isinstance(value, str) and value.startswith("<") and value.endswith(">")
 
 
+_METADATA_MATCHER_SUBKEYS = frozenset({"harness_parameterized", "non_empty_string"})
+
+
+def _assert_metadata_matcher_subkeys(label: str, actual: Any, spec: dict[str, Any]) -> None:
+    """Fixture 059 attribution matcher sub-keys: ``non_empty_string`` (the value
+    is a non-empty string) and ``harness_parameterized`` (the value equals the
+    named harness-injected parameter, e.g. the implementation name)."""
+    if spec.get("non_empty_string") is True:
+        assert isinstance(actual, str) and actual != "", f"{label}: expected non-empty string, got {actual!r}"
+    if "harness_parameterized" in spec:
+        import openarmature  # noqa: PLC0415
+
+        params = {"implementation_name": openarmature.__implementation_name__}
+        param_name = cast("str", spec["harness_parameterized"])
+        assert actual == params.get(param_name), (
+            f"{label}: expected harness param {param_name!r}={params.get(param_name)!r}, got {actual!r}"
+        )
+
+
 def _assert_metadata_subset(
     label: str,
     actual: Mapping[str, Any],
@@ -1409,6 +1460,16 @@ def _assert_metadata_subset(
         if _is_placeholder(expected_value):
             assert isinstance(actual_value, str) and len(actual_value) > 0, (
                 f"{label}.{key}: expected placeholder {expected_value!r} match, got {actual_value!r}"
+            )
+            continue
+        if (
+            isinstance(expected_value, dict)
+            and expected_value
+            and set(cast("dict[str, Any]", expected_value)).issubset(_METADATA_MATCHER_SUBKEYS)
+        ):
+            # Fixture 059 attribution: assertion sub-keys, not a nested mapping.
+            _assert_metadata_matcher_subkeys(
+                f"{label}.{key}", actual_value, cast("dict[str, Any]", expected_value)
             )
             continue
         if isinstance(expected_value, dict) and isinstance(actual_value, dict):
