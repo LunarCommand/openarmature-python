@@ -3862,8 +3862,8 @@ def _assert_langfuse_generation_fields(
         )
     if exp.get("input_is_raw_string_with_marker") is True:
         # Over-cap input falls through to the raw truncated string + §5.5.5 marker.
-        assert isinstance(match.input, str) and "[truncated" in match.input, (
-            f"{exp_name!r}: expected a raw truncated string with marker; got {match.input!r}"
+        assert isinstance(match.input, str) and re.search(r"\[truncated, \d+ bytes total\]", match.input), (
+            f"{exp_name!r}: expected a raw truncated string with the marker; got {match.input!r}"
         )
 
 
