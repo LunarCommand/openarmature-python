@@ -94,6 +94,11 @@ _SUPPORTED_FIXTURES = frozenset(
         # v0.42.0 — proposal 0050 call-level-retry per-attempt LLM span
         # surface. Single-attempt default: one span, attempt_index 0.
         "057-llm-attempt-index-single-attempt-default",
+        # proposal 0048 get_invocation_metadata read access: 043 roundtrip,
+        # 045 retry-scoping, 046 outside-invocation. 044 (fan-out) is a follow-up.
+        "043-get-invocation-metadata-roundtrip",
+        "045-get-invocation-metadata-retry-scoping",
+        "046-get-invocation-metadata-outside-invocation",
         "001-otel-basic-trace",
         "002-otel-subgraph-hierarchy",
         "003-otel-error-status",
@@ -316,13 +321,10 @@ _UNIT_TESTED_FIXTURES: dict[str, str] = {
         # conformance runner test_observability_langfuse.py -- see
         # _LANGFUSE_HARNESS_FIXTURES, NOT here (they are not unit-only).
         (
-            (
-                "043-get-invocation-metadata-roundtrip",
-                "044-get-invocation-metadata-fan-out-scoping",
-                "045-get-invocation-metadata-retry-scoping",
-                "046-get-invocation-metadata-outside-invocation",
-            ),
-            "proposal 0048 get_invocation_metadata; covered by test_observability_metadata.py",
+            ("044-get-invocation-metadata-fan-out-scoping",),
+            "proposal 0048 get_invocation_metadata fan-out scoping; covered by "
+            "test_observability_metadata.py (043/045/046 now wired into "
+            "_SUPPORTED_FIXTURES; 044's fan-out collection is a follow-up)",
         ),
         # Fixture-harness catch-up tier 1 wired the rest of the 0057/0058
         # family into _SUPPORTED_FIXTURES; these three stay here, each blocked
@@ -576,6 +578,12 @@ async def test_observability_fixture(fixture_path: Path) -> None:
         "098-langfuse-tool-observation",
     }:
         await _run_tool_fixture(spec)
+    elif fixture_id in {
+        "043-get-invocation-metadata-roundtrip",
+        "045-get-invocation-metadata-retry-scoping",
+        "046-get-invocation-metadata-outside-invocation",
+    }:
+        await _run_get_invocation_metadata_fixture(spec)
     else:
         raise AssertionError(f"no driver for supported fixture {fixture_id!r}")
 
@@ -1388,6 +1396,180 @@ async def _run_fixture_028(spec: Mapping[str, Any]) -> None:
                 )
         except AssertionError as e:
             raise AssertionError(f"case {case_name!r}: {e}") from e
+
+
+# ---------------------------------------------------------------------------
+# Proposal 0048 read access: get_invocation_metadata (fixtures 043 / 045 / 046).
+# Hand-built -- the cross-cap adapter does not model augment_metadata /
+# capture_invocation_metadata_into / retry_middleware / direct_call. Mirrors the
+# unit tests in test_observability_metadata.py.
+# ---------------------------------------------------------------------------
+
+
+class _MetadataRetryTransient(Exception):
+    # The default retry classifier treats provider_rate_limit as retryable; this
+    # is the test's "transient_marker_error" for fixture 045.
+    category = "provider_rate_limit"
+
+
+# Keys _apply_metadata_directives accepts: the three handled directives plus the
+# structural keys it legitimately skips (per-attempt scaffolding + the
+# node-level retry directives consumed by _make_metadata_node_body). Any other
+# key raises, so a typo or a new directive fails the harness loudly.
+_METADATA_DIRECTIVE_KEYS = frozenset(
+    {
+        "augment_metadata",
+        "capture_invocation_metadata_into",
+        "raises",
+        "attempt",
+        "succeeds",
+        "retry_middleware",
+        "per_attempt_behavior",
+    }
+)
+
+
+def _apply_metadata_directives(
+    directives: Mapping[str, Any], types_seen: dict[str, type]
+) -> tuple[dict[str, Any], bool]:
+    """Run a node's (or per-attempt's) in-node metadata directives, returning the
+    resulting state update and whether the node should then raise."""
+    # Directives run IN KEY ORDER -- 043 augments then captures, 045 attempt 1
+    # captures then augments, and the YAML key order encodes that. The capture
+    # records the read's type so the immutability invariant can verify it was a
+    # MappingProxyType. ``raises`` is terminal (a real node body that raises runs
+    # nothing after), so stop at it rather than processing later directives.
+    from openarmature.observability.metadata import (  # noqa: PLC0415
+        get_invocation_metadata,
+        set_invocation_metadata,
+    )
+
+    update: dict[str, Any] = {}
+    should_raise = False
+    for key, val in directives.items():
+        assert key in _METADATA_DIRECTIVE_KEYS, f"unrecognized metadata directive {key!r}"
+        if key == "augment_metadata":
+            set_invocation_metadata(**cast("dict[str, Any]", val))
+        elif key == "capture_invocation_metadata_into":
+            read = get_invocation_metadata()
+            types_seen[cast("str", val)] = type(read)
+            update[cast("str", val)] = dict(read)
+        elif key == "raises":
+            should_raise = True
+            break
+    return update, should_raise
+
+
+def _make_metadata_node_body(node_spec: Mapping[str, Any], types_seen: dict[str, type]) -> Any:
+    """Build a node body that runs the node's metadata directives -- attempt-keyed
+    when the node declares ``per_attempt_behavior`` (045), else once per call."""
+    per_attempt = cast("list[dict[str, Any]] | None", node_spec.get("per_attempt_behavior"))
+    if per_attempt is not None:
+        by_attempt = {int(b["attempt"]): b for b in per_attempt}
+        attempts: list[int] = []
+
+        async def _retry_body(_s: Any) -> dict[str, Any]:
+            n = len(attempts)
+            attempts.append(n)
+            update, should_raise = _apply_metadata_directives(by_attempt.get(n, {}), types_seen)
+            if should_raise:
+                raise _MetadataRetryTransient()
+            return update
+
+        return _retry_body
+
+    async def _body(_s: Any) -> dict[str, Any]:
+        update, should_raise = _apply_metadata_directives(node_spec, types_seen)
+        if should_raise:
+            raise _MetadataRetryTransient()
+        return update
+
+    return _body
+
+
+async def _run_get_invocation_metadata_fixture(spec: Mapping[str, Any]) -> None:
+    """Drive every case of a get_invocation_metadata fixture (043 / 045 / 046)."""
+    for case in cast("list[dict[str, Any]]", spec["cases"]):
+        await _run_get_invocation_metadata_case(case)
+
+
+async def _run_get_invocation_metadata_case(case: Mapping[str, Any]) -> None:
+    """Assert one case: a bare get_invocation_metadata() call (046), or a graph
+    whose final_state captures the in-node reads (043 / 045)."""
+    from types import MappingProxyType  # noqa: PLC0415
+
+    from openarmature.observability.metadata import get_invocation_metadata  # noqa: PLC0415
+
+    expected = cast("dict[str, Any]", case["expected"])
+    invariants = cast("dict[str, Any]", expected.get("invariants") or {})
+
+    # Fixture 046: a bare get_invocation_metadata() call outside any invocation.
+    direct_call = cast("dict[str, Any] | None", case.get("direct_call"))
+    if direct_call is not None:
+        result = get_invocation_metadata()
+        dc = cast("dict[str, Any]", expected["direct_call_result"])
+        assert dict(result) == cast("dict[str, Any]", dc.get("value") or {}), (
+            f"direct_call value {dict(result)!r} != {dc.get('value')!r}"
+        )
+        if dc.get("type") == "immutable_mapping":
+            assert isinstance(result, MappingProxyType), "direct_call result is not an immutable mapping"
+        # ``exception: null`` -- reaching here means the call did not raise.
+        return
+
+    # Fixtures 043 / 045: build the graph, invoke with caller metadata, assert
+    # final_state field equality + the immutability invariant.
+    from openarmature.graph import END, GraphBuilder  # noqa: PLC0415
+    from openarmature.graph.middleware import RetryConfig, RetryMiddleware  # noqa: PLC0415
+
+    from .adapter import build_state_cls  # noqa: PLC0415
+
+    types_seen: dict[str, type] = {}
+    state_cls = build_state_cls("MetadataFixtureState", cast("dict[str, Any]", case["state"]["fields"]))
+    builder = GraphBuilder(state_cls)
+    for node_name, node_spec_any in cast("dict[str, Any]", case["nodes"]).items():
+        node_spec = cast("dict[str, Any]", node_spec_any)
+        body = _make_metadata_node_body(node_spec, types_seen)
+        retry_cfg = cast("dict[str, Any] | None", node_spec.get("retry_middleware"))
+        if retry_cfg is not None:
+            # Fail loud if the fixture grows a semantics-bearing knob the runner
+            # doesn't model, rather than silently dropping it.
+            unexpected = set(retry_cfg) - {"max_attempts", "classifier"}
+            assert not unexpected, f"retry_middleware: unhandled keys {sorted(unexpected)}"
+            # The fixture's abstract ``classifier`` (transient_marker) maps to the
+            # default retry classifier: _MetadataRetryTransient carries the
+            # provider_rate_limit category, which that classifier retries. Only
+            # max_attempts is read off the directive.
+            builder.add_node(
+                node_name,
+                body,
+                middleware=[
+                    RetryMiddleware(
+                        RetryConfig(max_attempts=int(retry_cfg["max_attempts"]), backoff=lambda _i: 0.0)
+                    )
+                ],
+            )
+        else:
+            builder.add_node(node_name, body)
+    for edge in cast("list[dict[str, str]]", case["edges"]):
+        target = END if edge["to"] == "END" else edge["to"]
+        builder.add_edge(edge["from"], target)
+    builder.set_entry(cast("str", case["entry"]))
+    graph = builder.compile()
+
+    final = await graph.invoke(
+        state_cls(**cast("dict[str, Any]", case.get("initial_state") or {})),
+        metadata=cast("dict[str, Any] | None", case.get("caller_metadata")),
+    )
+    await graph.drain()
+
+    for field_name, expected_value in cast("dict[str, Any]", expected.get("final_state") or {}).items():
+        actual = getattr(final, field_name)
+        assert actual == expected_value, f"final_state.{field_name}: {actual!r} != {expected_value!r}"
+
+    if invariants.get("read_returns_immutable_mapping"):
+        assert types_seen and all(t is MappingProxyType for t in types_seen.values()), (
+            f"read_returns_immutable_mapping: captured read types {types_seen!r} not all MappingProxyType"
+        )
 
 
 def _normalize_attr_value(value: Any) -> Any:
