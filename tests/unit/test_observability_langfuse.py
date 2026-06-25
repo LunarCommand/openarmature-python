@@ -1195,6 +1195,57 @@ async def test_parallel_branches_node_renders_no_duplicate_observation() -> None
         assert (branch_obs[0].metadata or {}).get("branch_name") == branch
 
 
+async def test_parallel_branches_subgraph_branch_one_dispatch_observation() -> None:
+    # A subgraph branch with multiple inner nodes synthesizes exactly ONE
+    # per-branch dispatch observation; both inner nodes parent under it (not a
+    # fresh dispatch per inner started event). Guards the proposal-0044
+    # synthesis idempotency.
+    from openarmature.graph import BranchSpec
+
+    class _MultiBranchState(State):
+        a: str = ""
+        b: str = ""
+
+    class _MultiParentState(State):
+        out: str = ""
+
+    async def _node_a(_s: _MultiBranchState) -> dict[str, Any]:
+        return {"a": "a"}
+
+    async def _node_b(_s: _MultiBranchState) -> dict[str, Any]:
+        return {"b": "b"}
+
+    branch = (
+        GraphBuilder(_MultiBranchState)
+        .add_node("node_a", _node_a)
+        .add_node("node_b", _node_b)
+        .add_edge("node_a", "node_b")
+        .add_edge("node_b", END)
+        .set_entry("node_a")
+        .compile()
+    )
+    graph = (
+        GraphBuilder(_MultiParentState)
+        .add_parallel_branches_node(
+            "dispatch",
+            branches={"only": BranchSpec(subgraph=branch, outputs={"out": "b"})},
+        )
+        .add_edge("dispatch", END)
+        .set_entry("dispatch")
+        .compile()
+    )
+    graph, client, _ = _attach(graph)
+    await graph.invoke(_MultiParentState())
+    await graph.drain()
+
+    trace = next(iter(client.traces.values()))
+    branch_obs = [o for o in trace.observations if o.name == "only"]
+    assert len(branch_obs) == 1, f"expected one per-branch observation, got {len(branch_obs)}"
+    inner = [o for o in trace.observations if o.name in ("node_a", "node_b")]
+    assert len(inner) == 2, f"expected two inner observations, got {len(inner)}"
+    assert all(o.parent_observation_id == branch_obs[0].id for o in inner)
+
+
 # Spec §8.4.1 / proposal 0052: implementation attribution rows on
 # every Langfuse Trace. The two rows source from the §5.1
 # attributes; the always-emit invariant inherits from §5.1 so the
