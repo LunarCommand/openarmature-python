@@ -1412,6 +1412,23 @@ class _MetadataRetryTransient(Exception):
     category = "provider_rate_limit"
 
 
+# Keys _apply_metadata_directives accepts: the three handled directives plus the
+# structural keys it legitimately skips (per-attempt scaffolding + the
+# node-level retry directives consumed by _make_metadata_node_body). Any other
+# key raises, so a typo or a new directive fails the harness loudly.
+_METADATA_DIRECTIVE_KEYS = frozenset(
+    {
+        "augment_metadata",
+        "capture_invocation_metadata_into",
+        "raises",
+        "attempt",
+        "succeeds",
+        "retry_middleware",
+        "per_attempt_behavior",
+    }
+)
+
+
 def _apply_metadata_directives(
     directives: Mapping[str, Any], types_seen: dict[str, type]
 ) -> tuple[dict[str, Any], bool]:
@@ -1430,6 +1447,7 @@ def _apply_metadata_directives(
     update: dict[str, Any] = {}
     should_raise = False
     for key, val in directives.items():
+        assert key in _METADATA_DIRECTIVE_KEYS, f"unrecognized metadata directive {key!r}"
         if key == "augment_metadata":
             set_invocation_metadata(**cast("dict[str, Any]", val))
         elif key == "capture_invocation_metadata_into":
@@ -1513,6 +1531,10 @@ async def _run_get_invocation_metadata_case(case: Mapping[str, Any]) -> None:
         body = _make_metadata_node_body(node_spec, types_seen)
         retry_cfg = cast("dict[str, Any] | None", node_spec.get("retry_middleware"))
         if retry_cfg is not None:
+            # Fail loud if the fixture grows a semantics-bearing knob the runner
+            # doesn't model, rather than silently dropping it.
+            unexpected = set(retry_cfg) - {"max_attempts", "classifier"}
+            assert not unexpected, f"retry_middleware: unhandled keys {sorted(unexpected)}"
             # The fixture's abstract ``classifier`` (transient_marker) maps to the
             # default retry classifier: _MetadataRetryTransient carries the
             # provider_rate_limit category, which that classifier retries. Only
