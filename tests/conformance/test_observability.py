@@ -1590,9 +1590,10 @@ async def _build_and_invoke_metadata_fan_out(case: Mapping[str, Any], types_seen
     from .adapter import build_state_cls  # noqa: PLC0415
 
     nodes = cast("dict[str, Any]", case["nodes"])
-    fan_out_name, fan_out_spec = next(
-        (n, cast("dict[str, Any]", s)) for n, s in nodes.items() if "fan_out" in cast("dict[str, Any]", s)
-    )
+    fan_out_names = [n for n, s in nodes.items() if "fan_out" in cast("dict[str, Any]", s)]
+    assert len(fan_out_names) == 1, f"044 build expects exactly one fan-out node; got {fan_out_names}"
+    fan_out_name = fan_out_names[0]
+    fan_out_spec = cast("dict[str, Any]", nodes[fan_out_name])
     fan_out_cfg = cast("dict[str, Any]", fan_out_spec["fan_out"])
     items_field = cast("str", fan_out_cfg["items_field"])
     augment_map = cast("dict[str, str]", fan_out_cfg.get("augment_metadata_from_field") or {})
@@ -1616,8 +1617,9 @@ async def _build_and_invoke_metadata_fan_out(case: Mapping[str, Any], types_seen
     )
     inode_name, inode_spec_any = next(iter(inner_nodes.items()))
     inode_spec = cast("dict[str, Any]", inode_spec_any)
-    assert "capture_invocation_metadata_into" in inode_spec, (
-        f"fan-out inner node {inode_name!r} must declare capture_invocation_metadata_into"
+    assert set(inode_spec) == {"capture_invocation_metadata_into"}, (
+        f"fan-out inner node {inode_name!r} must declare only capture_invocation_metadata_into; "
+        f"got {sorted(inode_spec)}"
     )
     outer_target_field = cast("str", inode_spec["capture_invocation_metadata_into"])
     inner_builder.add_node(inode_name, _make_metadata_capture_body(inner_capture_field, types_seen))
