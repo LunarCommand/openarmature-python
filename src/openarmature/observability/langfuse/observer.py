@@ -1023,16 +1023,19 @@ class LangfuseObserver:
                 and (prefix + (str(event.fan_out_index),)) in inv_state.fan_out_instance_observations
             ):
                 continue
-            # Detached subgraph: detached_subgraphs holds bare node names, so
-            # match on prefix[-1] (the node-name segment) at any depth (at depth 1
-            # this coincides with prefix[0], so the depth-1 behavior is unchanged).
-            if prefix[-1] in self.detached_subgraphs:
+            # Detached subgraph: kept top-level (depth == 1). _trace_id_for routes
+            # detached events by namespace[:1], so a nested detached unit would
+            # partially detach (its dispatch in the new Trace, inner nodes in the
+            # main one). Nested-detached support rides with the deferred
+            # nested-dispatch-keying fix that generalizes _trace_id_for too.
+            if depth == 1 and prefix[0] in self.detached_subgraphs:
                 self._open_detached_subgraph_trace(inv_state, correlation_id, prefix, event)
                 continue
             # Detached fan-out: the fan-out instance gets its own Trace per spec
             # §8.5. The fan-out node's Span observation in the parent Trace
-            # already exists; the detached dispatch goes into the new Trace.
-            if event.fan_out_index is not None and prefix[-1] in self.detached_fan_outs:
+            # already exists; the detached dispatch goes into the new Trace. Kept
+            # top-level for the same reason as detached subgraphs above.
+            if depth == 1 and event.fan_out_index is not None and prefix[0] in self.detached_fan_outs:
                 self._open_detached_fan_out_instance_trace(inv_state, correlation_id, prefix, event)
                 continue
             # Non-detached fan-out: synthesize the per-instance dispatch
