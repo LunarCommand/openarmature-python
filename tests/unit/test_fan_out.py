@@ -679,23 +679,25 @@ async def test_instance_middleware_sees_fan_out_index() -> None:
     async def compute(state: WorkerState) -> Mapping[str, Any]:
         return {"result": state.item}
 
-    inner = (
-        GraphBuilder(WorkerState).add_node("compute", compute).add_edge("compute", END).set_entry("compute")
-    ).compile()
-    parent = (
-        GraphBuilder(InstanceMwParentState)
-        .add_fan_out_node(
-            "process",
-            subgraph=inner,
-            items_field="items",
-            item_field="item",
-            collect_field="result",
-            target_field="results",
-            instance_middleware=[_RecordIndexMW()],
-        )
-        .add_edge("process", END)
-        .set_entry("process")
-    ).compile()
+    inner_builder: GraphBuilder[WorkerState] = GraphBuilder(WorkerState)
+    inner_builder.set_entry("compute")
+    inner_builder.add_node("compute", compute)
+    inner_builder.add_edge("compute", END)
+    inner = inner_builder.compile()
+
+    parent_builder: GraphBuilder[InstanceMwParentState] = GraphBuilder(InstanceMwParentState)
+    parent_builder.set_entry("process")
+    parent_builder.add_fan_out_node(
+        "process",
+        subgraph=inner,
+        items_field="items",
+        item_field="item",
+        collect_field="result",
+        target_field="results",
+        instance_middleware=[_RecordIndexMW()],
+    )
+    parent_builder.add_edge("process", END)
+    parent = parent_builder.compile()
 
     await parent.invoke(InstanceMwParentState(items=[10, 20, 30]))
     await parent.drain()
@@ -722,24 +724,26 @@ async def test_instance_middleware_lineage_reset_on_failure() -> None:
     async def boom(_state: WorkerState) -> Mapping[str, Any]:
         raise RuntimeError("boom")
 
-    inner = (
-        GraphBuilder(WorkerState).add_node("boom", boom).add_edge("boom", END).set_entry("boom")
-    ).compile()
-    parent = (
-        GraphBuilder(InstanceMwParentState)
-        .add_fan_out_node(
-            "process",
-            subgraph=inner,
-            items_field="items",
-            item_field="item",
-            collect_field="result",
-            target_field="results",
-            instance_middleware=[_RecordMW()],
-            concurrency=1,
-        )
-        .add_edge("process", END)
-        .set_entry("process")
-    ).compile()
+    inner_builder: GraphBuilder[WorkerState] = GraphBuilder(WorkerState)
+    inner_builder.set_entry("boom")
+    inner_builder.add_node("boom", boom)
+    inner_builder.add_edge("boom", END)
+    inner = inner_builder.compile()
+
+    parent_builder: GraphBuilder[InstanceMwParentState] = GraphBuilder(InstanceMwParentState)
+    parent_builder.set_entry("process")
+    parent_builder.add_fan_out_node(
+        "process",
+        subgraph=inner,
+        items_field="items",
+        item_field="item",
+        collect_field="result",
+        target_field="results",
+        instance_middleware=[_RecordMW()],
+        concurrency=1,
+    )
+    parent_builder.add_edge("process", END)
+    parent = parent_builder.compile()
 
     with pytest.raises(NodeException):
         await parent.invoke(InstanceMwParentState(items=[1, 2]))
