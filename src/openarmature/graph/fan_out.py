@@ -32,9 +32,19 @@ from __future__ import annotations
 
 import asyncio
 import time
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from contextlib import AbstractContextManager, contextmanager, nullcontext
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal, cast
+
+from openarmature.observability.correlation import (
+    _reset_branch_name_chain,
+    _reset_fan_out_index,
+    _reset_fan_out_index_chain,
+    _set_branch_name_chain,
+    _set_fan_out_index,
+    _set_fan_out_index_chain,
+)
 
 from .errors import (
     FanOutEmpty,
@@ -55,6 +65,25 @@ if TYPE_CHECKING:
 # accepts the parent's pre-fan-out state snapshot and returns an int.
 CountResolver = Callable[[Any], int]
 ConcurrencyResolver = Callable[[Any], int | None]
+
+
+@contextmanager
+def _bind_instance_lineage(child_context: _InvocationContext) -> Iterator[None]:
+    """Bind the fan-out lineage ContextVars (the instance index and the
+    per-depth index / branch chains) to ``child_context`` for the duration of
+    the ``with`` block, resetting them on exit."""
+    # compiled.py binds these per-node, inside the inner subgraph; the
+    # instance_middleware chain runs outside that, so current_fan_out_index()
+    # and set_invocation_metadata's lineage view would otherwise be unset there.
+    fan_out_token = _set_fan_out_index(child_context.fan_out_index)
+    fan_out_chain_token = _set_fan_out_index_chain(child_context.fan_out_index_chain)
+    branch_chain_token = _set_branch_name_chain(child_context.branch_name_chain)
+    try:
+        yield
+    finally:
+        _reset_branch_name_chain(branch_chain_token)
+        _reset_fan_out_index_chain(fan_out_chain_token)
+        _reset_fan_out_index(fan_out_token)
 
 
 @dataclass(frozen=True)
@@ -291,8 +320,17 @@ class FanOutNode[ParentT: State, ChildT: State]:
                 return _extract_instance_partial(cfg, final_inst_state)
 
             chain: ChainCall = compose_chain(cfg.instance_middleware, innermost)
+            # Bind the lineage ContextVars around the chain only when there is
+            # instance middleware to read them; with none, the inner subgraph's
+            # nodes bind them and this level would be a redundant no-op. The
+            # context manager resets before the error-handling below so that
+            # path's saves keep their existing context.
+            lineage: AbstractContextManager[None] = (
+                _bind_instance_lineage(child_context) if cfg.instance_middleware else nullcontext()
+            )
             try:
-                partial = await chain(instance_state)
+                with lineage:
+                    partial = await chain(instance_state)
             except Exception as exc:
                 if cfg.error_policy == "collect":
                     # Per §10.11.2 collect mode: the failure becomes a

@@ -654,6 +654,103 @@ async def test_instance_middleware_retry_recovers_per_instance() -> None:
     assert instance_attempts == {7: 2, 9: 2}
 
 
+async def test_instance_middleware_sees_fan_out_index() -> None:
+    # An instance_middleware that reads current_fan_out_index() / its chain
+    # observes the instance's own index: the engine sets the lineage ContextVars
+    # around the middleware chain, not only inside node bodies. (Regression --
+    # the index was None here when only compiled.py set it, deeper in node
+    # execution, so the middleware wrapping the inner subgraph saw nothing.)
+    from openarmature.observability.correlation import (
+        current_fan_out_index,
+        current_fan_out_index_chain,
+    )
+
+    seen_index: dict[int, int | None] = {}
+    seen_chain: dict[int, tuple[int | None, ...]] = {}
+
+    class _RecordIndexMW:
+        async def __call__(self, state: WorkerState, next_: Any, /) -> Any:
+            # Key by the item so each instance is identifiable without relying
+            # on the index under test.
+            seen_index[state.item] = current_fan_out_index()
+            seen_chain[state.item] = current_fan_out_index_chain()
+            return await next_(state)
+
+    async def compute(state: WorkerState) -> Mapping[str, Any]:
+        return {"result": state.item}
+
+    inner = (
+        GraphBuilder(WorkerState).add_node("compute", compute).add_edge("compute", END).set_entry("compute")
+    ).compile()
+    parent = (
+        GraphBuilder(InstanceMwParentState)
+        .add_fan_out_node(
+            "process",
+            subgraph=inner,
+            items_field="items",
+            item_field="item",
+            collect_field="result",
+            target_field="results",
+            instance_middleware=[_RecordIndexMW()],
+        )
+        .add_edge("process", END)
+        .set_entry("process")
+    ).compile()
+
+    await parent.invoke(InstanceMwParentState(items=[10, 20, 30]))
+    await parent.drain()
+
+    # items 10/20/30 are fan-out indices 0/1/2 in order; the chain carries the
+    # instance index at the leaf.
+    assert seen_index == {10: 0, 20: 1, 30: 2}
+    assert seen_chain == {10: (0,), 20: (1,), 30: (2,)}
+
+
+async def test_instance_middleware_lineage_reset_on_failure() -> None:
+    # The lineage ContextVars reset even when an instance fails: the binding's
+    # finally runs on the exception path, so a failed instance leaks nothing
+    # into the parent scope.
+    from openarmature.observability.correlation import current_fan_out_index
+
+    seen: list[int | None] = []
+
+    class _RecordMW:
+        async def __call__(self, state: WorkerState, next_: Any, /) -> Any:
+            seen.append(current_fan_out_index())
+            return await next_(state)
+
+    async def boom(_state: WorkerState) -> Mapping[str, Any]:
+        raise RuntimeError("boom")
+
+    inner = (
+        GraphBuilder(WorkerState).add_node("boom", boom).add_edge("boom", END).set_entry("boom")
+    ).compile()
+    parent = (
+        GraphBuilder(InstanceMwParentState)
+        .add_fan_out_node(
+            "process",
+            subgraph=inner,
+            items_field="items",
+            item_field="item",
+            collect_field="result",
+            target_field="results",
+            instance_middleware=[_RecordMW()],
+            concurrency=1,
+        )
+        .add_edge("process", END)
+        .set_entry("process")
+    ).compile()
+
+    with pytest.raises(NodeException):
+        await parent.invoke(InstanceMwParentState(items=[1, 2]))
+    await parent.drain()
+
+    # The middleware saw the instance index (the bind happened) ...
+    assert seen and all(idx is not None for idx in seen)
+    # ... and the bind's finally reset it despite the failure.
+    assert current_fan_out_index() is None
+
+
 # ---------------------------------------------------------------------------
 # Fan-in determinism under nondeterministic completion order (§9.4)
 # ---------------------------------------------------------------------------
