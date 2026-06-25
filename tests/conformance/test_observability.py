@@ -293,6 +293,7 @@ _LANGFUSE_HARNESS_FIXTURES: frozenset[str] = frozenset(
         "024-langfuse-prompt-linkage",
         "027-langfuse-caller-supplied-metadata",
         "029-caller-metadata-fan-out-per-instance",
+        "030-caller-metadata-parallel-branches-per-branch",
         "031-langfuse-subgraph-span-hierarchy",
         "032-langfuse-fan-out-per-instance-spans",
         "033-langfuse-detached-trace-mode",
@@ -313,14 +314,7 @@ _UNIT_TESTED_FIXTURES: dict[str, str] = {
     for fixture_ids, reason in (
         # The Langfuse-mapping fixtures are fixture-tested by the sibling
         # conformance runner test_observability_langfuse.py -- see
-        # _LANGFUSE_HARNESS_FIXTURES, NOT here (they are not unit-only). 030 stays
-        # below: deferred in that file (needs a LangfuseObserver per-branch
-        # dispatch-span src change), unit-tested for now.
-        (
-            ("030-caller-metadata-parallel-branches-per-branch",),
-            "proposal 0040 per-branch caller metadata; covered by "
-            "test_observability_otel.py; deferred in test_observability_langfuse.py",
-        ),
+        # _LANGFUSE_HARNESS_FIXTURES, NOT here (they are not unit-only).
         (
             (
                 "043-get-invocation-metadata-roundtrip",

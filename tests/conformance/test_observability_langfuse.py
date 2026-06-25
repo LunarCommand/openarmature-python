@@ -103,16 +103,11 @@ _LANGFUSE_FIXTURES = frozenset(
         # collected results -- and augment_metadata_from_field drives the
         # per-instance set_invocation_metadata.
         "029-caller-metadata-fan-out-per-instance",
-        # 030 (parallel-branches per-branch) stays deferred: a SRC gap, not a
-        # harness one. The expected trace needs a per-branch dispatch-span
-        # observation (inner branch spans parent under it), which §4.3 + §8.4.2
-        # (proposal 0042 observation.metadata.branch_name) + proposal 0044
-        # mandate. The OTel observer synthesizes it
-        # (parallel_branches_branch_spans); the LangfuseObserver does not yet
-        # (0044 shipped OTel-only in v0.11.0). Un-defers once that synthesis is
-        # ported to the Langfuse observer (a src change). Sibling-skip behavior
-        # IS verified by the OTel unit test
-        # ``test_metadata_augmentation_in_parallel_branches_skips_sibling``.
+        # 030 (parallel-branches per-branch): the LangfuseObserver now
+        # synthesizes the per-branch dispatch-span observation (§4.3 + §8.4.2 +
+        # proposal 0044) that inner branch nodes parent under, ported from the
+        # OTel observer's parallel_branches_branch_spans machinery.
+        "030-caller-metadata-parallel-branches-per-branch",
         # 039 (nested-lineage augmentation, proposal 0045) stays deferred: the
         # three cases need harness extensions the existing primitives lack.
         # Cases 1 + 3 (nested fan-out / fan-out-in-serial) need the fan-out
