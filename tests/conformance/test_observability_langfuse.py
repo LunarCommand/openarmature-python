@@ -18,6 +18,7 @@ from __future__ import annotations
 import copy
 import json
 from collections.abc import Callable, Mapping, Sequence
+from contextvars import ContextVar
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
@@ -26,7 +27,7 @@ import httpx
 import pytest
 import yaml
 
-from openarmature.graph import END, GraphBuilder
+from openarmature.graph import END, ExplicitMapping, GraphBuilder
 from openarmature.llm import OpenAIProvider
 from openarmature.llm.response import RuntimeConfig
 from openarmature.observability.langfuse import (
@@ -108,17 +109,14 @@ _LANGFUSE_FIXTURES = frozenset(
         # proposal 0044) that inner branch nodes parent under, ported from the
         # OTel observer's parallel_branches_branch_spans machinery.
         "030-caller-metadata-parallel-branches-per-branch",
-        # 039 (nested-lineage augmentation, proposal 0045) stays deferred: the
-        # three cases need harness extensions the existing primitives lack.
-        # Cases 1 + 3 (nested fan-out / fan-out-in-serial) need the fan-out
-        # augment middleware to read items_field from the executing subgraph's
-        # RUNTIME state (the outer instance's threaded inner_seed), not the
-        # build-time initial_state the current _make_augment_instance_middleware
-        # captures. Case 2 (pb-inside-fan-out) needs a new
-        # augment_metadata_from_outer_item factory AND depends on 030's
-        # per-branch dispatch span landing first. 0045's contract IS exercised
-        # at unit level via the OTel observer's
-        # ``test_nested_fan_out_augmentation_reaches_outer_instance_dispatch_span``.
+        # 039 (nested-lineage augmentation, proposal 0045): the LangfuseObserver
+        # gained prefix-general fan-out-instance dispatch (so a fan-out under a
+        # serial wrapper parents correctly) and skips shared-parent NODEs in the
+        # augmentation walk (0045 §3.4 MUST-NOT). Case 3 (fan-out in a serial
+        # subgraph) is wired via the dedicated hand-built _build_039_graph runner;
+        # cases 1 + 2 are TEMPORARILY deferred via _DEFERRED_CASES pending the
+        # shared nested-dispatch-keying fix (see that note).
+        "039-nested-lineage-augmentation",
     }
 )
 
@@ -127,10 +125,24 @@ _LANGFUSE_FIXTURES = frozenset(
 # ``(fixture_stem, case_name)``.  The case-loop in the runner ``continue``s
 # past matching cases — NOT ``pytest.skip``, which would skip the whole
 # fixture's test invocation and hide the surrounding cases that DO run.
-# Currently empty; the harness covers every activated case.  Kept as a
-# named hook so future per-case deferrals don't need to re-introduce the
-# pattern.
-_DEFERRED_CASES: frozenset[tuple[str, str]] = frozenset()
+_DEFERRED_CASES: frozenset[tuple[str, str]] = frozenset(
+    {
+        # 039 cases 1 + 2 are TEMPORARILY deferred pending one deeper observer
+        # fix shared by both: dispatch keys
+        # (fan_out_instance_observations / parallel_branches_branch_spans) are
+        # namespace-local and do NOT encode the enclosing fan-out instance, so a
+        # dispatch INSIDE an outer fan-out instance collides across instances --
+        # case 1's inner instance dispatch and case 2's per-branch dispatch both
+        # reparent the second outer instance's events under the first's dispatch.
+        # The fix (thread the enclosing fan_out_index_chain / branch_name_chain
+        # into the dispatch keys, across synthesis + resolution + the
+        # augmentation walk, in both observers) is its own focused effort + spec
+        # coordination. Case 3 (single fan-out level under a serial wrapper) does
+        # not nest dispatches, so it is wired. See _build_039_graph.
+        ("039-nested-lineage-augmentation", "inner_fan_out_augmenter_propagates_to_outer_dispatch_span"),
+        ("039-nested-lineage-augmentation", "parallel_branch_augmenter_propagates_to_outer_fan_out_instance"),
+    }
+)
 
 
 # Mocks the spec fixture 037 references for ``trace_input_from_state`` /
@@ -469,11 +481,11 @@ async def test_langfuse_fixture(fixture_path: Path) -> None:
             if fixture_inner_subgraphs is not None and "inner_subgraphs" not in case:
                 case["inner_subgraphs"] = fixture_inner_subgraphs
             try:
-                await _run_case(case)
+                await _run_case(case, fixture_stem=fixture_stem)
             except AssertionError as e:
                 raise AssertionError(f"case {case_name!r}: {e}") from e
     else:
-        await _run_case(spec)
+        await _run_case(spec, fixture_stem=fixture_stem)
 
 
 def _has_topology_constructs(case: Mapping[str, Any]) -> bool:
@@ -640,6 +652,151 @@ def _build_inner_subgraph_with_llm(
     return builder.compile()
 
 
+# Fixture 039 (nested-lineage augmentation) declares nested fan-out graphs the
+# generic cross-cap adapter can't construct (a fan-out inside a subgraph wrapper
+# / another fan-out, and a per-item sub-field as the inner fan-out's items
+# source). Each case is hand-built here against the engine's GraphBuilder --
+# mirroring the dedicated 044 builder on the OTel side -- then driven through the
+# shared observer + assertion path. The expected langfuse_trace in the YAML
+# stays the oracle.
+_FIXTURE_039 = "039-nested-lineage-augmentation"
+
+
+def _build_039_graph(
+    case: Mapping[str, Any],
+    *,
+    provider: OpenAIProvider | None,
+    prompt_manager: PromptManager | None,
+) -> tuple[Any, Any]:
+    """Dispatch a 039 case to its hand-built graph; return (graph, factory)."""
+    name = cast("str", case.get("name"))
+    if name == "fan_out_in_serial_subgraph_augmenter_propagates_to_wrapper_span":
+        return _build_039_case3(case, provider=provider, prompt_manager=prompt_manager)
+    raise NotImplementedError(f"039 case not yet wired: {name!r}")
+
+
+def _build_039_case3(
+    case: Mapping[str, Any],
+    *,
+    provider: OpenAIProvider | None,
+    prompt_manager: PromptManager | None,
+) -> tuple[Any, Any]:
+    # Case 3: a serial subgraph wrapper (`wrap`) descends into `wrapped_fan_out`,
+    # whose `pick` fan-out runs per-product; each instance augments note=<id>.
+    # The wrapper span must carry the augmentation (last-writer) per 0045's
+    # lineage-aware rule, the fan-out NODE must not.
+    # The fan-out places each outer product into per_product's item_field slot;
+    # the augment middleware reads <id> from it. per_product's declared state
+    # ({picked}) lacks the slot, so inject it (mirrors _synthesize_fan_out_
+    # aggregation on the generic 029 path).
+    assert provider is not None, "039 cases declare mock_llm, so the provider must be set"
+    per_product_spec = copy.deepcopy(cast("dict[str, Any]", case["inner_subgraphs"]["per_product"]))
+    per_product_spec.setdefault("state", {}).setdefault("fields", {}).setdefault(
+        "oa_fan_out_item", {"type": "dict", "default": {}}
+    )
+    per_product = _build_inner_subgraph_with_llm(
+        per_product_spec,
+        provider=provider,
+        prompt_manager=prompt_manager,
+        render_variables={},
+    )
+    wrap_state_cls = build_state_cls(
+        "Wrapped039C3",
+        {
+            "picks": {"type": "list", "reducer": "append", "default": []},
+            "products": {"type": "list<dict>", "default": []},
+            "oa_fan_out_item": {"type": "dict", "default": {}},
+        },
+    )
+    wrap_builder: GraphBuilder[Any] = GraphBuilder(wrap_state_cls)
+    wrap_builder.set_entry("pick")
+    wrap_builder.add_fan_out_node(
+        "pick",
+        subgraph=per_product,
+        items_field="products",
+        item_field="oa_fan_out_item",
+        collect_field="picked",
+        target_field="picks",
+        instance_middleware=[_make_augment_instance_middleware({"note": "id"}, "oa_fan_out_item")],
+    )
+    wrap_builder.add_edge("pick", END)
+    wrapped_fan_out = wrap_builder.compile()
+
+    outer_state_cls = build_state_cls(
+        "Outer039C3",
+        {"result": {"type": "list", "default": []}, "products": {"type": "list<dict>", "default": []}},
+    )
+    outer_builder: GraphBuilder[Any] = GraphBuilder(outer_state_cls)
+    outer_builder.set_entry("wrap")
+    outer_builder.add_subgraph_node(
+        "wrap",
+        wrapped_fan_out,
+        ExplicitMapping(inputs={"products": "products"}, outputs={"result": "picks"}),
+    )
+    outer_builder.add_edge("wrap", END)
+    graph = outer_builder.compile()
+    initial = cast("dict[str, Any]", case.get("initial_state") or {})
+    return graph, (lambda: outer_state_cls(**initial))
+
+
+# Proposal 0045 §3.4: a key set via set_invocation_metadata inside a fan-out
+# instance / parallel-branches branch lands ONLY on the dispatch ancestors on
+# the augmenter's call-stack path -- NOT on the shared fan-out/pb NODE, sibling
+# instances, or (inside a dispatch) the Trace. The tree asserter is subset-based
+# (extra keys tolerated), which can't catch a MUST-NOT violation, so 039
+# additionally enforces that augmented keys absent from an observation's expected
+# metadata are absent in the actual. Scoped to 039 via this ContextVar so the
+# established subset semantics for the other fixtures are unchanged.
+_AUGMENT_KEYS_UNDER_TEST: ContextVar[frozenset[str]] = ContextVar(
+    "augment_keys_under_test", default=frozenset()
+)
+
+
+def _collect_augment_keys(case: Mapping[str, Any]) -> frozenset[str]:
+    """Collect the metadata keys augment directives set, anywhere in the case's
+    topology (fan-out / parallel-branches augment blocks at any nesting)."""
+    keys: set[str] = set()
+    directives = ("augment_metadata_from_field", "augment_metadata_from_outer_item", "augment_metadata")
+
+    def _harvest(block: Any) -> None:
+        if not isinstance(block, dict):
+            return
+        for directive in directives:
+            mapping = cast("dict[str, Any]", block).get(directive)
+            if isinstance(mapping, dict):
+                keys.update(cast("dict[str, Any]", mapping).keys())
+
+    def _walk(spec: Mapping[str, Any]) -> None:
+        for node in cast("dict[str, Any]", spec.get("nodes") or {}).values():
+            if not isinstance(node, dict):
+                continue
+            node_dict = cast("dict[str, Any]", node)
+            _harvest(node_dict.get("fan_out"))
+            pb = cast("dict[str, Any] | None", node_dict.get("parallel_branches"))
+            for branch in cast("dict[str, Any]", (pb or {}).get("branches") or {}).values():
+                _harvest(branch)
+        for collection in ("subgraphs", "inner_subgraphs"):
+            for sub in cast("dict[str, Any]", spec.get(collection) or {}).values():
+                if isinstance(sub, dict):
+                    _walk(cast("Mapping[str, Any]", sub))
+
+    _walk(case)
+    return frozenset(keys)
+
+
+def _assert_augment_keys_not_leaked(
+    label: str, actual: Mapping[str, Any], expected: Mapping[str, Any]
+) -> None:
+    # Proposal 0045 §3.4 MUST-NOT: an augmented key absent from the expected
+    # metadata (a shared fan-out/pb NODE, a sibling, or the Trace inside a
+    # dispatch) MUST also be absent in the actual. Complements the subset matcher.
+    for key in _AUGMENT_KEYS_UNDER_TEST.get():
+        if key not in expected:
+            assert key not in actual, (
+                f"{label}: MUST NOT carry augmented key {key!r} (proposal 0045 §3.4); got {actual.get(key)!r}"
+            )
+
+
 def _resolve_detached_wrapper_names(case: Mapping[str, Any]) -> frozenset[str]:
     """Translate fixture-level ``detached_subgraphs`` (a list of SUBGRAPH
     IDENTITY names) into the set of WRAPPER NODE names the observer keys
@@ -662,7 +819,11 @@ def _resolve_detached_wrapper_names(case: Mapping[str, Any]) -> frozenset[str]:
     return frozenset(wrappers)
 
 
-async def _run_case(case: Mapping[str, Any]) -> None:
+async def _run_case(case: Mapping[str, Any], *, fixture_stem: str | None = None) -> None:
+    # 039 additionally enforces proposal 0045's MUST-NOT scoping (an augmented
+    # key absent from an observation's expected metadata must be absent in the
+    # actual); other fixtures keep the established subset semantics.
+    _AUGMENT_KEYS_UNDER_TEST.set(_collect_augment_keys(case) if fixture_stem == _FIXTURE_039 else frozenset())
     # ---- Mock LLM transport (if the graph has an LLM call)
     mock_responses = cast("list[dict[str, Any]] | None", case.get("mock_llm"))
     transport = _build_mock_llm_handler(mock_responses) if mock_responses else None
@@ -692,7 +853,13 @@ async def _run_case(case: Mapping[str, Any]) -> None:
     # ``adapter.build_graph`` machinery for subgraph / fan_out shapes;
     # LLM/prompt fixtures (022/023/024) use the simpler hand-rolled
     # per-node build that knows about ``calls_llm`` / ``renders_prompt``.
-    if _has_topology_constructs(case):
+    if fixture_stem == _FIXTURE_039:
+        # 039's nested fan-out graphs are hand-built (the generic adapter can't
+        # construct them); see _build_039_graph.
+        graph, initial_state_factory = _build_039_graph(
+            case, provider=provider, prompt_manager=prompt_manager
+        )
+    elif _has_topology_constructs(case):
         # The topology fixtures (031/032/033) use inner-node test-seam
         # directives the cross-capability adapter doesn't translate
         # (``update_pure_from_state`` computes a value the assertions
@@ -1325,6 +1492,7 @@ def _assert_trace(
             f"trace.metadata.invocation_id: raw trace.id {trace.id!r} != {expected_invocation_id!r}"
         )
     _assert_metadata_subset("trace.metadata", trace.metadata, expected_metadata)
+    _assert_augment_keys_not_leaked("trace.metadata", trace.metadata, expected_metadata)
     # Proposal 0043 (§8.4.1 trace.input/output sourcing).  Fixtures that
     # opt in supply these as YAML maps; older fixtures leave them absent.
     if "input" in expected:
@@ -1452,6 +1620,9 @@ def _assert_observation(
         )
     expected_metadata = cast("dict[str, Any]", expected.get("metadata") or {})
     _assert_metadata_subset(f"observation[{actual.name}].metadata", actual.metadata, expected_metadata)
+    _assert_augment_keys_not_leaked(
+        f"observation[{actual.name}].metadata", actual.metadata, expected_metadata
+    )
 
     expected_children = cast("list[dict[str, Any]]", expected.get("children") or [])
     actual_children = trace.children_of(actual.id)
