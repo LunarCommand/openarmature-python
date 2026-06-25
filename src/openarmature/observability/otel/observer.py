@@ -1190,20 +1190,17 @@ class OTelObserver:
         #   parent_node_name caches)
         for key, open_span in inv_state.open_spans.items():
             ns, _ai, _fi, _bn = key
-            if ns == aug_ns:
-                # Same context — must have matching chain to be the
-                # augmenter's own attempt rather than a sibling
-                # instance's same-named node.
-                if _span_chain_on_path(open_span, aug_fi_chain, aug_bn_chain):
-                    targets.append(open_span.span)
+            if ns != aug_ns and not is_strict_prefix(ns, aug_ns):
                 continue
-            if not is_strict_prefix(ns, aug_ns):
-                continue
-            # Shared-parent check: if this NODE is a fan-out node or
-            # a parallel-branches node (dispatcher), it's a shared
-            # parent and MUST NOT be updated regardless of cardinality
-            # (§3.4 — the structural classification governs, not the
-            # live sibling count).
+            # Shared-parent check: a fan-out NODE or parallel-branches NODE
+            # (dispatcher) is a shared parent and MUST NOT be updated regardless
+            # of cardinality (§3.4 — the structural classification governs, not
+            # the live sibling count).  This applies whether the NODE is a strict
+            # ancestor OR sits at the augmenter's own namespace: an
+            # instance/branch executes AT the fan-out/pb node's namespace, so
+            # ns == aug_ns matches the shared NODE too (its per-instance dispatch
+            # span is the one updated, separately above).  The chain check below
+            # still excludes sibling instances' same-named nodes.
             if ns in inv_state.fan_out_parent_node_name or ns in inv_state.parallel_branches_parent_node_name:
                 continue
             if _span_chain_on_path(open_span, aug_fi_chain, aug_bn_chain):
