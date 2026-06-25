@@ -669,12 +669,14 @@ class LangfuseObserver:
         # parent_node_name caches.
         for key, observation in inv_state.open_observations.items():
             ns, _ai, _fi, _bn = key
-            if ns == aug_ns:
-                if _observation_chain_on_path(observation, aug_fi_chain, aug_bn_chain):
-                    observation.handle.update(metadata=metadata_delta)
+            if ns != aug_ns and not is_strict_prefix(ns, aug_ns):
                 continue
-            if not is_strict_prefix(ns, aug_ns):
-                continue
+            # A fan-out / pb NODE is a shared parent and MUST NOT carry an
+            # instance's / branch's augmentation (proposal 0045 §3.4). This skip
+            # applies whether the NODE sits strictly above the augmenter OR at
+            # the augmenter's own namespace: an instance/branch executes AT the
+            # fan-out/pb node's namespace, so ns == aug_ns also matches the shared
+            # NODE (its per-instance dispatch is the one updated, separately above).
             if ns in inv_state.fan_out_parent_node_name or ns in inv_state.parallel_branches_parent_node_name:
                 continue
             if _observation_chain_on_path(observation, aug_fi_chain, aug_bn_chain):
@@ -914,19 +916,24 @@ class LangfuseObserver:
         #   3. Leaf node observation at any matching ancestor prefix,
         #      walked longest-first.
         #   4. None — the Trace itself becomes the implicit parent.
-        # Per proposal 0044: an inner branch node parents under its per-branch
-        # dispatch observation (longest-first; innermost branch wins).
-        if event.branch_name is not None:
-            for prefix_len in range(len(event.namespace) - 1, 0, -1):
-                prefix = event.namespace[:prefix_len]
+        # Per proposals 0044 / 0013: an inner node parents under the INNERMOST
+        # dispatch on its lineage -- a per-branch dispatch
+        # (parallel_branches_branch_spans, keyed prefix + (branch_name,)) or a
+        # per-instance fan-out dispatch (fan_out_instance_observations, keyed
+        # prefix + (str(fan_out_index),)). Walk prefixes longest-first so the
+        # innermost wins; this resolves arbitrary nesting (fan-out in fan-out,
+        # parallel-branches in fan-out, ...). Mirrors the OTel
+        # _resolve_parent_context.
+        for prefix_len in range(len(event.namespace), 0, -1):
+            prefix = event.namespace[:prefix_len]
+            if event.branch_name is not None:
                 branch_dispatch = inv_state.parallel_branches_branch_spans.get(prefix + (event.branch_name,))
                 if branch_dispatch is not None:
                     return branch_dispatch.handle.id
-        if event.fan_out_index is not None and event.namespace:
-            instance_key = event.namespace[:1] + (str(event.fan_out_index),)
-            dispatch = inv_state.fan_out_instance_observations.get(instance_key)
-            if dispatch is not None:
-                return dispatch.handle.id
+            if event.fan_out_index is not None:
+                dispatch = inv_state.fan_out_instance_observations.get(prefix + (str(event.fan_out_index),))
+                if dispatch is not None:
+                    return dispatch.handle.id
         for prefix_len in range(len(event.namespace) - 1, 0, -1):
             prefix = event.namespace[:prefix_len]
             sg = inv_state.subgraph_observations.get(prefix)
@@ -1007,39 +1014,35 @@ class LangfuseObserver:
             prefix = namespace[:depth]
             if prefix in inv_state.subgraph_observations:
                 continue
-            # Non-detached per-instance dispatch for the current
-            # event's own fan-out instance gets opened below; skip
-            # the regular subgraph path here so we don't double-open.
+            # The per-instance dispatch for this event's own instance is opened
+            # below; skip the regular subgraph path so we don't double-open. Runs
+            # at ANY depth -- the fan-out may sit inside another fan-out instance
+            # or a subgraph wrapper -- mirroring the OTel observer.
             if (
-                depth == 1
-                and event.fan_out_index is not None
+                event.fan_out_index is not None
                 and (prefix + (str(event.fan_out_index),)) in inv_state.fan_out_instance_observations
             ):
                 continue
-            # Detached subgraph: the first segment matches a
-            # configured detached_subgraphs name → mint a fresh
-            # detached Trace + open the dispatch observation in it.
-            if depth == 1 and prefix[0] in self.detached_subgraphs:
+            # Detached subgraph: detached_subgraphs holds bare node names, so
+            # match on prefix[-1] (the node-name segment) at any depth (at depth 1
+            # this coincides with prefix[0], so the depth-1 behavior is unchanged).
+            if prefix[-1] in self.detached_subgraphs:
                 self._open_detached_subgraph_trace(inv_state, correlation_id, prefix, event)
                 continue
-            # Detached fan-out: the fan-out instance gets its own
-            # Trace per spec §8.5. The fan-out node's Span observation
-            # in the parent Trace already exists (opened on the
-            # fan-out node's started event); the detached dispatch
-            # observation goes into the new Trace.
-            if depth == 1 and event.fan_out_index is not None and prefix[0] in self.detached_fan_outs:
+            # Detached fan-out: the fan-out instance gets its own Trace per spec
+            # §8.5. The fan-out node's Span observation in the parent Trace
+            # already exists; the detached dispatch goes into the new Trace.
+            if event.fan_out_index is not None and prefix[-1] in self.detached_fan_outs:
                 self._open_detached_fan_out_instance_trace(inv_state, correlation_id, prefix, event)
                 continue
-            # Non-detached fan-out: synthesize per-instance dispatch
-            # observation under the fan-out node observation (proposal
-            # 0013 v0.10.0). Only triggers when the inner event is
-            # inside a fan-out instance AND the fan-out node's
-            # parent_node_name has been cached (i.e., the fan-out
-            # node's own started event was seen).
+            # Non-detached fan-out: synthesize the per-instance dispatch
+            # observation under the fan-out node observation (proposal 0013
+            # v0.10.0). The fan_out_parent_node_name cache match self-gates to
+            # the fan-out node's namespace, so this runs at any depth (nested
+            # fan-out, or a fan-out inside a subgraph wrapper / branch).
             if (
-                depth == 1
-                and event.fan_out_index is not None
-                and prefix[0] not in self.detached_fan_outs
+                event.fan_out_index is not None
+                and prefix[-1] not in self.detached_fan_outs
                 and prefix in inv_state.fan_out_parent_node_name
             ):
                 self._open_fan_out_instance_dispatch_observation(inv_state, correlation_id, prefix, event)
@@ -1440,14 +1443,16 @@ class LangfuseObserver:
     def _find_node_observation(
         self, inv_state: _InvState, prefix: tuple[str, ...]
     ) -> _OpenObservation | None:
-        # Find a NODE's own open leaf observation at the given prefix (the
-        # fan-out or parallel-branches NODE, whose per-instance / per-branch
-        # dispatches parent under it). Retry middleware wrapping the node bumps
-        # the attempt_index; this scans for any entry at ``prefix`` with
-        # ``fan_out_index is None``. Only one such entry is open at a time
-        # (retry opens and closes within an attempt's lifecycle).
+        # Find a NODE's own open leaf observation at ``prefix`` (the fan-out or
+        # parallel-branches NODE, whose per-instance / per-branch dispatches
+        # parent under it). Scan by namespace only: the NODE may itself carry an
+        # outer fan_out_index / branch_name when it is nested inside another
+        # fan-out instance or branch, so filtering on fan_out_index is None would
+        # miss it. Only one entry per namespace is open at a time (retry opens
+        # and closes attempts serially), so the scan is unambiguous. Mirrors the
+        # OTel _find_fan_out_node_span.
         for key, observation in inv_state.open_observations.items():
-            if key[0] == prefix and key[2] is None:
+            if key[0] == prefix:
                 return observation
         return None
 
