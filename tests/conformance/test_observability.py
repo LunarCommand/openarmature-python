@@ -95,8 +95,9 @@ _SUPPORTED_FIXTURES = frozenset(
         # surface. Single-attempt default: one span, attempt_index 0.
         "057-llm-attempt-index-single-attempt-default",
         # proposal 0048 get_invocation_metadata read access: 043 roundtrip,
-        # 045 retry-scoping, 046 outside-invocation. 044 (fan-out) is a follow-up.
+        # 044 fan-out scoping, 045 retry-scoping, 046 outside-invocation.
         "043-get-invocation-metadata-roundtrip",
+        "044-get-invocation-metadata-fan-out-scoping",
         "045-get-invocation-metadata-retry-scoping",
         "046-get-invocation-metadata-outside-invocation",
         "001-otel-basic-trace",
@@ -320,12 +321,6 @@ _UNIT_TESTED_FIXTURES: dict[str, str] = {
         # The Langfuse-mapping fixtures are fixture-tested by the sibling
         # conformance runner test_observability_langfuse.py -- see
         # _LANGFUSE_HARNESS_FIXTURES, NOT here (they are not unit-only).
-        (
-            ("044-get-invocation-metadata-fan-out-scoping",),
-            "proposal 0048 get_invocation_metadata fan-out scoping; covered by "
-            "test_observability_metadata.py (043/045/046 now wired into "
-            "_SUPPORTED_FIXTURES; 044's fan-out collection is a follow-up)",
-        ),
         # Fixture-harness catch-up tier 1 wired the rest of the 0057/0058
         # family into _SUPPORTED_FIXTURES; these three stay here, each blocked
         # on a spec-side fixture change that python picks up at the v0.16.0 pin
@@ -580,6 +575,7 @@ async def test_observability_fixture(fixture_path: Path) -> None:
         await _run_tool_fixture(spec)
     elif fixture_id in {
         "043-get-invocation-metadata-roundtrip",
+        "044-get-invocation-metadata-fan-out-scoping",
         "045-get-invocation-metadata-retry-scoping",
         "046-get-invocation-metadata-outside-invocation",
     }:
@@ -1488,14 +1484,14 @@ def _make_metadata_node_body(node_spec: Mapping[str, Any], types_seen: dict[str,
 
 
 async def _run_get_invocation_metadata_fixture(spec: Mapping[str, Any]) -> None:
-    """Drive every case of a get_invocation_metadata fixture (043 / 045 / 046)."""
+    """Drive every case of a get_invocation_metadata fixture (043 / 044 / 045 / 046)."""
     for case in cast("list[dict[str, Any]]", spec["cases"]):
         await _run_get_invocation_metadata_case(case)
 
 
 async def _run_get_invocation_metadata_case(case: Mapping[str, Any]) -> None:
     """Assert one case: a bare get_invocation_metadata() call (046), or a graph
-    whose final_state captures the in-node reads (043 / 045)."""
+    whose final_state captures the in-node reads (043 / 044 / 045)."""
     from types import MappingProxyType  # noqa: PLC0415
 
     from openarmature.observability.metadata import get_invocation_metadata  # noqa: PLC0415
@@ -1516,17 +1512,36 @@ async def _run_get_invocation_metadata_case(case: Mapping[str, Any]) -> None:
         # ``exception: null`` -- reaching here means the call did not raise.
         return
 
-    # Fixtures 043 / 045: build the graph, invoke with caller metadata, assert
-    # final_state field equality + the immutability invariant.
+    # Fixtures 043 / 044 / 045: build the graph (simple or fan-out), invoke with
+    # caller metadata, then assert final_state + the immutability invariant.
+    types_seen: dict[str, type] = {}
+    final = await _build_and_invoke_metadata_graph(case, types_seen)
+
+    for field_name, expected_value in cast("dict[str, Any]", expected.get("final_state") or {}).items():
+        actual = getattr(final, field_name)
+        assert actual == expected_value, f"final_state.{field_name}: {actual!r} != {expected_value!r}"
+
+    if invariants.get("read_returns_immutable_mapping"):
+        assert types_seen and all(t is MappingProxyType for t in types_seen.values()), (
+            f"read_returns_immutable_mapping: captured read types {types_seen!r} not all MappingProxyType"
+        )
+
+
+async def _build_and_invoke_metadata_graph(case: Mapping[str, Any], types_seen: dict[str, type]) -> Any:
+    """Build the case's graph (simple node chain, or 044's fan-out), invoke it
+    with the caller metadata, and return the final state."""
     from openarmature.graph import END, GraphBuilder  # noqa: PLC0415
     from openarmature.graph.middleware import RetryConfig, RetryMiddleware  # noqa: PLC0415
 
     from .adapter import build_state_cls  # noqa: PLC0415
 
-    types_seen: dict[str, type] = {}
+    nodes = cast("dict[str, Any]", case["nodes"])
+    if any("fan_out" in cast("dict[str, Any]", s) for s in nodes.values()):
+        return await _build_and_invoke_metadata_fan_out(case, types_seen)
+
     state_cls = build_state_cls("MetadataFixtureState", cast("dict[str, Any]", case["state"]["fields"]))
     builder = GraphBuilder(state_cls)
-    for node_name, node_spec_any in cast("dict[str, Any]", case["nodes"]).items():
+    for node_name, node_spec_any in nodes.items():
         node_spec = cast("dict[str, Any]", node_spec_any)
         body = _make_metadata_node_body(node_spec, types_seen)
         retry_cfg = cast("dict[str, Any] | None", node_spec.get("retry_middleware"))
@@ -1551,8 +1566,7 @@ async def _run_get_invocation_metadata_case(case: Mapping[str, Any]) -> None:
         else:
             builder.add_node(node_name, body)
     for edge in cast("list[dict[str, str]]", case["edges"]):
-        target = END if edge["to"] == "END" else edge["to"]
-        builder.add_edge(edge["from"], target)
+        builder.add_edge(edge["from"], END if edge["to"] == "END" else edge["to"])
     builder.set_entry(cast("str", case["entry"]))
     graph = builder.compile()
 
@@ -1561,15 +1575,120 @@ async def _run_get_invocation_metadata_case(case: Mapping[str, Any]) -> None:
         metadata=cast("dict[str, Any] | None", case.get("caller_metadata")),
     )
     await graph.drain()
+    return final
 
-    for field_name, expected_value in cast("dict[str, Any]", expected.get("final_state") or {}).items():
-        actual = getattr(final, field_name)
-        assert actual == expected_value, f"final_state.{field_name}: {actual!r} != {expected_value!r}"
 
-    if invariants.get("read_returns_immutable_mapping"):
-        assert types_seen and all(t is MappingProxyType for t in types_seen.values()), (
-            f"read_returns_immutable_mapping: captured read types {types_seen!r} not all MappingProxyType"
+async def _build_and_invoke_metadata_fan_out(case: Mapping[str, Any], types_seen: dict[str, type]) -> Any:
+    """Build and invoke 044's fan-out graph, returning the final state."""
+    # Each instance augments item_id (augment_metadata_from_field) then captures
+    # its read, collected into the outer per_instance_metadata list; a post-join
+    # serial node captures outermost_metadata. The inner capture writes a
+    # synthesized inner field that the fan-out collects into the directive's
+    # named outer field.
+    from openarmature.graph import END, GraphBuilder  # noqa: PLC0415
+
+    from .adapter import build_state_cls  # noqa: PLC0415
+
+    nodes = cast("dict[str, Any]", case["nodes"])
+    fan_out_name, fan_out_spec = next(
+        (n, cast("dict[str, Any]", s)) for n, s in nodes.items() if "fan_out" in cast("dict[str, Any]", s)
+    )
+    fan_out_cfg = cast("dict[str, Any]", fan_out_spec["fan_out"])
+    items_field = cast("str", fan_out_cfg["items_field"])
+    augment_map = cast("dict[str, str]", fan_out_cfg.get("augment_metadata_from_field") or {})
+
+    # Inner subgraph: the capture node writes into a synthesized inner field; the
+    # fan-out collects it into the outer list named by the directive.
+    item_field = "oa_fan_out_item"
+    inner_capture_field = "oa_captured_read"
+    inner_spec = cast("dict[str, Any]", case["inner_subgraphs"][cast("str", fan_out_cfg["inner_subgraph"])])
+    inner_state_cls = build_state_cls(
+        "MetaInnerState",
+        {inner_capture_field: {"type": "dict", "default": {}}, item_field: {"type": "dict", "default": {}}},
+    )
+    inner_builder = GraphBuilder(inner_state_cls)
+    # 044's inner subgraph is a single capture node; assert that shape so a future
+    # multi-node or non-capture inner subgraph fails loudly rather than silently
+    # collecting into one slot.
+    inner_nodes = cast("dict[str, Any]", inner_spec["nodes"])
+    assert len(inner_nodes) == 1, (
+        f"fan-out metadata inner subgraph must be one capture node; got {sorted(inner_nodes)}"
+    )
+    inode_name, inode_spec_any = next(iter(inner_nodes.items()))
+    inode_spec = cast("dict[str, Any]", inode_spec_any)
+    assert "capture_invocation_metadata_into" in inode_spec, (
+        f"fan-out inner node {inode_name!r} must declare capture_invocation_metadata_into"
+    )
+    outer_target_field = cast("str", inode_spec["capture_invocation_metadata_into"])
+    inner_builder.add_node(inode_name, _make_metadata_capture_body(inner_capture_field, types_seen))
+    for edge in cast("list[dict[str, str]]", inner_spec["edges"]):
+        inner_builder.add_edge(edge["from"], END if edge["to"] == "END" else edge["to"])
+    inner_builder.set_entry(cast("str", inner_spec["entry"]))
+    inner_graph = inner_builder.compile()
+
+    # Outer state: the declared fields + the items_field source (shipped via
+    # initial_state, like 029).
+    outer_fields = dict(cast("dict[str, Any]", case["state"]["fields"]))
+    outer_fields.setdefault(items_field, {"type": "list<dict>", "default": []})
+    outer_state_cls = build_state_cls("MetaOuterState", outer_fields)
+    outer_builder = GraphBuilder(outer_state_cls)
+    outer_builder.add_fan_out_node(
+        fan_out_name,
+        subgraph=inner_graph,
+        items_field=items_field,
+        item_field=item_field,
+        collect_field=inner_capture_field,
+        target_field=outer_target_field,
+        instance_middleware=[_make_metadata_augment_middleware(augment_map, item_field)],
+    )
+    for node_name, node_spec_any in nodes.items():
+        if node_name == fan_out_name:
+            continue
+        outer_builder.add_node(
+            node_name, _make_metadata_node_body(cast("dict[str, Any]", node_spec_any), types_seen)
         )
+    for edge in cast("list[dict[str, str]]", case["edges"]):
+        outer_builder.add_edge(edge["from"], END if edge["to"] == "END" else edge["to"])
+    outer_builder.set_entry(cast("str", case["entry"]))
+    graph = outer_builder.compile()
+
+    final = await graph.invoke(
+        outer_state_cls(**cast("dict[str, Any]", case.get("initial_state") or {})),
+        metadata=cast("dict[str, Any] | None", case.get("caller_metadata")),
+    )
+    await graph.drain()
+    return final
+
+
+def _make_metadata_capture_body(capture_field: str, types_seen: dict[str, type]) -> Any:
+    """Body that captures get_invocation_metadata() into a fixed state field --
+    044's inner-subgraph node, whose read the fan-out then collects."""
+    from openarmature.observability.metadata import get_invocation_metadata  # noqa: PLC0415
+
+    async def _body(_s: Any) -> dict[str, Any]:
+        read = get_invocation_metadata()
+        types_seen[capture_field] = type(read)
+        return {capture_field: dict(read)}
+
+    return _body
+
+
+def _make_metadata_augment_middleware(field_map: dict[str, str], item_field: str) -> Any:
+    """Per-instance fan-out middleware (044's augment_metadata_from_field): read
+    the instance's item from item_field and set_invocation_metadata from the
+    mapped fields, before the inner read. Reads runtime state (the engine has
+    placed the item by the time the chain runs)."""
+    from openarmature.observability.metadata import set_invocation_metadata  # noqa: PLC0415
+
+    class _AugmentMW:
+        async def __call__(self, state: Any, next_: Any, /) -> Any:
+            item = getattr(state, item_field, None)
+            if isinstance(item, Mapping):
+                item_map = cast("Mapping[str, Any]", item)
+                set_invocation_metadata(**{key: item_map[field] for key, field in field_map.items()})
+            return await next_(state)
+
+    return _AugmentMW()
 
 
 def _normalize_attr_value(value: Any) -> Any:
