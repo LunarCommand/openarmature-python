@@ -316,7 +316,13 @@ def _find_innermost_fan_out_instance_state(
     # fan-out's full key is (namespace_before_fan_out, fan_out_name)
     # where namespace_before_fan_out + (fan_out_name,) == prefix.
     for split in range(len(prefix), 0, -1):
-        key = (prefix[: split - 1], prefix[split - 1])
+        # The fan-out at prefix[:split] registered its tracking entry keyed by
+        # its ENCLOSING fan-out instance lineage (the non-None fan_out_index chain
+        # up to its own level, prefix depth split-1). Reconstruct it from the
+        # current chain so a fan-out nested inside an outer instance routes to the
+        # right outer instance's entry.
+        lineage = tuple(i for i in context.fan_out_index_chain[: split - 1] if i is not None)
+        key = (prefix[: split - 1], prefix[split - 1], lineage)
         if key in state_dict:
             exec_state = state_dict[key]
             idx = context.fan_out_index
@@ -326,7 +332,7 @@ def _find_innermost_fan_out_instance_state(
 
 
 def _project_fan_out_progress(
-    state_dict: Mapping[tuple[tuple[str, ...], str], _FanOutExecutionState],
+    state_dict: Mapping[tuple[tuple[str, ...], str, tuple[int, ...]], _FanOutExecutionState],
 ) -> tuple[FanOutProgress, ...]:
     """Project the engine-internal mutable per-fan-out state into the
     frozen :class:`FanOutProgress` shape on a saved record.
@@ -343,7 +349,16 @@ def _project_fan_out_progress(
     byte-identically, which matters for backends that hash records.
     """
     out: list[FanOutProgress] = []
-    for (namespace, name), exec_state in sorted(state_dict.items()):
+    # The key's third element is the enclosing fan-out instance lineage; it is
+    # NOT projected onto the record (top-level / subgraph-nested fan-outs have an
+    # empty lineage, and nested-fan-out resume is a tracked limitation). One
+    # consequence: a fan-out nested inside an outer fan-out instance emits one
+    # record PER outer instance, all sharing (namespace, fan_out_node_name);
+    # _restore_fan_out_progress_state is last-wins on that collision (the nested
+    # fan-out re-runs on resume regardless). Sorting includes the lineage so
+    # those same-namespace entries still order deterministically (preserving the
+    # byte-identical-record guarantee above).
+    for (namespace, name, _lineage), exec_state in sorted(state_dict.items()):
         instances = tuple(
             FanOutInstanceProgress(
                 state=inst.state,
@@ -366,7 +381,7 @@ def _project_fan_out_progress(
 
 def _restore_fan_out_progress_state(
     saved: Sequence[FanOutProgress],
-) -> dict[tuple[tuple[str, ...], str], _FanOutExecutionState]:
+) -> dict[tuple[tuple[str, ...], str, tuple[int, ...]], _FanOutExecutionState]:
     """Inverse projection of :func:`_project_fan_out_progress`. On resume
     the loaded record's frozen ``fan_out_progress`` tuple gets unpacked
     into the mutable per-fan-out tracking dict that ``FanOutNode``
@@ -387,7 +402,7 @@ def _restore_fan_out_progress_state(
     the engine's canonical error-record shape, and a heuristic would
     misclassify them.
     """
-    out: dict[tuple[tuple[str, ...], str], _FanOutExecutionState] = {}
+    out: dict[tuple[tuple[str, ...], str, tuple[int, ...]], _FanOutExecutionState] = {}
     for fp in saved:
         instances: list[_FanOutInstanceState] = []
         for inst in fp.instances:
@@ -400,7 +415,18 @@ def _restore_fan_out_progress_state(
                     completed_inner_positions=list(inst.completed_inner_positions),
                 )
             )
-        key = (fp.namespace, fp.fan_out_node_name)
+        # The enclosing fan-out instance lineage defaults to empty: the saved
+        # record carries no lineage, which is correct for top-level and
+        # subgraph/branch-nested fan-outs (all empty). A fan-out nested inside an
+        # outer fan-out instance does not round-trip its per-outer-instance
+        # progress through the current record format (it would need the lineage
+        # on the record): its in-memory keys carry the lineage, so the restored
+        # empty-lineage entry never matches and the nested fan-out RE-RUNS on
+        # resume. (Before the lineage fix it would instead skip, rolling forward
+        # the collapsed/wrong shared entry -- so re-running is the safer of two
+        # never-correct behaviors, and matches the spec's inner-subgraph re-entry
+        # model.) A full fix needs the lineage on the record; tracked separately.
+        key = (fp.namespace, fp.fan_out_node_name, ())
         out[key] = _FanOutExecutionState(
             fan_out_node_name=fp.fan_out_node_name,
             namespace=fp.namespace,
@@ -1987,7 +2013,14 @@ class CompiledGraph[StateT: State]:
         # raised, so subsequent saves in this invocation do not carry
         # stale fan-out progress and a retry middleware on the fan-out
         # node sees a fresh tracked state on the second attempt.
-        fan_out_progress_key = (context.namespace_prefix, current)
+        # Match the lineage-aware key FanOutNode.run registers (namespace, node
+        # name, enclosing fan-out instance lineage) so a nested fan-out's cleanup
+        # pops its own outer-instance entry, not a sibling's.
+        fan_out_progress_key = (
+            context.namespace_prefix,
+            current,
+            tuple(i for i in context.fan_out_index_chain if i is not None),
+        )
         try:
             try:
                 try:

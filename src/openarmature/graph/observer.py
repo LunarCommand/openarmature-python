@@ -525,8 +525,11 @@ class _InvocationContext:
     # of the fan-out so concurrent saves see consistent sibling state.
     # ``_maybe_save_checkpoint`` projects this into the frozen
     # ``FanOutProgress`` shape on the saved CheckpointRecord.
-    fan_out_progress_state: dict[tuple[tuple[str, ...], str], _FanOutExecutionState] = field(
-        default_factory=dict[tuple[tuple[str, ...], str], _FanOutExecutionState]
+    # Keyed by (namespace, fan_out_node_name, enclosing_fan_out_instance_lineage)
+    # -- the lineage (non-None outer fan_out_index chain) disambiguates a fan-out
+    # nested inside an outer fan-out instance across concurrent outer instances.
+    fan_out_progress_state: dict[tuple[tuple[str, ...], str, tuple[int, ...]], _FanOutExecutionState] = field(
+        default_factory=dict[tuple[tuple[str, ...], str, tuple[int, ...]], _FanOutExecutionState]
     )
     # Per spec §6 Drain (proposal 0010): shared mutable counters that
     # the worker reads at drain-cancel time to report undelivered events

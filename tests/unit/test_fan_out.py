@@ -274,6 +274,90 @@ async def test_inputs_mapping_projects_parent_fields() -> None:
 
 
 # ---------------------------------------------------------------------------
+# nested fan-out (a fan-out inside an outer fan-out instance)
+# ---------------------------------------------------------------------------
+
+
+class _NestedLeafState(State):
+    tag: str = ""
+    seed: str = ""
+    out: str = ""
+
+
+class _NestedMidState(State):
+    tag: str = ""
+    seeds: list[str] = Field(default_factory=list[str])
+    collected: Annotated[list[str], append] = Field(default_factory=list[str])
+
+
+class _NestedOuterState(State):
+    products: list[str] = Field(default_factory=list[str])
+    seeds: list[str] = Field(default_factory=list[str])
+    results: Annotated[list[Any], append] = Field(default_factory=list[Any])
+
+
+async def test_nested_fan_out_distinct_per_outer_instance_under_concurrency() -> None:
+    """A fan-out nested inside an outer fan-out instance runs its inner
+    subgraph once per (outer, inner) pair and returns the right per-outer
+    result, even with the outer instances running concurrently."""
+    # Regression: the per-fan-out tracking entry was keyed by (namespace, node
+    # name) only, so the inner fan-out's entry collided across outer instances.
+    # With concurrent outer instances the second found the first's entry already
+    # marked complete and rolled its result forward, so every outer instance
+    # returned the first's inner result and the inner subgraph ran only once.
+    leaf_calls = 0
+
+    async def leaf(state: _NestedLeafState) -> Mapping[str, Any]:
+        nonlocal leaf_calls
+        await asyncio.sleep(0)  # yield so the concurrent outer instances interleave
+        leaf_calls += 1
+        return {"out": f"{state.tag}-{state.seed}"}
+
+    leaf_builder: GraphBuilder[_NestedLeafState] = GraphBuilder(_NestedLeafState)
+    leaf_builder.set_entry("ask")
+    leaf_builder.add_node("ask", leaf)
+    leaf_builder.add_edge("ask", END)
+    leaf_graph = leaf_builder.compile()
+
+    mid_builder: GraphBuilder[_NestedMidState] = GraphBuilder(_NestedMidState)
+    mid_builder.set_entry("inner_fan")
+    mid_builder.add_fan_out_node(
+        "inner_fan",
+        subgraph=leaf_graph,
+        items_field="seeds",
+        item_field="seed",
+        inputs={"tag": "tag"},
+        collect_field="out",
+        target_field="collected",
+    )
+    mid_builder.add_edge("inner_fan", END)
+    mid_graph = mid_builder.compile()
+
+    outer_builder: GraphBuilder[_NestedOuterState] = GraphBuilder(_NestedOuterState)
+    outer_builder.set_entry("outer_fan")
+    outer_builder.add_fan_out_node(
+        "outer_fan",
+        subgraph=mid_graph,
+        items_field="products",
+        item_field="tag",
+        inputs={"seeds": "seeds"},
+        collect_field="collected",
+        target_field="results",
+    )
+    outer_builder.add_edge("outer_fan", END)
+    outer_graph = outer_builder.compile()
+
+    final = await outer_graph.invoke(_NestedOuterState(products=["A", "B"], seeds=["x", "y"]))
+    await outer_graph.drain()
+    # Each outer instance collected its OWN inner results; the collapse bug gave
+    # [["A-x", "A-y"], ["A-x", "A-y"]] (the second outer reused the first's).
+    got = sorted(tuple(sorted(sub)) for sub in final.results)
+    assert got == [("A-x", "A-y"), ("B-x", "B-y")]
+    # The inner leaf ran once per (outer, inner) pair, not once total.
+    assert leaf_calls == 4
+
+
+# ---------------------------------------------------------------------------
 # concurrency
 # ---------------------------------------------------------------------------
 

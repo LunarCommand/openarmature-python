@@ -208,7 +208,18 @@ class FanOutNode[ParentT: State, ChildT: State]:
         # shared dict. Resume threads a pre-restored entry through
         # ``context.fan_out_progress_state``; first-run constructs a
         # fresh one with all instances ``not_started``.
-        key = (context.namespace_prefix, self.name)
+        #
+        # The key carries the ENCLOSING fan-out instance lineage (the non-None
+        # fan_out_index chain), not just the namespace + node name. A fan-out
+        # nested inside an outer fan-out instance has the same namespace for every
+        # outer instance, so without the lineage the shared dict collides across
+        # concurrent outer instances and the second instance rolls forward the
+        # first's "completed" results (silently wrong results). Subgraph / branch
+        # nesting and top-level fan-outs contribute no fan-out index, so the
+        # lineage is empty there -- matching the resume restore (which defaults it
+        # to empty), so top-level / subgraph-nested resume is unaffected.
+        enclosing_fan_out_lineage = tuple(i for i in context.fan_out_index_chain if i is not None)
+        key = (context.namespace_prefix, self.name, enclosing_fan_out_lineage)
         exec_state = context.fan_out_progress_state.get(key)
         if exec_state is None:
             exec_state = _FanOutExecutionState(
