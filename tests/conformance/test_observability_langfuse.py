@@ -27,7 +27,7 @@ import httpx
 import pytest
 import yaml
 
-from openarmature.graph import END, ExplicitMapping, GraphBuilder
+from openarmature.graph import END, BranchSpec, ExplicitMapping, GraphBuilder
 from openarmature.llm import OpenAIProvider
 from openarmature.llm.response import RuntimeConfig
 from openarmature.observability.langfuse import (
@@ -125,24 +125,9 @@ _LANGFUSE_FIXTURES = frozenset(
 # ``(fixture_stem, case_name)``.  The case-loop in the runner ``continue``s
 # past matching cases — NOT ``pytest.skip``, which would skip the whole
 # fixture's test invocation and hide the surrounding cases that DO run.
-_DEFERRED_CASES: frozenset[tuple[str, str]] = frozenset(
-    {
-        # 039 cases 1 + 2 are TEMPORARILY deferred pending one deeper observer
-        # fix shared by both: dispatch keys
-        # (fan_out_instance_observations / parallel_branches_branch_spans) are
-        # namespace-local and do NOT encode the enclosing fan-out instance, so a
-        # dispatch INSIDE an outer fan-out instance collides across instances --
-        # case 1's inner instance dispatch and case 2's per-branch dispatch both
-        # reparent the second outer instance's events under the first's dispatch.
-        # The fix (thread the enclosing fan_out_index_chain / branch_name_chain
-        # into the dispatch keys, across synthesis + resolution + the
-        # augmentation walk, in both observers) is its own focused effort + spec
-        # coordination. Case 3 (single fan-out level under a serial wrapper) does
-        # not nest dispatches, so it is wired. See _build_039_graph.
-        ("039-nested-lineage-augmentation", "inner_fan_out_augmenter_propagates_to_outer_dispatch_span"),
-        ("039-nested-lineage-augmentation", "parallel_branch_augmenter_propagates_to_outer_fan_out_instance"),
-    }
-)
+# Currently empty; the harness covers every activated case. Kept as a named hook
+# so future per-case deferrals don't need to re-introduce the pattern.
+_DEFERRED_CASES: frozenset[tuple[str, str]] = frozenset()
 
 
 # Mocks the spec fixture 037 references for ``trace_input_from_state`` /
@@ -670,9 +655,168 @@ def _build_039_graph(
 ) -> tuple[Any, Any]:
     """Dispatch a 039 case to its hand-built graph; return (graph, factory)."""
     name = cast("str", case.get("name"))
+    if name == "inner_fan_out_augmenter_propagates_to_outer_dispatch_span":
+        return _build_039_case1(case, provider=provider, prompt_manager=prompt_manager)
+    if name == "parallel_branch_augmenter_propagates_to_outer_fan_out_instance":
+        return _build_039_case2(case, provider=provider, prompt_manager=prompt_manager)
     if name == "fan_out_in_serial_subgraph_augmenter_propagates_to_wrapper_span":
         return _build_039_case3(case, provider=provider, prompt_manager=prompt_manager)
     raise NotImplementedError(f"039 case not yet wired: {name!r}")
+
+
+def _make_039_inner_seed_extractor(outer_item_field: str, seed_field: str, seed_subkey: str) -> Any:
+    # Case 1 outer fan-out instance middleware: the inner fan-out's items_field
+    # (inner_seed) is a SUB-FIELD of the outer product item, which the engine's
+    # flat item_field / inputs projection can't reach. Read the outer item from
+    # its slot and inject the sub-field into the per_product instance state so the
+    # inner fan-out can fan over it.
+    async def _extract(state: Any, next_: Any) -> Any:
+        item = getattr(state, outer_item_field, None)
+        if isinstance(item, Mapping):
+            state = state.model_copy(update={seed_field: cast("Mapping[str, Any]", item)[seed_subkey]})
+        return await next_(state)
+
+    return _extract
+
+
+def _build_039_case1(
+    case: Mapping[str, Any],
+    *,
+    provider: OpenAIProvider | None,
+    prompt_manager: PromptManager | None,
+) -> tuple[Any, Any]:
+    # Case 1: fan-out inside a fan-out instance. The inner fan-out
+    # (per_product.inner_fan_out) fans over each product's inner_seed sub-field
+    # and augments note=<inner_seed.value>; per 0045 that note reaches the OUTER
+    # instance dispatch span (one level up) but NOT the shared fan-out NODEs.
+    assert provider is not None, "039 cases declare mock_llm, so the provider must be set"
+    per_category_spec = copy.deepcopy(cast("dict[str, Any]", case["inner_subgraphs"]["per_category"]))
+    per_category_spec.setdefault("state", {}).setdefault("fields", {}).setdefault(
+        "oa_fan_out_item", {"type": "dict", "default": {}}
+    )
+    per_category = _build_inner_subgraph_with_llm(
+        per_category_spec, provider=provider, prompt_manager=prompt_manager, render_variables={}
+    )
+    per_product_state = build_state_cls(
+        "PerProduct039C1",
+        {
+            "score": {"type": "string", "default": ""},
+            "inner_seed": {"type": "list<dict>", "default": []},
+            "oa_outer_item": {"type": "dict", "default": {}},
+            "inner_picks": {"type": "list", "reducer": "append", "default": []},
+        },
+    )
+    pp_builder: GraphBuilder[Any] = GraphBuilder(per_product_state)
+    pp_builder.set_entry("inner_fan_out")
+    pp_builder.add_fan_out_node(
+        "inner_fan_out",
+        subgraph=per_category,
+        items_field="inner_seed",
+        item_field="oa_fan_out_item",
+        collect_field="picked",
+        target_field="inner_picks",
+        instance_middleware=[_make_augment_instance_middleware({"note": "value"}, "oa_fan_out_item")],
+    )
+    pp_builder.add_edge("inner_fan_out", END)
+    per_product = pp_builder.compile()
+    outer_state = build_state_cls(
+        "Outer039C1",
+        {
+            "results": {"type": "list", "reducer": "append", "default": []},
+            "products": {"type": "list<dict>", "default": []},
+        },
+    )
+    outer_builder: GraphBuilder[Any] = GraphBuilder(outer_state)
+    outer_builder.set_entry("outer_fan_out")
+    outer_builder.add_fan_out_node(
+        "outer_fan_out",
+        subgraph=per_product,
+        items_field="products",
+        item_field="oa_outer_item",
+        collect_field="inner_picks",
+        target_field="results",
+        # concurrency=1 while the observer's NODE-key collision under concurrent
+        # nested fan-out is fixed (inner nodes of different outer instances share
+        # a _key_for and dedup, dropping spans). The engine produces correct
+        # results at any concurrency; this is an observability-only constraint.
+        concurrency=1,
+        instance_middleware=[_make_039_inner_seed_extractor("oa_outer_item", "inner_seed", "inner_seed")],
+    )
+    outer_builder.add_edge("outer_fan_out", END)
+    graph = outer_builder.compile()
+    initial = cast("dict[str, Any]", case.get("initial_state") or {})
+    return graph, (lambda: outer_state(**initial))
+
+
+def _build_039_case2(
+    case: Mapping[str, Any],
+    *,
+    provider: OpenAIProvider | None,
+    prompt_manager: PromptManager | None,
+) -> tuple[Any, Any]:
+    # Case 2: parallel-branches NODE inside a fan-out instance. Only the `probe`
+    # branch augments note=<outer product id> via augment_metadata_from_outer_item;
+    # per 0045 that note reaches the probe branch dispatch AND the OUTER fan-out
+    # instance dispatch, but NOT the baseline branch, the pb NODE, or the fan-out
+    # NODE.
+    assert provider is not None, "039 cases declare mock_llm, so the provider must be set"
+    subgraphs = cast("dict[str, Any]", case["subgraphs"])
+    probe_spec = copy.deepcopy(cast("dict[str, Any]", subgraphs["probe"]))
+    probe_spec.setdefault("state", {}).setdefault("fields", {}).setdefault(
+        "oa_outer_item", {"type": "dict", "default": {}}
+    )
+    probe = _build_inner_subgraph_with_llm(
+        probe_spec, provider=provider, prompt_manager=prompt_manager, render_variables={}
+    )
+    baseline = _build_inner_subgraph_with_llm(
+        cast("Mapping[str, Any]", subgraphs["baseline"]),
+        provider=provider,
+        prompt_manager=prompt_manager,
+        render_variables={},
+    )
+    per_product_state = build_state_cls(
+        "PerProduct039C2",
+        {
+            "outcome": {"type": "string", "default": ""},
+            "oa_outer_item": {"type": "dict", "default": {}},
+        },
+    )
+    pp_builder: GraphBuilder[Any] = GraphBuilder(per_product_state)
+    pp_builder.set_entry("dispatcher")
+    pp_builder.add_parallel_branches_node(
+        "dispatcher",
+        branches={
+            "probe": BranchSpec(
+                subgraph=probe,
+                inputs={"oa_outer_item": "oa_outer_item"},
+                middleware=(_make_augment_instance_middleware({"note": "id"}, "oa_outer_item"),),
+            ),
+            "baseline": BranchSpec(subgraph=baseline),
+        },
+    )
+    pp_builder.add_edge("dispatcher", END)
+    per_product = pp_builder.compile()
+    outer_state = build_state_cls(
+        "Outer039C2",
+        {
+            "results": {"type": "list", "reducer": "append", "default": []},
+            "products": {"type": "list<dict>", "default": []},
+        },
+    )
+    outer_builder: GraphBuilder[Any] = GraphBuilder(outer_state)
+    outer_builder.set_entry("outer_fan_out")
+    outer_builder.add_fan_out_node(
+        "outer_fan_out",
+        subgraph=per_product,
+        items_field="products",
+        item_field="oa_outer_item",
+        collect_field="outcome",
+        target_field="results",
+    )
+    outer_builder.add_edge("outer_fan_out", END)
+    graph = outer_builder.compile()
+    initial = cast("dict[str, Any]", case.get("initial_state") or {})
+    return graph, (lambda: outer_state(**initial))
 
 
 def _build_039_case3(

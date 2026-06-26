@@ -134,6 +134,42 @@ def _observation_chain_on_path(
     return True
 
 
+def _dispatch_key(
+    prefix: tuple[str, ...],
+    fan_out_index_chain: tuple[int | None, ...],
+    branch_name_chain: tuple[str | None, ...],
+) -> tuple[Any, ...]:
+    """Lineage-aware identity key for a fan-out instance / per-branch dispatch at
+    namespace ``prefix``. Encodes the fan-out/pb NODE namespace plus the full
+    chain of fan-out instance indices / branch names along the path to it (sliced
+    to ``len(prefix)``). Two dispatches at the same namespace but in different
+    enclosing fan-out instances / branches therefore get distinct keys -- the
+    enclosing chain entries differ -- which is what lets a fan-out / pb nested
+    inside an outer fan-out instance avoid colliding across outer instances. For
+    a top-level or serial-nested dispatch (no enclosing fan-out/branch) the
+    enclosing chain entries are all None, so the key is a stable function of the
+    namespace plus the dispatch's own axis."""
+    n = len(prefix)
+    return (prefix, tuple(fan_out_index_chain[:n]), tuple(branch_name_chain[:n]))
+
+
+def _branch_dispatch_key(
+    prefix: tuple[str, ...],
+    fan_out_index_chain: tuple[int | None, ...],
+    branch_name_chain: tuple[str | None, ...],
+    branch_name: str,
+) -> tuple[Any, ...]:
+    """Lineage-aware identity key for a per-branch dispatch at namespace
+    ``prefix``. The branch IDENTITY comes from ``branch_name`` explicitly (not
+    ``branch_name_chain[-1]``): a callable branch carries its name on the event
+    but never extends ``branch_name_chain`` (no subgraph descent). The key still
+    carries the ENCLOSING fan-out instance / branch chain (positions above this
+    pb node) so a pb nested inside an outer fan-out instance doesn't collide
+    across outer instances."""
+    n = len(prefix)
+    return (prefix, tuple(fan_out_index_chain[:n]), tuple(branch_name_chain[: n - 1]), branch_name)
+
+
 def _empty_str_frozenset() -> frozenset[str]:
     """Typed empty frozenset factory for ``detached_subgraphs`` /
     ``detached_fan_outs`` defaults."""
@@ -476,8 +512,12 @@ class LangfuseObserver:
         # started event so synthetic per-instance dispatch observations
         # can attach metadata.fan_out_parent_node_name (the inner
         # events from inside the fan-out don't carry fan_out_config
-        # themselves; this cache bridges).
-        if event.fan_out_config is not None and event.fan_out_index is None:
+        # themselves; this cache bridges). fan_out_config is set only on
+        # the NODE's own events, so it alone identifies them -- NOT
+        # ``fan_out_index is None``, which would miss a fan-out node nested
+        # inside an outer fan-out instance (its own event carries the OUTER
+        # instance index), leaving the inner dispatch unsynthesized.
+        if event.fan_out_config is not None:
             inv_state.fan_out_parent_node_name[event.namespace] = event.fan_out_config.parent_node_name
 
         # Per proposal 0045: mirror cache for parallel-branches NODE
@@ -536,21 +576,31 @@ class LangfuseObserver:
         # spawned. Done BEFORE the regular pop so the close ordering is
         # children-before-parents.
         if event.fan_out_index is None and event.namespace and event.namespace[0] in self.detached_fan_outs:
-            for prefix in list(inv_state.fan_out_instance_root_prefixes):
-                if len(prefix) > len(event.namespace) and prefix[: len(event.namespace)] == event.namespace:
+            ns = event.namespace
+            for key in list(inv_state.fan_out_instance_root_prefixes):
+                anchor_ns = cast("tuple[str, ...]", key[0])
+                if len(anchor_ns) >= len(ns) and anchor_ns[: len(ns)] == ns:
                     # Detached per-instance dispatches live in
                     # fan_out_instance_observations (same map as
                     # non-detached); close via the matching helper.
-                    self._close_fan_out_instance_dispatch_observation(inv_state, prefix)
-                    inv_state.fan_out_instance_root_prefixes.discard(prefix)
-                    inv_state.detached_traces.pop(prefix, None)
+                    self._close_fan_out_instance_dispatch_observation(inv_state, key)
+                    inv_state.fan_out_instance_root_prefixes.discard(key)
+                    # detached_traces uses the top-level routing key shape; derive
+                    # it from the lineage key's own instance index (last entry).
+                    fi_chain = cast("tuple[int | None, ...]", key[1])
+                    inv_state.detached_traces.pop(anchor_ns + (str(fi_chain[-1]),), None)
         # Per spec proposal 0013 (v0.10.0): when the fan-out node's
         # own completion fires, close all per-instance dispatch
         # observations synthesized for it. Children-before-parents.
         if event.fan_out_index is None and event.fan_out_config is not None:
-            for prefix in list(inv_state.fan_out_instance_observations.keys()):
-                if len(prefix) > len(event.namespace) and prefix[: len(event.namespace)] == event.namespace:
-                    self._close_fan_out_instance_dispatch_observation(inv_state, prefix)
+            ns = event.namespace
+            for key in list(inv_state.fan_out_instance_observations.keys()):
+                anchor_ns = cast("tuple[str, ...]", key[0])
+                # The dispatch key is now (anchor_ns, fi_chain, bn_chain); match
+                # on the NODE namespace (anchor_ns) being in this completing
+                # node's subtree.
+                if len(anchor_ns) >= len(ns) and anchor_ns[: len(ns)] == ns:
+                    self._close_fan_out_instance_dispatch_observation(inv_state, key)
             inv_state.fan_out_parent_node_name.pop(event.namespace, None)
             # Clear the detached-child-trace-ids accumulator for this
             # fan-out node — cyclic execution that re-enters the same
@@ -562,9 +612,11 @@ class LangfuseObserver:
         # per-branch dispatch observations synthesized for it (children-before-
         # parents) and clear the pb caches. Same shape as the fan-out cleanup.
         if event.parallel_branches_config is not None:
-            for prefix in list(inv_state.parallel_branches_branch_spans.keys()):
-                if len(prefix) > len(event.namespace) and prefix[: len(event.namespace)] == event.namespace:
-                    self._close_parallel_branches_branch_dispatch_observation(inv_state, prefix)
+            ns = event.namespace
+            for key in list(inv_state.parallel_branches_branch_spans.keys()):
+                anchor_ns = cast("tuple[str, ...]", key[0])
+                if len(anchor_ns) >= len(ns) and anchor_ns[: len(ns)] == ns:
+                    self._close_parallel_branches_branch_dispatch_observation(inv_state, key)
             inv_state.parallel_branches_parent_node_name.pop(event.namespace, None)
             inv_state.parallel_branches_branch_names.pop(event.namespace, None)
 
@@ -647,21 +699,17 @@ class LangfuseObserver:
             if _observation_chain_on_path(observation, aug_fi_chain, aug_bn_chain):
                 observation.handle.update(metadata=metadata_delta)
 
-        # Fan-out instance dispatch observations.
+        # Fan-out instance dispatch observations: on the augmenter's path iff the
+        # dispatch NODE namespace (key[0]) is an ancestor-or-equal of the
+        # augmenter AND its full lineage chain (carried on the observation) is a
+        # prefix of the augmenter's -- so a SIBLING outer instance's dispatch,
+        # whose chain differs at the enclosing position, is excluded.
         for key, observation in inv_state.fan_out_instance_observations.items():
-            if not key:
-                continue
-            anchor_ns = key[:-1]
-            fi_str = key[-1]
+            anchor_ns = cast("tuple[str, ...]", key[0])
             if not (is_strict_prefix(anchor_ns, aug_ns) or anchor_ns == aug_ns):
                 continue
-            chain_pos = len(anchor_ns) - 1
-            if chain_pos < 0 or chain_pos >= len(aug_fi_chain):
-                continue
-            aug_fi_at_pos = aug_fi_chain[chain_pos]
-            if aug_fi_at_pos is None or str(aug_fi_at_pos) != fi_str:
-                continue
-            observation.handle.update(metadata=metadata_delta)
+            if _observation_chain_on_path(observation, aug_fi_chain, aug_bn_chain):
+                observation.handle.update(metadata=metadata_delta)
 
         # Open NODE observations.  Same as augmenter or strict
         # ancestor on the path; skip shared-parent NODE observations
@@ -916,22 +964,34 @@ class LangfuseObserver:
         #   3. Leaf node observation at any matching ancestor prefix,
         #      walked longest-first.
         #   4. None — the Trace itself becomes the implicit parent.
-        # Per proposals 0044 / 0013: an inner node parents under the INNERMOST
-        # dispatch on its lineage -- a per-branch dispatch
-        # (parallel_branches_branch_spans, keyed prefix + (branch_name,)) or a
-        # per-instance fan-out dispatch (fan_out_instance_observations, keyed
-        # prefix + (str(fan_out_index),)). Walk prefixes longest-first so the
-        # innermost wins; this resolves arbitrary nesting (fan-out in fan-out,
-        # parallel-branches in fan-out, ...). Mirrors the OTel
+        # Per proposals 0044 / 0013 / 0045: an inner node parents under the
+        # INNERMOST dispatch on its lineage -- a per-branch dispatch
+        # (parallel_branches_branch_spans) or a per-instance fan-out dispatch
+        # (fan_out_instance_observations), both keyed by the lineage-aware
+        # _dispatch_key. Walk prefixes longest-first so the innermost wins; the
+        # lineage key carries the enclosing fan-out instance / branch chain, so
+        # this resolves arbitrary nesting (fan-out in fan-out, parallel-branches
+        # in fan-out, ...) to the RIGHT outer instance. Mirrors OTel
         # _resolve_parent_context.
         for prefix_len in range(len(event.namespace), 0, -1):
             prefix = event.namespace[:prefix_len]
+            fi_axis = (
+                event.fan_out_index_chain[prefix_len - 1]
+                if prefix_len - 1 < len(event.fan_out_index_chain)
+                else None
+            )
             if event.branch_name is not None:
-                branch_dispatch = inv_state.parallel_branches_branch_spans.get(prefix + (event.branch_name,))
+                branch_dispatch = inv_state.parallel_branches_branch_spans.get(
+                    _branch_dispatch_key(
+                        prefix, event.fan_out_index_chain, event.branch_name_chain, event.branch_name
+                    )
+                )
                 if branch_dispatch is not None:
                     return branch_dispatch.handle.id
-            if event.fan_out_index is not None:
-                dispatch = inv_state.fan_out_instance_observations.get(prefix + (str(event.fan_out_index),))
+            if fi_axis is not None:
+                dispatch = inv_state.fan_out_instance_observations.get(
+                    _dispatch_key(prefix, event.fan_out_index_chain, event.branch_name_chain)
+                )
                 if dispatch is not None:
                     return dispatch.handle.id
         for prefix_len in range(len(event.namespace) - 1, 0, -1):
@@ -1014,20 +1074,28 @@ class LangfuseObserver:
             prefix = namespace[:depth]
             if prefix in inv_state.subgraph_observations:
                 continue
-            # The per-instance dispatch for this event's own instance is opened
-            # below; skip the regular subgraph path so we don't double-open. Runs
-            # at ANY depth -- the fan-out may sit inside another fan-out instance
-            # or a subgraph wrapper -- mirroring the OTel observer.
+            # The fan-out instance axis at THIS depth -- the chain entry for the
+            # dispatch boundary into prefix -- NOT the innermost event.fan_out_index
+            # (which differs for an OUTER fan-out in a nested stack). Branches use
+            # event.branch_name directly (callable branches don't extend the chain).
+            fi_axis = (
+                event.fan_out_index_chain[depth - 1] if depth - 1 < len(event.fan_out_index_chain) else None
+            )
+            # The per-instance dispatch for this prefix's instance is opened
+            # below; skip the regular subgraph path so we don't double-open. Keyed
+            # by the full lineage so nested instances don't collide across outer
+            # ones. Runs at ANY depth (nested fan-out / subgraph wrapper).
             if (
-                event.fan_out_index is not None
-                and (prefix + (str(event.fan_out_index),)) in inv_state.fan_out_instance_observations
+                fi_axis is not None
+                and _dispatch_key(prefix, event.fan_out_index_chain, event.branch_name_chain)
+                in inv_state.fan_out_instance_observations
             ):
                 continue
             # Detached subgraph: kept top-level (depth == 1). _trace_id_for routes
             # detached events by namespace[:1], so a nested detached unit would
             # partially detach (its dispatch in the new Trace, inner nodes in the
             # main one). Nested-detached support rides with the deferred
-            # nested-dispatch-keying fix that generalizes _trace_id_for too.
+            # generalization of _trace_id_for (out of scope here).
             if depth == 1 and prefix[0] in self.detached_subgraphs:
                 self._open_detached_subgraph_trace(inv_state, correlation_id, prefix, event)
                 continue
@@ -1040,11 +1108,11 @@ class LangfuseObserver:
                 continue
             # Non-detached fan-out: synthesize the per-instance dispatch
             # observation under the fan-out node observation (proposal 0013
-            # v0.10.0). The fan_out_parent_node_name cache match self-gates to
-            # the fan-out node's namespace, so this runs at any depth (nested
-            # fan-out, or a fan-out inside a subgraph wrapper / branch).
+            # v0.10.0). Gated on the fan-out NODE at prefix and a fan-out axis at
+            # this depth, so it runs at any depth (nested fan-out, or a fan-out
+            # inside a subgraph wrapper / branch).
             if (
-                event.fan_out_index is not None
+                fi_axis is not None
                 and prefix[-1] not in self.detached_fan_outs
                 and prefix in inv_state.fan_out_parent_node_name
             ):
@@ -1053,8 +1121,8 @@ class LangfuseObserver:
             # Per proposal 0044: synthesize a per-branch dispatch observation
             # under the pb NODE for an inner branch event, so inner branch
             # nodes parent under it rather than the shared pb NODE span. Mirror
-            # of the fan-out per-instance arm above; gated on the branch
-            # belonging to the pb node declared at this prefix.
+            # of the fan-out per-instance arm above; gated on the branch at this
+            # depth belonging to the pb node declared at this prefix.
             if (
                 event.branch_name is not None
                 and prefix in inv_state.parallel_branches_parent_node_name
@@ -1063,7 +1131,14 @@ class LangfuseObserver:
                 # Synthesize once per branch: _sync runs on every inner node's
                 # started event, so guard against re-opening (a second open would
                 # orphan the first observation and split the branch's nodes).
-                if prefix + (event.branch_name,) not in inv_state.parallel_branches_branch_spans:
+                # event.branch_name (not bn_axis) so callable branches -- which
+                # don't extend branch_name_chain -- still synthesize.
+                if (
+                    _branch_dispatch_key(
+                        prefix, event.fan_out_index_chain, event.branch_name_chain, event.branch_name
+                    )
+                    not in inv_state.parallel_branches_branch_spans
+                ):
                     self._open_parallel_branches_branch_dispatch_observation(
                         inv_state, correlation_id, prefix, event
                     )
@@ -1139,18 +1214,27 @@ class LangfuseObserver:
     ) -> None:
         # Non-detached per-instance dispatch lives in the parent
         # Trace under the fan-out node's own Span observation.
-        fan_out_open = self._find_node_observation(inv_state, prefix)
+        fan_out_open = self._find_node_observation(inv_state, prefix, event)
         parent_observation_id = fan_out_open.handle.id if fan_out_open is not None else None
         parent_node_name = inv_state.fan_out_parent_node_name.get(prefix, prefix[-1])
         # Per-instance dispatch is synthesized from the first inner
         # event inside the instance subtree; inherit scalar metadata
         # from that event (same pattern as ``_open_subgraph_observation``).
+        # The dispatch's OWN instance index is the chain entry at this depth, not
+        # event.fan_out_index (the innermost index of the synthesizing inner
+        # event) -- they differ when this is an OUTER fan-out in a nested stack.
+        chain_len = len(prefix)
+        fan_out_index = (
+            event.fan_out_index_chain[chain_len - 1]
+            if chain_len - 1 < len(event.fan_out_index_chain)
+            else event.fan_out_index
+        )
         metadata: dict[str, Any] = {
             "namespace": list(prefix),
             "step": event.step,
             "attempt_index": 0,
             "fan_out_parent_node_name": parent_node_name,
-            "fan_out_index": event.fan_out_index,
+            "fan_out_index": fan_out_index,
             "subgraph_name": _subgraph_identity_at(event, len(prefix)),
         }
         if correlation_id is not None:
@@ -1162,9 +1246,9 @@ class LangfuseObserver:
             metadata=metadata,
             parent_observation_id=parent_observation_id,
         )
-        instance_key = prefix + (str(event.fan_out_index),)
-        # Per proposal 0045: chain sliced to instance-dispatch depth.
-        chain_len = len(prefix)
+        # Lineage-aware key (proposal 0045): the namespace plus the full instance
+        # / branch chain, so nested instances don't collide across outer ones.
+        instance_key = _dispatch_key(prefix, event.fan_out_index_chain, event.branch_name_chain)
         inv_state.fan_out_instance_observations[instance_key] = _OpenObservation(
             handle=handle,
             fan_out_index_chain=event.fan_out_index_chain[:chain_len],
@@ -1180,18 +1264,22 @@ class LangfuseObserver:
     ) -> None:
         # Per-branch dispatch lives under the parallel-branches NODE's own Span
         # observation (mirror of the fan-out per-instance dispatch).
-        pb_open = self._find_node_observation(inv_state, prefix)
+        pb_open = self._find_node_observation(inv_state, prefix, event)
         parent_observation_id = pb_open.handle.id if pb_open is not None else None
         parent_node_name = inv_state.parallel_branches_parent_node_name.get(prefix, prefix[-1])
         # Synthesized from the first inner event in the branch subtree; inherit
-        # scalar metadata from it. branch_name is the OA-emitted §8.4.2 row; the
-        # caller's branchName augmentation rides in via the caller metadata.
+        # scalar metadata from it. branch_name is the OA-emitted §8.4.2 row (from
+        # event.branch_name, which a callable branch sets without extending
+        # branch_name_chain); the caller's branchName augmentation rides in via
+        # the caller metadata.
+        chain_len = len(prefix)
+        branch_name = cast("str", event.branch_name)
         metadata: dict[str, Any] = {
             "namespace": list(prefix),
             "step": event.step,
             "attempt_index": 0,
             "parallel_branches_parent_node_name": parent_node_name,
-            "branch_name": event.branch_name,
+            "branch_name": branch_name,
             "subgraph_name": _subgraph_identity_at(event, len(prefix)),
         }
         if correlation_id is not None:
@@ -1199,12 +1287,16 @@ class LangfuseObserver:
         _apply_caller_metadata(metadata, event.caller_invocation_metadata)
         handle = self.client.span(
             trace_id=inv_state.trace_id,
-            name=event.branch_name,
+            name=branch_name,
             metadata=metadata,
             parent_observation_id=parent_observation_id,
         )
-        branch_key = prefix + (cast("str", event.branch_name),)
-        chain_len = len(prefix)
+        # Lineage-aware key (proposal 0045): the enclosing fan-out instance /
+        # branch chain plus the explicit branch name, so a branch nested inside
+        # an outer fan-out instance doesn't collide across outer instances.
+        branch_key = _branch_dispatch_key(
+            prefix, event.fan_out_index_chain, event.branch_name_chain, branch_name
+        )
         inv_state.parallel_branches_branch_spans[branch_key] = _OpenObservation(
             handle=handle,
             fan_out_index_chain=event.fan_out_index_chain[:chain_len],
@@ -1364,7 +1456,7 @@ class LangfuseObserver:
         # instance's entry.
         ids_list = inv_state.detached_child_trace_ids.setdefault(prefix, [])
         ids_list.append(detached_trace_id)
-        fan_out_open = self._find_node_observation(inv_state, prefix)
+        fan_out_open = self._find_node_observation(inv_state, prefix, event)
         if fan_out_open is not None:
             # `detached: True` per §8.4.2 (proposal 0042) — the
             # parent-side fan-out node observation marks itself when
@@ -1411,14 +1503,19 @@ class LangfuseObserver:
             metadata=dispatch_metadata,
             parent_observation_id=None,
         )
-        instance_key = prefix + (str(event.fan_out_index),)
+        # Shared fan_out_instance_observations / root_prefixes use the
+        # lineage-aware key (consistent with resolution / close). detached_traces
+        # keeps the top-level routing key shape that _trace_id_for reconstructs
+        # (detached fan-outs are top-level; generalizing _trace_id_for is out of
+        # scope for this fix).
+        instance_key = _dispatch_key(prefix, event.fan_out_index_chain, event.branch_name_chain)
         chain_len = len(prefix)
         inv_state.fan_out_instance_observations[instance_key] = _OpenObservation(
             handle=handle,
             fan_out_index_chain=event.fan_out_index_chain[:chain_len],
             branch_name_chain=event.branch_name_chain[:chain_len],
         )
-        inv_state.detached_traces[instance_key] = detached_trace_id
+        inv_state.detached_traces[prefix + (str(event.fan_out_index),)] = detached_trace_id
         inv_state.fan_out_instance_root_prefixes.add(instance_key)
 
     def _close_subgraph_observation(self, inv_state: _InvState, prefix: tuple[str, ...]) -> None:
@@ -1444,18 +1541,26 @@ class LangfuseObserver:
         observation.handle.end()
 
     def _find_node_observation(
-        self, inv_state: _InvState, prefix: tuple[str, ...]
+        self, inv_state: _InvState, prefix: tuple[str, ...], event: NodeEvent
     ) -> _OpenObservation | None:
         # Find a NODE's own open leaf observation at ``prefix`` (the fan-out or
         # parallel-branches NODE, whose per-instance / per-branch dispatches
-        # parent under it). Scan by namespace only: the NODE may itself carry an
-        # outer fan_out_index / branch_name when it is nested inside another
-        # fan-out instance or branch, so filtering on fan_out_index is None would
-        # miss it. Only one entry per namespace is open at a time (retry opens
-        # and closes attempts serially), so the scan is unambiguous. Mirrors the
-        # OTel _find_fan_out_node_span.
+        # parent under it). Match the ENCLOSING lineage, not just the namespace:
+        # when the NODE is itself nested inside an outer fan-out instance /
+        # branch, several instances of the same NODE namespace are open at once
+        # under concurrency, so a namespace-only scan would bind the wrong one.
+        # The NODE's own event carries the instance / branch it sits in as its
+        # fan_out_index / branch_name (key[2] / key[3]); that equals the
+        # augmenting/leaf event's chain entry at the level above this NODE.
+        n = len(prefix)
+        enclosing_fi = (
+            event.fan_out_index_chain[n - 2] if n >= 2 and n - 2 < len(event.fan_out_index_chain) else None
+        )
+        enclosing_bn = (
+            event.branch_name_chain[n - 2] if n >= 2 and n - 2 < len(event.branch_name_chain) else None
+        )
         for key, observation in inv_state.open_observations.items():
-            if key[0] == prefix:
+            if key[0] == prefix and key[2] == enclosing_fi and key[3] == enclosing_bn:
                 return observation
         return None
 
