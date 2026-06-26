@@ -1764,7 +1764,23 @@ class OTelObserver:
         calling = inv_state.open_spans.get(calling_key)
         if calling is not None:
             return set_span_in_context(calling.span)
-        # 2. Walk up the calling namespace prefix for a synthetic
+        # 2. Per-instance fan-out dispatch (spec ruling,
+        #    review-nested-fan-out-lineage): an orphaned LLM span inside a
+        #    fan-out instance parents under the per-instance dispatch span, not
+        #    the subgraph / invocation span. Mirrors the LangfuseObserver
+        #    fallback. Top-level instance ONLY (namespace[:1] + the scalar
+        #    fan_out_index): for a NESTED fan-out instance the innermost index
+        #    can coincide with a sibling top-level instance's, so this may
+        #    mis-resolve to that sibling rather than miss. The nearest-open-
+        #    ancestor-at-any-depth generalization (which also reorders this ahead
+        #    of the subgraph walk below) fixes that and rides the spec §5.5
+        #    fixture.
+        if calling_fan_out_index is not None and calling_namespace_prefix:
+            instance_key = _dispatch_key(calling_namespace_prefix[:1], (calling_fan_out_index,), (None,))
+            dispatch = inv_state.fan_out_instance_spans.get(instance_key)
+            if dispatch is not None:
+                return set_span_in_context(dispatch.span)
+        # 3. Walk up the calling namespace prefix for a synthetic
         #    subgraph dispatch span at any ancestor — covers LLM
         #    calls from inside subgraph wrapper middleware.
         for plen in range(len(calling_namespace_prefix), 0, -1):
@@ -1775,12 +1791,12 @@ class OTelObserver:
             dr = inv_state.detached_roots.get(ancestor)
             if dr is not None:
                 return set_span_in_context(dr.span)
-        # 3. Invocation span — ``complete()`` called outside any
+        # 4. Invocation span — ``complete()`` called outside any
         #    node body but inside an ``invoke()``.
         inv = self._invocation_span.get(invocation_id)
         if inv is not None:
             return set_span_in_context(inv.span)
-        # 4. No invocation in scope — return a fresh empty Context.
+        # 5. No invocation in scope — return a fresh empty Context.
         #    The span will live in its own trace.
         return otel_context.Context()
 
