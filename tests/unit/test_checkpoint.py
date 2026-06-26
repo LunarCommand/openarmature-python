@@ -746,6 +746,118 @@ async def test_nested_fan_out_records_outermost_schema_version() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Nested fan-out (a fan-out inside an outer fan-out INSTANCE): the per-fan-out
+# tracking key carries the enclosing instance lineage. Verify the save/restore
+# round-trip projects the inner fan-out's progress and resume rolls the outer
+# instances forward to the correct per-instance results.
+# ---------------------------------------------------------------------------
+
+
+class _RNestLeafState(State):
+    tag: str = ""
+    seed: str = ""
+    out: str = ""
+
+
+class _RNestMidState(State):
+    tag: str = ""
+    seeds: list[str] = Field(default_factory=list[str])
+    collected: list[str] = Field(default_factory=list[str])
+
+
+class _RNestOuterState(State):
+    products: list[str] = Field(default_factory=list[str])
+    seeds: list[str] = Field(default_factory=list[str])
+    results: list[Any] = Field(default_factory=list[Any])
+
+
+async def test_nested_fan_out_in_instance_resume_round_trips() -> None:
+    """A fan-out nested inside an outer fan-out instance round-trips through a
+    checkpoint save/restore: the projection emits the inner fan-out's
+    per-outer-instance progress, restore rebuilds the lineage-keyed dict, and
+    resuming from the completed record rolls the outer instances forward to the
+    correct per-instance results without re-running the inner leaf."""
+    leaf_calls = 0
+
+    async def leaf(state: _RNestLeafState) -> dict[str, str]:
+        nonlocal leaf_calls
+        leaf_calls += 1
+        return {"out": f"{state.tag}-{state.seed}"}
+
+    leaf_g = (
+        GraphBuilder(_RNestLeafState).add_node("ask", leaf).add_edge("ask", END).set_entry("ask").compile()
+    )
+    mid_g = (
+        GraphBuilder(_RNestMidState)
+        .add_fan_out_node(
+            "inner_fan",
+            subgraph=leaf_g,
+            items_field="seeds",
+            item_field="seed",
+            inputs={"tag": "tag"},
+            collect_field="out",
+            target_field="collected",
+        )
+        .add_edge("inner_fan", END)
+        .set_entry("inner_fan")
+        .compile()
+    )
+    cp = InMemoryCheckpointer()
+    captured_ids: list[str] = []
+    captured_records: list[CheckpointRecord] = []
+    original_save = cp.save
+
+    async def capture_save(invocation_id: str, record: CheckpointRecord) -> None:
+        captured_ids.append(invocation_id)
+        captured_records.append(record)
+        await original_save(invocation_id, record)
+
+    cp.save = capture_save  # type: ignore[method-assign]
+
+    outer_g = (
+        GraphBuilder(_RNestOuterState)
+        .add_fan_out_node(
+            "outer_fan",
+            subgraph=mid_g,
+            items_field="products",
+            item_field="tag",
+            inputs={"seeds": "seeds"},
+            collect_field="collected",
+            target_field="results",
+        )
+        .add_edge("outer_fan", END)
+        .set_entry("outer_fan")
+        .with_checkpointer(cp)
+        .compile()
+    )
+    correct = [("A-x", "A-y"), ("B-x", "B-y")]
+    final = await outer_g.invoke(_RNestOuterState(products=["A", "B"], seeds=["x", "y"]))
+    assert sorted(tuple(sorted(sub)) for sub in final.results) == correct
+    assert leaf_calls == 4
+    # The projection emitted the INNER fan-out's progress (a record whose
+    # fan_out_node_name is the inner node), so the lineage-keyed nested entry
+    # round-trips through the record format without colliding the projection's
+    # key destructuring.
+    assert any(
+        fp.fan_out_node_name == "inner_fan" for rec in captured_records for fp in rec.fan_out_progress
+    ), "expected the inner fan-out's progress in a saved record"
+
+    # Resume from the completed invocation: the outer instances are tracked
+    # ``completed`` so they roll forward (no inner re-run) to the same results,
+    # exercising _restore_fan_out_progress_state on a record set that includes
+    # the nested fan-out's (collapsed-lineage) entries.
+    resume_id = captured_ids[-1]
+    leaf_calls_before_resume = leaf_calls
+    resumed = await outer_g.invoke(
+        _RNestOuterState(products=["A", "B"], seeds=["x", "y"]), resume_invocation=resume_id
+    )
+    assert sorted(tuple(sorted(sub)) for sub in resumed.results) == correct
+    assert leaf_calls == leaf_calls_before_resume, (
+        "completed outer instances roll forward on resume; the inner leaf must not re-run"
+    )
+
+
+# ---------------------------------------------------------------------------
 # Resume re-entry into subgraph: parent_states populated on inner-node saves
 # ---------------------------------------------------------------------------
 

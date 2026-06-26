@@ -3712,6 +3712,218 @@ async def test_nested_fan_out_augmentation_reaches_outer_instance_dispatch_span(
     )
 
 
+async def test_nested_fan_out_in_fan_out_dispatch_lineage() -> None:
+    # Proposal 0045 / 0013: a fan-out nested INSIDE a fan-out instance. Each
+    # outer instance gets its OWN inner per-instance dispatch span (distinct
+    # lineage keys, no cross-instance collision -- before the fix the second
+    # collided with the first), and an inner leaf's augmentation reaches its own
+    # outer instance dispatch, not the sibling's, and not the shared NODE spans.
+    import asyncio
+
+    from openarmature.observability.metadata import set_invocation_metadata
+
+    class _LeafS(State):
+        tag: str = ""
+        seed: str = ""
+        out: str = ""
+
+    class _MidS(State):
+        tag: str = ""
+        seeds: list[str] = []
+        collected: Annotated[list[str], append] = []
+
+    class _OuterS(State):
+        products: list[str] = []
+        seeds: list[str] = []
+        results: Annotated[list[Any], append] = []
+
+    async def _leaf(s: _LeafS) -> dict[str, str]:
+        await asyncio.sleep(0)
+        set_invocation_metadata(note=f"{s.tag}-{s.seed}")
+        return {"out": f"{s.tag}-{s.seed}"}
+
+    leaf = GraphBuilder(_LeafS).add_node("ask", _leaf).add_edge("ask", END).set_entry("ask").compile()
+    mid = (
+        GraphBuilder(_MidS)
+        .add_fan_out_node(
+            "inner_fan",
+            subgraph=leaf,
+            items_field="seeds",
+            item_field="seed",
+            inputs={"tag": "tag"},
+            collect_field="out",
+            target_field="collected",
+        )
+        .add_edge("inner_fan", END)
+        .set_entry("inner_fan")
+        .compile()
+    )
+    exporter = InMemorySpanExporter()
+    observer = OTelObserver(span_processor=SimpleSpanProcessor(exporter))
+    g = (
+        GraphBuilder(_OuterS)
+        .add_fan_out_node(
+            "outer_fan",
+            subgraph=mid,
+            items_field="products",
+            item_field="tag",
+            inputs={"seeds": "seeds"},
+            collect_field="collected",
+            target_field="results",
+            # concurrency=1 while the observer's NODE-key collision under
+            # concurrent nested fan-out is fixed (the inner nodes of different
+            # outer instances share a _key_for and dedup); the engine results are
+            # correct at any concurrency. Tracked separately.
+            concurrency=1,
+        )
+        .add_edge("outer_fan", END)
+        .set_entry("outer_fan")
+        .compile()
+    )
+    g.attach_observer(observer)
+    try:
+        await g.invoke(_OuterS(products=["A", "B"], seeds=["x"]))
+        await g.drain()
+    finally:
+        observer.shutdown()
+    spans = exporter.get_finished_spans()
+
+    def _attr(s: Any, k: str) -> Any:
+        return dict(s.attributes or {}).get(k)
+
+    inner_dispatches = [
+        s
+        for s in spans
+        if s.name == "inner_fan" and "openarmature.fan_out.parent_node_name" in dict(s.attributes or {})
+    ]
+    assert len(inner_dispatches) == 2, (
+        f"expected 2 nested inner instance dispatches, got {len(inner_dispatches)}"
+    )
+    outer_dispatches = {
+        _attr(s, "openarmature.node.fan_out_index"): s
+        for s in spans
+        if s.name == "outer_fan" and "openarmature.fan_out.parent_node_name" in dict(s.attributes or {})
+    }
+    assert outer_dispatches.keys() == {0, 1}
+    assert _attr(outer_dispatches[0], "openarmature.user.note") == "A-x"
+    assert _attr(outer_dispatches[1], "openarmature.user.note") == "B-x"
+    node_spans = [
+        s
+        for s in spans
+        if s.name in ("outer_fan", "inner_fan")
+        and "openarmature.fan_out.parent_node_name" not in dict(s.attributes or {})
+    ]
+    assert node_spans, "expected fan-out NODE spans"
+    assert all(_attr(s, "openarmature.user.note") is None for s in node_spans), (
+        "shared fan-out NODE spans MUST NOT carry the augmentation"
+    )
+
+
+async def test_parallel_branches_in_fan_out_dispatch_lineage() -> None:
+    # Proposal 0045 / 0044: a parallel-branches NODE inside a fan-out instance.
+    # Each outer instance gets its own per-branch dispatch spans (distinct keys,
+    # no cross-instance collision); only the augmenting branch + its outer
+    # instance dispatch carry the augmentation, not the sibling branch.
+    import asyncio
+
+    from openarmature.graph import BranchSpec
+    from openarmature.observability.metadata import set_invocation_metadata
+
+    class _BranchS(State):
+        tag: str = ""
+        out: str = ""
+
+    class _MidS(State):
+        tag: str = ""
+        outcome: str = ""
+
+    class _OuterS(State):
+        products: list[str] = []
+        results: Annotated[list[Any], append] = []
+
+    async def _probe(s: _BranchS) -> dict[str, str]:
+        await asyncio.sleep(0)
+        return {"out": s.tag}
+
+    async def _baseline(_s: _BranchS) -> dict[str, str]:
+        await asyncio.sleep(0)
+        return {"out": "base"}
+
+    probe = GraphBuilder(_BranchS).add_node("ask", _probe).add_edge("ask", END).set_entry("ask").compile()
+    baseline = (
+        GraphBuilder(_BranchS).add_node("ask", _baseline).add_edge("ask", END).set_entry("ask").compile()
+    )
+
+    async def _augment(s: _BranchS, next_: Any) -> Any:
+        set_invocation_metadata(note=s.tag)
+        return await next_(s)
+
+    mid = (
+        GraphBuilder(_MidS)
+        .add_parallel_branches_node(
+            "dispatcher",
+            branches={
+                "probe": BranchSpec(subgraph=probe, inputs={"tag": "tag"}, middleware=(_augment,)),
+                "baseline": BranchSpec(subgraph=baseline),
+            },
+        )
+        .add_edge("dispatcher", END)
+        .set_entry("dispatcher")
+        .compile()
+    )
+    exporter = InMemorySpanExporter()
+    observer = OTelObserver(span_processor=SimpleSpanProcessor(exporter))
+    g = (
+        GraphBuilder(_OuterS)
+        .add_fan_out_node(
+            "outer_fan",
+            subgraph=mid,
+            items_field="products",
+            item_field="tag",
+            collect_field="outcome",
+            target_field="results",
+        )
+        .add_edge("outer_fan", END)
+        .set_entry("outer_fan")
+        .compile()
+    )
+    g.attach_observer(observer)
+    try:
+        await g.invoke(_OuterS(products=["A", "B"]))
+        await g.drain()
+    finally:
+        observer.shutdown()
+    spans = exporter.get_finished_spans()
+
+    def _attr(s: Any, k: str) -> Any:
+        return dict(s.attributes or {}).get(k)
+
+    probe_dispatches = [
+        s
+        for s in spans
+        if s.name == "probe" and "openarmature.parallel_branches.parent_node_name" in dict(s.attributes or {})
+    ]
+    baseline_dispatches = [
+        s
+        for s in spans
+        if s.name == "baseline"
+        and "openarmature.parallel_branches.parent_node_name" in dict(s.attributes or {})
+    ]
+    assert len(probe_dispatches) == 2, f"expected 2 probe dispatches, got {len(probe_dispatches)}"
+    assert len(baseline_dispatches) == 2, f"expected 2 baseline dispatches, got {len(baseline_dispatches)}"
+    outer_dispatches = {
+        _attr(s, "openarmature.node.fan_out_index"): s
+        for s in spans
+        if s.name == "outer_fan" and "openarmature.fan_out.parent_node_name" in dict(s.attributes or {})
+    }
+    assert outer_dispatches.keys() == {0, 1}
+    assert _attr(outer_dispatches[0], "openarmature.user.note") == "A"
+    assert _attr(outer_dispatches[1], "openarmature.user.note") == "B"
+    assert all(_attr(s, "openarmature.user.note") is None for s in baseline_dispatches), (
+        "the non-augmenting baseline branch MUST NOT carry the augmentation"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Callable parallel branches (proposal 0075, observability §5.7). Mirrors
 # spec conformance fixture 110 (otel-callable-branch-span), which is not yet

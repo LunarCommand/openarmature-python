@@ -123,6 +123,14 @@ from openarmature.observability.llm_event import serialize_tool_calls
 # same namespace + fan_out_index would collide on the same key.
 _StackKey = tuple[tuple[str, ...], int, int | None, str | None]
 
+# Lineage-aware dispatch keys (proposal 0045): the fan-out / pb NODE namespace
+# prefix plus the fan-out instance index / branch name chain slices along the
+# path to it. _BranchDispatchKey carries the explicit branch name (a callable
+# branch sets it without extending the chain) instead of a trailing chain entry.
+# Mirrors the LangfuseObserver aliases.
+_DispatchKey = tuple[tuple[str, ...], tuple[int | None, ...], tuple[str | None, ...]]
+_BranchDispatchKey = tuple[tuple[str, ...], tuple[int | None, ...], tuple[str | None, ...], str]
+
 
 # §5.5.5 truncation marker. The leading character is U+2026 HORIZONTAL
 # ELLIPSIS (3 bytes UTF-8); the marker is a fixed UTF-8 string and is
@@ -299,6 +307,41 @@ def _span_chain_on_path(
     return True
 
 
+def _dispatch_key(
+    prefix: tuple[str, ...],
+    fan_out_index_chain: tuple[int | None, ...],
+    branch_name_chain: tuple[str | None, ...],
+) -> _DispatchKey:
+    """Lineage-aware identity key for a fan-out instance / per-branch dispatch
+    span at namespace ``prefix``. Encodes the fan-out/pb NODE namespace plus the
+    full chain of fan-out instance indices / branch names along the path to it
+    (sliced to ``len(prefix)``). Two dispatches at the same namespace but in
+    different enclosing fan-out instances / branches get distinct keys, so a
+    fan-out / pb nested inside an outer fan-out instance no longer collides
+    across outer instances. Mirrors the LangfuseObserver helper of the same
+    name."""
+    n = len(prefix)
+    return (prefix, tuple(fan_out_index_chain[:n]), tuple(branch_name_chain[:n]))
+
+
+def _branch_dispatch_key(
+    prefix: tuple[str, ...],
+    fan_out_index_chain: tuple[int | None, ...],
+    branch_name_chain: tuple[str | None, ...],
+    branch_name: str,
+) -> _BranchDispatchKey:
+    """Lineage-aware identity key for a per-branch dispatch span at namespace
+    ``prefix``. The branch IDENTITY comes from ``branch_name`` explicitly (not
+    ``branch_name_chain[-1]``): a callable branch carries its name on the event
+    but never extends ``branch_name_chain`` (no subgraph descent). The key still
+    carries the ENCLOSING fan-out instance / branch chain (positions above this
+    pb node) so a pb nested inside an outer fan-out instance doesn't collide
+    across outer instances. Mirrors the LangfuseObserver helper of the same
+    name."""
+    n = len(prefix)
+    return (prefix, tuple(fan_out_index_chain[:n]), tuple(branch_name_chain[: n - 1]), branch_name)
+
+
 # Sorted object keys, no insignificant whitespace, UTF-8 output (per
 # observability §5.5.1 / §5.5.6). Within-impl determinism for identical
 # inputs is required; cross-impl bytewise stability is NOT required by
@@ -381,6 +424,9 @@ class _InvState:
     # lets it OVERRIDE a prior ERROR (only a set to UNSET is ignored), so
     # an unconditional OK at close would erase the detached-trace ERROR.
     errored_detached_keys: set[tuple[str, ...]] = field(default_factory=set[tuple[str, ...]])
+    # OTel keeps detached instance roots on a FLAT key (prefix + (str(index),)),
+    # the same shape _resolve_parent_context / detached_roots use; only the
+    # non-detached dispatch maps moved to the lineage-aware _DispatchKey.
     fan_out_instance_root_prefixes: set[tuple[str, ...]] = field(default_factory=set[tuple[str, ...]])
     # Per spec §5.4 + proposal 0013 (v0.10.0): non-detached fan-outs
     # synthesize per-instance dispatch spans nested between the fan-out
@@ -389,8 +435,8 @@ class _InvState:
     # ``detached_roots``. Lives in the parent trace (not a fresh
     # trace_id, unlike detached). Closed when the fan-out node's
     # ``completed`` event fires.
-    fan_out_instance_spans: dict[tuple[str, ...], _OpenSpan] = field(
-        default_factory=dict[tuple[str, ...], _OpenSpan]
+    fan_out_instance_spans: dict[_DispatchKey, _OpenSpan] = field(
+        default_factory=dict[_DispatchKey, _OpenSpan]
     )
     # ``parent_node_name`` cache (per spec proposal 0013 correction #4):
     # the fan-out node's name surfaces on its own ``started`` event via
@@ -407,8 +453,8 @@ class _InvState:
     # per-instance synthesis above).  Keyed by
     # ``prefix + (branch_name,)``.  Closed when the parallel-branches
     # node's ``completed`` event fires.
-    parallel_branches_branch_spans: dict[tuple[str, ...], _OpenSpan] = field(
-        default_factory=dict[tuple[str, ...], _OpenSpan]
+    parallel_branches_branch_spans: dict[_BranchDispatchKey, _OpenSpan] = field(
+        default_factory=dict[_BranchDispatchKey, _OpenSpan]
     )
     # ``parent_node_name`` cache for parallel-branches (mirrors the
     # ``fan_out_parent_node_name`` cache above).  Surfaces from the
@@ -807,7 +853,12 @@ class OTelObserver:
             # the branch span.
             if event.branch_name is not None and event.parallel_branches_config is None:
                 dispatch = inv_state.parallel_branches_branch_spans.get(
-                    event.namespace + (event.branch_name,)
+                    _branch_dispatch_key(
+                        event.namespace,
+                        event.fan_out_index_chain,
+                        event.branch_name_chain,
+                        event.branch_name,
+                    )
                 )
                 if dispatch is not None:
                     _set_active_observer_span(dispatch.span)
@@ -951,8 +1002,13 @@ class OTelObserver:
         # or a pb's branch, the NODE's own completion event carries
         # the OUTER axis values.
         if event.fan_out_config is not None:
+            ns = event.namespace
             for key in list(inv_state.fan_out_instance_spans.keys()):
-                if len(key) > len(event.namespace) and key[: len(event.namespace)] == event.namespace:
+                # The dispatch key is now (anchor_ns, fi_chain, bn_chain); match
+                # on the NODE namespace (anchor_ns = key[0]) being in this
+                # completing node's subtree.
+                anchor_ns = key[0]
+                if len(anchor_ns) >= len(ns) and anchor_ns[: len(ns)] == ns:
                     self._close_fan_out_instance_dispatch_span(inv_state, key)
             inv_state.fan_out_parent_node_name.pop(event.namespace, None)
 
@@ -966,8 +1022,10 @@ class OTelObserver:
         # ``branch_name is None`` (which would skip close for a pb
         # nested inside another pb's branch).
         if event.parallel_branches_config is not None:
+            ns = event.namespace
             for key in list(inv_state.parallel_branches_branch_spans.keys()):
-                if len(key) > len(event.namespace) and key[: len(event.namespace)] == event.namespace:
+                anchor_ns = key[0]
+                if len(anchor_ns) >= len(ns) and anchor_ns[: len(ns)] == ns:
                     self._close_parallel_branches_branch_dispatch_span(inv_state, key)
             inv_state.parallel_branches_parent_node_name.pop(event.namespace, None)
             inv_state.parallel_branches_branch_names.pop(event.namespace, None)
@@ -1147,40 +1205,25 @@ class OTelObserver:
             if _span_chain_on_path(open_span, aug_fi_chain, aug_bn_chain):
                 targets.append(open_span.span)
 
-        # Fan-out instance dispatch spans: keyed by anchor_ns +
-        # (str(fi),).  The dispatch represents the descent at namespace
-        # position len(anchor_ns)-1 — i.e., chain position
-        # ``len(anchor_ns)-1`` should match the dispatch's fi.
+        # Fan-out instance dispatch spans: on the augmenter's path iff the
+        # dispatch NODE namespace (key[0]) is an ancestor-or-equal of the
+        # augmenter AND its full lineage chain (carried on the span) is a prefix
+        # of the augmenter's -- so a SIBLING outer instance's dispatch, whose
+        # chain differs at the enclosing position, is excluded.
         for key, open_span in inv_state.fan_out_instance_spans.items():
-            if not key:
-                continue
-            anchor_ns = key[:-1]
-            fi_str = key[-1]
+            anchor_ns = key[0]
             if not (is_strict_prefix(anchor_ns, aug_ns) or anchor_ns == aug_ns):
                 continue
-            chain_pos = len(anchor_ns) - 1
-            if chain_pos < 0 or chain_pos >= len(aug_fi_chain):
-                continue
-            aug_fi_at_pos = aug_fi_chain[chain_pos]
-            if aug_fi_at_pos is None or str(aug_fi_at_pos) != fi_str:
-                continue
-            targets.append(open_span.span)
+            if _span_chain_on_path(open_span, aug_fi_chain, aug_bn_chain):
+                targets.append(open_span.span)
 
-        # Per-branch dispatch spans: keyed by anchor_ns + (branch_name,).
-        # Mirror logic to fan-out above, against the branch chain.
+        # Per-branch dispatch spans: same lineage match as fan-out above.
         for key, open_span in inv_state.parallel_branches_branch_spans.items():
-            if not key:
-                continue
-            anchor_ns = key[:-1]
-            bn_str = key[-1]
+            anchor_ns = key[0]
             if not (is_strict_prefix(anchor_ns, aug_ns) or anchor_ns == aug_ns):
                 continue
-            chain_pos = len(anchor_ns) - 1
-            if chain_pos < 0 or chain_pos >= len(aug_bn_chain):
-                continue
-            if aug_bn_chain[chain_pos] != bn_str:
-                continue
-            targets.append(open_span.span)
+            if _span_chain_on_path(open_span, aug_fi_chain, aug_bn_chain):
+                targets.append(open_span.span)
 
         # Open NODE spans: same context (aug's own attempt span), or
         # strict ancestor on the augmenter's path.  Skip:
@@ -1803,16 +1846,32 @@ class OTelObserver:
         #    deepest matching depth is the most-immediate parent.
         for prefix_len in range(len(event.namespace), 0, -1):
             prefix = event.namespace[:prefix_len]
+            # Lineage-aware keys (proposal 0045): carry the enclosing fan-out
+            # instance / branch chain so this resolves to the RIGHT outer
+            # instance for arbitrary nesting.
+            fi_axis = (
+                event.fan_out_index_chain[prefix_len - 1]
+                if prefix_len - 1 < len(event.fan_out_index_chain)
+                else None
+            )
             if event.branch_name is not None:
-                branch_dispatch = inv_state.parallel_branches_branch_spans.get(prefix + (event.branch_name,))
+                branch_dispatch = inv_state.parallel_branches_branch_spans.get(
+                    _branch_dispatch_key(
+                        prefix, event.fan_out_index_chain, event.branch_name_chain, event.branch_name
+                    )
+                )
                 if branch_dispatch is not None:
                     return set_span_in_context(branch_dispatch.span)
             if event.fan_out_index is not None:
-                instance_key = prefix + (str(event.fan_out_index),)
-                root = inv_state.detached_roots.get(instance_key)
+                # Detached roots keep the top-level routing key shape (detached
+                # generalization is out of scope).
+                root = inv_state.detached_roots.get(prefix + (str(event.fan_out_index),))
                 if root is not None:
                     return set_span_in_context(root.span)
-                instance_dispatch = inv_state.fan_out_instance_spans.get(instance_key)
+            if fi_axis is not None:
+                instance_dispatch = inv_state.fan_out_instance_spans.get(
+                    _dispatch_key(prefix, event.fan_out_index_chain, event.branch_name_chain)
+                )
                 if instance_dispatch is not None:
                     return set_span_in_context(instance_dispatch.span)
         # 1b. Detached subgraph root at any matching prefix wins
@@ -1886,20 +1945,24 @@ class OTelObserver:
                 continue
             if prefix in inv_state.detached_roots:
                 continue
-            # Per spec proposal 0013 (v0.10.0): for non-detached
-            # fan-out instances, the per-instance dispatch span lives
-            # at ``prefix + (str(fan_out_index),)`` in
-            # ``fan_out_instance_spans``. If the per-instance dispatch
-            # span for THIS event's instance is already open, the
-            # fan-out node span at ``prefix`` is already open too
-            # (synthesized as part of the fan-out node's started
-            # event), so we don't open a new subgraph span at
-            # ``prefix``.  This dedup runs at any depth — the fan-out
-            # node may sit inside a subgraph wrapper, another fan-out,
-            # or a parallel-branches branch.
+            # The fan-out instance axis at THIS depth -- the chain entry for the
+            # dispatch boundary into prefix -- NOT the innermost event.fan_out_index
+            # (which differs for an OUTER fan-out in a nested stack). Branches use
+            # event.branch_name directly (callable branches don't extend the chain).
+            fi_axis = (
+                event.fan_out_index_chain[depth - 1] if depth - 1 < len(event.fan_out_index_chain) else None
+            )
+            # Per spec proposal 0013 (v0.10.0): for non-detached fan-out
+            # instances, the per-instance dispatch span lives in
+            # ``fan_out_instance_spans`` keyed by the lineage-aware _dispatch_key.
+            # If the dispatch span for THIS event's instance is already open, the
+            # fan-out node span at ``prefix`` is already open too, so we don't
+            # open a new subgraph span. Runs at any depth (nested fan-out /
+            # subgraph wrapper / branch).
             if (
-                event.fan_out_index is not None
-                and (prefix + (str(event.fan_out_index),)) in inv_state.fan_out_instance_spans
+                fi_axis is not None
+                and _dispatch_key(prefix, event.fan_out_index_chain, event.branch_name_chain)
+                in inv_state.fan_out_instance_spans
             ):
                 continue
             # If this prefix's first segment is configured as a
@@ -1933,7 +1996,7 @@ class OTelObserver:
             # detached check uses ``prefix[-1]`` (the fan-out node
             # name) so it remains correct at depth > 1.
             if (
-                event.fan_out_index is not None
+                fi_axis is not None
                 and prefix[-1] not in self.detached_fan_outs
                 and prefix in inv_state.fan_out_parent_node_name
             ):
@@ -1955,7 +2018,11 @@ class OTelObserver:
                 and prefix in inv_state.parallel_branches_parent_node_name
                 and event.branch_name in inv_state.parallel_branches_branch_names.get(prefix, frozenset())
             ):
-                branch_key = prefix + (event.branch_name,)
+                # event.branch_name (not bn_axis) so callable branches -- which
+                # don't extend branch_name_chain -- still synthesize.
+                branch_key = _branch_dispatch_key(
+                    prefix, event.fan_out_index_chain, event.branch_name_chain, event.branch_name
+                )
                 if branch_key not in inv_state.parallel_branches_branch_spans:
                     self._open_parallel_branches_branch_dispatch_span(
                         inv_state, correlation_id, prefix, event
@@ -2203,7 +2270,7 @@ class OTelObserver:
         # ``fan_out_index is None`` rather than hardcoding the key.
         # Only one such entry is open at a time (retry opens and
         # closes within a single attempt's lifecycle).
-        fan_out_open = self._find_fan_out_node_span(inv_state, prefix)
+        fan_out_open = self._find_fan_out_node_span(inv_state, prefix, event)
         if fan_out_open is not None:
             fan_out_open.span.add_link(detached_sc)
 
@@ -2272,7 +2339,7 @@ class OTelObserver:
         """
         # Find the fan-out node's open span (latest attempt under
         # retry) to use as parent.
-        fan_out_open = self._find_fan_out_node_span(inv_state, prefix)
+        fan_out_open = self._find_fan_out_node_span(inv_state, prefix, event)
         parent_ctx: object
         if fan_out_open is not None:
             parent_ctx = set_span_in_context(fan_out_open.span)
@@ -2280,10 +2347,19 @@ class OTelObserver:
             parent_ctx = otel_context.Context()
 
         parent_node_name = inv_state.fan_out_parent_node_name.get(prefix, prefix[-1])
+        # The dispatch's OWN instance index is the chain entry at this depth, not
+        # event.fan_out_index (the innermost index of the synthesizing inner
+        # event) -- they differ when this is an OUTER fan-out in a nested stack.
+        chain_len = len(prefix)
+        fan_out_index = (
+            event.fan_out_index_chain[chain_len - 1]
+            if chain_len - 1 < len(event.fan_out_index_chain)
+            else event.fan_out_index
+        )
         attrs: dict[str, Any] = {
             "openarmature.node.name": prefix[-1],
             "openarmature.fan_out.parent_node_name": parent_node_name,
-            "openarmature.node.fan_out_index": event.fan_out_index,
+            "openarmature.node.fan_out_index": fan_out_index,
             "openarmature.subgraph.name": _subgraph_identity_at(event, len(prefix)),
         }
         if correlation_id is not None:
@@ -2295,19 +2371,18 @@ class OTelObserver:
             kind=SpanKind.INTERNAL,
             attributes=attrs,
         )
-        instance_key = prefix + (str(event.fan_out_index),)
-        # Per proposal 0045: this dispatch span sits AT the descent
-        # boundary into the fan-out instance.  Its chain is the slice
-        # of the inner event's chain up to and including the
-        # boundary's own position.
-        chain_len = len(prefix)
+        # Lineage-aware key (proposal 0045): the namespace plus the full instance
+        # / branch chain, so nested instances don't collide across outer ones.
+        # Its chain is the slice of the inner event's chain up to and including
+        # this boundary's own position.
+        instance_key = _dispatch_key(prefix, event.fan_out_index_chain, event.branch_name_chain)
         inv_state.fan_out_instance_spans[instance_key] = _OpenSpan(
             span=instance_span,
             fan_out_index_chain=event.fan_out_index_chain[:chain_len],
             branch_name_chain=event.branch_name_chain[:chain_len],
         )
 
-    def _close_fan_out_instance_dispatch_span(self, inv_state: _InvState, key: tuple[str, ...]) -> None:
+    def _close_fan_out_instance_dispatch_span(self, inv_state: _InvState, key: _DispatchKey) -> None:
         open_span = inv_state.fan_out_instance_spans.pop(key, None)
         if open_span is None:
             return
@@ -2340,19 +2415,11 @@ class OTelObserver:
         assert event.branch_name is not None, (
             "parallel-branches branch dispatch synthesis requires event.branch_name"
         )
-        # Find the parallel-branches NODE's open span (latest attempt
-        # under retry) to use as parent.  Scan ``open_spans`` by
-        # namespace only — the NODE may carry an outer
-        # ``fan_out_index`` (if the parallel-branches node sits inside
-        # a fan-out instance) or ``branch_name`` (if it sits inside
-        # another parallel-branches branch).  Only one entry per
-        # namespace is open at a time, so the scan is unambiguous.
-        node_open: _OpenSpan | None = None
-        for key, open_span in inv_state.open_spans.items():
-            ns, _attempt, _fan_idx, _bn = key
-            if ns == prefix:
-                node_open = open_span
-                break
+        # Find the parallel-branches NODE's open span on THIS branch's lineage
+        # (the same enclosing-instance/branch match as the fan-out parent
+        # finder), so a pb nested inside an outer fan-out instance binds the
+        # right outer instance's NODE under concurrency.
+        node_open = self._find_fan_out_node_span(inv_state, prefix, event)
         parent_ctx: object
         if node_open is not None:
             parent_ctx = set_span_in_context(node_open.span)
@@ -2360,9 +2427,13 @@ class OTelObserver:
             parent_ctx = otel_context.Context()
 
         parent_node_name = inv_state.parallel_branches_parent_node_name.get(prefix, prefix[-1])
+        # branch_name from event.branch_name (a callable branch sets it without
+        # extending branch_name_chain). The assert above narrows it to str.
+        chain_len = len(prefix)
+        branch_name = event.branch_name
         attrs: dict[str, Any] = {
-            "openarmature.node.name": event.branch_name,
-            "openarmature.node.branch_name": event.branch_name,
+            "openarmature.node.name": branch_name,
+            "openarmature.node.branch_name": branch_name,
             "openarmature.parallel_branches.parent_node_name": parent_node_name,
             "openarmature.subgraph.name": _subgraph_identity_at(event, len(prefix)),
         }
@@ -2370,16 +2441,17 @@ class OTelObserver:
             attrs["openarmature.correlation_id"] = correlation_id
         _apply_caller_metadata(attrs, event.caller_invocation_metadata)
         branch_span = self._tracer.start_span(
-            name=event.branch_name,
+            name=branch_name,
             context=cast("Any", parent_ctx),
             kind=SpanKind.INTERNAL,
             attributes=attrs,
         )
-        branch_key = prefix + (event.branch_name,)
-        # Per proposal 0045: this dispatch span sits at the descent
-        # boundary into this branch.  Its chain is the slice up to
-        # and including the boundary's own position.
-        chain_len = len(prefix)
+        # Lineage-aware key (proposal 0045): the enclosing fan-out instance /
+        # branch chain plus the explicit branch name, so a branch nested inside
+        # an outer fan-out instance doesn't collide across outer instances.
+        branch_key = _branch_dispatch_key(
+            prefix, event.fan_out_index_chain, event.branch_name_chain, branch_name
+        )
         inv_state.parallel_branches_branch_spans[branch_key] = _OpenSpan(
             span=branch_span,
             fan_out_index_chain=event.fan_out_index_chain[:chain_len],
@@ -2387,7 +2459,7 @@ class OTelObserver:
         )
 
     def _close_parallel_branches_branch_dispatch_span(
-        self, inv_state: _InvState, key: tuple[str, ...]
+        self, inv_state: _InvState, key: _BranchDispatchKey
     ) -> None:
         open_span = inv_state.parallel_branches_branch_spans.pop(key, None)
         if open_span is None:
@@ -2431,17 +2503,27 @@ class OTelObserver:
         self._run_enrichers(open_span.span, None)
         open_span.span.end()
 
-    def _find_fan_out_node_span(self, inv_state: _InvState, prefix: tuple[str, ...]) -> _OpenSpan | None:
-        """Find the currently-open fan-out NODE span at ``prefix``.
-        Scans by namespace only — the NODE may carry an outer
-        ``fan_out_index`` or ``branch_name`` if the fan-out is itself
-        nested inside another fan-out instance or a parallel-branches
-        branch.  Only one entry per namespace is open at a time
-        (retry middleware opens and closes attempts serially), so the
-        scan is unambiguous."""
+    def _find_fan_out_node_span(
+        self, inv_state: _InvState, prefix: tuple[str, ...], event: NodeEvent
+    ) -> _OpenSpan | None:
+        """Find the currently-open fan-out / pb NODE span at ``prefix`` on the
+        given event's ENCLOSING lineage. When the NODE is itself nested inside an
+        outer fan-out instance / branch, several instances of the same NODE
+        namespace are open at once under concurrency, so a namespace-only scan
+        would bind the wrong one. The NODE's own event carries the instance /
+        branch it sits in as its fan_out_index / branch_name (key[2] / key[3]);
+        that equals the synthesizing event's chain entry at the level above this
+        NODE."""
+        n = len(prefix)
+        enclosing_fi = (
+            event.fan_out_index_chain[n - 2] if n >= 2 and n - 2 < len(event.fan_out_index_chain) else None
+        )
+        enclosing_bn = (
+            event.branch_name_chain[n - 2] if n >= 2 and n - 2 < len(event.branch_name_chain) else None
+        )
         for key, open_span in inv_state.open_spans.items():
-            ns, _attempt, _fan_idx, _bn = key
-            if ns == prefix:
+            ns, _attempt, fan_idx, bn = key
+            if ns == prefix and fan_idx == enclosing_fi and bn == enclosing_bn:
                 return open_span
         return None
 
