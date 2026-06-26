@@ -421,11 +421,16 @@ def _restore_fan_out_progress_state(
         # outer fan-out instance does not round-trip its per-outer-instance
         # progress through the current record format (it would need the lineage
         # on the record): its in-memory keys carry the lineage, so the restored
-        # empty-lineage entry never matches and the nested fan-out RE-RUNS on
-        # resume. (Before the lineage fix it would instead skip, rolling forward
-        # the collapsed/wrong shared entry -- so re-running is the safer of two
-        # never-correct behaviors, and matches the spec's inner-subgraph re-entry
-        # model.) A full fix needs the lineage on the record; tracked separately.
+        # empty-lineage entry never matches. The consequence only bites when
+        # resume actually RE-ENTERS the nested fan-out -- i.e. its outer instance
+        # was in-flight at the save. A completed outer instance rolls forward and
+        # never re-runs its inner fan-out, so the missing inner entry is moot
+        # there. When the inner fan-out does re-enter, it re-runs from scratch
+        # rather than skipping its completed inner instances. (Before the lineage
+        # fix it would instead skip, rolling forward the collapsed/wrong shared
+        # entry -- so re-running is the safer of two never-correct behaviors, and
+        # matches the spec's inner-subgraph re-entry model.) A full fix needs the
+        # lineage on the record; tracked separately.
         key = (fp.namespace, fp.fan_out_node_name, ())
         out[key] = _FanOutExecutionState(
             fan_out_node_name=fp.fan_out_node_name,

@@ -1573,6 +1573,65 @@ async def test_typed_failed_event_parents_under_branch_calling_node() -> None:
     assert error_gens[0].parent_observation_id != slow_handle.id
 
 
+async def test_llm_event_parents_under_fan_out_instance_dispatch() -> None:
+    # Regression cover for _resolve_llm_parent_observation_id fallback #2: when an
+    # LLM event fires inside a top-level fan-out instance and the calling node has
+    # no open observation (fallback #1 misses), the Generation MUST parent under
+    # the per-instance fan-out dispatch observation. The dispatch map is keyed by
+    # the lineage-aware _dispatch_key; before the lineage keys this fallback used
+    # a flat namespace[:1] + (str(index),) key, which always-misses against the
+    # composite map and silently re-parents the Generation under the Trace.
+    from openarmature.observability.correlation import (
+        _reset_invocation_id,
+        _set_invocation_id,
+    )
+    from openarmature.observability.langfuse.observer import (
+        _dispatch_key,
+        _InvState,
+        _OpenObservation,
+    )
+    from tests._helpers.typed_event import make_failed_event
+
+    client = InMemoryLangfuseClient()
+    observer = LangfuseObserver(client=client)
+    invocation_id = "inv-fanout-llm"
+    token = _set_invocation_id(invocation_id)
+    try:
+        client.trace(id=invocation_id, name="fan")
+        observer._inv_states[invocation_id] = _InvState(trace_id=invocation_id)  # noqa: SLF001
+        inv_state = observer._inv_states[invocation_id]  # noqa: SLF001
+        # Per-instance dispatch for top-level fan-out "fan", instance 0, keyed by
+        # the lineage-aware _dispatch_key. No open_observation for the calling
+        # node ("fan", "ask"), so the resolver must reach fallback #2.
+        dispatch_handle = client.span(trace_id=invocation_id, name="fan")
+        instance_key = _dispatch_key(("fan",), (0,), (None,))
+        inv_state.fan_out_instance_observations[instance_key] = _OpenObservation(handle=dispatch_handle)
+        await observer(
+            make_failed_event(
+                invocation_id=invocation_id,
+                node_name="ask",
+                namespace=("fan", "ask"),
+                attempt_index=0,
+                fan_out_index=0,
+                branch_name=None,
+                model="m-test",
+                error_category="provider_unavailable",
+                error_type="ProviderUnavailable",
+                error_message="503 from upstream",
+                call_id="cc-fan",
+            )
+        )
+    finally:
+        _reset_invocation_id(token)
+
+    trace = client.traces[invocation_id]
+    error_gens = [o for o in trace.observations if o.type == "generation" and o.level == "ERROR"]
+    assert len(error_gens) == 1
+    assert error_gens[0].parent_observation_id == dispatch_handle.id, (
+        "LLM Generation must parent under the per-instance fan-out dispatch (resolver fallback #2)"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Proposal 0063 — tool-execution Tool observation (asType "tool")
 # ---------------------------------------------------------------------------

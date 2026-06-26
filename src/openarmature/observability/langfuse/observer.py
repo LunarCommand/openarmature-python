@@ -96,6 +96,13 @@ def _read_implementation_version() -> str:
 # Langfuse handle instead of an OTel Span.
 _StackKey = tuple[tuple[str, ...], int, int | None, str | None]
 
+# Lineage-aware dispatch keys (proposal 0045): the fan-out / pb NODE namespace
+# prefix plus the fan-out instance index / branch name chain slices along the
+# path to it. _BranchDispatchKey carries the explicit branch name (a callable
+# branch sets it without extending the chain) instead of a trailing chain entry.
+_DispatchKey = tuple[tuple[str, ...], tuple[int | None, ...], tuple[str | None, ...]]
+_BranchDispatchKey = tuple[tuple[str, ...], tuple[int | None, ...], tuple[str | None, ...], str]
+
 
 @dataclass
 class _OpenObservation:
@@ -138,7 +145,7 @@ def _dispatch_key(
     prefix: tuple[str, ...],
     fan_out_index_chain: tuple[int | None, ...],
     branch_name_chain: tuple[str | None, ...],
-) -> tuple[Any, ...]:
+) -> _DispatchKey:
     """Lineage-aware identity key for a fan-out instance / per-branch dispatch at
     namespace ``prefix``. Encodes the fan-out/pb NODE namespace plus the full
     chain of fan-out instance indices / branch names along the path to it (sliced
@@ -158,7 +165,7 @@ def _branch_dispatch_key(
     fan_out_index_chain: tuple[int | None, ...],
     branch_name_chain: tuple[str | None, ...],
     branch_name: str,
-) -> tuple[Any, ...]:
+) -> _BranchDispatchKey:
     """Lineage-aware identity key for a per-branch dispatch at namespace
     ``prefix``. The branch IDENTITY comes from ``branch_name`` explicitly (not
     ``branch_name_chain[-1]``): a callable branch carries its name on the event
@@ -262,8 +269,8 @@ class _InvState:
     # fan-out node's own Span observation; inner-node observations
     # parent under this dispatch instead of the shared fan-out node
     # span. Closed when the fan-out node's completed event fires.
-    fan_out_instance_observations: dict[tuple[str, ...], _OpenObservation] = field(
-        default_factory=dict[tuple[str, ...], _OpenObservation]
+    fan_out_instance_observations: dict[_DispatchKey, _OpenObservation] = field(
+        default_factory=dict[_DispatchKey, _OpenObservation]
     )
     # Maps a namespace prefix to the detached Langfuse trace_id when
     # that subtree is configured detached (per the observer's
@@ -276,7 +283,7 @@ class _InvState:
     # detached subgraph prefixes because they're closed when the
     # fan-out node's completed event fires, not when the namespace
     # cursor leaves the subtree.
-    fan_out_instance_root_prefixes: set[tuple[str, ...]] = field(default_factory=set[tuple[str, ...]])
+    fan_out_instance_root_prefixes: set[_DispatchKey] = field(default_factory=set[_DispatchKey])
     # ``parent_node_name`` cache for per-instance attribution
     # (spec proposal 0013 v0.10.0 — inner events from inside a
     # non-detached fan-out instance don't carry fan_out_config
@@ -297,8 +304,8 @@ class _InvState:
     # (prefix = the parallel-branches NODE namespace). Inner branch-node
     # observations parent under this dispatch instead of the shared pb NODE
     # span; closed when the pb NODE's completed event fires.
-    parallel_branches_branch_spans: dict[tuple[str, ...], _OpenObservation] = field(
-        default_factory=dict[tuple[str, ...], _OpenObservation]
+    parallel_branches_branch_spans: dict[_BranchDispatchKey, _OpenObservation] = field(
+        default_factory=dict[_BranchDispatchKey, _OpenObservation]
     )
     # Declared branch-name set per pb NODE namespace (from the NODE's
     # parallel_branches_config), so an inner branch event matches only the node
@@ -578,7 +585,7 @@ class LangfuseObserver:
         if event.fan_out_index is None and event.namespace and event.namespace[0] in self.detached_fan_outs:
             ns = event.namespace
             for key in list(inv_state.fan_out_instance_root_prefixes):
-                anchor_ns = cast("tuple[str, ...]", key[0])
+                anchor_ns = key[0]
                 if len(anchor_ns) >= len(ns) and anchor_ns[: len(ns)] == ns:
                     # Detached per-instance dispatches live in
                     # fan_out_instance_observations (same map as
@@ -587,7 +594,7 @@ class LangfuseObserver:
                     inv_state.fan_out_instance_root_prefixes.discard(key)
                     # detached_traces uses the top-level routing key shape; derive
                     # it from the lineage key's own instance index (last entry).
-                    fi_chain = cast("tuple[int | None, ...]", key[1])
+                    fi_chain = key[1]
                     inv_state.detached_traces.pop(anchor_ns + (str(fi_chain[-1]),), None)
         # Per spec proposal 0013 (v0.10.0): when the fan-out node's
         # own completion fires, close all per-instance dispatch
@@ -595,7 +602,7 @@ class LangfuseObserver:
         if event.fan_out_index is None and event.fan_out_config is not None:
             ns = event.namespace
             for key in list(inv_state.fan_out_instance_observations.keys()):
-                anchor_ns = cast("tuple[str, ...]", key[0])
+                anchor_ns = key[0]
                 # The dispatch key is now (anchor_ns, fi_chain, bn_chain); match
                 # on the NODE namespace (anchor_ns) being in this completing
                 # node's subtree.
@@ -614,7 +621,7 @@ class LangfuseObserver:
         if event.parallel_branches_config is not None:
             ns = event.namespace
             for key in list(inv_state.parallel_branches_branch_spans.keys()):
-                anchor_ns = cast("tuple[str, ...]", key[0])
+                anchor_ns = key[0]
                 if len(anchor_ns) >= len(ns) and anchor_ns[: len(ns)] == ns:
                     self._close_parallel_branches_branch_dispatch_observation(inv_state, key)
             inv_state.parallel_branches_parent_node_name.pop(event.namespace, None)
@@ -705,7 +712,7 @@ class LangfuseObserver:
         # prefix of the augmenter's -- so a SIBLING outer instance's dispatch,
         # whose chain differs at the enclosing position, is excluded.
         for key, observation in inv_state.fan_out_instance_observations.items():
-            anchor_ns = cast("tuple[str, ...]", key[0])
+            anchor_ns = key[0]
             if not (is_strict_prefix(anchor_ns, aug_ns) or anchor_ns == aug_ns):
                 continue
             if _observation_chain_on_path(observation, aug_fi_chain, aug_bn_chain):
@@ -1524,18 +1531,16 @@ class LangfuseObserver:
             return
         observation.handle.end()
 
-    def _close_fan_out_instance_dispatch_observation(
-        self, inv_state: _InvState, prefix: tuple[str, ...]
-    ) -> None:
-        observation = inv_state.fan_out_instance_observations.pop(prefix, None)
+    def _close_fan_out_instance_dispatch_observation(self, inv_state: _InvState, key: _DispatchKey) -> None:
+        observation = inv_state.fan_out_instance_observations.pop(key, None)
         if observation is None:
             return
         observation.handle.end()
 
     def _close_parallel_branches_branch_dispatch_observation(
-        self, inv_state: _InvState, prefix: tuple[str, ...]
+        self, inv_state: _InvState, key: _BranchDispatchKey
     ) -> None:
-        observation = inv_state.parallel_branches_branch_spans.pop(prefix, None)
+        observation = inv_state.parallel_branches_branch_spans.pop(key, None)
         if observation is None:
             return
         observation.handle.end()
@@ -1903,9 +1908,14 @@ class LangfuseObserver:
         observation = inv_state.open_observations.get(key)
         if observation is not None:
             return observation.handle.id
-        # Per-instance fan-out dispatch.
+        # Per-instance fan-out dispatch. The dispatch map is keyed by the
+        # lineage-aware _dispatch_key; reconstruct the top-level instance's key
+        # (namespace[:1], the instance index, no branch axis) to match it. Only
+        # the innermost fan_out_index is available here, so this resolves an LLM
+        # call directly inside a top-level fan-out instance (the case the flat
+        # ``namespace[:1] + (str(index),)`` key handled before the lineage keys).
         if calling_fan_out_index is not None and calling_namespace_prefix:
-            instance_key = calling_namespace_prefix[:1] + (str(calling_fan_out_index),)
+            instance_key = _dispatch_key(calling_namespace_prefix[:1], (calling_fan_out_index,), (None,))
             dispatch = inv_state.fan_out_instance_observations.get(instance_key)
             if dispatch is not None:
                 return dispatch.handle.id
