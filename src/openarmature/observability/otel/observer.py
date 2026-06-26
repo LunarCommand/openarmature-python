@@ -1752,8 +1752,8 @@ class OTelObserver:
         calling_branch_name: str | None,
     ) -> object:
         """Look up the calling node's span using the calling-node
-        identity, fall back through subgraph dispatch / invocation
-        span."""
+        identity, falling back through the per-instance fan-out dispatch
+        span, subgraph dispatch / detached root, and the invocation span."""
         # 1. Direct match on the calling node's ``_StackKey``.
         calling_key: _StackKey = (
             calling_namespace_prefix,

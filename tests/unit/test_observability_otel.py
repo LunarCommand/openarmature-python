@@ -601,7 +601,8 @@ async def test_llm_span_parents_under_fan_out_instance_dispatch() -> None:
                 branch_name=None,
             )
         )
-        dispatch_span.end()
+        # dispatch_span is ended by observer.shutdown() below (it drains
+        # fan_out_instance_spans); ending it here too would double-end it.
     finally:
         _reset_invocation_id(token)
 
