@@ -559,6 +559,62 @@ async def test_active_prompt_propagates_to_llm_span_attributes() -> None:
     assert attrs.get("openarmature.prompt.group_name") == "classifier_chain"
 
 
+async def test_llm_span_parents_under_fan_out_instance_dispatch() -> None:
+    # Gap 2 (review-nested-fan-out-lineage): an LLM span whose calling node has
+    # no open span and fires inside a top-level fan-out instance MUST parent
+    # under the per-instance fan-out dispatch span (matching the Langfuse
+    # observer), not fall through to the subgraph / invocation span. Before this
+    # OTel had no fan-out-instance fallback in _resolve_llm_parent.
+    from openarmature.observability.correlation import (
+        _reset_invocation_id,
+        _set_invocation_id,
+    )
+    from openarmature.observability.otel.observer import (
+        _dispatch_key,
+        _InvState,
+        _OpenSpan,
+    )
+    from tests._helpers.typed_event import make_retry_attempt_event
+
+    exporter = InMemorySpanExporter()
+    observer = OTelObserver(span_processor=SimpleSpanProcessor(exporter))
+    invocation_id = "inv-fanout-llm"
+    token = _set_invocation_id(invocation_id)
+    try:
+        # Per-instance dispatch span for top-level fan-out "fan", instance 0,
+        # keyed by the lineage-aware _dispatch_key. No open_spans entry for the
+        # calling node ("fan", "ask"), so the resolver must reach the fan-out
+        # dispatch fallback.
+        observer._inv_states[invocation_id] = _InvState()  # noqa: SLF001
+        dispatch_span = observer._tracer.start_span("fan")  # noqa: SLF001
+        instance_key = _dispatch_key(("fan",), (0,), (None,))
+        observer._inv_states[invocation_id].fan_out_instance_spans[instance_key] = _OpenSpan(  # noqa: SLF001
+            span=dispatch_span
+        )
+        await observer(
+            make_retry_attempt_event(
+                invocation_id=invocation_id,
+                node_name="ask",
+                namespace=("fan", "ask"),
+                attempt_index=0,
+                fan_out_index=0,
+                branch_name=None,
+            )
+        )
+        # dispatch_span is ended by observer.shutdown() below (it drains
+        # fan_out_instance_spans); ending it here too would double-end it.
+    finally:
+        _reset_invocation_id(token)
+
+    observer.shutdown()
+    llm_spans = [s for s in exporter.get_finished_spans() if s.name == "openarmature.llm.complete"]
+    assert len(llm_spans) == 1
+    assert llm_spans[0].parent is not None, "LLM span must have a parent, not be a trace root"
+    assert cast("Any", llm_spans[0].parent).span_id == dispatch_span.get_span_context().span_id, (
+        "LLM span must parent under the per-instance fan-out dispatch span"
+    )
+
+
 async def test_llm_span_has_no_prompt_attributes_when_no_active_prompt() -> None:
     """Without ``with_active_prompt``, the LLM-call span MUST NOT carry
     ``openarmature.prompt.*`` attributes."""
