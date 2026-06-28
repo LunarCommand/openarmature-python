@@ -58,7 +58,7 @@ class EmbeddingProvider(Protocol):
             config: Optional per-call request parameters.
 
         Returns an :class:`EmbeddingResponse` whose ``vectors[i]`` is the
-        embedding of ``input[i]`` -- order is preserved, never permuted.
+        embedding of ``input[i]``; order is preserved, never permuted.
         """
         ...
 

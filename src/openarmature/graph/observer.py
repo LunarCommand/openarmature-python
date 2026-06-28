@@ -110,9 +110,9 @@ class Observer(Protocol):
     conformance doesn't pin you to that name; any of `event`, `_event`,
     `e`, etc. matches.
 
-    Seven event variants reach observers. The signature is the union;
-    observers ``isinstance``-narrow on the first line and choose which
-    variants they handle.
+    The variants reaching observers are the :data:`ObserverEvent` members.
+    The signature is that union; observers ``isinstance``-narrow on the
+    first line and choose which variants they handle.
 
     - :class:`NodeEvent` — the started/completed/checkpoint phase
       events. Subject to the ``phases`` filter on
@@ -784,7 +784,7 @@ def _dispatch(
 ) -> None:
     """Enqueue an event for the delivery worker.
 
-    Handles four event variants:
+    Handles the :data:`ObserverEvent` variants. The principal ones:
 
     - :class:`NodeEvent`: the started/completed/checkpoint pair model.
       For ``"started"``-phase events, also calls any subscribed

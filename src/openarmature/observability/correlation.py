@@ -36,40 +36,13 @@ from contextvars import ContextVar, Token
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from openarmature.graph.events import (
-        EmbeddingEvent,
-        EmbeddingFailedEvent,
-        FailureIsolatedEvent,
-        InvocationCompletedEvent,
-        InvocationStartedEvent,
-        LlmCompletionEvent,
-        LlmFailedEvent,
-        LlmRetryAttemptEvent,
-        MetadataAugmentationEvent,
-        NodeEvent,
-        ToolCallEvent,
-        ToolCallFailedEvent,
-    )
-    from openarmature.graph.observer import SubscribedObserver
+    from openarmature.graph.observer import ObserverEvent, SubscribedObserver
 
-    # The event-record union the engine's serial dispatch worker accepts.
-    # Defined once and reused across the ContextVar + the get/set/reset
-    # accessors so a new capability event widens the contract in one place.
-    _DispatchEvent = (
-        NodeEvent
-        | MetadataAugmentationEvent
-        | InvocationStartedEvent
-        | InvocationCompletedEvent
-        | LlmCompletionEvent
-        | LlmFailedEvent
-        | LlmRetryAttemptEvent
-        | FailureIsolatedEvent
-        | ToolCallEvent
-        | ToolCallFailedEvent
-        | EmbeddingEvent
-        | EmbeddingFailedEvent
-    )
-    _DispatchFn = Callable[[_DispatchEvent], None]
+    # The dispatch callable accepts the full ObserverEvent union (the single
+    # source of truth, defined in graph.observer): a new capability event
+    # widens the contract in one place rather than across every dispatch
+    # accessor here.
+    _DispatchFn = Callable[[ObserverEvent], None]
 
 
 # ---------------------------------------------------------------------------

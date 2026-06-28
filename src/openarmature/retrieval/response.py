@@ -30,7 +30,7 @@ from pydantic import BaseModel, ConfigDict, Field
 class EmbeddingUsage(BaseModel):
     """Token-accounting record for an embedding call.
 
-    Carries ``input_tokens`` only -- an embedding call has no output
+    Carries ``input_tokens`` only; an embedding call has no output
     tokens (vectors are not tokens).
     """
 

@@ -4,7 +4,7 @@ The fixtures (``spec/retrieval-provider/conformance/``) describe an
 ``EmbeddingProvider``'s behavior as OpenAI-compatible ``/v1/embeddings``
 mock responses + expected ``embed()`` outcomes. Each fixture wraps the
 call in a single ``embed_node`` graph, but that node is just one
-``embed()`` call -- so the harness extracts the ``calls_embed`` directive
+``embed()`` call, so the harness extracts the ``calls_embed`` directive
 + ``mock_embedding`` and drives the real :class:`OpenAIEmbeddingProvider`
 through ``httpx.MockTransport`` directly, mirroring ``test_llm_provider``
 (no graph engine; fixtures 074-083 cover the observed-event path).
@@ -197,8 +197,8 @@ async def _run_one_case(case: Mapping[str, Any]) -> None:
                 f"expected {len(input_strings)} vectors, got {len(response.vectors)}"
             )
             final_state = cast("Mapping[str, Any]", expected.get("final_state") or {})
-            stored = cast("str", calls_embed["stores_response_in"])
-            if stored in final_state:
+            stored = cast("str | None", calls_embed.get("stores_response_in"))
+            if stored is not None and stored in final_state:
                 _assert_embedding_response(response, cast("Mapping[str, Any]", final_state[stored]))
             _check_success_invariants(response, input_strings, invariants)
     finally:

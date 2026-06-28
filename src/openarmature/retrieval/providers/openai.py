@@ -56,10 +56,10 @@ from ..response import EmbeddingResponse, EmbeddingRuntimeConfig, EmbeddingUsage
 
 
 def _classify_embedding_http_error(resp: httpx.Response) -> LlmProviderError:
-    """Map a non-200 OpenAI-shape embeddings response to a §7 category.
+    """Map a non-200 OpenAI-shape embeddings response to an error category.
 
-    The embedding-applicable subset: 401/403 -> auth, 429 -> rate_limit,
-    404 -> invalid_model, 400/422 -> invalid_request, other 5xx ->
+    The applicable subset: 401/403 to auth, 429 to rate_limit, 404 to
+    invalid_model, 400/422 to invalid_request, and other 5xx to
     unavailable. Returns the exception (does not raise) so the caller
     raises with consistent traceback context.
     """
@@ -290,13 +290,14 @@ class OpenAIEmbeddingProvider:
         request_extras: dict[str, Any],
     ) -> dict[str, Any]:
         """Build the /v1/embeddings request body."""
-        # model + input always; the supplied request params (the same dict
-        # the event carries -- dimensions for embedding) and the
-        # runtime-config extras pass-through merge through. Sharing the one
-        # params dict keeps the wire body and the observed request_params
+        # Extras are merged FIRST so the bound model, the input list, and the
+        # declared request params always win: a caller's undeclared extra
+        # named "model" or "input" must not clobber the wire identity. The
+        # request params are the same dict the event carries (dimensions for
+        # embedding), keeping the wire body and the observed request_params
         # provably identical. Proposal 0077's input_type maps to a per-vendor
         # wire key at the wire layer.
-        return {"model": self.model, "input": input_strings, **request_params, **request_extras}
+        return {**request_extras, "model": self.model, "input": input_strings, **request_params}
 
     def _parse_response(
         self,
@@ -341,10 +342,14 @@ class OpenAIEmbeddingProvider:
             embedding = entry.get("embedding")
             if not isinstance(embedding, list) or not embedding:
                 raise ProviderInvalidResponse("embedding response entry has a missing or empty 'embedding'")
-            try:
-                vectors.append([float(x) for x in cast("list[Any]", embedding)])
-            except (TypeError, ValueError) as exc:
-                raise ProviderInvalidResponse("embedding response has a non-numeric vector value") from exc
+            values = cast("list[Any]", embedding)
+            # Reject non-numeric vector values (JSON strings, bools) rather
+            # than coercing them: bool is an int subclass, and float("0.1")
+            # would silently accept a string, so the strict isinstance check
+            # is what makes "non-numeric is malformed" actually hold.
+            if not all(isinstance(x, (int, float)) and not isinstance(x, bool) for x in values):
+                raise ProviderInvalidResponse("embedding response has a non-numeric vector value")
+            vectors.append([float(x) for x in values])
         dimensions = validate_embedding_response(vectors, len(input_strings))
         usage_block = body.get("usage")
         prompt_tokens = (
@@ -352,7 +357,13 @@ class OpenAIEmbeddingProvider:
             if isinstance(usage_block, dict)
             else None
         )
-        input_tokens = prompt_tokens if isinstance(prompt_tokens, int) and prompt_tokens >= 0 else 0
+        # bool is an int subclass, so exclude it explicitly; a malformed or
+        # absent usage falls back to 0 (the embed succeeded; usage is secondary).
+        input_tokens = (
+            prompt_tokens
+            if isinstance(prompt_tokens, int) and not isinstance(prompt_tokens, bool) and prompt_tokens >= 0
+            else 0
+        )
         response_id = body.get("id")
         model = body.get("model")
         return EmbeddingResponse(

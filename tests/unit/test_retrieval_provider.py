@@ -156,7 +156,10 @@ async def test_otel_observer_safely_ignores_embedding_events() -> None:
 async def test_langfuse_observer_safely_ignores_embedding_events() -> None:
     from openarmature.observability.langfuse import InMemoryLangfuseClient, LangfuseObserver
 
-    observer = LangfuseObserver(client=InMemoryLangfuseClient())
-    # Must not raise (same skip-branch contract as the OTel observer).
+    client = InMemoryLangfuseClient()
+    observer = LangfuseObserver(client=client)
+    # Must not raise (same skip-branch contract as the OTel observer), and no
+    # trace / observation is created for the skipped events.
     await observer(_embedding_event())
     await observer(_embedding_failed_event())
+    assert client.traces == {}

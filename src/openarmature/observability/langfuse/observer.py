@@ -43,6 +43,7 @@ from openarmature.graph.events import (
     ToolCallEvent,
     ToolCallFailedEvent,
 )
+from openarmature.graph.observer import ObserverEvent
 from openarmature.observability.lineage import is_strict_prefix
 
 from .client import (
@@ -434,20 +435,7 @@ class LangfuseObserver:
 
     async def __call__(
         self,
-        event: (
-            NodeEvent
-            | MetadataAugmentationEvent
-            | InvocationStartedEvent
-            | InvocationCompletedEvent
-            | LlmCompletionEvent
-            | LlmFailedEvent
-            | LlmRetryAttemptEvent
-            | FailureIsolatedEvent
-            | ToolCallEvent
-            | ToolCallFailedEvent
-            | EmbeddingEvent
-            | EmbeddingFailedEvent
-        ),
+        event: ObserverEvent,
     ) -> None:
         if isinstance(event, InvocationStartedEvent):
             self._handle_invocation_started(event)

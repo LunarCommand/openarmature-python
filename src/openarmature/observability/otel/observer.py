@@ -113,6 +113,7 @@ from openarmature.graph.events import (
     ToolCallEvent,
     ToolCallFailedEvent,
 )
+from openarmature.graph.observer import ObserverEvent
 from openarmature.observability.lineage import is_strict_prefix
 from openarmature.observability.llm_event import serialize_tool_calls
 
@@ -746,20 +747,7 @@ class OTelObserver:
 
     async def __call__(
         self,
-        event: (
-            NodeEvent
-            | MetadataAugmentationEvent
-            | InvocationStartedEvent
-            | InvocationCompletedEvent
-            | LlmCompletionEvent
-            | LlmFailedEvent
-            | LlmRetryAttemptEvent
-            | FailureIsolatedEvent
-            | ToolCallEvent
-            | ToolCallFailedEvent
-            | EmbeddingEvent
-            | EmbeddingFailedEvent
-        ),
+        event: ObserverEvent,
     ) -> None:
         # Proposal 0043 invocation-boundary events: OTel has no
         # Trace-level input/output payload concept (a trace is a
