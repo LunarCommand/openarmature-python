@@ -32,6 +32,7 @@ from .state import State
 if TYPE_CHECKING:
     from openarmature.llm.messages import ToolCall
     from openarmature.llm.response import Usage
+    from openarmature.retrieval.response import EmbeddingUsage
 
 # Sentinel empty metadata mapping for events constructed without a
 # live caller-metadata snapshot (test helpers, synthetic events).
@@ -749,6 +750,125 @@ class LlmRetryAttemptEvent:
     output_tool_calls: list["ToolCall"] = field(default_factory=list["ToolCall"])
 
 
+# Spec: realizes graph-engine §6 + observability §5.5.9 -- the typed
+# EmbeddingEvent / EmbeddingFailedEvent pair (proposal 0059,
+# retrieval-provider capability). Dispatched on the observer delivery
+# queue per EmbeddingProvider.embed() call: the success variant after the
+# response is parsed + validated, the failure variant alongside a raised
+# §7 category exception (mutually exclusive per call). Scalar
+# fan_out_index / branch_name only; the lineage chains arrive uniformly
+# across the provider events with proposal 0084 (v0.81.0). input_strings /
+# request_extras are payload-bearing, populated unconditionally; observer-
+# side privacy gates (OTel disable_provider_payload, Langfuse equivalents)
+# apply at rendering, symmetric with LlmCompletionEvent.
+@dataclass(frozen=True)
+class EmbeddingEvent:
+    """A typed embedding provider call event delivered to observers.
+
+    Carries identity, scoping, and outcome data for a successful
+    ``EmbeddingProvider.embed()`` call. Observer code filters by type
+    discrimination (``isinstance(event, EmbeddingEvent)``).
+
+    The identity / scoping / request-side fields mirror
+    ``LlmCompletionEvent``'s convention; the outcome fields are
+    embedding-specific:
+
+    - ``input_strings``: the input strings the call was made with;
+      non-nullable, populated unconditionally (privacy gating is
+      observer-side at rendering).
+    - ``input_count``: ``len(input_strings)``; a convenience field.
+    - ``dimensions``: the output vector dimensionality from the response;
+      ``None`` when the response surfaced no determinate dimensionality.
+    - ``response_model`` / ``response_id``: the provider-returned model
+      and response identifiers; ``None`` when the provider returned none.
+    - ``usage``: the embedding token record; ``None`` when the call
+      returned no usage.
+    - ``request_params``: the embedding request parameters the caller
+      supplied (e.g. ``dimensions``). Absence-is-meaningful: only supplied
+      keys appear; an empty mapping when none.
+    - ``request_extras``: the runtime-config extras pass-through bag.
+    - ``active_prompt`` / ``active_prompt_group``: prompt-context
+      snapshots at embed-call time; ``None`` outside a binding.
+    - ``call_id``: a per-call disambiguator, always present, freshly
+      minted per ``embed()`` call.
+    """
+
+    invocation_id: str
+    correlation_id: str | None
+    node_name: str
+    namespace: tuple[str, ...]
+    attempt_index: int
+    fan_out_index: int | None
+    branch_name: str | None
+    provider: str
+    model: str
+    response_id: str | None
+    response_model: str | None
+    # EmbeddingUsage is a string-typed forward reference per the
+    # TYPE_CHECKING import -- keeps the runtime import direction
+    # graph -> retrieval off the module-load path.
+    usage: "EmbeddingUsage | None"
+    latency_ms: float | None
+    input_strings: list[str]
+    input_count: int
+    dimensions: int | None
+    request_params: Mapping[str, Any]
+    request_extras: Mapping[str, Any]
+    active_prompt: Any
+    active_prompt_group: Any
+    call_id: str
+    caller_invocation_metadata: Mapping[str, AttributeValue] | None = None
+
+
+# Spec: the failure sibling of EmbeddingEvent (proposal 0059). Dispatched
+# whenever EmbeddingProvider.embed() raises a §7 category exception --
+# covers both the provider-caught path and the pre-send validation raise
+# (provider_invalid_request on an empty input list). Dispatched ALONGSIDE
+# the exception, not in place of it; mutually exclusive with EmbeddingEvent
+# on the same call. The response-side fields are absent (no response).
+@dataclass(frozen=True)
+class EmbeddingFailedEvent:
+    """A typed embedding provider call failure event delivered to observers.
+
+    Carries identity, scoping, and failure-context data for an ``embed()``
+    call that raised a retrieval-provider category exception. Observer code
+    filters by type discrimination
+    (``isinstance(event, EmbeddingFailedEvent)``).
+
+    The identity / scoping / request-side field set mirrors
+    ``EmbeddingEvent``; the response-side fields are absent. Failure-
+    specific fields:
+
+    - ``error_category``: the error category the call raised (one of the
+      embedding-applicable provider categories). Always present.
+    - ``error_type``: an optional impl-level / vendor-specific type or
+      code; ``None`` when unavailable.
+    - ``error_message``: a human-readable message; always present (the
+      empty string when the exception carried no message).
+    """
+
+    invocation_id: str
+    correlation_id: str | None
+    node_name: str
+    namespace: tuple[str, ...]
+    attempt_index: int
+    fan_out_index: int | None
+    branch_name: str | None
+    provider: str
+    model: str
+    latency_ms: float | None
+    input_strings: list[str]
+    request_params: Mapping[str, Any]
+    request_extras: Mapping[str, Any]
+    active_prompt: Any
+    active_prompt_group: Any
+    call_id: str
+    error_category: str
+    error_message: str
+    error_type: str | None = None
+    caller_invocation_metadata: Mapping[str, AttributeValue] | None = None
+
+
 # Spec: realizes pipeline-utilities §6.3 failure-isolation middleware
 # (proposal 0050). Emitted by FailureIsolationMiddleware when it
 # catches an exception escaping the inner chain and substitutes a
@@ -905,6 +1025,8 @@ class ToolCallFailedEvent:
 
 
 __all__ = [
+    "EmbeddingEvent",
+    "EmbeddingFailedEvent",
     "FailureIsolatedEvent",
     "FanOutEventConfig",
     "InvocationCompletedEvent",

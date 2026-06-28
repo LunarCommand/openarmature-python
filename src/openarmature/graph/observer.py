@@ -35,6 +35,8 @@ from dataclasses import dataclass, field
 from typing import Any, Literal, Protocol
 
 from .events import (
+    EmbeddingEvent,
+    EmbeddingFailedEvent,
     FailureIsolatedEvent,
     InvocationCompletedEvent,
     InvocationStartedEvent,
@@ -63,7 +65,9 @@ from .state import State
 # retry to drive the per-attempt OTel span surface),
 # and FailureIsolatedEvent (proposal 0050 §6.3 framework-emitted event,
 # dispatched by FailureIsolationMiddleware when it catches an exception
-# escaping the inner chain and substitutes a degraded partial update).
+# escaping the inner chain and substitutes a degraded partial update);
+# and EmbeddingEvent / EmbeddingFailedEvent (proposal 0059 typed embedding
+# provider call events, dispatched on every EmbeddingProvider.embed()).
 ObserverEvent = (
     NodeEvent
     | MetadataAugmentationEvent
@@ -75,6 +79,8 @@ ObserverEvent = (
     | FailureIsolatedEvent
     | ToolCallEvent
     | ToolCallFailedEvent
+    | EmbeddingEvent
+    | EmbeddingFailedEvent
 )
 
 
@@ -85,7 +91,7 @@ class Observer(Protocol):
     signature qualifies, no subclass required. Plain functions, bound
     methods, and class instances with `__call__` all work::
 
-        async def log_observer(event: NodeEvent | MetadataAugmentationEvent) -> None:
+        async def log_observer(event: ObserverEvent) -> None:
             if isinstance(event, NodeEvent):
                 print(event.node_name, event.phase)
 
@@ -104,9 +110,9 @@ class Observer(Protocol):
     conformance doesn't pin you to that name; any of `event`, `_event`,
     `e`, etc. matches.
 
-    Seven event variants reach observers. The signature is the union;
-    observers ``isinstance``-narrow on the first line and choose which
-    variants they handle.
+    The variants reaching observers are the :data:`ObserverEvent` members.
+    The signature is that union; observers ``isinstance``-narrow on the
+    first line and choose which variants they handle.
 
     - :class:`NodeEvent` — the started/completed/checkpoint phase
       events. Subject to the ``phases`` filter on
@@ -778,7 +784,7 @@ def _dispatch(
 ) -> None:
     """Enqueue an event for the delivery worker.
 
-    Handles four event variants:
+    Handles the :data:`ObserverEvent` variants. The principal ones:
 
     - :class:`NodeEvent`: the started/completed/checkpoint pair model.
       For ``"started"``-phase events, also calls any subscribed

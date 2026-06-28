@@ -36,19 +36,13 @@ from contextvars import ContextVar, Token
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from openarmature.graph.events import (
-        FailureIsolatedEvent,
-        InvocationCompletedEvent,
-        InvocationStartedEvent,
-        LlmCompletionEvent,
-        LlmFailedEvent,
-        LlmRetryAttemptEvent,
-        MetadataAugmentationEvent,
-        NodeEvent,
-        ToolCallEvent,
-        ToolCallFailedEvent,
-    )
-    from openarmature.graph.observer import SubscribedObserver
+    from openarmature.graph.observer import ObserverEvent, SubscribedObserver
+
+    # The dispatch callable accepts the full ObserverEvent union (the single
+    # source of truth, defined in graph.observer): a new capability event
+    # widens the contract in one place rather than across every dispatch
+    # accessor here.
+    _DispatchFn = Callable[[ObserverEvent], None]
 
 
 # ---------------------------------------------------------------------------
@@ -221,44 +215,12 @@ def _reset_active_observers(token: Token[tuple[SubscribedObserver, ...]]) -> Non
 # ---------------------------------------------------------------------------
 
 
-_active_dispatch_var: ContextVar[
-    Callable[
-        [
-            NodeEvent
-            | MetadataAugmentationEvent
-            | InvocationStartedEvent
-            | InvocationCompletedEvent
-            | LlmCompletionEvent
-            | LlmFailedEvent
-            | LlmRetryAttemptEvent
-            | FailureIsolatedEvent
-            | ToolCallEvent
-            | ToolCallFailedEvent
-        ],
-        None,
-    ]
-    | None
-] = ContextVar("openarmature.active_dispatch", default=None)
+_active_dispatch_var: ContextVar[_DispatchFn | None] = ContextVar(
+    "openarmature.active_dispatch", default=None
+)
 
 
-def current_dispatch() -> (
-    Callable[
-        [
-            NodeEvent
-            | MetadataAugmentationEvent
-            | InvocationStartedEvent
-            | InvocationCompletedEvent
-            | LlmCompletionEvent
-            | LlmFailedEvent
-            | LlmRetryAttemptEvent
-            | FailureIsolatedEvent
-            | ToolCallEvent
-            | ToolCallFailedEvent
-        ],
-        None,
-    ]
-    | None
-):
+def current_dispatch() -> _DispatchFn | None:
     """Return the engine's dispatch callable for the current invocation,
     or ``None`` outside any invocation.
 
@@ -272,65 +234,13 @@ def current_dispatch() -> (
     return _active_dispatch_var.get()
 
 
-def _set_active_dispatch(
-    dispatch: Callable[
-        [
-            NodeEvent
-            | MetadataAugmentationEvent
-            | InvocationStartedEvent
-            | InvocationCompletedEvent
-            | LlmCompletionEvent
-            | LlmFailedEvent
-            | LlmRetryAttemptEvent
-            | FailureIsolatedEvent
-            | ToolCallEvent
-            | ToolCallFailedEvent
-        ],
-        None,
-    ],
-) -> Token[
-    Callable[
-        [
-            NodeEvent
-            | MetadataAugmentationEvent
-            | InvocationStartedEvent
-            | InvocationCompletedEvent
-            | LlmCompletionEvent
-            | LlmFailedEvent
-            | LlmRetryAttemptEvent
-            | FailureIsolatedEvent
-            | ToolCallEvent
-            | ToolCallFailedEvent
-        ],
-        None,
-    ]
-    | None
-]:
+def _set_active_dispatch(dispatch: _DispatchFn) -> Token[_DispatchFn | None]:
     """Set the engine's dispatch callable in scope. Internal —
     engine-only."""
     return _active_dispatch_var.set(dispatch)
 
 
-def _reset_active_dispatch(
-    token: Token[
-        Callable[
-            [
-                NodeEvent
-                | MetadataAugmentationEvent
-                | InvocationStartedEvent
-                | InvocationCompletedEvent
-                | LlmCompletionEvent
-                | LlmFailedEvent
-                | LlmRetryAttemptEvent
-                | FailureIsolatedEvent
-                | ToolCallEvent
-                | ToolCallFailedEvent
-            ],
-            None,
-        ]
-        | None
-    ],
-) -> None:
+def _reset_active_dispatch(token: Token[_DispatchFn | None]) -> None:
     _active_dispatch_var.reset(token)
 
 

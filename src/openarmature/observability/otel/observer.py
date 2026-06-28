@@ -100,6 +100,8 @@ from opentelemetry.trace import (
 from opentelemetry.trace.propagation import set_span_in_context
 
 from openarmature.graph.events import (
+    EmbeddingEvent,
+    EmbeddingFailedEvent,
     FailureIsolatedEvent,
     InvocationCompletedEvent,
     InvocationStartedEvent,
@@ -111,6 +113,7 @@ from openarmature.graph.events import (
     ToolCallEvent,
     ToolCallFailedEvent,
 )
+from openarmature.graph.observer import ObserverEvent
 from openarmature.observability.lineage import is_strict_prefix
 from openarmature.observability.llm_event import serialize_tool_calls
 
@@ -744,18 +747,7 @@ class OTelObserver:
 
     async def __call__(
         self,
-        event: (
-            NodeEvent
-            | MetadataAugmentationEvent
-            | InvocationStartedEvent
-            | InvocationCompletedEvent
-            | LlmCompletionEvent
-            | LlmFailedEvent
-            | LlmRetryAttemptEvent
-            | FailureIsolatedEvent
-            | ToolCallEvent
-            | ToolCallFailedEvent
-        ),
+        event: ObserverEvent,
     ) -> None:
         # Proposal 0043 invocation-boundary events: OTel has no
         # Trace-level input/output payload concept (a trace is a
@@ -781,6 +773,13 @@ class OTelObserver:
         # the queue for the Langfuse mapping and payload/latency
         # consumers, so the OTel observer ignores them here.
         if isinstance(event, LlmCompletionEvent | LlmFailedEvent):
+            return
+        # Proposal 0059 embedding events: the bundled OTel embedding span
+        # (openarmature.embedding.complete) is a follow-up. Until it lands
+        # the events are safely ignored here rather than falling through to
+        # the NodeEvent phase dispatch (which would AttributeError on the
+        # absent ``phase`` field).
+        if isinstance(event, EmbeddingEvent | EmbeddingFailedEvent):
             return
         # Proposal 0063 tool-execution observability: emit the
         # openarmature.tool.call span from the typed tool events.

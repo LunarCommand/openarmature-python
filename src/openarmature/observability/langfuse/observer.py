@@ -30,6 +30,8 @@ from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 
 from openarmature.graph.events import (
+    EmbeddingEvent,
+    EmbeddingFailedEvent,
     FailureIsolatedEvent,
     InvocationCompletedEvent,
     InvocationStartedEvent,
@@ -41,6 +43,7 @@ from openarmature.graph.events import (
     ToolCallEvent,
     ToolCallFailedEvent,
 )
+from openarmature.graph.observer import ObserverEvent
 from openarmature.observability.lineage import is_strict_prefix
 
 from .client import (
@@ -432,18 +435,7 @@ class LangfuseObserver:
 
     async def __call__(
         self,
-        event: (
-            NodeEvent
-            | MetadataAugmentationEvent
-            | InvocationStartedEvent
-            | InvocationCompletedEvent
-            | LlmCompletionEvent
-            | LlmFailedEvent
-            | LlmRetryAttemptEvent
-            | FailureIsolatedEvent
-            | ToolCallEvent
-            | ToolCallFailedEvent
-        ),
+        event: ObserverEvent,
     ) -> None:
         if isinstance(event, InvocationStartedEvent):
             self._handle_invocation_started(event)
@@ -483,6 +475,12 @@ class LangfuseObserver:
             return
         if isinstance(event, MetadataAugmentationEvent):
             self._handle_metadata_augmentation(event)
+            return
+        # Proposal 0059 embedding events: the bundled Langfuse Embedding
+        # observation is a follow-up. Until it lands the events are safely
+        # ignored here rather than falling through to the NodeEvent phase
+        # dispatch (which would AttributeError on the absent ``phase``).
+        if isinstance(event, EmbeddingEvent | EmbeddingFailedEvent):
             return
         if event.phase == "started":
             self._open_started_observation(event)
