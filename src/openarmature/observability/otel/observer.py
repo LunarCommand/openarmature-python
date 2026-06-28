@@ -100,6 +100,8 @@ from opentelemetry.trace import (
 from opentelemetry.trace.propagation import set_span_in_context
 
 from openarmature.graph.events import (
+    EmbeddingEvent,
+    EmbeddingFailedEvent,
     FailureIsolatedEvent,
     InvocationCompletedEvent,
     InvocationStartedEvent,
@@ -755,6 +757,8 @@ class OTelObserver:
             | FailureIsolatedEvent
             | ToolCallEvent
             | ToolCallFailedEvent
+            | EmbeddingEvent
+            | EmbeddingFailedEvent
         ),
     ) -> None:
         # Proposal 0043 invocation-boundary events: OTel has no
@@ -781,6 +785,13 @@ class OTelObserver:
         # the queue for the Langfuse mapping and payload/latency
         # consumers, so the OTel observer ignores them here.
         if isinstance(event, LlmCompletionEvent | LlmFailedEvent):
+            return
+        # Proposal 0059 embedding events: the bundled OTel embedding span
+        # (openarmature.embedding.complete) is a follow-up. Until it lands
+        # the events are safely ignored here rather than falling through to
+        # the NodeEvent phase dispatch (which would AttributeError on the
+        # absent ``phase`` field).
+        if isinstance(event, EmbeddingEvent | EmbeddingFailedEvent):
             return
         # Proposal 0063 tool-execution observability: emit the
         # openarmature.tool.call span from the typed tool events.

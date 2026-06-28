@@ -35,6 +35,8 @@ from dataclasses import dataclass, field
 from typing import Any, Literal, Protocol
 
 from .events import (
+    EmbeddingEvent,
+    EmbeddingFailedEvent,
     FailureIsolatedEvent,
     InvocationCompletedEvent,
     InvocationStartedEvent,
@@ -63,7 +65,9 @@ from .state import State
 # retry to drive the per-attempt OTel span surface),
 # and FailureIsolatedEvent (proposal 0050 §6.3 framework-emitted event,
 # dispatched by FailureIsolationMiddleware when it catches an exception
-# escaping the inner chain and substitutes a degraded partial update).
+# escaping the inner chain and substitutes a degraded partial update);
+# and EmbeddingEvent / EmbeddingFailedEvent (proposal 0059 typed embedding
+# provider call events, dispatched on every EmbeddingProvider.embed()).
 ObserverEvent = (
     NodeEvent
     | MetadataAugmentationEvent
@@ -75,6 +79,8 @@ ObserverEvent = (
     | FailureIsolatedEvent
     | ToolCallEvent
     | ToolCallFailedEvent
+    | EmbeddingEvent
+    | EmbeddingFailedEvent
 )
 
 
