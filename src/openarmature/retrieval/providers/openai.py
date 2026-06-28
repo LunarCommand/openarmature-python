@@ -59,7 +59,7 @@ def _classify_embedding_http_error(resp: httpx.Response) -> LlmProviderError:
     """Map a non-200 OpenAI-shape embeddings response to an error category.
 
     The applicable subset: 401/403 to auth, 429 to rate_limit, 404 to
-    invalid_model, 400/422 to invalid_request, and other 5xx to
+    invalid_model, 400/422 to invalid_request, and every other status to
     unavailable. Returns the exception (does not raise) so the caller
     raises with consistent traceback context.
     """
@@ -213,9 +213,13 @@ class OpenAIEmbeddingProvider:
             body_raw = resp.json()
         except ValueError as exc:
             raise ProviderInvalidResponse("models response is not valid JSON") from exc
-        body = cast("dict[str, Any]", body_raw) if isinstance(body_raw, dict) else {}
+        if not isinstance(body_raw, dict):
+            raise ProviderInvalidResponse("models response is not a JSON object")
+        body = cast("dict[str, Any]", body_raw)
         data_raw = body.get("data")
-        models = cast("list[Any]", data_raw) if isinstance(data_raw, list) else []
+        if not isinstance(data_raw, list):
+            raise ProviderInvalidResponse("models response missing 'data' array")
+        models = cast("list[Any]", data_raw)
         ids = [cast("dict[str, Any]", m).get("id") for m in models if isinstance(m, dict)]
         if self.model not in ids:
             seen = sorted(i for i in ids if isinstance(i, str))

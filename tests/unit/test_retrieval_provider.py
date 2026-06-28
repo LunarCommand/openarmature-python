@@ -15,7 +15,7 @@ import httpx
 import pytest
 
 from openarmature.graph.events import EmbeddingEvent, EmbeddingFailedEvent
-from openarmature.llm.errors import ProviderInvalidModel
+from openarmature.llm.errors import ProviderInvalidModel, ProviderInvalidResponse
 from openarmature.retrieval import OpenAIEmbeddingProvider
 
 
@@ -84,6 +84,24 @@ async def test_readiness_models_probe_raises_when_model_absent() -> None:
         transport=httpx.MockTransport(handler),
     )
     with pytest.raises(ProviderInvalidModel):
+        await provider.ready()
+    await provider.aclose()
+
+
+async def test_readiness_models_probe_raises_on_malformed_catalog() -> None:
+    # A 200 OK whose body is not a JSON object, or whose 'data' is not a
+    # list, is a wire-format problem (proxy/backend), not a missing model:
+    # it surfaces as ProviderInvalidResponse, not ProviderInvalidModel.
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"object": "list", "data": "not-a-list"})
+
+    provider = OpenAIEmbeddingProvider(
+        base_url="http://x",
+        model="m",
+        readiness_probe="models",
+        transport=httpx.MockTransport(handler),
+    )
+    with pytest.raises(ProviderInvalidResponse):
         await provider.ready()
     await provider.aclose()
 
