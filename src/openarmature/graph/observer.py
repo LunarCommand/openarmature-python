@@ -91,7 +91,7 @@ class Observer(Protocol):
     signature qualifies, no subclass required. Plain functions, bound
     methods, and class instances with `__call__` all work::
 
-        async def log_observer(event: NodeEvent | MetadataAugmentationEvent) -> None:
+        async def log_observer(event: ObserverEvent) -> None:
             if isinstance(event, NodeEvent):
                 print(event.node_name, event.phase)
 
