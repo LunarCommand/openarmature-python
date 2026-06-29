@@ -115,9 +115,13 @@ _DEFERRED_FIXTURES: dict[str, str] = {
     # ----- v0.16.0 spec-pin bump (v0.70.1 -> v0.84.0) -------------------
     # Proposal 0082 (structured-output failure diagnostics, spec v0.77.0)
     # extended fixtures 022/023 to additionally assert the now-required
-    # finish_reason + usage on the structured_output_invalid error; python
-    # does not yet carry those response-side fields on the error, so the
-    # extended fixtures defer until a later v0.16.0 PR lands 0082.
+    # finish_reason + usage on the structured_output_invalid error. The
+    # base structured_output_invalid mapping still has coverage in
+    # tests/unit/test_structured_output.py::
+    # test_pydantic_validation_failure_wraps_in_structured_output_invalid;
+    # only 0082's additive finish_reason / usage-on-error response-side
+    # fields are unimplemented, which is why the conformance fixtures defer
+    # until a later v0.16.0 PR lands 0082.
     "022-structured-output-parse-failure": (
         "Proposal 0082 finish_reason/usage on structured_output_invalid; not implemented"
     ),

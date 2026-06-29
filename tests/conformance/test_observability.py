@@ -316,7 +316,8 @@ _DEFERRED_FIXTURES: dict[str, str] = {
     # shape the cross-capability parser doesn't model (cf. 110) and has no
     # dedicated runner here yet; defer until the harness wires it.
     "119-otel-callable-branch-attempt-index-under-node-retry": (
-        "proposal 0075 callable-branch attempt_index coverage round-out; harness runner not yet wired"
+        "0075 shipped v0.15.0; runner for this callable-branch-attempt-index-under-retry "
+        "case not yet wired -- harness gap, not unimplemented"
     ),
     # Proposal 0082 (structured-output failure diagnostics, spec v0.77.0).
     # The LlmFailedEvent response-side surface (output_content / finish_reason
@@ -347,15 +348,24 @@ _DEFERRED_FIXTURES: dict[str, str] = {
             "131-token-budget-on-structured-output-failure",
         )
     },
-    # Proposal 0084 (nested-fan-out span lineage, spec v0.81.0). The
-    # fan_out_index_chain / branch_name_chain event surface + the lineage-
-    # keyed OTel parent resolution are unimplemented until a later v0.16.0
-    # PR; the no-dropped-spans keying, orphan fallback, and Langfuse parent-
-    # resolution fixtures defer with it.
+    # Proposal 0084 (nested-fan-out span lineage, spec v0.81.0).
+    # Fixture 132's nested-lineage dispatch KEYING shipped in #194 (the
+    # OTel + Langfuse observers key dispatches by the full enclosing
+    # fan-out / branch lineage, so no spans drop). It stays deferred for
+    # 0084's remaining surface: the fan_out_index_chain / branch_name_chain
+    # arrive on the provider events with 0084 (see graph/events.py), and the
+    # nested-orphan LLM parent resolution is top-level-instance-only as of
+    # #195 -- the at-any-depth generalization rides 0084.
+    "132-otel-nested-fan-out-span-keying-and-llm-exact-match": (
+        "nested-lineage span keying shipped (#194); deferred for 0084's event-chain "
+        "surface (fan_out_index_chain / branch_name_chain on provider events) and the "
+        "nested-orphan LLM parent (top-level only as of #195)"
+    ),
+    # Proposal 0084: 133 (orphan LLM fallback) + 134 (Langfuse parent
+    # resolution) defer with 0084's lineage-resolved parent surface.
     **{
         fixture_id: "nested-fan-out span lineage (proposal 0084) not-yet implemented"
         for fixture_id in (
-            "132-otel-nested-fan-out-span-keying-and-llm-exact-match",
             "133-otel-nested-fan-out-orphan-llm-fallback",
             "134-langfuse-nested-fan-out-parent-resolution",
         )
@@ -2539,6 +2549,54 @@ def _has_exception_event(span: Any) -> bool:
     return any(getattr(e, "name", None) == "exception" for e in events)
 
 
+def _assert_detached_raise_both_spans(
+    spans: Sequence[ReadableSpan],
+    *,
+    parent_span_name: str,
+    expected_link_count: int,
+) -> None:
+    # Proposal 0061 §4.2: a raising detached unit surfaces ERROR on BOTH the
+    # parent's dispatch span (the one carrying the Link, named
+    # ``parent_span_name``) and the per-unit detached invocation span (its own
+    # trace) -- distinct traces, shared invocation_id, each with the §4 category
+    # + an OTel exception event. The parent's own openarmature.invocation span
+    # also inherits ERROR (§4.4): the fixtures' expected span_trees show the
+    # parent invocation ERROR.
+    parent_dispatch = next((s for s in spans if s.name == parent_span_name and s.links), None)
+    assert parent_dispatch is not None, f"expected a parent {parent_span_name!r} span carrying a Link"
+    assert parent_dispatch.status.status_code.name == "ERROR", (
+        f"parent {parent_span_name!r} span MUST carry ERROR for a raising detached unit"
+    )
+    assert _has_exception_event(parent_dispatch), (
+        f"parent {parent_span_name!r} span MUST record the exception"
+    )
+    assert dict(parent_dispatch.attributes or {}).get("openarmature.error.category") == "node_exception"
+    assert len(parent_dispatch.links) == expected_link_count, (
+        f"parent {parent_span_name!r} span MUST carry exactly {expected_link_count} Link(s); "
+        f"got {len(parent_dispatch.links)}"
+    )
+    parent_trace_id = cast("Any", parent_dispatch.context).trace_id
+    detached_trace_id = parent_dispatch.links[0].context.trace_id
+    assert detached_trace_id != parent_trace_id, "detached + parent traces MUST be distinct"
+    inv_spans = [s for s in spans if s.name == "openarmature.invocation"]
+    detached_inv = next((s for s in inv_spans if cast("Any", s.context).trace_id == detached_trace_id), None)
+    parent_inv = next((s for s in inv_spans if cast("Any", s.context).trace_id == parent_trace_id), None)
+    assert detached_inv is not None, "detached trace MUST root in an openarmature.invocation span"
+    assert parent_inv is not None
+    assert parent_inv.status.status_code.name == "ERROR", (
+        "parent openarmature.invocation span MUST inherit ERROR for a raising detached unit (§4.4)"
+    )
+    assert detached_inv.status.status_code.name == "ERROR", (
+        "detached invocation span MUST carry the detached unit's ERROR status (§4.2)"
+    )
+    assert _has_exception_event(detached_inv), "detached invocation span MUST record the exception"
+    assert dict(detached_inv.attributes or {}).get("openarmature.error.category") == "node_exception"
+    parent_iid = _invocation_id_of(parent_inv)
+    assert parent_iid is not None and _invocation_id_of(detached_inv) == parent_iid, (
+        "detached invocation span MUST share the parent's invocation_id"
+    )
+
+
 async def _run_fixture_008_case(case: Mapping[str, Any]) -> None:
     case_name = case["name"]
     expect_raise = case_name in (
@@ -2644,79 +2702,17 @@ async def _run_fixture_008_case(case: Mapping[str, Any]) -> None:
         return
 
     if case_name == "detached_subgraph_raises_error_status_on_both_spans":
-        # Proposal 0061 §4.2: a raising detached subgraph surfaces ERROR
-        # on BOTH the parent's dispatch span and the detached invocation
-        # span — distinct traces, shared invocation_id, each with the §4
-        # category + an OTel exception event.
-        dispatch_spans = [s for s in spans if s.name == "dispatch"]
-        parent_dispatch = next((s for s in dispatch_spans if s.links), None)
-        assert parent_dispatch is not None, "expected a parent 'dispatch' span with a Link"
-        assert parent_dispatch.status.status_code.name == "ERROR", (
-            "parent dispatch span MUST carry ERROR for a raising detached subgraph"
-        )
-        assert _has_exception_event(parent_dispatch), "parent dispatch span MUST record the exception"
-        assert dict(parent_dispatch.attributes or {}).get("openarmature.error.category") == "node_exception"
-        parent_trace_id = cast("Any", parent_dispatch.context).trace_id
-        detached_trace_id = parent_dispatch.links[0].context.trace_id
-        assert detached_trace_id != parent_trace_id, "detached + parent traces MUST be distinct"
-        inv_spans = [s for s in spans if s.name == "openarmature.invocation"]
-        detached_inv = next(
-            (s for s in inv_spans if cast("Any", s.context).trace_id == detached_trace_id), None
-        )
-        parent_inv = next((s for s in inv_spans if cast("Any", s.context).trace_id == parent_trace_id), None)
-        assert detached_inv is not None, "detached trace MUST root in an openarmature.invocation span"
-        assert parent_inv is not None
-        assert detached_inv.status.status_code.name == "ERROR", (
-            "detached invocation span MUST carry the detached unit's ERROR status (§4.2)"
-        )
-        assert _has_exception_event(detached_inv), "detached invocation span MUST record the exception"
-        assert dict(detached_inv.attributes or {}).get("openarmature.error.category") == "node_exception"
-        parent_iid = _invocation_id_of(parent_inv)
-        assert parent_iid is not None and _invocation_id_of(detached_inv) == parent_iid, (
-            "detached invocation span MUST share the parent's invocation_id"
-        )
+        # The parent's subgraph-dispatch span (named "dispatch") carries the
+        # single Link to the one detached subgraph trace.
+        _assert_detached_raise_both_spans(spans, parent_span_name="dispatch", expected_link_count=1)
         return
 
     if case_name == "detached_fan_out_instance_raises_error_status_on_both_spans":
-        # Proposal 0061 §4.2, fan-out-instance variant: a raising detached
-        # fan-out instance surfaces ERROR on BOTH the parent's fan-out node
-        # span (parent trace, carrying the Link) and the per-instance detached
-        # invocation span (its own trace), each with the §4 category + an OTel
-        # exception event, sharing the parent invocation_id. The single-element
-        # fan-out (items [1]) means exactly one instance runs and raises.
-        fan_out_node_spans = [s for s in spans if s.name == "per_document_scoring"]
-        parent_fan_out = next((s for s in fan_out_node_spans if s.links), None)
-        assert parent_fan_out is not None, "expected a fan-out node span with a Link in the parent trace"
-        assert parent_fan_out.status.status_code.name == "ERROR", (
-            "parent fan-out node span MUST carry ERROR for a raising detached instance"
-        )
-        assert _has_exception_event(parent_fan_out), "parent fan-out node span MUST record the exception"
-        assert dict(parent_fan_out.attributes or {}).get("openarmature.error.category") == "node_exception"
-        assert len(parent_fan_out.links) == 1, (
-            f"fan-out node span MUST carry exactly one Link; got {len(parent_fan_out.links)}"
-        )
-        parent_trace_id = cast("Any", parent_fan_out.context).trace_id
-        detached_trace_id = parent_fan_out.links[0].context.trace_id
-        assert detached_trace_id != parent_trace_id, "detached instance + parent traces MUST be distinct"
-        inv_spans = [s for s in spans if s.name == "openarmature.invocation"]
-        detached_inv = next(
-            (s for s in inv_spans if cast("Any", s.context).trace_id == detached_trace_id), None
-        )
-        parent_inv = next((s for s in inv_spans if cast("Any", s.context).trace_id == parent_trace_id), None)
-        assert detached_inv is not None, (
-            "detached instance trace MUST root in an openarmature.invocation span"
-        )
-        assert parent_inv is not None
-        assert detached_inv.status.status_code.name == "ERROR", (
-            "detached instance invocation span MUST carry the instance's ERROR status (§4.2)"
-        )
-        assert _has_exception_event(detached_inv), (
-            "detached instance invocation span MUST record the exception"
-        )
-        assert dict(detached_inv.attributes or {}).get("openarmature.error.category") == "node_exception"
-        parent_iid = _invocation_id_of(parent_inv)
-        assert parent_iid is not None and _invocation_id_of(detached_inv) == parent_iid, (
-            "detached instance invocation span MUST share the parent's invocation_id"
+        # Fan-out-instance variant: the parent's fan-out node span
+        # ("per_document_scoring") carries the Link. The single-element fan-out
+        # (items [1]) means exactly one instance runs and raises -> one Link.
+        _assert_detached_raise_both_spans(
+            spans, parent_span_name="per_document_scoring", expected_link_count=1
         )
         return
 

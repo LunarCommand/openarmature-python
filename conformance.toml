@@ -801,9 +801,14 @@ status = "not-yet"
 
 # Spec v0.76.0 (proposal 0081).  Conformance-adapter value-matcher
 # vocabulary (§5.10) -- ratifies the fixture matcher tokens already in
-# use.  Not-yet (no fixture changes); awaits a conformance-pin batch.
+# use.  Descriptive (no fixture changes); the one tightening with teeth
+# (<any-string> = non-empty) is already enforced by the adapter
+# (tests/conformance/test_observability.py _value_matches rejects the
+# empty string). No module-level change required; matches the
+# conformance-adapter textual-only precedent (0055 / 0071).
 [proposals."0081"]
-status = "not-yet"
+status = "textual-only"
+since = "0.16.0"
 
 # Spec v0.77.0 (proposal 0082).  Structured-output failure diagnostics
 # (graph-engine §6 -- LlmFailedEvent response-side surface for
@@ -822,16 +827,16 @@ status = "not-yet"
 # Spec v0.81.0 (proposal 0084).  Nested-fan-out span lineage chain
 # (graph-engine §6 fan_out_index_chain / branch_name_chain +
 # observability §4 / §5.5 lineage-resolved parent).  Not-yet; graph-
-# engine fixture 039 and observability fixtures 132-134 (+ a new case
-# on 008) defer with it.
+# engine fixture 039 and observability fixtures 132-134 defer with it.
 [proposals."0084"]
 status = "not-yet"
 
 # Spec v0.80.0 (proposal 0085).  Nested-fan-out checkpoint resume
-# lineage (pipeline-utilities §10.11 enclosing_fan_out_lineage).  Not-
-# yet; pipeline-utilities fixture 076 defers with it.
+# lineage (pipeline-utilities §10.11 enclosing_fan_out_lineage).
 [proposals."0085"]
-status = "not-yet"
+status = "partial"
+since = "0.16.0"
+note = "The SAVE-side enclosing_fan_out_lineage keying (pipeline-utilities §10.11) shipped in #194: a fan-out instance's checkpoint tracking key carries the enclosing fan-out instance lineage in the in-memory dict and through the checkpoint projection / lookup / cleanup / restore, so concurrent outer instances no longer collide. partial because the RESUME consume-side is not yet shipped: a fan-out nested inside an outer instance re-runs rather than skipping on resume, since the saved record format carries no lineage (tracked as a follow-up). pipeline-utilities fixture 076 is not collected by the test_pipeline_utilities.py _LAST_DRIVEN_FIXTURE number gate (it is not deferred); the resume consume-side plus its fixture wiring land in a later PR."
 
 # Spec v0.79.0 (proposal 0086).  Service-wide default cache_ttl_seconds
 # on PromptManager (prompt-management §6).  Not-yet; prompt-management

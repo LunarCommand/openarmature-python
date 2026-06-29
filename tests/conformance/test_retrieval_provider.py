@@ -65,7 +65,12 @@ _DEFERRED_FIXTURES: dict[str, str] = {
         if 18 <= int(p.stem[:3]) <= 22
     },
     **{
-        p.stem: "OpenAI-compatible embeddings wire mapping (proposal 0079) not implemented"
+        p.stem: (
+            "OpenAI-compatible embed wire ships via the bundled OpenAIEmbeddingProvider "
+            "(proposal 0059); deferred because the harness lacks a wire-capture primitive "
+            "(expected_wire_request / url / headers) and 0079's dimensions / input_type "
+            "request knobs are unimplemented"
+        )
         for p in CONFORMANCE_DIR.glob("[0-9][0-9][0-9]-*.yaml")
         if 23 <= int(p.stem[:3]) <= 27
     },
