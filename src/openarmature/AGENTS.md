@@ -1,6 +1,6 @@
 # OpenArmature — Agent documentation
 
-*This is the agent guide bundled with the openarmature Python package, version 0.15.0 (spec v0.70.1). For the full docs site see [openarmature.ai](https://openarmature.ai). For the canonical spec text see [openarmature.org/capabilities](https://openarmature.org/capabilities/). For project-specific conventions for the code you're editing, see the host project's `AGENTS.md` or `CLAUDE.md`.*
+*This is the agent guide bundled with the openarmature Python package, version 0.15.0 (spec v0.84.0). For the full docs site see [openarmature.ai](https://openarmature.ai). For the canonical spec text see [openarmature.org/capabilities](https://openarmature.org/capabilities/). For project-specific conventions for the code you're editing, see the host project's `AGENTS.md` or `CLAUDE.md`.*
 
 ## TL;DR
 
@@ -10,7 +10,7 @@ OpenArmature is a workflow framework for LLM pipelines and tool-calling agents: 
 
 ## Capability contracts
 
-_Sourced from openarmature-spec v0.70.1. Each entry below reproduces §1 (Purpose) and §2 (Concepts) of the capability's `spec.md` verbatim — including additions from accepted proposals that this Python implementation may not yet ship. For per-proposal implementation status (implemented / partial / textual-only / not-yet), see the `conformance.toml` manifest at the repo root. For the full spec text (execution model, error semantics, determinism, observer hooks, etc.) see the linked docs site._
+_Sourced from openarmature-spec v0.84.0. Each entry below reproduces §1 (Purpose) and §2 (Concepts) of the capability's `spec.md` verbatim — including additions from accepted proposals that this Python implementation may not yet ship. For per-proposal implementation status (implemented / partial / textual-only / not-yet), see the `conformance.toml` manifest at the repo root. For the full spec text (execution model, error semantics, determinism, observer hooks, etc.) see the linked docs site._
 
 ### Capability: `graph-engine`
 
@@ -221,7 +221,7 @@ and is invisible to nodes that don't opt into middleware.
 
 **Middleware.** An async callable with the shape:
 
-```
+```python
 async def middleware(state, next) -> partial_update
 ```
 
@@ -262,13 +262,14 @@ second, and so on, with the original node at the inner end.
 
 For a chain `[m1, m2, m3]` wrapping node `n`, execution proceeds:
 
-```
-m1 sees state, calls next(s) ────► m2 sees state, calls next(s) ────► m3 sees state, calls next(s)
-                                                                                  │
-                                                                                  ▼
-                                                                                 n(state) → partial_update
-                                                                                  │
-m1 returns partial_update ◄──── m2 returns partial_update ◄──── m3 returns partial_update
+```mermaid
+flowchart LR
+    m1["m1 sees state,<br/>calls next(s)"] --> m2["m2 sees state,<br/>calls next(s)"]
+    m2 --> m3["m3 sees state,<br/>calls next(s)"]
+    m3 --> n["n(state) produces<br/>partial_update"]
+    n --> r3["m3 returns<br/>partial_update"]
+    r3 --> r2["m2 returns<br/>partial_update"]
+    r2 --> r1["m1 returns<br/>partial_update"]
 ```
 
 Each middleware's return value flows back through the previous layer's `next` call return.
@@ -283,7 +284,7 @@ The two phases are tied to a single position in the chain: if `m1` is outermost,
 runs first AND `m1`'s post-phase runs last. Pre-order and post-order are not configured
 independently. Concretely, a middleware function carries both phases:
 
-```
+```python
 async def my_middleware(state, next):
     # ── pre-node phase: runs on the way IN ──
     started_at = time.time()

@@ -557,6 +557,78 @@ _DEFERRED_FIXTURES: dict[str, str] = {
     "observability/110-otel-callable-branch-span": (
         "Cross-capability parser doesn't model final_state + span_tree together; runs in test_observability"
     ),
+    # ----- v0.16.0 spec-pin bump (v0.70.1 -> v0.84.0) -----------------------
+    # New fixtures whose directive shapes the cross-capability parser doesn't
+    # model, for proposals deferred to their own later v0.16.0 PRs. Each runs
+    # (or stays accounted) in its capability runner once that proposal lands.
+    # Proposal 0062 (LLM completion streaming, v0.71.0) -- the stream-flag
+    # llm-provider wire fixtures + the per-chunk LlmTokenEvent observability
+    # fixtures. (117 parses cleanly and is accounted in test_observability.)
+    "llm-provider/059-openai-streaming-wire": "Proposal 0062 streaming; not implemented",
+    "llm-provider/060-stream-unsupported-mapping-rejects": "Proposal 0062 streaming; not implemented",
+    "observability/111-llm-token-event-dispatch-on-stream": "Proposal 0062 streaming; not implemented",
+    "observability/112-llm-token-event-absent-without-stream": "Proposal 0062 streaming; not implemented",
+    "observability/113-streamed-tool-call-reassembles-no-token-events": (
+        "Proposal 0062 streaming; not implemented"
+    ),
+    "observability/114-llm-token-event-then-failure-mid-stream": "Proposal 0062 streaming; not implemented",
+    "observability/115-llm-token-event-call-id-links-to-completion": (
+        "Proposal 0062 streaming; not implemented"
+    ),
+    "observability/116-llm-token-event-call-level-retry-one-call-id": (
+        "Proposal 0062 streaming; not implemented"
+    ),
+    "observability/118-llm-token-event-reasoning-delta-kind": "Proposal 0062 streaming; not implemented",
+    # Proposal 0075 (callable branches) coverage round-out fixture 119
+    # (v0.73.1); the cross-capability parser doesn't model its graph-style
+    # shape (cf. 110). Accounted in test_observability.
+    "observability/119-otel-callable-branch-attempt-index-under-node-retry": (
+        "Proposal 0075 callable-branch coverage round-out; harness shape not modelled"
+    ),
+    # Proposal 0082 (structured-output failure diagnostics, v0.77.0) -- the
+    # LlmFailedEvent response-side directive shape.
+    "observability/120-llm-failure-event-structured-output-truncation": (
+        "Proposal 0082 structured-output failure diagnostics; not implemented"
+    ),
+    "observability/121-llm-failure-event-structured-output-schema-mismatch": (
+        "Proposal 0082 structured-output failure diagnostics; not implemented"
+    ),
+    "observability/122-llm-failure-event-response-side-null-on-non-body-failure": (
+        "Proposal 0082 structured-output failure diagnostics; not implemented"
+    ),
+    # Proposal 0083 (per-prompt token-budget observability, v0.78.0) -- the
+    # token_budget directive shape + budget-exceeded expectations.
+    "observability/126-token-budget-input-exceeded": "Proposal 0083 token-budget; not implemented",
+    "observability/127-token-budget-total-exceeded": "Proposal 0083 token-budget; not implemented",
+    "observability/128-token-budget-under-budget-no-warning": "Proposal 0083 token-budget; not implemented",
+    "observability/129-token-budget-absent-unchanged": "Proposal 0083 token-budget; not implemented",
+    "observability/130-langfuse-token-budget-warning-level": "Proposal 0083 token-budget; not implemented",
+    "observability/131-token-budget-on-structured-output-failure": (
+        "Proposal 0083 token-budget; not implemented"
+    ),
+    # Proposal 0084 (nested-fan-out span lineage, v0.81.0) -- the
+    # lineage-chain directive shapes. (132 parses cleanly; accounted in
+    # test_observability.)
+    "observability/133-otel-nested-fan-out-orphan-llm-fallback": (
+        "Proposal 0084 nested-fan-out span lineage; not implemented"
+    ),
+    "observability/134-langfuse-nested-fan-out-parent-resolution": (
+        "Proposal 0084 nested-fan-out span lineage; not implemented"
+    ),
+    # Proposal 0087 (within-node directive execution order, v0.82.0).
+    "observability/135-within-node-directive-execution-order": (
+        "Proposal 0087 within-node directive execution order; not implemented"
+    ),
+    # Proposal 0089 (embedding / rerank typed-event output, v0.84.0) -- the
+    # rerank failure observation directive shape (rerank capability unshipped).
+    "observability/138-langfuse-rerank-failure-observation": (
+        "Proposal 0089 rerank failure observation; rerank capability not implemented"
+    ),
+    # Proposal 0086 (PromptManager default cache_ttl_seconds, v0.79.0) -- the
+    # manager default-cache-ttl directive shape.
+    "prompt-management/036-prompt-manager-default-cache-ttl": (
+        "Proposal 0086 default cache_ttl_seconds; not implemented"
+    ),
 }
 
 

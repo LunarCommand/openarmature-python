@@ -32,7 +32,7 @@
 
 [manifest]
 implementation = "openarmature-python"
-spec_pin = "v0.70.1"
+spec_pin = "v0.84.0"
 
 # Status values:
 #   implemented   — shipped behavior matches the proposal's contract
@@ -764,3 +764,96 @@ note = "ParallelBranchesNode gains two additive branch forms. (1) Inline-callabl
 status = "implemented"
 since = "0.15.0"
 note = "The model's output tool calls get an output-side home on the openarmature.llm.complete span. observability §5.5.10 adds the UNGATED identity projections openarmature.llm.output.tool_calls.count / .names / .ids (the class of openarmature.llm.model / attempt_index; emitted only on a tool-calling completion, omitted entirely otherwise -- not count=0); .names and .ids are index-aligned in request order, .count equals their length. §5.5.1 adds the GATED openarmature.llm.output.tool_calls, the full [{id, name, arguments}] serialization (reusing the §5.5.5 input tool-call encoding) carrying the arguments, suppressed under disable_provider_payload and subject to the truncation contract. graph-engine §6: LlmCompletionEvent gains an output_tool_calls field (the ToolCall records, populated unconditionally). python carries the field on BOTH the terminal LlmCompletionEvent (spec-conformance + the Langfuse/consumer path) and the python-internal per-attempt LlmRetryAttemptEvent, and the OTel observer renders the span attributes from the per-attempt event (the LLM-span source since 0050) -- mirroring how output_content already works. OA-namespace, no gen_ai.* mirror (the attempt_index precedent). Langfuse request-side mapping is OUT OF SCOPE (proposal defers it as future work); no Langfuse change. Fixtures 085 (two calls -> count/names/ids), 086 (no calls -> family absent), 087 (payload-gating: identity survives off, gated full present only on)."
+
+# Spec v0.71.0 (proposal 0062).  LLM completion streaming -- an opt-in
+# stream flag on complete() emitting a per-chunk LlmTokenEvent plus the
+# §6 streaming-assembly reassembly into the atomic Response.  Python has
+# not yet shipped streaming; v0.16.0 leaves it not-yet.  llm-provider
+# fixtures 059/060 and observability fixtures 111-118 defer with it.
+[proposals."0062"]
+status = "not-yet"
+
+# Spec v0.72.0 (proposal 0077).  Retrieval-provider TEI wire mapping
+# (§8 / §8.1) plus the input_type embedding knob (§2 / §3).  Python has
+# not yet shipped the retrieval wire mappings; not-yet.  retrieval-
+# provider fixtures 013-017 defer with it.
+[proposals."0077"]
+status = "not-yet"
+
+# Spec v0.73.0 (proposal 0078).  Retrieval-provider Jina hosted wire
+# mapping (§8.2).  Not-yet; retrieval-provider fixtures 018-022 defer
+# with it.
+[proposals."0078"]
+status = "not-yet"
+
+# Spec v0.74.0 (proposal 0079).  Retrieval-provider OpenAI-compatible
+# embeddings wire mapping (§8.3).  Not-yet; retrieval-provider fixtures
+# 023-027 defer with it.
+[proposals."0079"]
+status = "not-yet"
+
+# Spec v0.75.0 (proposal 0080).  PromptGroup arity enforcement
+# (prompt-management §10 / §11 -- construct-time raise plus the new
+# prompt_group_invalid error category).  Not-yet; prompt-management
+# fixture 035 defers with it.
+[proposals."0080"]
+status = "not-yet"
+
+# Spec v0.76.0 (proposal 0081).  Conformance-adapter value-matcher
+# vocabulary (§5.10) -- ratifies the fixture matcher tokens already in
+# use.  Not-yet (no fixture changes); awaits a conformance-pin batch.
+[proposals."0081"]
+status = "not-yet"
+
+# Spec v0.77.0 (proposal 0082).  Structured-output failure diagnostics
+# (graph-engine §6 -- LlmFailedEvent response-side surface for
+# structured_output_invalid + llm-provider §7 finish_reason / usage).
+# Not-yet; llm-provider fixtures 022/023 and observability fixtures
+# 120-125 defer with it.
+[proposals."0082"]
+status = "not-yet"
+
+# Spec v0.78.0 (proposal 0083).  Per-prompt token-budget observability
+# (prompt-management §3 / graph-engine §6 / observability §5.5.15).
+# Not-yet; observability fixtures 126-131 defer with it.
+[proposals."0083"]
+status = "not-yet"
+
+# Spec v0.81.0 (proposal 0084).  Nested-fan-out span lineage chain
+# (graph-engine §6 fan_out_index_chain / branch_name_chain +
+# observability §4 / §5.5 lineage-resolved parent).  Not-yet; graph-
+# engine fixture 039 and observability fixtures 132-134 (+ a new case
+# on 008) defer with it.
+[proposals."0084"]
+status = "not-yet"
+
+# Spec v0.80.0 (proposal 0085).  Nested-fan-out checkpoint resume
+# lineage (pipeline-utilities §10.11 enclosing_fan_out_lineage).  Not-
+# yet; pipeline-utilities fixture 076 defers with it.
+[proposals."0085"]
+status = "not-yet"
+
+# Spec v0.79.0 (proposal 0086).  Service-wide default cache_ttl_seconds
+# on PromptManager (prompt-management §6).  Not-yet; prompt-management
+# fixture 036 defers with it.
+[proposals."0086"]
+status = "not-yet"
+
+# Spec v0.82.0 (proposal 0087).  Conformance-adapter within-node
+# directive execution order (§8.3).  Not-yet; observability fixture 135
+# defers with it.
+[proposals."0087"]
+status = "not-yet"
+
+# Spec v0.83.0 (proposal 0088).  Langfuse parallel-branches mapping
+# parity (observability §8.4.8).  Not-yet; observability fixture 136
+# defers with it.
+[proposals."0088"]
+status = "not-yet"
+
+# Spec v0.84.0 (proposal 0089).  Embedding / rerank typed-event output
+# (graph-engine §6 EmbeddingEvent.output_vectors / RerankEvent.
+# output_results + observability output mappings).  Not-yet;
+# observability fixtures 137/138 defer with it (and re-source 083/108).
+[proposals."0089"]
+status = "not-yet"

@@ -605,6 +605,18 @@ _DEFERRED_FIXTURES: dict[str, str] = {
     "032-cross-variable-substring-stability": (
         "Proposal 0047 wire-byte stability (expected_shared_prefix directive); queued for v0.13.0"
     ),
+    # ----- v0.16.0 spec-pin bump (v0.70.1 -> v0.84.0) -------------------
+    # Proposal 0080 (PromptGroup arity enforcement, spec v0.75.0) -- fixture
+    # 035 uses a cases-only shape (no backends) the PM fixture model doesn't
+    # accept, and asserts the construct-time prompt_group_invalid raise that
+    # python does not yet implement. Defers until a later v0.16.0 PR.
+    "035-prompt-group-arity-rejection": ("Proposal 0080 PromptGroup arity enforcement; not implemented"),
+    # Proposal 0086 (PromptManager default cache_ttl_seconds, spec v0.79.0)
+    # -- fixture 036 uses the manager default-cache-ttl construction slot
+    # python does not yet implement. Defers until a later v0.16.0 PR.
+    "036-prompt-manager-default-cache-ttl": (
+        "Proposal 0086 PromptManager default cache_ttl_seconds; not implemented"
+    ),
 }
 
 

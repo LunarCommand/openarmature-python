@@ -39,10 +39,36 @@ _DEFAULT_MODEL = "text-embedding-test"
 
 # Rerank fixtures (006-012) ride the RerankProvider, which lands with
 # proposal 0060. Deferred so a green run means "what we implement passes."
+#
+# The v0.84.0 pin also pulls in the retrieval-provider WIRE-MAPPING fixtures
+# (013-027) for proposals 0077 (TEI) / 0078 (Jina) / 0079 (OpenAI-compatible),
+# none of which python has shipped. This runner drives only the bundled
+# OpenAIEmbeddingProvider's embed() and asserts the response, so it cannot
+# exercise their request-side mappings (TEI server-side prompt_name, Jina's
+# task, the client-side query/document prefix) -- the contracts those
+# fixtures exist to verify. Defer the whole batch until each wire-mapping
+# impl PR (v0.16.0+).
 _DEFERRED_FIXTURES: dict[str, str] = {
-    p.stem: "RerankProvider not implemented (proposal 0060 not-yet)"
-    for p in CONFORMANCE_DIR.glob("[0-9][0-9][0-9]-*.yaml")
-    if 6 <= int(p.stem[:3]) <= 12
+    **{
+        p.stem: "RerankProvider not implemented (proposal 0060 not-yet)"
+        for p in CONFORMANCE_DIR.glob("[0-9][0-9][0-9]-*.yaml")
+        if 6 <= int(p.stem[:3]) <= 12
+    },
+    **{
+        p.stem: "TEI wire mapping (proposal 0077) not implemented"
+        for p in CONFORMANCE_DIR.glob("[0-9][0-9][0-9]-*.yaml")
+        if 13 <= int(p.stem[:3]) <= 17
+    },
+    **{
+        p.stem: "Jina wire mapping (proposal 0078) not implemented"
+        for p in CONFORMANCE_DIR.glob("[0-9][0-9][0-9]-*.yaml")
+        if 18 <= int(p.stem[:3]) <= 22
+    },
+    **{
+        p.stem: "OpenAI-compatible embeddings wire mapping (proposal 0079) not implemented"
+        for p in CONFORMANCE_DIR.glob("[0-9][0-9][0-9]-*.yaml")
+        if 23 <= int(p.stem[:3]) <= 27
+    },
 }
 
 
