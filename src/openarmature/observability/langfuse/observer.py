@@ -476,11 +476,14 @@ class LangfuseObserver:
         if isinstance(event, MetadataAugmentationEvent):
             self._handle_metadata_augmentation(event)
             return
-        # Proposal 0059 embedding events: the bundled Langfuse Embedding
-        # observation is a follow-up. Until it lands the events are safely
-        # ignored here rather than falling through to the NodeEvent phase
-        # dispatch (which would AttributeError on the absent ``phase``).
+        # Proposal 0059 embedding observability (observability §8.4.5): render
+        # the dedicated Langfuse Embedding observation (asType "embedding")
+        # under the calling node's Span observation. NOT gated by
+        # disable_llm_spans (scoped to LLM completion per §5.5.8); the
+        # input / output payload is gated by disable_provider_payload inside
+        # the handler.
         if isinstance(event, EmbeddingEvent | EmbeddingFailedEvent):
+            self._handle_embedding(event)
             return
         if event.phase == "started":
             self._open_started_observation(event)
@@ -1878,6 +1881,110 @@ class LangfuseObserver:
         )
         handle.end(end_time=end_time)
 
+    # Spec: observability §8.4.5 (proposal 0059) Embedding observation
+    # (Langfuse asType="embedding"). The failure path is the generic §4.2 /
+    # §8.4.2 ERROR mapping with the §7 error category, mirroring the tool
+    # failure.
+    def _handle_embedding(self, event: EmbeddingEvent | EmbeddingFailedEvent) -> None:
+        """Open + close a dedicated Embedding observation (Langfuse
+        ``asType="embedding"``) under the calling node's Span observation.
+
+        Success (``EmbeddingEvent``): DEFAULT level, ``model`` =
+        ``response_model`` (falling back to the requested ``model``),
+        ``usage`` from the embedding token record, the OA identity metadata
+        (``openarmature_input_count`` / ``openarmature_dimensions`` /
+        ``openarmature_response_id``), and the payload-gated ``input``
+        strings + ``output`` vectors.
+
+        Failure (``EmbeddingFailedEvent``): ERROR level with the
+        ``error_category`` as the status message and ``error_type`` /
+        ``error_message`` in metadata, mirroring the tool failure. The
+        request-side ``input`` strings are still payload-gated; there is NO
+        ``output`` (no response received).
+        """
+        from openarmature.observability.correlation import (
+            current_correlation_id,
+            current_invocation_id,
+        )
+
+        invocation_id = current_invocation_id()
+        if invocation_id is None:
+            return
+        correlation_id = current_correlation_id()
+        if invocation_id not in self._inv_states:
+            self._open_trace_for_typed_event(invocation_id, correlation_id, event)
+        inv_state = self._inv_states[invocation_id]
+        end_time = datetime.now(UTC)
+        if event.latency_ms is not None:
+            start_time = end_time - timedelta(milliseconds=event.latency_ms)
+        else:
+            start_time = end_time
+        parent_observation_id = self._resolve_llm_parent_observation_id(
+            inv_state,
+            calling_namespace_prefix=event.namespace,
+            calling_attempt_index=event.attempt_index,
+            calling_fan_out_index=event.fan_out_index,
+            calling_branch_name=event.branch_name,
+        )
+        # §8.4.5 metadata: input_count always; dimensions / response_id are
+        # response-derived (success-only). correlation_id + caller metadata
+        # mirror the other observation handlers' scoping rows.
+        metadata: dict[str, Any] = {}
+        if correlation_id is not None:
+            metadata["correlation_id"] = correlation_id
+        if event.fan_out_index is not None:
+            metadata["fan_out_index"] = event.fan_out_index
+        if event.branch_name is not None:
+            metadata["branch_name"] = event.branch_name
+        if event.caller_invocation_metadata is not None:
+            _apply_caller_metadata(metadata, event.caller_invocation_metadata)
+        input_value: Any = None
+        if not self.disable_provider_payload and event.input_strings:
+            input_value = self._maybe_truncate_for_input(event.input_strings)
+        if isinstance(event, EmbeddingEvent):
+            metadata["openarmature_input_count"] = event.input_count
+            if event.dimensions is not None:
+                metadata["openarmature_dimensions"] = event.dimensions
+            if event.response_id is not None:
+                metadata["openarmature_response_id"] = event.response_id
+            output_value: Any = None
+            if not self.disable_provider_payload and event.output_vectors:
+                output_value = self._maybe_truncate_for_input(event.output_vectors)
+            usage = LangfuseUsage(input=event.usage.input_tokens) if event.usage is not None else None
+            target_trace_id = self._trace_id_for(inv_state, event.namespace, event.fan_out_index)
+            handle = self.client.embedding(
+                trace_id=target_trace_id,
+                name="openarmature.embedding.complete",
+                model=event.response_model or event.model,
+                usage=usage,
+                input=input_value,
+                output=output_value,
+                metadata=metadata,
+                parent_observation_id=parent_observation_id,
+                start_time=start_time,
+            )
+            handle.end(end_time=end_time)
+            return
+        # Failure path: request-side input_count survives; the response-derived
+        # rows do not. No output. ERROR level + category-as-statusMessage.
+        metadata["openarmature_input_count"] = len(event.input_strings)
+        if event.error_type is not None:
+            metadata["error_type"] = event.error_type
+        metadata["error_message"] = event.error_message
+        target_trace_id = self._trace_id_for(inv_state, event.namespace, event.fan_out_index)
+        handle = self.client.embedding(
+            trace_id=target_trace_id,
+            name="openarmature.embedding.complete",
+            model=event.model,
+            input=input_value,
+            metadata=metadata,
+            parent_observation_id=parent_observation_id,
+            level="ERROR",
+            status_message=event.error_category,
+            start_time=start_time,
+        )
+        handle.end(end_time=end_time)
+
     def _resolve_llm_parent_observation_id(
         self,
         inv_state: _InvState,
@@ -2004,10 +2111,16 @@ class LangfuseObserver:
         self,
         invocation_id: str,
         correlation_id: str | None,
-        event: LlmCompletionEvent | LlmFailedEvent | ToolCallEvent | ToolCallFailedEvent,
+        event: LlmCompletionEvent
+        | LlmFailedEvent
+        | ToolCallEvent
+        | ToolCallFailedEvent
+        | EmbeddingEvent
+        | EmbeddingFailedEvent,
     ) -> None:
-        """Trace open path for a typed event (LLM completion / failure or
-        tool execution) arriving before any node-started event reached
+        """Trace open path for a typed event (LLM completion / failure,
+        tool execution, or embedding) arriving before any node-started event
+        reached
         this observer. Synthesizes the minimal trace shape from the
         typed event's scoping fields (all read generically)."""
         if event.namespace:

@@ -33,7 +33,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Literal, Protocol, runtime_checkable
 
-ObservationType = Literal["span", "generation", "event", "tool"]
+ObservationType = Literal["span", "generation", "event", "tool", "embedding"]
 
 # Langfuse-supported `level` values per spec §8.4.2 (statusMessage pair).
 ObservationLevel = Literal["DEFAULT", "DEBUG", "INFO", "WARNING", "ERROR"]
@@ -266,6 +266,31 @@ class LangfuseClient(Protocol):
         usage / prompt surface: a Tool carries ``input`` (arguments) /
         ``output`` (result) / metadata / level. Returns a minimal
         handle the caller ``.end()``s at outcome time."""
+        ...
+
+    # Proposal 0059 embedding observability: a dedicated Embedding
+    # observation (Langfuse asType="embedding", spec observability §8.4.5),
+    # not a Generation with a discriminator.
+    def embedding(
+        self,
+        *,
+        trace_id: str,
+        name: str | None = None,
+        model: str | None = None,
+        usage: LangfuseUsage | None = None,
+        metadata: dict[str, Any] | None = None,
+        parent_observation_id: str | None = None,
+        level: ObservationLevel = "DEFAULT",
+        status_message: str | None = None,
+        input: Any = None,
+        output: Any = None,
+        start_time: datetime | None = None,
+    ) -> LangfuseSpanHandle:
+        """Open a dedicated Embedding observation. Like :meth:`generation`
+        for the model / usage surface but a distinct observation type:
+        carries ``model`` / ``usage`` (input tokens) / ``input`` (strings) /
+        ``output`` (vectors) / metadata / level. Returns a minimal handle
+        the caller ``.end()``s at outcome time."""
         ...
 
     def force_flush(self, timeout_ms: int = 30_000) -> bool:
@@ -524,6 +549,39 @@ class InMemoryLangfuseClient:
             status_message=status_message,
             input=input,
             output=output,
+            start_time=start_time,
+        )
+        trace.observations.append(observation)
+        return _InMemorySpanHandle(observation=observation)
+
+    def embedding(
+        self,
+        *,
+        trace_id: str,
+        name: str | None = None,
+        model: str | None = None,
+        usage: LangfuseUsage | None = None,
+        metadata: dict[str, Any] | None = None,
+        parent_observation_id: str | None = None,
+        level: ObservationLevel = "DEFAULT",
+        status_message: str | None = None,
+        input: Any = None,
+        output: Any = None,
+        start_time: datetime | None = None,
+    ) -> LangfuseSpanHandle:
+        trace = self._get_trace(trace_id)
+        observation = LangfuseObservation(
+            id=self._mint_observation_id(),
+            type="embedding",
+            name=name,
+            metadata=dict(metadata) if metadata is not None else {},
+            parent_observation_id=parent_observation_id,
+            level=level,
+            status_message=status_message,
+            input=input,
+            output=output,
+            model=model,
+            usage=usage,
             start_time=start_time,
         )
         trace.observations.append(observation)

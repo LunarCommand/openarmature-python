@@ -124,6 +124,7 @@ def _embedding_event() -> EmbeddingEvent:
         input_strings=["x"],
         input_count=1,
         dimensions=2,
+        output_vectors=[[0.1, 0.2]],
         request_params={},
         request_extras={},
         active_prompt=None,
@@ -155,7 +156,7 @@ def _embedding_failed_event() -> EmbeddingFailedEvent:
     )
 
 
-async def test_otel_observer_safely_ignores_embedding_events() -> None:
+async def test_otel_observer_embedding_no_op_without_invocation_context() -> None:
     from opentelemetry.sdk.trace.export import SimpleSpanProcessor
     from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
@@ -163,21 +164,24 @@ async def test_otel_observer_safely_ignores_embedding_events() -> None:
 
     exporter = InMemorySpanExporter()
     observer = OTelObserver(span_processor=SimpleSpanProcessor(exporter))
-    # Without the skip branch these would fall through to ``event.phase``
-    # and AttributeError (the events have no ``phase`` field). The bundled
-    # embedding span is a follow-up; here they must no-op.
+    # The observer renders openarmature.embedding.complete spans from these
+    # events (covered end-to-end by conformance fixture 082). Here they are
+    # delivered outside any invocation: the observer reads the invocation_id
+    # from the ContextVar (None here) and returns early, so no span is opened.
     await observer(_embedding_event())
     await observer(_embedding_failed_event())
     assert len(exporter.get_finished_spans()) == 0
 
 
-async def test_langfuse_observer_safely_ignores_embedding_events() -> None:
+async def test_langfuse_observer_embedding_no_op_without_invocation_context() -> None:
     from openarmature.observability.langfuse import InMemoryLangfuseClient, LangfuseObserver
 
     client = InMemoryLangfuseClient()
     observer = LangfuseObserver(client=client)
-    # Must not raise (same skip-branch contract as the OTel observer), and no
-    # trace / observation is created for the skipped events.
+    # The observer renders dedicated Embedding observations from these events
+    # (covered end-to-end by conformance fixtures 083 / 137). Delivered outside
+    # any invocation, the observer returns early on the None invocation_id, so
+    # no trace / observation is created.
     await observer(_embedding_event())
     await observer(_embedding_failed_event())
     assert client.traces == {}

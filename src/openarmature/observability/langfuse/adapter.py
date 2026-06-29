@@ -460,6 +460,65 @@ class LangfuseSDKAdapter:
             )
         return _SpanHandle(obs)
 
+    def embedding(
+        self,
+        *,
+        trace_id: str,
+        name: str | None = None,
+        model: str | None = None,
+        usage: LangfuseUsage | None = None,
+        metadata: dict[str, Any] | None = None,
+        parent_observation_id: str | None = None,
+        level: ObservationLevel = "DEFAULT",
+        status_message: str | None = None,
+        input: Any = None,
+        output: Any = None,
+        start_time: datetime | None = None,
+    ) -> LangfuseSpanHandle:
+        # v4 unifies observations under start_observation(as_type=); an
+        # Embedding observation routes through as_type="embedding" (proposal
+        # 0059), the SDK's native LangfuseEmbedding span. It carries model +
+        # usage like a Generation but is a distinct type; usage maps to v4's
+        # usage_details. Back-date via the private OTel tracer when start_time
+        # is supplied, exactly as generation()/tool() do.
+        extra_kwargs: dict[str, Any] = {"model": model, "input": input, "output": output}
+        if usage is not None:
+            usage_details: dict[str, int] = {}
+            if usage.input is not None:
+                usage_details["input"] = usage.input
+            if usage.output is not None:
+                usage_details["output"] = usage.output
+            if usage.total is not None:
+                usage_details["total"] = usage.total
+            extra_kwargs["usage_details"] = usage_details
+        present_extra = {k: v for k, v in extra_kwargs.items() if v is not None}
+        if start_time is not None:
+            from langfuse._client.span import LangfuseEmbedding
+
+            obs = self._start_back_dated_observation(
+                LangfuseEmbedding,
+                trace_id=trace_id,
+                name=name,
+                metadata=metadata,
+                parent_observation_id=parent_observation_id,
+                level=level,
+                status_message=status_message,
+                start_time=start_time,
+                **present_extra,
+            )
+        else:
+            obs = self._start_observation(
+                as_type="embedding",
+                trace_id=trace_id,
+                name=name,
+                metadata=metadata,
+                parent_observation_id=parent_observation_id,
+                level=level,
+                status_message=status_message,
+                **present_extra,
+            )
+        return _SpanHandle(obs)
+
     def _start_back_dated_observation(
         self,
         observation_cls: type[Any],
