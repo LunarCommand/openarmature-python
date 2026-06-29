@@ -812,6 +812,14 @@ class EmbeddingEvent:
     input_strings: list[str]
     input_count: int
     dimensions: int | None
+    # Spec graph-engine §6 (proposal 0089, v0.84.0): the output embedding
+    # vectors (sourced from EmbeddingResponse.vectors at dispatch). Populated
+    # unconditionally on the success event -- payload-bearing like
+    # input_strings, gated observer-side at the rendering boundary (OTel
+    # disable_provider_payload, Langfuse equivalents) per observability
+    # §5.5.9. The §8.4.5 embedding.output mapping reads this field, not the
+    # response object. No output field on EmbeddingFailedEvent (no response).
+    output_vectors: list[list[float]]
     request_params: Mapping[str, Any]
     request_extras: Mapping[str, Any]
     active_prompt: Any

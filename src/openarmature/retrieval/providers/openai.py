@@ -419,6 +419,11 @@ class OpenAIEmbeddingProvider:
             input_strings=input_strings,
             input_count=len(input_strings),
             dimensions=response.dimensions,
+            # Populated unconditionally on success per observability §5.5.9;
+            # privacy gating is observer-side at rendering (symmetric with
+            # input_strings). Sources EmbeddingEvent.output_vectors from the
+            # parsed response vectors for the §8.4.5 embedding.output mapping.
+            output_vectors=response.vectors,
             request_params=request_params,
             request_extras=request_extras,
             active_prompt=active_prompt,

@@ -214,6 +214,25 @@ _SUPPORTED_FIXTURES = frozenset(
         "096-tool-call-payload-gating",
         "097-otel-tool-span-attributes",
         "098-langfuse-tool-observation",
+        # v0.16.0 — proposal 0059 embedding observability (0059b). A
+        # calls_embed node awaits OpenAIEmbeddingProvider.embed() inside the
+        # node body; the typed EmbeddingEvent / EmbeddingFailedEvent drive the
+        # typed-event collector (074-081), the OTel embedding span
+        # (082, openarmature.embedding.complete), and the Langfuse Embedding
+        # observation (083 success, 137 failure -- the proposal 0089
+        # output_vectors-sourced rendering). 089 (embedding metrics) stays
+        # deferred with the §11 embedding-metrics path.
+        "074-embedding-event-dispatch",
+        "075-embedding-failure-event-dispatch-on-provider-unavailable",
+        "076-embedding-event-mutual-exclusion",
+        "077-embedding-event-call-id-distinct",
+        "078-embedding-event-input-strings-populated",
+        "079-embedding-event-request-params-populated",
+        "080-embedding-event-input-count-and-dimensions-populated",
+        "081-embedding-event-active-prompt-populated",
+        "082-otel-embedding-span-attributes",
+        "083-langfuse-embedding-observation",
+        "137-langfuse-embedding-failure-observation",
         # v0.70.1 — proposal 0075 callable-branch span shape (observability
         # §5.7). The ORIGINAL fixture 110 (span shape + skip-emits-no-span);
         # the branch_count assertion arrives with the v0.73.1 pin (v0.16.0).
@@ -222,9 +241,10 @@ _SUPPORTED_FIXTURES = frozenset(
 )
 
 
-_EMBEDDING_DEFER = (
-    "embedding capability (proposal 0059) unimplemented until v0.16.0; "
-    "no embedding event/provider to record from"
+_EMBEDDING_METRICS_DEFER = (
+    "embedding observability (074-083 + 137) is wired (proposal 0059b); only the "
+    "§11 embedding-metrics path stays deferred -- the OTelObserver records metrics "
+    "from the LLM per-attempt event, not yet from EmbeddingEvent"
 )
 
 _RERANK_DEFER = (
@@ -247,28 +267,12 @@ _DEFERRED_FIXTURES: dict[str, str] = {
     "039-nested-lineage-augmentation": (
         "nested-case Langfuse harness wiring not yet implemented (proposal 0045 nested fan-out)"
     ),
-    # Embedding observability (proposals 0059 / 0067 §11). The embedding
-    # capability is unshipped until v0.16.0; the LLM-path equivalents run.
-    **{
-        fixture_id: _EMBEDDING_DEFER
-        for fixture_id in (
-            "074-embedding-event-dispatch",
-            "075-embedding-failure-event-dispatch-on-provider-unavailable",
-            "076-embedding-event-mutual-exclusion",
-            "077-embedding-event-call-id-distinct",
-            "078-embedding-event-input-strings-populated",
-            "079-embedding-event-request-params-populated",
-            "080-embedding-event-input-count-and-dimensions-populated",
-            "081-embedding-event-active-prompt-populated",
-            "082-otel-embedding-span-attributes",
-            "083-langfuse-embedding-observation",
-            "089-embedding-metrics-token-and-duration",
-            # proposal 0089 (v0.84.0) embedding failure observation -- the
-            # EmbeddingFailedEvent ERROR-level Langfuse rendering; blocked on
-            # the same unimplemented embedding capability.
-            "137-langfuse-embedding-failure-observation",
-        )
-    },
+    # Embedding observability (proposal 0067 §11). 074-083 + 137 are wired
+    # (proposal 0059b -- see _SUPPORTED_FIXTURES). Only the §11 embedding-
+    # metrics path (089) stays deferred: the OTelObserver records metrics from
+    # the LLM per-attempt event only; extending the metric instruments to the
+    # embedding path rides the §11 embedding-metrics work, not 0059b.
+    "089-embedding-metrics-token-and-duration": _EMBEDDING_METRICS_DEFER,
     # Rerank observability (proposal 0060, v0.70.0). The rerank protocol is
     # unshipped in python until v0.16.0; no rerank provider/event exists.
     **{
@@ -672,6 +676,20 @@ async def test_observability_fixture(fixture_path: Path) -> None:
         "098-langfuse-tool-observation",
     }:
         await _run_tool_fixture(spec)
+    elif fixture_id in {
+        "074-embedding-event-dispatch",
+        "075-embedding-failure-event-dispatch-on-provider-unavailable",
+        "076-embedding-event-mutual-exclusion",
+        "077-embedding-event-call-id-distinct",
+        "078-embedding-event-input-strings-populated",
+        "079-embedding-event-request-params-populated",
+        "080-embedding-event-input-count-and-dimensions-populated",
+        "081-embedding-event-active-prompt-populated",
+        "082-otel-embedding-span-attributes",
+        "083-langfuse-embedding-observation",
+        "137-langfuse-embedding-failure-observation",
+    }:
+        await _run_embedding_fixture(spec)
     elif fixture_id in {
         "043-get-invocation-metadata-roundtrip",
         "044-get-invocation-metadata-fan-out-scoping",
@@ -3983,8 +4001,10 @@ def _assert_langfuse_observation_tree(
 ) -> None:
     """Recursively match expected observations against the trace's flat
     observation list (linked by parent_observation_id). type + name are
-    matched exactly; level / input / output exactly when present;
-    metadata is subset-matched."""
+    matched exactly; level / statusMessage / model / input / output exactly
+    when present; usageDetails is subset-matched against the observation's
+    usage record; metadata is subset-matched (values honor the
+    ``<any-string>`` token via ``_value_matches``)."""
     # Mutable copy: each matched observation is consumed so two
     # same-shape expected siblings can't both bind to one actual.
     remaining = list(trace.children_of(parent_id))
@@ -4002,6 +4022,17 @@ def _assert_langfuse_observation_tree(
         remaining.remove(match)
         if "level" in exp:
             assert match.level == exp["level"], f"{exp_name!r}: level {match.level!r} != {exp['level']!r}"
+        if "statusMessage" in exp:
+            assert match.status_message == exp["statusMessage"], (
+                f"{exp_name!r}: statusMessage {match.status_message!r} != {exp['statusMessage']!r}"
+            )
+        if "model" in exp:
+            assert match.model == exp["model"], f"{exp_name!r}: model {match.model!r} != {exp['model']!r}"
+        if "usageDetails" in exp:
+            assert match.usage is not None, f"{exp_name!r}: expected usageDetails but usage is None"
+            for uk, uv in cast("dict[str, Any]", exp["usageDetails"]).items():
+                actual_usage = getattr(match.usage, uk, None)
+                assert actual_usage == uv, f"{exp_name!r}: usageDetails.{uk} {actual_usage!r} != {uv!r}"
         if "input" in exp:
             assert match.input == exp["input"], f"{exp_name!r}: input {match.input!r} != {exp['input']!r}"
         if "output" in exp:
@@ -4009,7 +4040,7 @@ def _assert_langfuse_observation_tree(
                 f"{exp_name!r}: output {match.output!r} != {exp['output']!r}"
             )
         for key, val in cast("dict[str, Any]", exp.get("metadata") or {}).items():
-            assert match.metadata.get(key) == val, (
+            assert _value_matches(match.metadata.get(key), val), (
                 f"{exp_name!r}: metadata.{key} {match.metadata.get(key)!r} != {val!r}"
             )
         children = cast("list[dict[str, Any]] | None", exp.get("children"))
@@ -4068,6 +4099,226 @@ async def _run_tool_case(case: Mapping[str, Any]) -> None:
         lf_kwargs: dict[str, Any] = {"client": langfuse_client}
         if "disable_provider_payload" in case:
             lf_kwargs["disable_provider_payload"] = bool(case["disable_provider_payload"])
+        graph.attach_observer(LangfuseObserver(**lf_kwargs))
+
+    try:
+        if expected_error is not None:
+            with pytest.raises(NodeException):
+                await graph.invoke(state)
+        else:
+            await graph.invoke(state)
+        await graph.drain()
+    finally:
+        for provider in providers:
+            await provider.aclose()
+        if otel_observer is not None:
+            otel_observer.shutdown()
+
+    if "observers" in expected:
+        for obs_name, obs_spec in cast("dict[str, Any]", expected["observers"]).items():
+            _assert_observer_expectations(obs_name, collectors[obs_name], cast("dict[str, Any]", obs_spec))
+    if "span_tree" in expected and exporter is not None:
+        _check_payload_span_tree(
+            exporter.get_finished_spans(),
+            cast("list[dict[str, Any]]", expected["span_tree"]),
+            full_input_serialization=None,
+            assert_attributes_absent=assert_attributes_absent,
+            assert_attribute_parses_as_messages=assert_attribute_parses_as_messages,
+            assert_attribute_parses_as_object=assert_attribute_parses_as_object,
+            assert_attribute_does_not_contain=assert_attribute_does_not_contain,
+            assert_attribute_truncation=assert_attribute_truncation,
+        )
+    if "langfuse_trace" in expected and langfuse_client is not None:
+        assert len(langfuse_client.traces) == 1, (
+            f"expected 1 Langfuse trace; got {sorted(langfuse_client.traces)}"
+        )
+        trace = next(iter(langfuse_client.traces.values()))
+        _assert_langfuse_observation_tree(
+            trace, cast("list[dict[str, Any]]", expected["langfuse_trace"].get("observations") or [])
+        )
+
+
+# ---------------------------------------------------------------------------
+# Proposal 0059 — embedding observability fixtures (074-083, 137)
+# ---------------------------------------------------------------------------
+#
+# A calls_embed node constructs an OpenAIEmbeddingProvider on an
+# httpx.MockTransport built from the fixture's mock_embedding block and awaits
+# provider.embed(inputs) INSIDE the node body, so the calling-node ContextVars
+# are set and the EmbeddingEvent / EmbeddingFailedEvent flow through the
+# observer queue. One graph builder serves all three assertion shapes:
+# typed-event-collector (074-081), OTel span_tree (082), and the Langfuse
+# Embedding observation tree (083 / 137). Dispatch is by which expected.* key
+# appears, mirroring the tool path (_run_tool_case).
+
+
+def _embedding_model_from_first_response(case: Mapping[str, Any]) -> str | None:
+    """Return the ``model`` on the first ``mock_embedding`` response body, so
+    the provider binds to the model the fixture's expected event reports."""
+    responses = cast("list[dict[str, Any]] | None", case.get("mock_embedding")) or []
+    if not responses:
+        return None
+    body = cast("dict[str, Any] | None", responses[0].get("body")) or {}
+    model = body.get("model")
+    return model if isinstance(model, str) else None
+
+
+def _build_embedding_runtime_config(config_spec: Mapping[str, Any] | None) -> Any:
+    """Build an EmbeddingRuntimeConfig from a ``calls_embed.config`` block
+    (fixture 079: ``dimensions``), or None when absent."""
+    if not config_spec:
+        return None
+    from openarmature.retrieval import EmbeddingRuntimeConfig
+
+    return EmbeddingRuntimeConfig(**dict(config_spec))
+
+
+def _make_embedding_node_body(node_spec: Mapping[str, Any], provider: Any, case: Mapping[str, Any]) -> Any:
+    calls_embed = cast("dict[str, Any]", node_spec["calls_embed"])
+    stores_in = cast("str | None", calls_embed.get("stores_response_in"))
+    config = _build_embedding_runtime_config(cast("dict[str, Any] | None", calls_embed.get("config")))
+    # A node may render a prompt first (081, RAG retrieval): the rendered
+    # PromptResult is stamped active for the embed() call and supplies the
+    # input text (one-element list) when input_from_rendered_prompt is set.
+    renders_prompt_name = cast("str | None", node_spec.get("renders_prompt"))
+    prompt_result = _render_prompt_result(case, renders_prompt_name) if renders_prompt_name else None
+    input_from_rendered = bool(calls_embed.get("input_from_rendered_prompt", False))
+    explicit_input = cast("list[str] | None", calls_embed.get("input"))
+
+    async def body(_state: Any) -> Mapping[str, Any]:
+        if input_from_rendered and prompt_result is not None:
+            inputs = [cast("str", prompt_result.messages[0].content)]
+        else:
+            inputs = list(explicit_input or [])
+        if prompt_result is not None:
+            from openarmature.prompts import with_active_prompt
+
+            with with_active_prompt(prompt_result):
+                response = await provider.embed(inputs, config=config)
+        else:
+            response = await provider.embed(inputs, config=config)
+        return {stores_in: response.model_dump()} if stores_in else {}
+
+    return body
+
+
+def _build_embedding_graph(
+    case: Mapping[str, Any],
+    *,
+    populate_caller_metadata: bool,
+) -> tuple[Any, type[Any], list[Any]]:
+    """Build a graph whose nodes are calls_embed. Every embed node gets its own
+    OpenAIEmbeddingProvider sharing one MockTransport that replays the case's
+    ``mock_embedding`` queue in order (077 has two embed nodes in series).
+    Returns (compiled_graph, state_cls, providers-to-close)."""
+    import json
+
+    import httpx
+
+    from openarmature.graph import END, GraphBuilder
+    from openarmature.retrieval import OpenAIEmbeddingProvider
+
+    from .adapter import build_state_cls
+
+    state_cls = build_state_cls(
+        "EmbeddingFixtureState", cast("dict[str, dict[str, Any]]", case["state"]["fields"])
+    )
+    builder = GraphBuilder(state_cls)
+    providers: list[Any] = []
+    mock_responses = list(cast("list[dict[str, Any]]", case.get("mock_embedding") or []))
+
+    def _handler(_request: httpx.Request) -> httpx.Response:
+        if not mock_responses:
+            raise AssertionError("mock_embedding queue exhausted")
+        spec_resp = mock_responses.pop(0)
+        body = cast("dict[str, Any]", spec_resp.get("body") or {})
+        return httpx.Response(
+            int(spec_resp.get("status", 200)),
+            content=json.dumps(body).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+        )
+
+    transport = httpx.MockTransport(_handler)
+    bound_model = _embedding_model_from_first_response(case) or "text-embedding-test"
+
+    nodes = cast("dict[str, Any]", case["nodes"])
+    for node_name, node_spec in nodes.items():
+        nd = cast("dict[str, Any]", node_spec)
+        if "calls_embed" not in nd:
+            raise AssertionError(f"embedding fixture node {node_name!r} has no calls_embed directive")
+        provider = OpenAIEmbeddingProvider(
+            base_url="http://mock-embed.test",
+            model=bound_model,
+            api_key="test",
+            transport=transport,
+            populate_caller_metadata=populate_caller_metadata,
+        )
+        providers.append(provider)
+        builder.add_node(node_name, _make_embedding_node_body(nd, provider, case))
+
+    for edge in cast("list[dict[str, str]]", case["edges"]):
+        target = END if edge["to"] == "END" else edge["to"]
+        builder.add_edge(edge["from"], target)
+    builder.set_entry(cast("str", case["entry"]))
+    return builder.compile(), state_cls, providers
+
+
+async def _run_embedding_fixture(spec: Mapping[str, Any]) -> None:
+    cases = cast("list[dict[str, Any]]", spec["cases"])
+    for case in cases:
+        try:
+            await _run_embedding_case(case)
+        except AssertionError as e:
+            raise AssertionError(f"case {case.get('name')!r}: {e}") from e
+
+
+async def _run_embedding_case(case: Mapping[str, Any]) -> None:
+    from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import (
+        InMemorySpanExporter,
+    )
+
+    from openarmature.graph import NodeException
+    from openarmature.observability.langfuse import InMemoryLangfuseClient, LangfuseObserver
+
+    from .harness.llm_attribute_assertions import (
+        assert_attribute_does_not_contain,
+        assert_attribute_parses_as_messages,
+        assert_attribute_parses_as_object,
+        assert_attribute_truncation,
+        assert_attributes_absent,
+    )
+
+    expected = cast("dict[str, Any]", case["expected"])
+    expected_error = cast("dict[str, Any] | None", case.get("expected_error"))
+    # The provider's caller-metadata snapshot is opt-in via the collector's
+    # include_caller_metadata flag (none of 074-083 set it, so the events carry
+    # caller_invocation_metadata=None, matching the fixtures' null assertion).
+    collectors, populate_caller_metadata = _parse_typed_observers(case)
+    graph, state_cls, providers = _build_embedding_graph(
+        case, populate_caller_metadata=populate_caller_metadata
+    )
+    state = _make_state_instance(case, state_cls)
+
+    exporter: Any = None
+    otel_observer: Any = None
+    langfuse_client: Any = None
+    if "observers" in expected:
+        for collector in collectors.values():
+            graph.attach_observer(collector)
+    if "span_tree" in expected:
+        exporter = InMemorySpanExporter()
+        otel_kwargs: dict[str, Any] = {"span_processor": SimpleSpanProcessor(exporter)}
+        if "disable_provider_payload" in case:
+            otel_kwargs["disable_provider_payload"] = bool(case["disable_provider_payload"])
+        otel_observer = OTelObserver(**otel_kwargs)
+        graph.attach_observer(otel_observer)
+    if "langfuse_trace" in expected:
+        langfuse_client = InMemoryLangfuseClient()
+        lf_kwargs: dict[str, Any] = {"client": langfuse_client}
+        lf_cfg = cast("dict[str, Any] | None", case.get("langfuse_observer")) or {}
+        if "disable_provider_payload" in lf_cfg:
+            lf_kwargs["disable_provider_payload"] = bool(lf_cfg["disable_provider_payload"])
         graph.attach_observer(LangfuseObserver(**lf_kwargs))
 
     try:

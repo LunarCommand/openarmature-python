@@ -599,6 +599,8 @@ class OTelObserver:
                 | LlmRetryAttemptEvent
                 | ToolCallEvent
                 | ToolCallFailedEvent
+                | EmbeddingEvent
+                | EmbeddingFailedEvent
                 | None,
             ],
             None,
@@ -708,6 +710,8 @@ class OTelObserver:
         | LlmRetryAttemptEvent
         | ToolCallEvent
         | ToolCallFailedEvent
+        | EmbeddingEvent
+        | EmbeddingFailedEvent
         | None,
     ) -> None:
         """Invoke configured enrichers against ``span`` before
@@ -774,12 +778,13 @@ class OTelObserver:
         # consumers, so the OTel observer ignores them here.
         if isinstance(event, LlmCompletionEvent | LlmFailedEvent):
             return
-        # Proposal 0059 embedding events: the bundled OTel embedding span
-        # (openarmature.embedding.complete) is a follow-up. Until it lands
-        # the events are safely ignored here rather than falling through to
-        # the NodeEvent phase dispatch (which would AttributeError on the
-        # absent ``phase`` field).
+        # Proposal 0059 embedding observability (observability §5.5.8): emit
+        # the openarmature.embedding.complete span from the typed embedding
+        # events. NOT gated by disable_llm_spans (that flag is scoped to LLM
+        # completion spans per §5.5.8); only the payload / GenAI-semconv
+        # attribute subsets are gated, inside the handler.
         if isinstance(event, EmbeddingEvent | EmbeddingFailedEvent):
+            self._handle_embedding(event)
             return
         # Proposal 0063 tool-execution observability: emit the
         # openarmature.tool.call span from the typed tool events.
@@ -1680,6 +1685,115 @@ class OTelObserver:
                 },
             )
             span.set_status(Status(StatusCode.ERROR, description=event.error_message or event.error_type))
+        else:
+            span.set_status(Status(StatusCode.OK))
+        self._run_enrichers(span, event)
+        span.end(end_time=end_time_ns)
+
+    # Spec: observability §5.5.8 (proposal 0059) embedding span. Payload
+    # gating is §5.5.4 + the §5.5.5 truncation contract; gen_ai.operation.name
+    # is deferred per the stable-only adoption policy.
+    def _handle_embedding(self, event: EmbeddingEvent | EmbeddingFailedEvent) -> None:
+        """Emit an ``openarmature.embedding.complete`` span for an
+        ``EmbeddingProvider.embed()`` call, parented under the calling node.
+
+        An ``EmbeddingEvent`` renders OK with the GenAI response subset +
+        the OA embedding identity attributes; an ``EmbeddingFailedEvent``
+        renders ERROR with the standard OTel ``error.type`` attribute, an
+        exception event carrying the message, and the
+        ``openarmature.error.category`` attribute. ``input.strings`` /
+        ``request.extras`` are payload, gated by ``disable_provider_payload``
+        (with the standard truncation cap); the GenAI semconv subset is gated
+        by ``disable_genai_semconv``. No ``gen_ai.operation.name`` is emitted;
+        operation discrimination is via the span name + provider.
+        ``disable_llm_spans`` does not gate this span.
+        """
+        from openarmature.observability.correlation import (
+            current_correlation_id,
+            current_invocation_id,
+        )
+
+        invocation_id = current_invocation_id()
+        if invocation_id is None:
+            return
+        inv_state = self._inv_state_for(invocation_id)
+        # Back-date start_time by latency_ms so the span duration reflects the
+        # adapter-boundary measurement, mirroring the LLM / tool spans.
+        end_time_ns = time.time_ns()
+        if event.latency_ms is not None:
+            start_time_ns = end_time_ns - int(event.latency_ms * 1_000_000)
+        else:
+            start_time_ns = end_time_ns
+        parent_ctx = self._resolve_llm_parent(
+            inv_state,
+            invocation_id,
+            calling_namespace_prefix=event.namespace,
+            calling_attempt_index=event.attempt_index,
+            calling_fan_out_index=event.fan_out_index,
+            calling_branch_name=event.branch_name,
+        )
+        attrs: dict[str, Any] = {}
+        cid = current_correlation_id()
+        if cid is not None:
+            attrs["openarmature.correlation_id"] = cid
+        if event.caller_invocation_metadata is not None:
+            _apply_caller_metadata(attrs, event.caller_invocation_metadata)
+        # OA-namespace embedding identity attributes (ungated). input_count is
+        # available on both variants (the failure event carries input_strings);
+        # dimensions is response-derived, so success-only.
+        if isinstance(event, EmbeddingEvent):
+            attrs["openarmature.embedding.input_count"] = event.input_count
+            if event.dimensions is not None:
+                attrs["openarmature.embedding.dimensions"] = event.dimensions
+        else:
+            attrs["openarmature.embedding.input_count"] = len(event.input_strings)
+        # GenAI semconv subset, gated by disable_genai_semconv. The response
+        # subset (response.model / response.id / usage.input_tokens) is
+        # success-only; the request subset (system / request.model) emits on
+        # both variants.
+        if not self.disable_genai_semconv:
+            attrs["gen_ai.system"] = event.provider
+            attrs["gen_ai.request.model"] = event.model
+            if isinstance(event, EmbeddingEvent):
+                if event.response_model is not None:
+                    attrs["gen_ai.response.model"] = event.response_model
+                if event.response_id is not None:
+                    attrs["gen_ai.response.id"] = event.response_id
+                if event.usage is not None:
+                    attrs["gen_ai.usage.input_tokens"] = event.usage.input_tokens
+        # Payload-gated (disable_provider_payload): input strings + extras.
+        if not self.disable_provider_payload:
+            if event.input_strings:
+                serialized = _serialize_for_attribute(event.input_strings)
+                attrs["openarmature.embedding.input.strings"] = _truncate_for_attribute(
+                    serialized, self.payload_max_bytes
+                )
+            if event.request_extras:
+                serialized_extras = _serialize_for_attribute(event.request_extras)
+                attrs["openarmature.embedding.request.extras"] = _truncate_for_attribute(
+                    serialized_extras, self.payload_max_bytes
+                )
+        span = self._tracer.start_span(
+            name="openarmature.embedding.complete",
+            context=cast("Any", parent_ctx),
+            kind=SpanKind.CLIENT,
+            attributes=attrs,
+            start_time=start_time_ns,
+        )
+        if isinstance(event, EmbeddingFailedEvent):
+            # Generic §4.2 / §8.4.2 error mapping: ERROR status + error.type +
+            # an OTel exception event + the §7 category attribute.
+            if event.error_type is not None:
+                span.set_attribute("error.type", event.error_type)
+            span.add_event(
+                "exception",
+                attributes={
+                    "exception.type": event.error_type or "",
+                    "exception.message": event.error_message,
+                },
+            )
+            span.set_attribute("openarmature.error.category", event.error_category)
+            span.set_status(Status(StatusCode.ERROR, description=event.error_category))
         else:
             span.set_status(Status(StatusCode.OK))
         self._run_enrichers(span, event)
