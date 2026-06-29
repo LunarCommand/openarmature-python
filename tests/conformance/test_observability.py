@@ -2541,16 +2541,10 @@ def _has_exception_event(span: Any) -> bool:
 
 async def _run_fixture_008_case(case: Mapping[str, Any]) -> None:
     case_name = case["name"]
-    # v0.73.1 added the detached fan-out INSTANCE error-status case
-    # (proposal 0061 §4.2, the fan-out-instance counterpart to the
-    # subgraph case). Proposal 0061 IS implemented (the instance raise
-    # propagates exactly like the subgraph raise), but this runner does
-    # not yet wire the fan-out-instance raise path (expect_raise + the
-    # both-spans error-status assertions); defer the single case until the
-    # harness wires it, keeping the other 008 cases running.
-    if case_name == "detached_fan_out_instance_raises_error_status_on_both_spans":
-        return
-    expect_raise = case_name == "detached_subgraph_raises_error_status_on_both_spans"
+    expect_raise = case_name in (
+        "detached_subgraph_raises_error_status_on_both_spans",
+        "detached_fan_out_instance_raises_error_status_on_both_spans",
+    )
     spans = await _run_detached_case_graph(case, expect_raise=expect_raise)
 
     if case_name == "detached_subgraph_two_traces_one_link":
@@ -2680,6 +2674,49 @@ async def _run_fixture_008_case(case: Mapping[str, Any]) -> None:
         parent_iid = _invocation_id_of(parent_inv)
         assert parent_iid is not None and _invocation_id_of(detached_inv) == parent_iid, (
             "detached invocation span MUST share the parent's invocation_id"
+        )
+        return
+
+    if case_name == "detached_fan_out_instance_raises_error_status_on_both_spans":
+        # Proposal 0061 §4.2, fan-out-instance variant: a raising detached
+        # fan-out instance surfaces ERROR on BOTH the parent's fan-out node
+        # span (parent trace, carrying the Link) and the per-instance detached
+        # invocation span (its own trace), each with the §4 category + an OTel
+        # exception event, sharing the parent invocation_id. The single-element
+        # fan-out (items [1]) means exactly one instance runs and raises.
+        fan_out_node_spans = [s for s in spans if s.name == "per_document_scoring"]
+        parent_fan_out = next((s for s in fan_out_node_spans if s.links), None)
+        assert parent_fan_out is not None, "expected a fan-out node span with a Link in the parent trace"
+        assert parent_fan_out.status.status_code.name == "ERROR", (
+            "parent fan-out node span MUST carry ERROR for a raising detached instance"
+        )
+        assert _has_exception_event(parent_fan_out), "parent fan-out node span MUST record the exception"
+        assert dict(parent_fan_out.attributes or {}).get("openarmature.error.category") == "node_exception"
+        assert len(parent_fan_out.links) == 1, (
+            f"fan-out node span MUST carry exactly one Link; got {len(parent_fan_out.links)}"
+        )
+        parent_trace_id = cast("Any", parent_fan_out.context).trace_id
+        detached_trace_id = parent_fan_out.links[0].context.trace_id
+        assert detached_trace_id != parent_trace_id, "detached instance + parent traces MUST be distinct"
+        inv_spans = [s for s in spans if s.name == "openarmature.invocation"]
+        detached_inv = next(
+            (s for s in inv_spans if cast("Any", s.context).trace_id == detached_trace_id), None
+        )
+        parent_inv = next((s for s in inv_spans if cast("Any", s.context).trace_id == parent_trace_id), None)
+        assert detached_inv is not None, (
+            "detached instance trace MUST root in an openarmature.invocation span"
+        )
+        assert parent_inv is not None
+        assert detached_inv.status.status_code.name == "ERROR", (
+            "detached instance invocation span MUST carry the instance's ERROR status (§4.2)"
+        )
+        assert _has_exception_event(detached_inv), (
+            "detached instance invocation span MUST record the exception"
+        )
+        assert dict(detached_inv.attributes or {}).get("openarmature.error.category") == "node_exception"
+        parent_iid = _invocation_id_of(parent_inv)
+        assert parent_iid is not None and _invocation_id_of(detached_inv) == parent_iid, (
+            "detached instance invocation span MUST share the parent's invocation_id"
         )
         return
 
