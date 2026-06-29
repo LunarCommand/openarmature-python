@@ -263,6 +263,10 @@ _DEFERRED_FIXTURES: dict[str, str] = {
             "082-otel-embedding-span-attributes",
             "083-langfuse-embedding-observation",
             "089-embedding-metrics-token-and-duration",
+            # proposal 0089 (v0.84.0) embedding failure observation -- the
+            # EmbeddingFailedEvent ERROR-level Langfuse rendering; blocked on
+            # the same unimplemented embedding capability.
+            "137-langfuse-embedding-failure-observation",
         )
     },
     # Rerank observability (proposal 0060, v0.70.0). The rerank protocol is
@@ -281,8 +285,103 @@ _DEFERRED_FIXTURES: dict[str, str] = {
             "107-otel-rerank-span-attributes",
             "108-langfuse-rerank-observation",
             "109-rerank-metrics-token-and-duration",
+            # proposal 0089 (v0.84.0) rerank failure observation -- the
+            # RerankFailedEvent ERROR-level Langfuse rendering; blocked on
+            # the same unimplemented rerank capability.
+            "138-langfuse-rerank-failure-observation",
         )
     },
+    # ---- v0.16.0 spec-pin bump (v0.70.1 -> v0.84.0): new fixtures for
+    # proposals deferred to their own later PRs of this release. ----
+    # Proposal 0062 (LLM completion streaming, spec v0.71.0). The stream
+    # flag on complete() + the per-chunk LlmTokenEvent + §6 streaming
+    # assembly are unimplemented in python until a later v0.16.0 PR; the
+    # observer-side atomicity + token-event fixtures defer with it.
+    **{
+        fixture_id: "LLM completion streaming (proposal 0062) not-yet implemented"
+        for fixture_id in (
+            "111-llm-token-event-dispatch-on-stream",
+            "112-llm-token-event-absent-without-stream",
+            "113-streamed-tool-call-reassembles-no-token-events",
+            "114-llm-token-event-then-failure-mid-stream",
+            "115-llm-token-event-call-id-links-to-completion",
+            "116-llm-token-event-call-level-retry-one-call-id",
+            "117-otel-langfuse-atomic-under-stream",
+            "118-llm-token-event-reasoning-delta-kind",
+        )
+    },
+    # Proposal 0075 (parallel-branches lightweight branches) IS implemented
+    # (v0.15.0), but fixture 119 -- the v0.73.1 callable-branch dispatch-span
+    # attempt_index-under-node-retry coverage round-out -- mixes a graph-style
+    # shape the cross-capability parser doesn't model (cf. 110) and has no
+    # dedicated runner here yet; defer until the harness wires it.
+    "119-otel-callable-branch-attempt-index-under-node-retry": (
+        "0075 shipped v0.15.0; runner for this callable-branch-attempt-index-under-retry "
+        "case not yet wired -- harness gap, not unimplemented"
+    ),
+    # Proposal 0082 (structured-output failure diagnostics, spec v0.77.0).
+    # The LlmFailedEvent response-side surface (output_content / finish_reason
+    # / usage on structured_output_invalid) is unimplemented until a later
+    # v0.16.0 PR; the OTel / Langfuse / metrics rendering fixtures defer too.
+    **{
+        fixture_id: "structured-output failure diagnostics (proposal 0082) not-yet implemented"
+        for fixture_id in (
+            "120-llm-failure-event-structured-output-truncation",
+            "121-llm-failure-event-structured-output-schema-mismatch",
+            "122-llm-failure-event-response-side-null-on-non-body-failure",
+            "123-langfuse-failed-generation-renders-output-usage-finish-reason",
+            "124-otel-error-span-renders-output-usage-finish-reason",
+            "125-metrics-token-usage-on-structured-output-failure",
+        )
+    },
+    # Proposal 0083 (per-prompt token-budget observability, spec v0.78.0).
+    # The Prompt.token_budget advisory + budget-exceeded span attribute /
+    # WARNING / metrics are unimplemented until a later v0.16.0 PR.
+    **{
+        fixture_id: "per-prompt token-budget observability (proposal 0083) not-yet implemented"
+        for fixture_id in (
+            "126-token-budget-input-exceeded",
+            "127-token-budget-total-exceeded",
+            "128-token-budget-under-budget-no-warning",
+            "129-token-budget-absent-unchanged",
+            "130-langfuse-token-budget-warning-level",
+            "131-token-budget-on-structured-output-failure",
+        )
+    },
+    # Proposal 0084 (nested-fan-out span lineage, spec v0.81.0).
+    # Fixture 132's nested-lineage dispatch KEYING shipped in #194 (the
+    # OTel + Langfuse observers key dispatches by the full enclosing
+    # fan-out / branch lineage, so no spans drop). It stays deferred for
+    # 0084's remaining surface: the fan_out_index_chain / branch_name_chain
+    # arrive on the provider events with 0084 (see graph/events.py), and the
+    # nested-orphan LLM parent resolution is top-level-instance-only as of
+    # #195 -- the at-any-depth generalization rides 0084.
+    "132-otel-nested-fan-out-span-keying-and-llm-exact-match": (
+        "nested-lineage span keying shipped (#194); deferred for 0084's event-chain "
+        "surface (fan_out_index_chain / branch_name_chain on provider events) and the "
+        "nested-orphan LLM parent (top-level only as of #195)"
+    ),
+    # Proposal 0084: 133 (orphan LLM fallback) + 134 (Langfuse parent
+    # resolution) defer with 0084's lineage-resolved parent surface.
+    **{
+        fixture_id: "nested-fan-out span lineage (proposal 0084) not-yet implemented"
+        for fixture_id in (
+            "133-otel-nested-fan-out-orphan-llm-fallback",
+            "134-langfuse-nested-fan-out-parent-resolution",
+        )
+    },
+    # Proposal 0087 (within-node directive execution order, spec v0.82.0).
+    # The conformance-adapter document-order directive rule is unimplemented
+    # until a later v0.16.0 PR.
+    "135-within-node-directive-execution-order": (
+        "within-node directive execution order (proposal 0087) not-yet implemented"
+    ),
+    # Proposal 0088 (Langfuse parallel-branches mapping parity, spec
+    # v0.83.0). The §8.4.8 per-branch dispatch-span Langfuse observation is
+    # unimplemented until a later v0.16.0 PR.
+    "136-langfuse-parallel-branches-dispatch-span": (
+        "Langfuse parallel-branches dispatch-span parity (proposal 0088) not-yet implemented"
+    ),
 }
 
 
@@ -2450,9 +2549,60 @@ def _has_exception_event(span: Any) -> bool:
     return any(getattr(e, "name", None) == "exception" for e in events)
 
 
+def _assert_detached_raise_both_spans(
+    spans: Sequence[ReadableSpan],
+    *,
+    parent_span_name: str,
+    expected_link_count: int,
+) -> None:
+    # Proposal 0061 §4.2: a raising detached unit surfaces ERROR on BOTH the
+    # parent's dispatch span (the one carrying the Link, named
+    # ``parent_span_name``) and the per-unit detached invocation span (its own
+    # trace) -- distinct traces, shared invocation_id, each with the §4 category
+    # + an OTel exception event. The parent's own openarmature.invocation span
+    # also inherits ERROR (§4.4): the fixtures' expected span_trees show the
+    # parent invocation ERROR.
+    parent_dispatch = next((s for s in spans if s.name == parent_span_name and s.links), None)
+    assert parent_dispatch is not None, f"expected a parent {parent_span_name!r} span carrying a Link"
+    assert parent_dispatch.status.status_code.name == "ERROR", (
+        f"parent {parent_span_name!r} span MUST carry ERROR for a raising detached unit"
+    )
+    assert _has_exception_event(parent_dispatch), (
+        f"parent {parent_span_name!r} span MUST record the exception"
+    )
+    assert dict(parent_dispatch.attributes or {}).get("openarmature.error.category") == "node_exception"
+    assert len(parent_dispatch.links) == expected_link_count, (
+        f"parent {parent_span_name!r} span MUST carry exactly {expected_link_count} Link(s); "
+        f"got {len(parent_dispatch.links)}"
+    )
+    parent_trace_id = cast("Any", parent_dispatch.context).trace_id
+    detached_trace_id = parent_dispatch.links[0].context.trace_id
+    assert detached_trace_id != parent_trace_id, "detached + parent traces MUST be distinct"
+    inv_spans = [s for s in spans if s.name == "openarmature.invocation"]
+    detached_inv = next((s for s in inv_spans if cast("Any", s.context).trace_id == detached_trace_id), None)
+    parent_inv = next((s for s in inv_spans if cast("Any", s.context).trace_id == parent_trace_id), None)
+    assert detached_inv is not None, "detached trace MUST root in an openarmature.invocation span"
+    assert parent_inv is not None
+    assert parent_inv.status.status_code.name == "ERROR", (
+        "parent openarmature.invocation span MUST inherit ERROR for a raising detached unit (§4.4)"
+    )
+    assert detached_inv.status.status_code.name == "ERROR", (
+        "detached invocation span MUST carry the detached unit's ERROR status (§4.2)"
+    )
+    assert _has_exception_event(detached_inv), "detached invocation span MUST record the exception"
+    assert dict(detached_inv.attributes or {}).get("openarmature.error.category") == "node_exception"
+    parent_iid = _invocation_id_of(parent_inv)
+    assert parent_iid is not None and _invocation_id_of(detached_inv) == parent_iid, (
+        "detached invocation span MUST share the parent's invocation_id"
+    )
+
+
 async def _run_fixture_008_case(case: Mapping[str, Any]) -> None:
     case_name = case["name"]
-    expect_raise = case_name == "detached_subgraph_raises_error_status_on_both_spans"
+    expect_raise = case_name in (
+        "detached_subgraph_raises_error_status_on_both_spans",
+        "detached_fan_out_instance_raises_error_status_on_both_spans",
+    )
     spans = await _run_detached_case_graph(case, expect_raise=expect_raise)
 
     if case_name == "detached_subgraph_two_traces_one_link":
@@ -2552,36 +2702,17 @@ async def _run_fixture_008_case(case: Mapping[str, Any]) -> None:
         return
 
     if case_name == "detached_subgraph_raises_error_status_on_both_spans":
-        # Proposal 0061 §4.2: a raising detached subgraph surfaces ERROR
-        # on BOTH the parent's dispatch span and the detached invocation
-        # span — distinct traces, shared invocation_id, each with the §4
-        # category + an OTel exception event.
-        dispatch_spans = [s for s in spans if s.name == "dispatch"]
-        parent_dispatch = next((s for s in dispatch_spans if s.links), None)
-        assert parent_dispatch is not None, "expected a parent 'dispatch' span with a Link"
-        assert parent_dispatch.status.status_code.name == "ERROR", (
-            "parent dispatch span MUST carry ERROR for a raising detached subgraph"
-        )
-        assert _has_exception_event(parent_dispatch), "parent dispatch span MUST record the exception"
-        assert dict(parent_dispatch.attributes or {}).get("openarmature.error.category") == "node_exception"
-        parent_trace_id = cast("Any", parent_dispatch.context).trace_id
-        detached_trace_id = parent_dispatch.links[0].context.trace_id
-        assert detached_trace_id != parent_trace_id, "detached + parent traces MUST be distinct"
-        inv_spans = [s for s in spans if s.name == "openarmature.invocation"]
-        detached_inv = next(
-            (s for s in inv_spans if cast("Any", s.context).trace_id == detached_trace_id), None
-        )
-        parent_inv = next((s for s in inv_spans if cast("Any", s.context).trace_id == parent_trace_id), None)
-        assert detached_inv is not None, "detached trace MUST root in an openarmature.invocation span"
-        assert parent_inv is not None
-        assert detached_inv.status.status_code.name == "ERROR", (
-            "detached invocation span MUST carry the detached unit's ERROR status (§4.2)"
-        )
-        assert _has_exception_event(detached_inv), "detached invocation span MUST record the exception"
-        assert dict(detached_inv.attributes or {}).get("openarmature.error.category") == "node_exception"
-        parent_iid = _invocation_id_of(parent_inv)
-        assert parent_iid is not None and _invocation_id_of(detached_inv) == parent_iid, (
-            "detached invocation span MUST share the parent's invocation_id"
+        # The parent's subgraph-dispatch span (named "dispatch") carries the
+        # single Link to the one detached subgraph trace.
+        _assert_detached_raise_both_spans(spans, parent_span_name="dispatch", expected_link_count=1)
+        return
+
+    if case_name == "detached_fan_out_instance_raises_error_status_on_both_spans":
+        # Fan-out-instance variant: the parent's fan-out node span
+        # ("per_document_scoring") carries the Link. The single-element fan-out
+        # (items [1]) means exactly one instance runs and raises -> one Link.
+        _assert_detached_raise_both_spans(
+            spans, parent_span_name="per_document_scoring", expected_link_count=1
         )
         return
 
