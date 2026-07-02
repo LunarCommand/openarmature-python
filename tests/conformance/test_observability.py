@@ -248,7 +248,9 @@ _EMBEDDING_METRICS_DEFER = (
 )
 
 _RERANK_DEFER = (
-    "rerank capability (proposal 0060) unimplemented until v0.16.0; no rerank event/provider to record from"
+    "rerank observability rendering (OTel span / Langfuse Retriever observation / rerank metrics) "
+    "lands in 0060b; the RerankProvider + typed RerankEvent / RerankFailedEvent ship in 0060a, but "
+    "the bundled observers safe-skip the rerank events until the rendering is wired"
 )
 
 
@@ -273,8 +275,8 @@ _DEFERRED_FIXTURES: dict[str, str] = {
     # the LLM per-attempt event only; extending the metric instruments to the
     # embedding path rides the §11 embedding-metrics work, not 0059b.
     "089-embedding-metrics-token-and-duration": _EMBEDDING_METRICS_DEFER,
-    # Rerank observability (proposal 0060, v0.70.0). The rerank protocol is
-    # unshipped in python until v0.16.0; no rerank provider/event exists.
+    # Rerank observability (proposal 0060, v0.70.0). The RerankProvider + typed
+    # rerank events ship in 0060a; only the observer rendering defers to 0060b.
     **{
         fixture_id: _RERANK_DEFER
         for fixture_id in (
@@ -290,8 +292,8 @@ _DEFERRED_FIXTURES: dict[str, str] = {
             "108-langfuse-rerank-observation",
             "109-rerank-metrics-token-and-duration",
             # proposal 0089 (v0.84.0) rerank failure observation -- the
-            # RerankFailedEvent ERROR-level Langfuse rendering; blocked on
-            # the same unimplemented rerank capability.
+            # RerankFailedEvent ERROR-level Langfuse rendering; lands with the
+            # 0060b rerank observability.
             "138-langfuse-rerank-failure-observation",
         )
     },
@@ -399,12 +401,12 @@ _DEFERRED_FIXTURES: dict[str, str] = {
             "140-langfuse-embedding-no-usage-usagedetails-omitted",
         )
     },
-    # 141/142 -- rerank no-usage; also blocked on the unshipped rerank
-    # capability (proposal 0060).
+    # 141/142 -- rerank no-usage; the rendering lands with the 0060b rerank
+    # observability (the rerank capability ships in 0060a).
     **{
         fixture_id: (
-            "rerank no-usage rendering (proposal 0093); blocked on the unshipped "
-            "rerank capability (proposal 0060)"
+            "rerank no-usage rendering (proposal 0093); lands with the 0060b "
+            "rerank observability (the rerank capability ships in 0060a)"
         )
         for fixture_id in (
             "141-otel-rerank-no-usage-attributes-omitted",

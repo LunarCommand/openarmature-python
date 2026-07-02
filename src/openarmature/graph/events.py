@@ -32,7 +32,7 @@ from .state import State
 if TYPE_CHECKING:
     from openarmature.llm.messages import ToolCall
     from openarmature.llm.response import Usage
-    from openarmature.retrieval.response import EmbeddingUsage
+    from openarmature.retrieval.response import EmbeddingUsage, RerankUsage, ScoredDocument
 
 # Sentinel empty metadata mapping for events constructed without a
 # live caller-metadata snapshot (test helpers, synthetic events).
@@ -877,6 +877,142 @@ class EmbeddingFailedEvent:
     caller_invocation_metadata: Mapping[str, AttributeValue] | None = None
 
 
+# Spec: realizes graph-engine §6 -- the typed RerankEvent / RerankFailedEvent
+# pair (proposal 0060, retrieval-provider rerank capability), the rerank
+# sibling to the EmbeddingEvent / EmbeddingFailedEvent pair. Dispatched on the
+# observer delivery queue per RerankProvider.rerank() call: the success variant
+# after the response is parsed + validated (retrieval-provider §6), the failure
+# variant alongside a raised §7 category exception (mutually exclusive per
+# call). Scalar fan_out_index / branch_name only, matching the embedding pair
+# (the lineage chains arrive uniformly across the provider events with proposal
+# 0084). query / documents / request_extras / output_results are payload-
+# bearing, populated unconditionally; observer-side privacy gates (OTel
+# disable_provider_payload, Langfuse equivalents) apply at rendering, symmetric
+# with EmbeddingEvent.
+@dataclass(frozen=True)
+class RerankEvent:
+    """A typed rerank provider call event delivered to observers.
+
+    Carries identity, scoping, and outcome data for a successful
+    ``RerankProvider.rerank()`` call. Observer code filters by type
+    discrimination (``isinstance(event, RerankEvent)``).
+
+    The identity / scoping / request-side fields mirror ``EmbeddingEvent``'s
+    convention; the outcome fields are rerank-specific:
+
+    - ``query``: the query string the call was made with; non-nullable,
+      populated unconditionally (privacy gating is observer-side at
+      rendering).
+    - ``documents``: the input documents list; non-nullable, populated
+      unconditionally. Same privacy posture as ``query``.
+    - ``document_count``: ``len(documents)``; a convenience field.
+    - ``top_k``: the caller-supplied ``top_k`` value; ``None`` when the
+      caller passed ``None``.
+    - ``result_count``: ``len(output_results)``; a convenience field.
+    - ``output_results``: the scored results the call returned; populated
+      unconditionally on the success event (privacy gating is observer-side
+      at rendering).
+    - ``response_model`` / ``response_id``: the provider-returned model and
+      response identifiers; ``None`` when the provider returned none.
+    - ``usage``: the rerank usage record; ``None`` when the call returned
+      no usage.
+    - ``request_params``: the rerank request parameters the caller supplied
+      (e.g. ``return_documents``). Absence-is-meaningful: only supplied keys
+      appear; an empty mapping when none.
+    - ``request_extras``: the runtime-config extras pass-through bag.
+    - ``active_prompt`` / ``active_prompt_group``: prompt-context snapshots
+      at rerank-call time; ``None`` outside a binding.
+    - ``call_id``: a per-call disambiguator, always present, freshly minted
+      per ``rerank()`` call.
+    """
+
+    invocation_id: str
+    correlation_id: str | None
+    node_name: str
+    namespace: tuple[str, ...]
+    attempt_index: int
+    fan_out_index: int | None
+    branch_name: str | None
+    provider: str
+    model: str
+    response_id: str | None
+    response_model: str | None
+    # RerankUsage is a string-typed forward reference per the TYPE_CHECKING
+    # import -- keeps the runtime import direction graph -> retrieval off the
+    # module-load path.
+    usage: "RerankUsage | None"
+    latency_ms: float | None
+    query: str
+    documents: list[str]
+    document_count: int
+    top_k: int | None
+    result_count: int
+    # Spec graph-engine §6 (proposal 0089): the output scored results (sourced
+    # from RerankResponse.results at dispatch). Populated unconditionally on the
+    # success event -- payload-bearing like query / documents, gated observer-
+    # side at the rendering boundary. The §8.4.7 rerank output mapping reads
+    # this field. No output field on RerankFailedEvent (no response).
+    output_results: list["ScoredDocument"]
+    request_params: Mapping[str, Any]
+    request_extras: Mapping[str, Any]
+    active_prompt: Any
+    active_prompt_group: Any
+    call_id: str
+    caller_invocation_metadata: Mapping[str, AttributeValue] | None = None
+
+
+# Spec: the failure sibling of RerankEvent (proposal 0060). Dispatched
+# whenever RerankProvider.rerank() raises a §7 category exception -- covers
+# both the provider-caught path and the pre-send validation raise
+# (provider_invalid_request on an empty query / documents list / non-positive
+# top_k). Dispatched ALONGSIDE the exception, not in place of it; mutually
+# exclusive with RerankEvent on the same call. The response-side fields
+# (usage / response_id / response_model / result_count / output_results) are
+# absent (no response).
+@dataclass(frozen=True)
+class RerankFailedEvent:
+    """A typed rerank provider call failure event delivered to observers.
+
+    Carries identity, scoping, and failure-context data for a ``rerank()``
+    call that raised a retrieval-provider category exception. Observer code
+    filters by type discrimination (``isinstance(event, RerankFailedEvent)``).
+
+    The identity / scoping / request-side field set mirrors ``RerankEvent``;
+    the response-side fields are absent. Failure-specific fields:
+
+    - ``error_category``: the error category the call raised (one of the
+      rerank-applicable provider categories). Always present.
+    - ``error_type``: an optional impl-level / vendor-specific type or code;
+      ``None`` when unavailable.
+    - ``error_message``: a human-readable message; always present (the empty
+      string when the exception carried no message).
+    """
+
+    invocation_id: str
+    correlation_id: str | None
+    node_name: str
+    namespace: tuple[str, ...]
+    attempt_index: int
+    fan_out_index: int | None
+    branch_name: str | None
+    provider: str
+    model: str
+    latency_ms: float | None
+    query: str
+    documents: list[str]
+    document_count: int
+    top_k: int | None
+    request_params: Mapping[str, Any]
+    request_extras: Mapping[str, Any]
+    active_prompt: Any
+    active_prompt_group: Any
+    call_id: str
+    error_category: str
+    error_message: str
+    error_type: str | None = None
+    caller_invocation_metadata: Mapping[str, AttributeValue] | None = None
+
+
 # Spec: realizes pipeline-utilities §6.3 failure-isolation middleware
 # (proposal 0050). Emitted by FailureIsolationMiddleware when it
 # catches an exception escaping the inner chain and substitutes a
@@ -1045,6 +1181,8 @@ __all__ = [
     "MetadataAugmentationEvent",
     "NodeEvent",
     "ParallelBranchesEventConfig",
+    "RerankEvent",
+    "RerankFailedEvent",
     "ToolCallEvent",
     "ToolCallFailedEvent",
 ]

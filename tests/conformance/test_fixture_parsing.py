@@ -527,32 +527,40 @@ _DEFERRED_FIXTURES: dict[str, str] = {
     "observability/081-embedding-event-active-prompt-populated": (
         "Proposal 0059 typed-event-collector shape; runs in test_observability"
     ),
-    # Proposal 0060 (retrieval-provider rerank, v0.70.0): the rerank
-    # observability fixtures (099-109) model the RerankEvent /
-    # RerankFailedEvent + rerank span / Langfuse Retriever / rerank-metrics
-    # surface, which python does not implement (0060 is not-yet; rerank lands
-    # with the embedding capability in v0.16.0). Sibling to embeddings (074-083).
-    "observability/099-rerank-event-dispatch": "Proposal 0060 rerank events; not implemented",
-    "observability/100-rerank-failure-event-dispatch-on-provider-unavailable": (
-        "Proposal 0060 rerank events; not implemented"
+    # Proposal 0060 (retrieval-provider rerank, v0.70.0): the rerank typed-
+    # collector fixtures (099-106) share the ``expected.observers`` shape of the
+    # embedding typed-collector fixtures (074-081) / the LLM 050-068 (which the
+    # harness schema models loosely, hence the same parser-deferral); they still
+    # RUN via test_observability. Their ``calls_rerank`` directive now parses
+    # (0060a); the parse-deferral is purely the typed-event-collector shape. The
+    # OTel-span (107), Langfuse (108), and rerank-metrics (109) fixtures parse
+    # fine against the existing span_tree / langfuse_trace / metrics shapes now
+    # that calls_rerank is modelled and are NOT deferred here -- they run in
+    # test_observability, where the rerank rendering stays deferred until 0060b.
+    "observability/099-rerank-event-dispatch": (
+        "Proposal 0060 typed-event-collector shape; runs in test_observability"
     ),
-    "observability/101-rerank-event-mutual-exclusion": "Proposal 0060 rerank events; not implemented",
-    "observability/102-rerank-event-call-id-distinct": "Proposal 0060 rerank events; not implemented",
+    "observability/100-rerank-failure-event-dispatch-on-provider-unavailable": (
+        "Proposal 0060 typed-event-collector shape; runs in test_observability"
+    ),
+    "observability/101-rerank-event-mutual-exclusion": (
+        "Proposal 0060 typed-event-collector shape; runs in test_observability"
+    ),
+    "observability/102-rerank-event-call-id-distinct": (
+        "Proposal 0060 typed-event-collector shape; runs in test_observability"
+    ),
     "observability/103-rerank-event-query-and-documents-populated": (
-        "Proposal 0060 rerank events; not implemented"
+        "Proposal 0060 typed-event-collector shape; runs in test_observability"
     ),
     "observability/104-rerank-event-request-params-populated": (
-        "Proposal 0060 rerank events; not implemented"
+        "Proposal 0060 typed-event-collector shape; runs in test_observability"
     ),
     "observability/105-rerank-event-top-k-and-result-count-populated": (
-        "Proposal 0060 rerank events; not implemented"
+        "Proposal 0060 typed-event-collector shape; runs in test_observability"
     ),
     "observability/106-rerank-event-active-prompt-populated": (
-        "Proposal 0060 rerank events; not implemented"
+        "Proposal 0060 typed-event-collector shape; runs in test_observability"
     ),
-    "observability/107-otel-rerank-span-attributes": "Proposal 0060 rerank events; not implemented",
-    "observability/108-langfuse-rerank-observation": "Proposal 0060 rerank events; not implemented",
-    "observability/109-rerank-metrics-token-and-duration": "Proposal 0060 rerank events; not implemented",
     # Proposal 0075 (callable-branch span, fixture 110 added v0.70.1): the case
     # mixes a graph-style ``expected.final_state`` with the observability
     # ``span_tree``; the cross-capability parser's ObservabilityExpected model
@@ -623,26 +631,10 @@ _DEFERRED_FIXTURES: dict[str, str] = {
     "observability/135-within-node-directive-execution-order": (
         "Proposal 0087 within-node directive execution order; not implemented"
     ),
-    # Proposal 0089 (embedding / rerank typed-event output, v0.84.0) -- the
-    # rerank failure observation directive shape (rerank capability unshipped).
-    "observability/138-langfuse-rerank-failure-observation": (
-        "Proposal 0089 rerank failure observation; rerank capability not implemented"
-    ),
     # Proposal 0086 (PromptManager default cache_ttl_seconds, v0.79.0) -- the
     # manager default-cache-ttl directive shape.
     "prompt-management/036-prompt-manager-default-cache-ttl": (
         "Proposal 0086 default cache_ttl_seconds; not implemented"
-    ),
-    # Proposal 0093 (nullable provider usage records, v0.88.0) -- the rerank
-    # no-usage fixtures use the calls_rerank directive (rerank capability
-    # unshipped, proposal 0060), so they defer at the parse layer like
-    # 099-109 / 138. The embedding no-usage fixtures (139/140/143) parse via
-    # the modelled calls_embed directive.
-    "observability/141-otel-rerank-no-usage-attributes-omitted": (
-        "Proposal 0093 rerank no-usage; rerank capability not implemented (0060)"
-    ),
-    "observability/142-langfuse-rerank-no-usage-usagedetails-omitted": (
-        "Proposal 0093 rerank no-usage; rerank capability not implemented (0060)"
     ),
 }
 

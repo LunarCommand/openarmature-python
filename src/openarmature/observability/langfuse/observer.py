@@ -40,6 +40,8 @@ from openarmature.graph.events import (
     LlmRetryAttemptEvent,
     MetadataAugmentationEvent,
     NodeEvent,
+    RerankEvent,
+    RerankFailedEvent,
     ToolCallEvent,
     ToolCallFailedEvent,
 )
@@ -484,6 +486,13 @@ class LangfuseObserver:
         # the handler.
         if isinstance(event, EmbeddingEvent | EmbeddingFailedEvent):
             self._handle_embedding(event)
+            return
+        # Proposal 0060 rerank observability (observability §8.4.7): the
+        # dedicated Langfuse Retriever observation renders from the typed
+        # rerank events. Not implemented yet (the rerank rendering lands in the
+        # 0060b follow-on); the observer safely skips the events for now rather
+        # than falling through to the NodeEvent phase dispatch.
+        if isinstance(event, RerankEvent | RerankFailedEvent):
             return
         if event.phase == "started":
             self._open_started_observation(event)

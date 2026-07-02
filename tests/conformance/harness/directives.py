@@ -412,6 +412,22 @@ class CallsEmbedSpec(_AllowExtras):
     stores_response_in: str
 
 
+class CallsRerankSpec(_AllowExtras):
+    """Rerank-using node: sends ``query`` + ``documents`` to a mock rerank
+    provider and stores the result in ``stores_response_in``. Used by the
+    retrieval-provider rerank fixtures (006-012) and the rerank observability
+    fixtures (099-109 / 138 / 141 / 142). ``top_k``, ``config``, and ``model``
+    are optional. Permissive on extras so companion knobs (e.g.
+    ``query_from_rendered_prompt`` on fixture 106) parse."""
+
+    query: str
+    documents: list[str]
+    stores_response_in: str
+    top_k: int | None = None
+    config: dict[str, Any] | None = None
+    model: str | None = None
+
+
 class EmitsLogSpec(_AllowExtras):
     """Additive companion: the node emits a log record alongside its
     state update. Verified by observability fixture 010 (Logs Bridge)."""
@@ -447,6 +463,9 @@ class NodeSpec(_ForbidExtras):
     - ``calls_llm`` — see :class:`CallsLlmSpec`.
     - ``calls_embed`` — see :class:`CallsEmbedSpec` (embedding fixture 089,
       deferred at the runner; modelled so the fixture parses).
+    - ``calls_rerank`` — see :class:`CallsRerankSpec` (rerank fixtures 006-012
+      run against the reference reranker; the rerank observability fixtures
+      defer at the runner until 0060b).
 
     Companion modifiers (additive, may combine with most primaries):
 
@@ -472,6 +491,7 @@ class NodeSpec(_ForbidExtras):
     flaky_resume_aware: FlakyResumeAwareSpec | None = None
     calls_llm: CallsLlmSpec | None = None
     calls_embed: CallsEmbedSpec | None = None
+    calls_rerank: CallsRerankSpec | None = None
     calls_tool: CallsToolSpec | None = None
 
     # Companions — additive.
@@ -506,6 +526,7 @@ class NodeSpec(_ForbidExtras):
         "flaky_resume_aware",
         "calls_llm",
         "calls_embed",
+        "calls_rerank",
         "calls_tool",
     )
 
@@ -708,6 +729,7 @@ class LlmCallSpec(_AllowExtras):
 
 __all__ = [
     "CallsLlmSpec",
+    "CallsRerankSpec",
     "EdgeSpec",
     "EmitsLogSpec",
     "ErrorRecoveryMiddleware",
