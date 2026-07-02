@@ -1063,11 +1063,12 @@ def _add_fan_out_node(
     )
 
 
+# Spec proposal 0075: callable branch ``call:`` directive.
 def _build_call_fn(
     branch_name: str,
     call_cfg: Mapping[str, Any],
 ) -> Callable[[Any], Awaitable[Mapping[str, Any]]]:
-    """Translate a callable branch's ``call:`` directive (proposal 0075)
+    """Translate a callable branch's ``call:`` directive
     into an async function over the parent state.
 
     Reuses the node-behavior factories (``update`` / ``flaky`` /
@@ -1087,8 +1088,9 @@ def _build_call_fn(
     raise ValueError(f"callable branch {branch_name!r}: unsupported call directive {dict(call_cfg)!r}")
 
 
+# Spec proposal 0075 §11.10: branch ``when:`` predicate.
 def _build_when_predicate(when_cfg: Mapping[str, Any]) -> Callable[[Any], bool]:
-    """Translate a branch ``when:`` directive (proposal 0075 §11.10) into
+    """Translate a branch ``when:`` directive into
     a parent-state predicate. Supports ``{field: <name>}`` — a truthy
     check on a parent-state field at dispatch time."""
     if "field" in when_cfg:
@@ -1115,7 +1117,7 @@ def _add_parallel_branches_node(
 
     A branch is either a ``subgraph`` (name resolved against the shared
     ``subgraphs`` registry, with optional ``inputs`` / ``outputs``) or an
-    inline ``call`` (proposal 0075), and may carry a ``when`` predicate.
+    inline ``call``, and may carry a ``when`` predicate.
     ``branch_middleware`` maps branch-name to a pre-translated middleware
     list; the test driver populates it from each branch's ``middleware:``
     block.

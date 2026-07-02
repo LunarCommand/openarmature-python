@@ -305,13 +305,14 @@ class FanOutSpec(_AllowExtras):
         return data_dict
 
 
+# Spec proposal 0075: parallel-branches branch entry.
 class ParallelBranchSpec(_AllowExtras):
     """One entry inside a ``parallel_branches.branches`` mapping.
 
     A branch's work is given by exactly one of ``subgraph`` (a compiled
     subgraph referenced by name, with optional ``inputs`` / ``outputs``)
     or ``call`` (an inline node-behavior directive — ``update`` / ``flaky``
-    / ``raises`` — run as a function over the parent state, proposal 0075).
+    / ``raises`` — run as a function over the parent state).
     An optional ``when`` directive (``{field: <name>}``) skips the branch
     at dispatch. Permissive on extras because fixtures may carry extra
     knobs (e.g., per-branch annotations the harness ignores).
@@ -385,8 +386,9 @@ class MockToolSpec(_AllowExtras):
     raises: dict[str, Any] | None = None
 
 
+# Spec proposal 0063: tool-using node directive.
 class CallsToolSpec(_AllowExtras):
-    """Tool-using node (proposal 0063): the node body enters the
+    """Tool-using node: the node body enters the
     ``with_tool_call`` instrumentation scope, runs the ``mock_tool``, and
     OA emits the ToolCallEvent / ToolCallFailedEvent. ``tool_call_id`` is
     optional (null = a standalone instrumented function);
@@ -400,11 +402,12 @@ class CallsToolSpec(_AllowExtras):
     stores_result_in: str | None = None
 
 
+# Spec proposal 0059: embedding-using node directive.
 class CallsEmbedSpec(_AllowExtras):
     """Embedding-using node: sends ``input`` to a mock embedding provider
     and stores the result in ``stores_response_in``. Used by the
     GenAI-metrics embedding fixture (089). The embedding capability
-    (proposal 0059) is unimplemented in python until v0.16.0, so 089 is
+    is unimplemented in python until v0.16.0, so 089 is
     deferred at the runner; this directive is modelled here only so the
     fixture parses + round-trips through the harness schema."""
 

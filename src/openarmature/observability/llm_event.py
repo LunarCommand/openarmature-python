@@ -147,9 +147,9 @@ class LlmEventPayload(BaseModel):
     caller_invocation_metadata: dict[str, Any] = Field(default_factory=dict)
 
 
+# Spec observability §5.5.5: tool-call serialization.
 def serialize_tool_calls(tool_calls: Sequence[ToolCall]) -> list[dict[str, Any]]:
-    """The observability §5.5.5 tool-call serialization,
-    ``[{id, name, arguments}, ...]``.
+    """Serialize tool calls to ``[{id, name, arguments}, ...]``.
 
     The single home for the encoding, shared by the input-message
     payload (the provider's ``input.messages`` serialization, where the

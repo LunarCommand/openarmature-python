@@ -139,10 +139,12 @@ class ParallelBranchesNode[ParentT: State]:
             "compiled.invoke)."
         )
 
+    # Spec pipeline-utilities §11.10: a branch dispatches when its ``when``
+    # predicate is absent or returns true.
     def dispatched_branches(self, state: Any) -> list[tuple[str, BranchSpec[Any]]]:
         """Return the branches that dispatch for ``state``, in insertion
         order: every declared branch whose ``when`` predicate is absent or
-        returns true (§11.10).
+        returns true.
 
         ``when`` MUST be a pure function of the dispatch-time parent state,
         so this is deterministic and safe to evaluate both here (the
@@ -288,6 +290,11 @@ class ParallelBranchesNode[ParentT: State]:
             return await self._fail_fast(state, tasks, contributions)
         return await self._collect(state, tasks, contributions, errors)
 
+    # Spec pipeline-utilities §11.4 (the buffer-then-project subgraph path is
+    # bypassed for inline callables) + §11.7 (per-leg branch middleware). The
+    # callable emits its own graph-engine §6 started/completed pair keyed by
+    # ``branch_name``, rendered per observability §5.7 as a per-branch dispatch
+    # span with no inner-node span beneath it.
     async def _dispatch_callable_branch(
         self,
         branch_name: str,
@@ -300,14 +307,14 @@ class ParallelBranchesNode[ParentT: State]:
 
         The callable reads the parent state and returns a parent-shaped
         partial update directly — no subgraph, no ``inputs`` / ``outputs``
-        projection (§11.4). Branch ``middleware`` (e.g. a per-leg
-        ``FailureIsolationMiddleware``, §11.7) wraps the callable.
+        projection. Branch ``middleware`` (e.g. a per-leg
+        ``FailureIsolationMiddleware``) wraps the callable.
 
         A callable branch has no inner nodes, so it IS the unit of work:
         it emits one ``started`` / ``completed`` observer pair keyed by its
-        ``branch_name`` (graph-engine §6), which the observers render as the
-        branch's per-branch dispatch span with NO inner-node span beneath it
-        (observability §5.7). To render that way the pair is emitted at the
+        ``branch_name``, which the observers render as the
+        branch's per-branch dispatch span with NO inner-node span beneath it.
+        To render that way the pair is emitted at the
         parallel-branches NODE's own namespace (not a descended branch
         namespace), tagged with ``branch_name`` (set on the ContextVar in
         ``run_branch``): an event at a pb-node's own namespace carrying a
