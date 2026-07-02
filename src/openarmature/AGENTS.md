@@ -1,6 +1,6 @@
 # OpenArmature — Agent documentation
 
-*This is the agent guide bundled with the openarmature Python package, version 0.15.0 (spec v0.84.0). For the full docs site see [openarmature.ai](https://openarmature.ai). For the canonical spec text see [openarmature.org/capabilities](https://openarmature.org/capabilities/). For project-specific conventions for the code you're editing, see the host project's `AGENTS.md` or `CLAUDE.md`.*
+*This is the agent guide bundled with the openarmature Python package, version 0.15.0 (spec v0.88.0). For the full docs site see [openarmature.ai](https://openarmature.ai). For the canonical spec text see [openarmature.org/capabilities](https://openarmature.org/capabilities/). For project-specific conventions for the code you're editing, see the host project's `AGENTS.md` or `CLAUDE.md`.*
 
 ## TL;DR
 
@@ -10,7 +10,7 @@ OpenArmature is a workflow framework for LLM pipelines and tool-calling agents: 
 
 ## Capability contracts
 
-_Sourced from openarmature-spec v0.84.0. Each entry below reproduces §1 (Purpose) and §2 (Concepts) of the capability's `spec.md` verbatim — including additions from accepted proposals that this Python implementation may not yet ship. For per-proposal implementation status (implemented / partial / textual-only / not-yet), see the `conformance.toml` manifest at the repo root. For the full spec text (execution model, error semantics, determinism, observer hooks, etc.) see the linked docs site._
+_Sourced from openarmature-spec v0.88.0. Each entry below reproduces §1 (Purpose) and §2 (Concepts) of the capability's `spec.md` verbatim — including additions from accepted proposals that this Python implementation may not yet ship. For per-proposal implementation status (implemented / partial / textual-only / not-yet), see the `conformance.toml` manifest at the repo root. For the full spec text (execution model, error semantics, determinism, observer hooks, etc.) see the linked docs site._
 
 ### Capability: `graph-engine`
 
@@ -459,6 +459,97 @@ variables. Splitting the two operations lets users:
 
 A convenience operation that combines fetch + render is permitted (see §6) but the spec
 treats fetch and render as separable.
+
+### Capability: `retrieval-provider`
+
+#### 1. Purpose
+
+The retrieval-provider capability is the home for retrieval-primitive provider operations that sit
+alongside LLM completion. The first protocol surface this specification defines is **embedding** —
+turning a list of input strings into a list of vectors via an `EmbeddingProvider`. A sibling
+`RerankProvider` protocol (§5) re-scores a list of candidate documents against a query, returning
+them sorted by relevance — the second retrieval-primitive surface on the same capability.
+
+Retrieval-provider is a sibling capability to `llm-provider` (per proposal 0006),
+not a subtype of it. Embedding and LLM completion both bind per-instance to a model identifier per
+the llm-provider §5 contract, but embedding model identifiers (`text-embedding-3-small`,
+`voyage-3`, `embed-multilingual-v3.0`, etc.) live in disjoint namespaces from completion model
+identifiers (`gpt-4o-mini`, `claude-3-5-sonnet`, etc.). A single Provider abstraction bundling both
+surfaces would either contradict the per-model-binding contract OR carve a different contract shape
+for the same protocol — both bad. Separate protocols preserve per-model-binding while opening a
+path to observable embedding calls.
+
+Retrieval-provider is one of a planned family of `<domain>-provider` capabilities (`llm-provider`,
+`retrieval-provider`, plus future siblings as downstream demand surfaces). Each domain capability
+covers related-shape provider operations under a narrow protocol surface; new domains land as new
+capabilities rather than as extensions to existing ones. This keeps per-capability protocol surface
+narrow and per-domain evolution independent.
+
+The substrate is intentionally narrow, matching llm-provider's posture:
+
+- An `EmbeddingProvider` is **stateless**. It does not cache vectors; the caller passes the full
+  input list on every call.
+- An `EmbeddingProvider` does **not** handle retry, rate limiting, fallback, or routing. Those are
+  pipeline-utilities concerns and compose above the provider via middleware.
+- An `EmbeddingProvider` is **bound to a single model identifier**. Switching models means
+  constructing a new provider, not passing a different argument per call.
+
+**Transparency.** Per charter §3.1 principle 8 ("Transparency over abstraction"), the embedding
+abstraction surfaces a normalized shape — `EmbeddingResponse`, `EmbeddingUsage` — without hiding
+what the underlying provider returned. The `EmbeddingResponse.raw` field carries the parsed provider
+response verbatim alongside the normalized fields, and the error categories preserve the underlying
+provider exception as cause.
+
+#### 2. Concepts
+
+**RetrievalProvider.** The umbrella term covering both `EmbeddingProvider` and `RerankProvider`. Not
+a concrete protocol itself; used as the capability-level descriptor when discussing cross-protocol
+concerns (observability, error semantics, per-model binding).
+
+**EmbeddingProvider.** An object that, given a sequence of input strings, returns a sequence of
+vectors wrapped in an `EmbeddingResponse`. Bound to a specific embedding model identifier per
+instance.
+
+**EmbeddingResponse.** The result of an `embed()` call: the vectors, the model identifier, the
+parsed raw response, and — when present — usage information and the provider-returned request
+identifier.
+
+**EmbeddingUsage.** A usage record carrying `input_tokens` only — embedding has no output tokens
+(vectors aren't tokens).
+
+**Embedding runtime config.** A `RuntimeConfig`-shaped record (parallel to llm-provider §6) carrying
+embedding-specific caller-supplied request parameters: an optional `dimensions` field (for callers
+controlling output vector size on providers that support it), an optional **`input_type`** field, and
+the extras-pass-through bag for vendor-specific knobs. `input_type` (`"query"` / `"document"`, an
+extensible string) declares what the embedded text is *for*, so a provider bound to an asymmetric model
+applies the model-appropriate query/document treatment per its §8 wire mapping; **absent ⇒ symmetric
+embedding** (a symmetric model ignores it). Additional well-known values (`"classification"`,
+`"clustering"`, …) MAY be recognized by mappings whose backend supports them; an unrecognized value is
+`provider_invalid_request` (§7) at a mapping that declares a closed set, or passed through by a mapping
+that accepts arbitrary types. Free-form per-model instruction overrides ride the extras-pass-through
+bag (no second declared field).
+
+**RerankProvider.** An object that, given a query string and a list of candidate documents, returns
+the documents sorted by query-relevance with provider-specific scores. Bound to a specific rerank
+model identifier per instance.
+
+**RerankResponse.** The result of a `rerank()` call: the sorted scored documents, the model
+identifier, the parsed raw response, and — when present — usage information and the
+provider-returned response identifier.
+
+**RerankUsage.** A usage record with optional `search_units` and optional `input_tokens`, reflecting
+the messy provider landscape where rerank pricing surfaces vary widely.
+
+**ScoredDocument.** A single result entry carrying the document's original index in the input list,
+the provider-assigned relevance score, and (optionally) an echo of the document text.
+
+**Rerank runtime config.** A `RuntimeConfig`-shaped record (parallel to llm-provider §6) carrying
+rerank-specific caller-supplied request parameters. Initially minimal: one declared field,
+`return_documents` (boolean, default `False`), controlling whether the provider echoes document text
+on each `ScoredDocument` in the response. The field name + default match the major rerank vendors'
+wire-shape parameter (Voyage AI exposes `return_documents` defaulting `False`; Jina AI's wire default is `True`, so the §8.2 Jina mapping sends the OA value explicitly; Cohere's `/v2/rerank` has no `return_documents` field, so the §8.4 mapping treats the OA knob as a silent no-op);
+per-vendor wire-format mappings pin the source-side translation where a vendor diverges. Plus the
+extras-pass-through bag for vendor-specific knobs.
 
 ## Patterns
 

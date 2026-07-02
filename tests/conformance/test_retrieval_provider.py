@@ -40,14 +40,20 @@ _DEFAULT_MODEL = "text-embedding-test"
 # Rerank fixtures (006-012) ride the RerankProvider, which lands with
 # proposal 0060. Deferred so a green run means "what we implement passes."
 #
-# The v0.84.0 pin also pulls in the retrieval-provider WIRE-MAPPING fixtures
-# (013-027) for proposals 0077 (TEI) / 0078 (Jina) / 0079 (OpenAI-compatible),
-# none of which python has shipped. This runner drives only the bundled
+# The v0.84.0 pin bump also introduced the retrieval-provider WIRE-MAPPING
+# fixtures (013-027) for proposals 0077 (TEI) / 0078 (Jina) / 0079
+# (OpenAI-compatible), still present at the current pin, none of which python
+# has shipped. This runner drives only the bundled
 # OpenAIEmbeddingProvider's embed() and asserts the response, so it cannot
 # exercise their request-side mappings (TEI server-side prompt_name, Jina's
 # task, the client-side query/document prefix) -- the contracts those
 # fixtures exist to verify. Defer the whole batch until each wire-mapping
 # impl PR (v0.16.0+).
+#
+# The v0.88.0 pin pulls in the Cohere wire mappings + the general embed
+# batch-chunking rule: 028-031 (0090 Cohere rerank), 032-037 (0091 Cohere
+# embed), 038 (0092 TEI /embed over-cap chunk-and-stitch). None are shipped
+# -- same deferral rationale as 013-027.
 _DEFERRED_FIXTURES: dict[str, str] = {
     **{
         p.stem: "RerankProvider not implemented (proposal 0060 not-yet)"
@@ -73,6 +79,25 @@ _DEFERRED_FIXTURES: dict[str, str] = {
         )
         for p in CONFORMANCE_DIR.glob("[0-9][0-9][0-9]-*.yaml")
         if 23 <= int(p.stem[:3]) <= 27
+    },
+    **{
+        p.stem: "Cohere rerank wire mapping (proposal 0090) not implemented"
+        for p in CONFORMANCE_DIR.glob("[0-9][0-9][0-9]-*.yaml")
+        if 28 <= int(p.stem[:3]) <= 31
+    },
+    **{
+        p.stem: "Cohere embed wire mapping (proposal 0091) not implemented"
+        for p in CONFORMANCE_DIR.glob("[0-9][0-9][0-9]-*.yaml")
+        if 32 <= int(p.stem[:3]) <= 37
+    },
+    **{
+        p.stem: (
+            "embedding batch-chunking general rule (proposal 0092); the TEI "
+            "/embed over-cap chunk-and-stitch fixture rides the unshipped TEI "
+            "embed wire mapping (proposal 0077)"
+        )
+        for p in CONFORMANCE_DIR.glob("[0-9][0-9][0-9]-*.yaml")
+        if int(p.stem[:3]) == 38
     },
 }
 

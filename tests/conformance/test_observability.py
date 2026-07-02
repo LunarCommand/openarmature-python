@@ -386,6 +386,37 @@ _DEFERRED_FIXTURES: dict[str, str] = {
     "136-langfuse-parallel-branches-dispatch-span": (
         "Langfuse parallel-branches dispatch-span parity (proposal 0088) not-yet implemented"
     ),
+    # ---- v0.88.0 spec-pin bump (v0.84.0 -> v0.88.0): proposal 0093
+    # nullable provider usage records. The no-usage rendering fixtures defer
+    # with the conditional-emission follow-up (widen the shipped
+    # EmbeddingResponse.usage to nullable + omit the usage attribute /
+    # usageDetails when the provider reports none). ----
+    # 139/140 -- embedding no-usage (OTel span + Langfuse observation).
+    **{
+        fixture_id: "nullable provider usage records (proposal 0093) not-yet implemented"
+        for fixture_id in (
+            "139-otel-embedding-no-usage-input-tokens-omitted",
+            "140-langfuse-embedding-no-usage-usagedetails-omitted",
+        )
+    },
+    # 141/142 -- rerank no-usage; also blocked on the unshipped rerank
+    # capability (proposal 0060).
+    **{
+        fixture_id: (
+            "rerank no-usage rendering (proposal 0093); blocked on the unshipped "
+            "rerank capability (proposal 0060)"
+        )
+        for fixture_id in (
+            "141-otel-rerank-no-usage-attributes-omitted",
+            "142-langfuse-rerank-no-usage-usagedetails-omitted",
+        )
+    },
+    # 143 -- embedding no-usage metric; rides the §11 embedding-metrics path
+    # (proposal 0067), which is itself deferred (cf. 089).
+    "143-embedding-metrics-no-usage-no-token-observation": (
+        "embedding no-usage metric (proposal 0093) rides the deferred §11 "
+        "embedding-metrics path (proposal 0067; cf. 089)"
+    ),
 }
 
 
