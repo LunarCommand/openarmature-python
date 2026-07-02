@@ -22,3 +22,12 @@ updates:
     commit-message:
       prefix: "chore"
       include: "scope"
+    # Group the codeql-action sub-actions (init / analyze / upload-sarif)
+    # into a single PR. They share one version, and CodeQL refuses to run
+    # when its steps mix versions, so they must bump in lockstep. Separate
+    # per-sub-action PRs each leave a version mismatch that fails CI (the
+    # split that produced PRs #200 / #201).
+    groups:
+      codeql-action:
+        patterns:
+          - "github/codeql-action*"
