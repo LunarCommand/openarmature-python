@@ -110,6 +110,8 @@ from openarmature.graph.events import (
     LlmRetryAttemptEvent,
     MetadataAugmentationEvent,
     NodeEvent,
+    RerankEvent,
+    RerankFailedEvent,
     ToolCallEvent,
     ToolCallFailedEvent,
 )
@@ -785,6 +787,13 @@ class OTelObserver:
         # attribute subsets are gated, inside the handler.
         if isinstance(event, EmbeddingEvent | EmbeddingFailedEvent):
             self._handle_embedding(event)
+            return
+        # Proposal 0060 rerank observability (observability §5.5.13): the
+        # openarmature.rerank.complete span + rerank metrics render from the
+        # typed rerank events. Not implemented yet (the rerank rendering lands
+        # in the 0060b follow-on); the observer safely skips the events for now
+        # rather than falling through to the NodeEvent phase dispatch.
+        if isinstance(event, RerankEvent | RerankFailedEvent):
             return
         # Proposal 0063 tool-execution observability: emit the
         # openarmature.tool.call span from the typed tool events.

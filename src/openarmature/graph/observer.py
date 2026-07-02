@@ -45,6 +45,8 @@ from .events import (
     LlmRetryAttemptEvent,
     MetadataAugmentationEvent,
     NodeEvent,
+    RerankEvent,
+    RerankFailedEvent,
     ToolCallEvent,
     ToolCallFailedEvent,
 )
@@ -67,7 +69,9 @@ from .state import State
 # dispatched by FailureIsolationMiddleware when it catches an exception
 # escaping the inner chain and substitutes a degraded partial update);
 # and EmbeddingEvent / EmbeddingFailedEvent (proposal 0059 typed embedding
-# provider call events, dispatched on every EmbeddingProvider.embed()).
+# provider call events, dispatched on every EmbeddingProvider.embed());
+# and RerankEvent / RerankFailedEvent (proposal 0060 typed rerank provider
+# call events, dispatched on every RerankProvider.rerank()).
 ObserverEvent = (
     NodeEvent
     | MetadataAugmentationEvent
@@ -81,6 +85,8 @@ ObserverEvent = (
     | ToolCallFailedEvent
     | EmbeddingEvent
     | EmbeddingFailedEvent
+    | RerankEvent
+    | RerankFailedEvent
 )
 
 

@@ -610,12 +610,11 @@ note = "Retrieval-provider embedding capability. The EmbeddingProvider protocol 
 # Spec v0.70.0 (proposal 0060).  Retrieval-provider rerank protocol — the
 # ``RerankProvider`` surface + ``RerankEvent`` / ``RerankFailedEvent`` typed
 # variants + OTel ``openarmature.rerank.complete`` span / Langfuse Retriever
-# observation / rerank metrics.  Sibling to the embedding surface (0059);
-# python has not shipped retrieval-provider, so rerank is not-yet.  Crossed by
-# the v0.70.1 pin (adopted for fixture 110 / 0075); the 11 rerank observability
-# fixtures (099-109) defer with it.
+# observation / rerank metrics.  Sibling to the embedding surface (0059).
 [proposals."0060"]
-status = "not-yet"
+status = "partial"
+since = "0.16.0"
+note = "Retrieval-provider rerank protocol. The RerankProvider protocol (retrieval-provider §5) + the RerankResponse / ScoredDocument / RerankUsage / RerankRuntimeConfig response types (§6) + the RerankRuntimeConfig runtime config (§2) ship, alongside the CohereRerankProvider reference reranker against POST /v2/rerank (§8.4, Cohere-shape): the request body is {model, query, documents (string array), top_n from top_k}, return_documents is a silent no-op (the Cohere wire has no such field), and max_tokens_per_doc rides the extras pass-through bag. The provider parses {id, model?, results: [{index, relevance_score, document?}], meta.billed_units.{search_units, input_tokens}}, sorts results by relevance_score descending, reads the document echo only when present (never auto-filled), builds a RerankUsage record only when the provider surfaces >= 1 usage figure (else usage = null, never fabricated), and enforces the §6 invariants -- valid index into the input documents, no duplicate index, len(results) <= top_k when supplied -- raising provider_invalid_response otherwise. Pre-send validation raises provider_invalid_request on an empty query, an empty documents list, or top_k <= 0 (top_k MAY exceed len(documents)). The provider dispatches the typed RerankEvent / RerankFailedEvent (graph-engine §6) per rerank() call, mutually exclusive, alongside the §7-category exception on failure; RerankEvent.output_results is populated unconditionally on success (proposal 0089). The §7 categories reuse the shared llm-provider taxonomy. Protocol fixtures 006-012 pass. partial because the observability rendering (OTel §5.5.13 openarmature.rerank.complete span + Langfuse §8.4.7 Retriever observation + the rerank-metrics surface; fixtures 099-109 / 138 / 141 / 142) lands in the 0060b follow-on -- the bundled OTel + Langfuse observers safely skip the rerank events for now. Wire-format details (0090 Cohere rerank fixtures 028-031) are a separate proposal."
 
 # Spec v0.55.0 (proposal 0065; repo pins v0.55.1).  Failure-isolation
 # cause fidelity at non-node placements (pipeline-utilities §6.3 /
