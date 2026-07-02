@@ -32,7 +32,7 @@
 
 [manifest]
 implementation = "openarmature-python"
-spec_pin = "v0.84.0"
+spec_pin = "v0.88.0"
 
 # Status values:
 #   implemented   — shipped behavior matches the proposal's contract
@@ -855,7 +855,41 @@ status = "not-yet"
 
 # Spec v0.84.0 (proposal 0089).  Embedding / rerank typed-event output
 # (graph-engine §6 EmbeddingEvent.output_vectors / RerankEvent.
-# output_results + observability output mappings).  Not-yet;
-# observability fixtures 137/138 defer with it (and re-source 083/108).
+# output_results + observability output mappings).
 [proposals."0089"]
+status = "partial"
+since = "0.16.0"
+note = "The embedding half shipped in 0059b (#198): EmbeddingEvent.output_vectors is populated by OpenAIEmbeddingProvider and rendered as the Langfuse Embedding observation output (observability §8.4.5), sourced event-side per 0089; observability fixtures 083 (re-sourced) + 137 pass. partial because the rerank half is unshipped -- RerankEvent.output_results and the rerank observation output rendering ride the rerank capability (proposal 0060, not-yet); observability fixtures 108 + 138 defer with it."
+
+# Spec v0.85.0 (proposal 0090).  Cohere rerank wire mapping
+# (retrieval-provider §8.4, POST /v2/rerank; backs 0060's Cohere-shaped
+# reference reranker).  Not-yet; the rerank capability (0060) is
+# unshipped, so its wire fixtures 028-031 defer with it.
+[proposals."0090"]
+status = "not-yet"
+
+# Spec v0.86.0 (proposal 0091).  Cohere embeddings wire mapping
+# (retrieval-provider §8.4, POST /v2/embed) extending §8.4 to both
+# Cohere endpoints.  Not-yet; wire fixtures 032-037 defer with it (no
+# harness wire-capture primitive; the Cohere provider is unshipped).
+[proposals."0091"]
+status = "not-yet"
+
+# Spec v0.87.0 (proposal 0092).  Embedding-mapping batch chunking, the
+# general §8 rule (consecutive <=cap chunks, one request each, vectors
+# concatenated in input order, usage summed).  Not-yet; the TEI /embed
+# over-cap fixture 038 defers with it (no embedding wire mapping is
+# shipped).
+[proposals."0092"]
+status = "not-yet"
+
+# Spec v0.88.0 (proposal 0093).  Nullable provider usage records:
+# EmbeddingResponse.usage / RerankResponse.usage become record|null and
+# the embedding usage emission (OTel §5.5.8 gen_ai.usage.input_tokens,
+# Langfuse §8.4.5 usageDetails.input) becomes conditional.  Not-yet; the
+# no-usage fixtures 139-143 defer with it.  Follow-up when they un-defer:
+# widen the shipped EmbeddingResponse.usage to nullable + make its
+# emission conditional; 0060 builds RerankResponse.usage nullable from
+# the start.
+[proposals."0093"]
 status = "not-yet"

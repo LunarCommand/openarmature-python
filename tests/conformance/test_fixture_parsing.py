@@ -633,6 +633,17 @@ _DEFERRED_FIXTURES: dict[str, str] = {
     "prompt-management/036-prompt-manager-default-cache-ttl": (
         "Proposal 0086 default cache_ttl_seconds; not implemented"
     ),
+    # Proposal 0093 (nullable provider usage records, v0.88.0) -- the rerank
+    # no-usage fixtures use the calls_rerank directive (rerank capability
+    # unshipped, proposal 0060), so they defer at the parse layer like
+    # 099-109 / 138. The embedding no-usage fixtures (139/140/143) parse via
+    # the modelled calls_embed directive.
+    "observability/141-otel-rerank-no-usage-attributes-omitted": (
+        "Proposal 0093 rerank no-usage; rerank capability not implemented (0060)"
+    ),
+    "observability/142-langfuse-rerank-no-usage-usagedetails-omitted": (
+        "Proposal 0093 rerank no-usage; rerank capability not implemented (0060)"
+    ),
 }
 
 

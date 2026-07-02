@@ -73,7 +73,7 @@ PATTERNS_DIR_OUTPUT = REPO_ROOT / "src" / "openarmature" / "_patterns"
 # Spec capability directory names under ``openarmature-spec/spec/``,
 # in the order they appear in the bundle's "Capability contracts"
 # section. The order matches the order capabilities were introduced
-# (graph-engine first, prompt-management most recent) so an agent
+# (graph-engine first, retrieval-provider most recent) so an agent
 # reading top-down sees the foundational layer before the layers
 # built on top.
 CAPABILITIES = (
@@ -82,6 +82,7 @@ CAPABILITIES = (
     "llm-provider",
     "observability",
     "prompt-management",
+    "retrieval-provider",
 )
 
 

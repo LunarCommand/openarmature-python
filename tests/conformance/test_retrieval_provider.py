@@ -48,6 +48,11 @@ _DEFAULT_MODEL = "text-embedding-test"
 # task, the client-side query/document prefix) -- the contracts those
 # fixtures exist to verify. Defer the whole batch until each wire-mapping
 # impl PR (v0.16.0+).
+#
+# The v0.88.0 pin pulls in the Cohere wire mappings + the general embed
+# batch-chunking rule: 028-031 (0090 Cohere rerank), 032-037 (0091 Cohere
+# embed), 038 (0092 TEI /embed over-cap chunk-and-stitch). None are shipped
+# -- same deferral rationale as 013-027.
 _DEFERRED_FIXTURES: dict[str, str] = {
     **{
         p.stem: "RerankProvider not implemented (proposal 0060 not-yet)"
@@ -73,6 +78,25 @@ _DEFERRED_FIXTURES: dict[str, str] = {
         )
         for p in CONFORMANCE_DIR.glob("[0-9][0-9][0-9]-*.yaml")
         if 23 <= int(p.stem[:3]) <= 27
+    },
+    **{
+        p.stem: "Cohere rerank wire mapping (proposal 0090) not implemented"
+        for p in CONFORMANCE_DIR.glob("[0-9][0-9][0-9]-*.yaml")
+        if 28 <= int(p.stem[:3]) <= 31
+    },
+    **{
+        p.stem: "Cohere embed wire mapping (proposal 0091) not implemented"
+        for p in CONFORMANCE_DIR.glob("[0-9][0-9][0-9]-*.yaml")
+        if 32 <= int(p.stem[:3]) <= 37
+    },
+    **{
+        p.stem: (
+            "embedding batch-chunking general rule (proposal 0092); the TEI "
+            "/embed over-cap chunk-and-stitch fixture rides the unshipped TEI "
+            "embed wire mapping (proposal 0077)"
+        )
+        for p in CONFORMANCE_DIR.glob("[0-9][0-9][0-9]-*.yaml")
+        if int(p.stem[:3]) == 38
     },
 }
 
