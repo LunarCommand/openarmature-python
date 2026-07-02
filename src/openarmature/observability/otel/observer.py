@@ -359,7 +359,7 @@ def _serialize_for_attribute(value: Any) -> str:
     renders via its ``str()`` rather than raising inside the observer
     (which would lose the whole span). It is a no-op for the
     already-encodable payloads (messages, params); it matters for the
-    proposal 0063 tool ``result``, which is an opaque, language-idiomatic
+    tool ``result``, which is an opaque, language-idiomatic
     value the tool produced (a model, dataclass, datetime, ...)."""
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False, default=str)
 
@@ -1389,8 +1389,10 @@ class OTelObserver:
     # active_prompt_group snapshots taken at dispatch time — NOT the
     # ContextVar. The dispatch worker's task-local Context doesn't see
     # node-body ContextVar writes.
+    # Spec observability §11 GenAI metrics. §11.2: the attempt index is
+    # deliberately not a metric dimension (cardinality control).
     def _record_llm_metrics(self, event: LlmRetryAttemptEvent) -> None:
-        """Record the §11 GenAI metric observations for one LLM-call
+        """Record the GenAI metric observations for one LLM-call
         attempt.
 
         Duration is recorded for every attempt (including a failed one,
@@ -1398,8 +1400,8 @@ class OTelObserver:
         returned a usage record (a failed attempt has none). Sourced from
         the per-attempt ``LlmRetryAttemptEvent`` — one duration sample per
         attempt under call-level retry, matching the per-attempt span
-        model. The attempt index is deliberately not a dimension (§11.2
-        cardinality).
+        model. The attempt index is deliberately not a dimension
+        (cardinality control).
         """
         if self._duration_histogram is None or self._token_histogram is None:
             return
@@ -1615,16 +1617,18 @@ class OTelObserver:
         self._run_enrichers(span, event)
         span.end(end_time=end_time_ns)
 
+    # Spec proposal 0063 tool span. Payload attributes (arguments / result)
+    # follow observability §5.5.4 opt-out + §5.5.5 truncation.
     def _handle_tool_call(self, event: ToolCallEvent | ToolCallFailedEvent) -> None:
-        """Emit an ``openarmature.tool.call`` span for a tool execution
-        (proposal 0063), parented under the calling node.
+        """Emit an ``openarmature.tool.call`` span for a tool execution,
+        parented under the calling node.
 
         A ``ToolCallEvent`` renders OK with the result attribute; a
         ``ToolCallFailedEvent`` renders ERROR with the standard OTel
         ``error.type`` attribute + an exception event carrying the
         message. ``arguments`` / ``result`` are payload, gated by
-        ``disable_provider_payload`` (§5.5.4) + the §5.5.5 truncation
-        contract. The OA-namespace ``openarmature.tool.*`` attributes
+        ``disable_provider_payload`` and truncated. The OA-namespace
+        ``openarmature.tool.*`` attributes
         mirror the Development ``gen_ai.tool.*`` surface, which is NOT
         emitted in v1. ``disable_llm_spans`` does not gate this span.
         """

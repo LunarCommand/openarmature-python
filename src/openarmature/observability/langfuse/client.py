@@ -185,11 +185,13 @@ class LangfuseClient(Protocol):
         Implementations track Traces internally; observation calls
         pass `trace_id` to associate.
 
-        `session_id` / `user_id` (proposal 0064 §8.4.1) populate
+        `session_id` / `user_id` populate
         Langfuse's cross-trace grouping fields (the Sessions / Users
         dashboards); each is unset when its source is absent.
         """
         # Spec §8.4.1: the Trace id is the OA invocation_id verbatim.
+        # session_id / user_id (proposal 0064) populate Langfuse's
+        # cross-trace grouping (the Sessions / Users dashboards).
         ...
 
     # The current observer doesn't invoke this method — it sets the
@@ -248,6 +250,8 @@ class LangfuseClient(Protocol):
         start_time: datetime | None = None,
     ) -> LangfuseGenerationHandle: ...
 
+    # Spec proposal 0063: dedicated Tool observation (Langfuse asType="tool"),
+    # not a Generation with a discriminator.
     def tool(
         self,
         *,
@@ -261,7 +265,7 @@ class LangfuseClient(Protocol):
         output: Any = None,
         start_time: datetime | None = None,
     ) -> LangfuseSpanHandle:
-        """Open a dedicated Tool observation (proposal 0063, Langfuse
+        """Open a dedicated Tool observation (Langfuse
         ``asType="tool"``). Like :meth:`generation` minus the model /
         usage / prompt surface: a Tool carries ``input`` (arguments) /
         ``output`` (result) / metadata / level. Returns a minimal

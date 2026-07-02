@@ -709,7 +709,7 @@ class LlmRetryAttemptEvent:
       ``finish_reason`` / ``output_content`` / ``output_tool_calls``):
       populated on a successful attempt; ``None`` / empty list on a
       failed attempt. ``output_tool_calls`` is the source the OTel
-      observer renders the §5.5.1 / §5.5.10 output tool-call attributes
+      observer renders the output tool-call attributes
       from (this is the per-attempt event that drives the LLM span).
     - failure side (``error_category`` / ``error_message`` /
       ``error_type``): populated on a failed attempt; ``None`` on a
@@ -745,8 +745,9 @@ class LlmRetryAttemptEvent:
     # Proposal 0076: the attempt's output tool calls (ToolCall records),
     # mirroring LlmCompletionEvent.output_tool_calls. Populated on a
     # successful attempt; empty list on a failed one (no response). The
-    # OTel observer renders the output tool-call span attributes from
-    # this field (the per-attempt event is the LLM-span source).
+    # OTel observer renders the observability §5.5.1 / §5.5.10 output
+    # tool-call span attributes from this field (the per-attempt event is
+    # the LLM-span source).
     output_tool_calls: list["ToolCall"] = field(default_factory=list["ToolCall"])
 
 

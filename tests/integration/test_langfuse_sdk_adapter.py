@@ -249,16 +249,19 @@ async def test_sdk_adapter_generation_timestamps_round_trip_through_langfuse() -
         client.shutdown()
 
 
+# Spec proposal 0064 §8.4.1: trace(session_id=, user_id=) populates the live
+# Trace's sessionId / userId grouping. proposal 0020 (sessions capability) will
+# later supply openarmature.session_id along the same passthrough.
 @pytest.mark.integration
 async def test_sdk_adapter_populates_session_and_user_id_on_live_langfuse() -> None:
-    """End-to-end (proposal 0064 §8.4.1): trace(session_id=, user_id=)
+    """End-to-end: trace(session_id=, user_id=)
     populates the live Trace's sessionId / userId grouping fields.
 
     The observer leaves session_id dormant until the sessions capability
-    (proposal 0020) supplies openarmature.session_id, but the adapter
+    supplies openarmature.session_id, but the adapter
     passes whatever it is given, so this exercises BOTH passthroughs at
-    the SDK boundary: when 0020 lands, the session_id rides the same
-    propagate_attributes path the userId promotion uses today.
+    the SDK boundary: when the sessions capability lands, the session_id
+    rides the same propagate_attributes path the userId promotion uses today.
     """
     from langfuse import Langfuse
 

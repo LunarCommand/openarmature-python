@@ -1,4 +1,5 @@
-"""Unit tests for the tool-call instrumentation scope (proposal 0063).
+# Spec proposal 0063: tool-call instrumentation scope.
+"""Unit tests for the tool-call instrumentation scope.
 
 Exercise ``with_tool_call`` directly by installing a collecting dispatch
 callback + a node-scope identity into the correlation ContextVars, the

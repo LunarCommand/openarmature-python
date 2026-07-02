@@ -1821,9 +1821,10 @@ class LangfuseObserver:
             status_message=event.error_category,
         )
 
+    # Spec proposal 0063: dedicated Langfuse Tool observation (asType="tool").
     def _handle_tool_call(self, event: ToolCallEvent | ToolCallFailedEvent) -> None:
         """Open + close a dedicated Tool observation (Langfuse
-        ``asType="tool"``, proposal 0063) under the calling node's Span
+        ``asType="tool"``) under the calling node's Span
         observation. DEFAULT level on a ToolCallEvent; ERROR (with
         ``error_type`` / ``error_message`` in metadata and as the status
         message) on a ToolCallFailedEvent. ``input`` (arguments) /
