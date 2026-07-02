@@ -16,11 +16,12 @@ envelope into a :class:`RerankResponse`. ``base_url`` is the host root (the
 provider appends ``/v2/rerank``), overridable for a proxy / private gateway.
 The ``transport`` parameter is the test seam (``httpx.MockTransport``).
 
-The Cohere ``/v2/rerank`` wire has no ``return_documents`` parameter and
-never echoes document text, so
+The Cohere ``/v2/rerank`` wire has no ``return_documents`` parameter, so
 ``RerankRuntimeConfig.return_documents`` is a silent no-op on this wire (the
-mapping sends no wire field for it and leaves ``ScoredDocument.document`` null
-on every result). ``max_tokens_per_doc`` rides the extras pass-through bag.
+mapping sends no wire field for it). Cohere v2 does not echo document text, so
+``ScoredDocument.document`` is null in practice; the parser still passes
+through a ``document`` echo when a response carries one (a compatible gateway
+or a fixture). ``max_tokens_per_doc`` rides the extras pass-through bag.
 """
 
 from __future__ import annotations

@@ -160,8 +160,10 @@ class RerankResponse(BaseModel):
 
 # Spec §2 rerank runtime config: one declared field ``return_documents``
 # (boolean, default False) plus the extras pass-through bag (``extra="allow"``).
-# Undeclared fields supplied by callers are forwarded to the wire body
-# untouched by the §8 wire-format mapping.
+# Undeclared fields supplied by callers are forwarded to the wire body by the
+# §8 wire-format mapping, except for the provider-reserved keys a mapping
+# manages itself (e.g. the Cohere mapping owns model / query / documents /
+# top_n, so a caller extra cannot clobber them).
 class RerankRuntimeConfig(BaseModel):
     """Per-call rerank request parameters."""
 
