@@ -519,6 +519,65 @@ class LangfuseSDKAdapter:
             )
         return _SpanHandle(obs)
 
+    def retriever(
+        self,
+        *,
+        trace_id: str,
+        name: str | None = None,
+        model: str | None = None,
+        usage: LangfuseUsage | None = None,
+        metadata: dict[str, Any] | None = None,
+        parent_observation_id: str | None = None,
+        level: ObservationLevel = "DEFAULT",
+        status_message: str | None = None,
+        input: Any = None,
+        output: Any = None,
+        start_time: datetime | None = None,
+    ) -> LangfuseSpanHandle:
+        # v4 unifies observations under start_observation(as_type=); a Retriever
+        # observation routes through as_type="retriever" (proposal 0060), the
+        # SDK's native LangfuseRetriever span. It carries model + usage like an
+        # Embedding but is a distinct type; usage maps to v4's usage_details.
+        # The rerank usageDetails convention (§8.4.7) exposes input tokens under
+        # "input" and search-units under "searchUnits". Back-date via the
+        # private OTel tracer when start_time is supplied, exactly as
+        # generation()/tool()/embedding() do.
+        extra_kwargs: dict[str, Any] = {"model": model, "input": input, "output": output}
+        if usage is not None:
+            usage_details: dict[str, int] = {}
+            if usage.input is not None:
+                usage_details["input"] = usage.input
+            if usage.search_units is not None:
+                usage_details["searchUnits"] = usage.search_units
+            extra_kwargs["usage_details"] = usage_details
+        present_extra = {k: v for k, v in extra_kwargs.items() if v is not None}
+        if start_time is not None:
+            from langfuse._client.span import LangfuseRetriever
+
+            obs = self._start_back_dated_observation(
+                LangfuseRetriever,
+                trace_id=trace_id,
+                name=name,
+                metadata=metadata,
+                parent_observation_id=parent_observation_id,
+                level=level,
+                status_message=status_message,
+                start_time=start_time,
+                **present_extra,
+            )
+        else:
+            obs = self._start_observation(
+                as_type="retriever",
+                trace_id=trace_id,
+                name=name,
+                metadata=metadata,
+                parent_observation_id=parent_observation_id,
+                level=level,
+                status_message=status_message,
+                **present_extra,
+            )
+        return _SpanHandle(obs)
+
     def _start_back_dated_observation(
         self,
         observation_cls: type[Any],

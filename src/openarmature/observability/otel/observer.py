@@ -603,6 +603,8 @@ class OTelObserver:
                 | ToolCallFailedEvent
                 | EmbeddingEvent
                 | EmbeddingFailedEvent
+                | RerankEvent
+                | RerankFailedEvent
                 | None,
             ],
             None,
@@ -714,6 +716,8 @@ class OTelObserver:
         | ToolCallFailedEvent
         | EmbeddingEvent
         | EmbeddingFailedEvent
+        | RerankEvent
+        | RerankFailedEvent
         | None,
     ) -> None:
         """Invoke configured enrichers against ``span`` before
@@ -788,12 +792,14 @@ class OTelObserver:
         if isinstance(event, EmbeddingEvent | EmbeddingFailedEvent):
             self._handle_embedding(event)
             return
-        # Proposal 0060 rerank observability (observability §5.5.13): the
-        # openarmature.rerank.complete span + rerank metrics render from the
-        # typed rerank events. Not implemented yet (the rerank rendering lands
-        # in the 0060b follow-on); the observer safely skips the events for now
-        # rather than falling through to the NodeEvent phase dispatch.
+        # Proposal 0060 rerank observability (observability §5.5.13): emit the
+        # openarmature.rerank.complete span from the typed rerank events. NOT
+        # gated by disable_llm_spans (that flag is scoped to LLM completion
+        # spans per §5.5.13); only the payload / GenAI-semconv attribute subsets
+        # are gated, inside the handler. Rerank metrics ride proposal 0067
+        # (§11), not wired here.
         if isinstance(event, RerankEvent | RerankFailedEvent):
+            self._handle_rerank(event)
             return
         # Proposal 0063 tool-execution observability: emit the
         # openarmature.tool.call span from the typed tool events.
@@ -1794,6 +1800,130 @@ class OTelObserver:
             start_time=start_time_ns,
         )
         if isinstance(event, EmbeddingFailedEvent):
+            # Generic §4.2 / §8.4.2 error mapping: ERROR status + error.type +
+            # an OTel exception event + the §7 category attribute.
+            if event.error_type is not None:
+                span.set_attribute("error.type", event.error_type)
+            span.add_event(
+                "exception",
+                attributes={
+                    "exception.type": event.error_type or "",
+                    "exception.message": event.error_message,
+                },
+            )
+            span.set_attribute("openarmature.error.category", event.error_category)
+            span.set_status(Status(StatusCode.ERROR, description=event.error_category))
+        else:
+            span.set_status(Status(StatusCode.OK))
+        self._run_enrichers(span, event)
+        span.end(end_time=end_time_ns)
+
+    # Spec: observability §5.5.13 (proposal 0060) rerank span. Parallels the
+    # §5.5.8 embedding span. Payload gating is §5.5.4 + the §5.5.5 truncation
+    # contract; gen_ai.operation.name is deferred (no upstream rerank coverage).
+    # The output results (openarmature.rerank.results) are sourced from
+    # RerankEvent.output_results per proposal 0089.
+    def _handle_rerank(self, event: RerankEvent | RerankFailedEvent) -> None:
+        """Emit an ``openarmature.rerank.complete`` span for a
+        ``RerankProvider.rerank()`` call, parented under the calling node.
+
+        A ``RerankEvent`` renders OK with the GenAI response subset + the OA
+        rerank identity attributes; a ``RerankFailedEvent`` renders ERROR with
+        the standard OTel ``error.type`` attribute, an exception event carrying
+        the message, and the ``openarmature.error.category`` attribute. The
+        ``query`` / ``documents`` / ``results`` payload is gated by
+        ``disable_provider_payload`` (with the standard truncation cap); the
+        GenAI semconv subset is gated by ``disable_genai_semconv``. No
+        ``gen_ai.operation.name`` is emitted; operation discrimination is via
+        the span name + provider. ``disable_llm_spans`` does not gate this span.
+        """
+        from openarmature.observability.correlation import (
+            current_correlation_id,
+            current_invocation_id,
+        )
+
+        invocation_id = current_invocation_id()
+        if invocation_id is None:
+            return
+        inv_state = self._inv_state_for(invocation_id)
+        # Back-date start_time by latency_ms so the span duration reflects the
+        # adapter-boundary measurement, mirroring the embedding / tool spans.
+        end_time_ns = time.time_ns()
+        if event.latency_ms is not None:
+            start_time_ns = end_time_ns - int(event.latency_ms * 1_000_000)
+        else:
+            start_time_ns = end_time_ns
+        parent_ctx = self._resolve_llm_parent(
+            inv_state,
+            invocation_id,
+            calling_namespace_prefix=event.namespace,
+            calling_attempt_index=event.attempt_index,
+            calling_fan_out_index=event.fan_out_index,
+            calling_branch_name=event.branch_name,
+        )
+        attrs: dict[str, Any] = {}
+        cid = current_correlation_id()
+        if cid is not None:
+            attrs["openarmature.correlation_id"] = cid
+        if event.caller_invocation_metadata is not None:
+            _apply_caller_metadata(attrs, event.caller_invocation_metadata)
+        # OA-namespace rerank identity attributes (ungated). query_length /
+        # document_count / top_k are request-side (present on both variants);
+        # result_count is response-derived (success-only). query_length is the
+        # UTF-8 byte length of the query, not a token count.
+        attrs["openarmature.rerank.query_length"] = len(event.query.encode("utf-8"))
+        attrs["openarmature.rerank.document_count"] = event.document_count
+        if event.top_k is not None:
+            attrs["openarmature.rerank.top_k"] = event.top_k
+        if isinstance(event, RerankEvent):
+            attrs["openarmature.rerank.result_count"] = event.result_count
+        # GenAI semconv subset, gated by disable_genai_semconv. The response
+        # subset (response.model / response.id / usage.input_tokens) is
+        # success-only; the request subset (system / request.model) emits on
+        # both variants. input_tokens is conditional: emitted only when a usage
+        # record is present AND its input_tokens is non-null.
+        if not self.disable_genai_semconv:
+            attrs["gen_ai.system"] = event.provider
+            attrs["gen_ai.request.model"] = event.model
+            if isinstance(event, RerankEvent):
+                if event.response_model is not None:
+                    attrs["gen_ai.response.model"] = event.response_model
+                if event.response_id is not None:
+                    attrs["gen_ai.response.id"] = event.response_id
+                if event.usage is not None and event.usage.input_tokens is not None:
+                    attrs["gen_ai.usage.input_tokens"] = event.usage.input_tokens
+        # openarmature.rerank.search_units is conditional (success-only, and
+        # only when a usage record reports a non-null search_units figure).
+        if (
+            isinstance(event, RerankEvent)
+            and event.usage is not None
+            and event.usage.search_units is not None
+        ):
+            attrs["openarmature.rerank.search_units"] = event.usage.search_units
+        # Payload-gated (disable_provider_payload): the query string, the input
+        # documents (JSON list), and the scored results (JSON list of records).
+        if not self.disable_provider_payload:
+            attrs["openarmature.rerank.query"] = _truncate_for_attribute(event.query, self.payload_max_bytes)
+            if event.documents:
+                serialized_docs = _serialize_for_attribute(event.documents)
+                attrs["openarmature.rerank.documents"] = _truncate_for_attribute(
+                    serialized_docs, self.payload_max_bytes
+                )
+            if isinstance(event, RerankEvent) and event.output_results:
+                serialized_results = _serialize_for_attribute(
+                    [result.model_dump(exclude_none=True) for result in event.output_results]
+                )
+                attrs["openarmature.rerank.results"] = _truncate_for_attribute(
+                    serialized_results, self.payload_max_bytes
+                )
+        span = self._tracer.start_span(
+            name="openarmature.rerank.complete",
+            context=cast("Any", parent_ctx),
+            kind=SpanKind.CLIENT,
+            attributes=attrs,
+            start_time=start_time_ns,
+        )
+        if isinstance(event, RerankFailedEvent):
             # Generic §4.2 / §8.4.2 error mapping: ERROR status + error.type +
             # an OTel exception event + the §7 category attribute.
             if event.error_type is not None:
