@@ -33,7 +33,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Literal, Protocol, runtime_checkable
 
-ObservationType = Literal["span", "generation", "event", "tool", "embedding"]
+ObservationType = Literal["span", "generation", "event", "tool", "embedding", "retriever"]
 
 # Langfuse-supported `level` values per spec §8.4.2 (statusMessage pair).
 ObservationLevel = Literal["DEFAULT", "DEBUG", "INFO", "WARNING", "ERROR"]
@@ -46,6 +46,12 @@ class LangfuseUsage:
     input: int | None = None
     output: int | None = None
     total: int | None = None
+    # Rerank observability (proposal 0060, observability §8.4.7): Langfuse's
+    # usageDetails is an open-shape map, and the OA convention adds a
+    # `searchUnits` figure for the Retriever observation. Modeled here as a
+    # snake_case field; the SDK adapter maps it to the camelCase `searchUnits`
+    # usage_details key. None when the provider reported no search-units count.
+    search_units: int | None = None
 
 
 @dataclass
@@ -295,6 +301,35 @@ class LangfuseClient(Protocol):
         carries ``model`` / ``usage`` (input tokens) / ``input`` (strings) /
         ``output`` (vectors) / metadata / level. Returns a minimal handle
         the caller ``.end()``s at outcome time."""
+        ...
+
+    # Proposal 0060 rerank observability: a dedicated Retriever observation
+    # (Langfuse asType="retriever", spec observability §8.4.7), NOT a
+    # Generation with a discriminator. Langfuse positions Retriever for data
+    # retrieval steps (broad enough to cover reranking); the `usage` record's
+    # `search_units` / `input` figures render into the open-shape usageDetails
+    # map (the OA `searchUnits` key convention is defined in §8.4.7).
+    def retriever(
+        self,
+        *,
+        trace_id: str,
+        name: str | None = None,
+        model: str | None = None,
+        usage: LangfuseUsage | None = None,
+        metadata: dict[str, Any] | None = None,
+        parent_observation_id: str | None = None,
+        level: ObservationLevel = "DEFAULT",
+        status_message: str | None = None,
+        input: Any = None,
+        output: Any = None,
+        start_time: datetime | None = None,
+    ) -> LangfuseSpanHandle:
+        """Open a dedicated Retriever observation. Like :meth:`embedding`
+        for the model / usage surface but a distinct observation type:
+        carries ``model`` / ``usage`` (input-token + search-unit figures) /
+        ``input`` (the query + documents) / ``output`` (the scored results) /
+        metadata / level. Returns a minimal handle the caller ``.end()``s at
+        outcome time."""
         ...
 
     def force_flush(self, timeout_ms: int = 30_000) -> bool:
@@ -577,6 +612,39 @@ class InMemoryLangfuseClient:
         observation = LangfuseObservation(
             id=self._mint_observation_id(),
             type="embedding",
+            name=name,
+            metadata=dict(metadata) if metadata is not None else {},
+            parent_observation_id=parent_observation_id,
+            level=level,
+            status_message=status_message,
+            input=input,
+            output=output,
+            model=model,
+            usage=usage,
+            start_time=start_time,
+        )
+        trace.observations.append(observation)
+        return _InMemorySpanHandle(observation=observation)
+
+    def retriever(
+        self,
+        *,
+        trace_id: str,
+        name: str | None = None,
+        model: str | None = None,
+        usage: LangfuseUsage | None = None,
+        metadata: dict[str, Any] | None = None,
+        parent_observation_id: str | None = None,
+        level: ObservationLevel = "DEFAULT",
+        status_message: str | None = None,
+        input: Any = None,
+        output: Any = None,
+        start_time: datetime | None = None,
+    ) -> LangfuseSpanHandle:
+        trace = self._get_trace(trace_id)
+        observation = LangfuseObservation(
+            id=self._mint_observation_id(),
+            type="retriever",
             name=name,
             metadata=dict(metadata) if metadata is not None else {},
             parent_observation_id=parent_observation_id,

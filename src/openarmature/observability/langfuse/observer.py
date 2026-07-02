@@ -487,12 +487,13 @@ class LangfuseObserver:
         if isinstance(event, EmbeddingEvent | EmbeddingFailedEvent):
             self._handle_embedding(event)
             return
-        # Proposal 0060 rerank observability (observability §8.4.7): the
-        # dedicated Langfuse Retriever observation renders from the typed
-        # rerank events. Not implemented yet (the rerank rendering lands in the
-        # 0060b follow-on); the observer safely skips the events for now rather
-        # than falling through to the NodeEvent phase dispatch.
+        # Proposal 0060 rerank observability (observability §8.4.7): render the
+        # dedicated Langfuse Retriever observation (asType "retriever") under
+        # the calling node's Span observation. NOT gated by disable_llm_spans
+        # (scoped to LLM completion per §5.5.13); the input / output payload is
+        # gated by disable_provider_payload inside the handler.
         if isinstance(event, RerankEvent | RerankFailedEvent):
+            self._handle_rerank(event)
             return
         if event.phase == "started":
             self._open_started_observation(event)
@@ -1995,6 +1996,127 @@ class LangfuseObserver:
         )
         handle.end(end_time=end_time)
 
+    # Spec: observability §8.4.7 (proposal 0060) Retriever observation
+    # (Langfuse asType="retriever"). The failure path is the generic §4.2 /
+    # §8.4.2 ERROR mapping with the §7 error category, mirroring the tool /
+    # embedding failure. The output results are sourced from
+    # RerankEvent.output_results per proposal 0089; the searchUnits usageDetails
+    # key follows the §8.4.7 OA convention.
+    def _handle_rerank(self, event: RerankEvent | RerankFailedEvent) -> None:
+        """Open + close a dedicated Retriever observation (Langfuse
+        ``asType="retriever"``) under the calling node's Span observation.
+
+        Success (``RerankEvent``): DEFAULT level, ``model`` = ``response_model``
+        (falling back to the requested ``model``), ``usage`` carrying the input-
+        token + search-unit figures, the OA identity metadata
+        (``openarmature_query_length`` / ``openarmature_document_count`` /
+        ``openarmature_top_k`` / ``openarmature_result_count`` /
+        ``openarmature_response_id``), and the payload-gated ``input``
+        (``{query, documents}``) + ``output`` (scored results).
+
+        Failure (``RerankFailedEvent``): ERROR level with the ``error_category``
+        as the status message and ``error_type`` / ``error_message`` in
+        metadata, mirroring the tool / embedding failure. The request-side
+        ``input`` is still payload-gated; there is NO ``output`` (no response
+        received).
+        """
+        from openarmature.observability.correlation import (
+            current_correlation_id,
+            current_invocation_id,
+        )
+
+        invocation_id = current_invocation_id()
+        if invocation_id is None:
+            return
+        correlation_id = current_correlation_id()
+        if invocation_id not in self._inv_states:
+            self._open_trace_for_typed_event(invocation_id, correlation_id, event)
+        inv_state = self._inv_states[invocation_id]
+        end_time = datetime.now(UTC)
+        if event.latency_ms is not None:
+            start_time = end_time - timedelta(milliseconds=event.latency_ms)
+        else:
+            start_time = end_time
+        parent_observation_id = self._resolve_llm_parent_observation_id(
+            inv_state,
+            calling_namespace_prefix=event.namespace,
+            calling_attempt_index=event.attempt_index,
+            calling_fan_out_index=event.fan_out_index,
+            calling_branch_name=event.branch_name,
+        )
+        # §8.4.7 request-side identity metadata (present on both variants):
+        # query_length (UTF-8 byte length), document_count, top_k (when
+        # supplied). correlation_id + caller metadata mirror the other
+        # observation handlers' scoping rows.
+        metadata: dict[str, Any] = {}
+        if correlation_id is not None:
+            metadata["correlation_id"] = correlation_id
+        if event.fan_out_index is not None:
+            metadata["fan_out_index"] = event.fan_out_index
+        if event.branch_name is not None:
+            metadata["branch_name"] = event.branch_name
+        if event.caller_invocation_metadata is not None:
+            _apply_caller_metadata(metadata, event.caller_invocation_metadata)
+        metadata["openarmature_query_length"] = len(event.query.encode("utf-8"))
+        metadata["openarmature_document_count"] = event.document_count
+        if event.top_k is not None:
+            metadata["openarmature_top_k"] = event.top_k
+        input_value: Any = None
+        if not self.disable_provider_payload:
+            input_value = self._maybe_truncate_for_input(
+                {"query": event.query, "documents": list(event.documents)}
+            )
+        if isinstance(event, RerankEvent):
+            # §8.4.7 response-derived metadata (success-only).
+            metadata["openarmature_result_count"] = event.result_count
+            if event.response_id is not None:
+                metadata["openarmature_response_id"] = event.response_id
+            output_value: Any = None
+            if not self.disable_provider_payload and event.output_results:
+                output_value = self._maybe_truncate_for_input(
+                    [result.model_dump(exclude_none=True) for result in event.output_results]
+                )
+            # usageDetails omitted entirely when no usage record; when present,
+            # only the non-null figures render (input / searchUnits) per §8.4.7.
+            usage = None
+            if event.usage is not None:
+                usage = LangfuseUsage(
+                    input=event.usage.input_tokens,
+                    search_units=event.usage.search_units,
+                )
+            target_trace_id = self._trace_id_for(inv_state, event.namespace, event.fan_out_index)
+            handle = self.client.retriever(
+                trace_id=target_trace_id,
+                name="openarmature.rerank.complete",
+                model=event.response_model or event.model,
+                usage=usage,
+                input=input_value,
+                output=output_value,
+                metadata=metadata,
+                parent_observation_id=parent_observation_id,
+                start_time=start_time,
+            )
+            handle.end(end_time=end_time)
+            return
+        # Failure path: the request-side metadata survives; the response-derived
+        # rows do not. No output. ERROR level + category-as-statusMessage.
+        if event.error_type is not None:
+            metadata["error_type"] = event.error_type
+        metadata["error_message"] = event.error_message
+        target_trace_id = self._trace_id_for(inv_state, event.namespace, event.fan_out_index)
+        handle = self.client.retriever(
+            trace_id=target_trace_id,
+            name="openarmature.rerank.complete",
+            model=event.model,
+            input=input_value,
+            metadata=metadata,
+            parent_observation_id=parent_observation_id,
+            level="ERROR",
+            status_message=event.error_category,
+            start_time=start_time,
+        )
+        handle.end(end_time=end_time)
+
     def _resolve_llm_parent_observation_id(
         self,
         inv_state: _InvState,
@@ -2126,11 +2248,13 @@ class LangfuseObserver:
         | ToolCallEvent
         | ToolCallFailedEvent
         | EmbeddingEvent
-        | EmbeddingFailedEvent,
+        | EmbeddingFailedEvent
+        | RerankEvent
+        | RerankFailedEvent,
     ) -> None:
         """Trace open path for a typed event (LLM completion / failure,
-        tool execution, or embedding) arriving before any node-started event
-        reached
+        tool execution, embedding, or rerank) arriving before any node-started
+        event reached
         this observer. Synthesizes the minimal trace shape from the
         typed event's scoping fields (all read generically)."""
         if event.namespace:

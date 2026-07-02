@@ -233,6 +233,27 @@ _SUPPORTED_FIXTURES = frozenset(
         "082-otel-embedding-span-attributes",
         "083-langfuse-embedding-observation",
         "137-langfuse-embedding-failure-observation",
+        # v0.16.0 — proposal 0060 rerank observability (0060b). A calls_rerank
+        # node awaits CohereRerankProvider.rerank() inside the node body; the
+        # typed RerankEvent / RerankFailedEvent drive the typed-event collector
+        # (099-106), the OTel rerank span (107 / 141,
+        # openarmature.rerank.complete), and the Langfuse Retriever observation
+        # (108 success, 138 failure, 142 no-usage -- the proposal 0089
+        # output_results-sourced rendering + the proposal 0093 nullable-usage
+        # path). 109 (rerank metrics) stays deferred with the §11 path.
+        "099-rerank-event-dispatch",
+        "100-rerank-failure-event-dispatch-on-provider-unavailable",
+        "101-rerank-event-mutual-exclusion",
+        "102-rerank-event-call-id-distinct",
+        "103-rerank-event-query-and-documents-populated",
+        "104-rerank-event-request-params-populated",
+        "105-rerank-event-top-k-and-result-count-populated",
+        "106-rerank-event-active-prompt-populated",
+        "107-otel-rerank-span-attributes",
+        "108-langfuse-rerank-observation",
+        "138-langfuse-rerank-failure-observation",
+        "141-otel-rerank-no-usage-attributes-omitted",
+        "142-langfuse-rerank-no-usage-usagedetails-omitted",
         # v0.70.1 — proposal 0075 callable-branch span shape (observability
         # §5.7). The ORIGINAL fixture 110 (span shape + skip-emits-no-span);
         # the branch_count assertion arrives with the v0.73.1 pin (v0.16.0).
@@ -248,9 +269,9 @@ _EMBEDDING_METRICS_DEFER = (
 )
 
 _RERANK_DEFER = (
-    "rerank observability rendering (OTel span / Langfuse Retriever observation / rerank metrics) "
-    "lands in 0060b; the RerankProvider + typed RerankEvent / RerankFailedEvent ship in 0060a, but "
-    "the bundled observers safe-skip the rerank events until the rendering is wired"
+    "rerank observability (099-108 + 138 + 141/142) is wired (proposal 0060b); only the "
+    "§11 rerank-metrics path stays deferred -- the OTelObserver records metrics from the "
+    "LLM per-attempt event, not yet from RerankEvent (rides proposal 0067, cf. 089)"
 )
 
 
@@ -275,28 +296,12 @@ _DEFERRED_FIXTURES: dict[str, str] = {
     # the LLM per-attempt event only; extending the metric instruments to the
     # embedding path rides the §11 embedding-metrics work, not 0059b.
     "089-embedding-metrics-token-and-duration": _EMBEDDING_METRICS_DEFER,
-    # Rerank observability (proposal 0060, v0.70.0). The RerankProvider + typed
-    # rerank events ship in 0060a; only the observer rendering defers to 0060b.
-    **{
-        fixture_id: _RERANK_DEFER
-        for fixture_id in (
-            "099-rerank-event-dispatch",
-            "100-rerank-failure-event-dispatch-on-provider-unavailable",
-            "101-rerank-event-mutual-exclusion",
-            "102-rerank-event-call-id-distinct",
-            "103-rerank-event-query-and-documents-populated",
-            "104-rerank-event-request-params-populated",
-            "105-rerank-event-top-k-and-result-count-populated",
-            "106-rerank-event-active-prompt-populated",
-            "107-otel-rerank-span-attributes",
-            "108-langfuse-rerank-observation",
-            "109-rerank-metrics-token-and-duration",
-            # proposal 0089 (v0.84.0) rerank failure observation -- the
-            # RerankFailedEvent ERROR-level Langfuse rendering; lands with the
-            # 0060b rerank observability.
-            "138-langfuse-rerank-failure-observation",
-        )
-    },
+    # Rerank observability (proposal 0060). 099-108 + 138 + 141/142 are wired
+    # (proposal 0060b -- see _SUPPORTED_FIXTURES). Only the §11 rerank-metrics
+    # path (109) stays deferred with the embedding-metrics sibling (089): the
+    # OTelObserver records metrics from the LLM per-attempt event only;
+    # extending the instruments to the rerank path rides proposal 0067.
+    "109-rerank-metrics-token-and-duration": _RERANK_DEFER,
     # ---- v0.16.0 spec-pin bump (v0.70.1 -> v0.84.0): new fixtures for
     # proposals deferred to their own later PRs of this release. ----
     # Proposal 0062 (LLM completion streaming, spec v0.71.0). The stream
@@ -401,18 +406,9 @@ _DEFERRED_FIXTURES: dict[str, str] = {
             "140-langfuse-embedding-no-usage-usagedetails-omitted",
         )
     },
-    # 141/142 -- rerank no-usage; the rendering lands with the 0060b rerank
-    # observability (the rerank capability ships in 0060a).
-    **{
-        fixture_id: (
-            "rerank no-usage rendering (proposal 0093); lands with the 0060b "
-            "rerank observability (the rerank capability ships in 0060a)"
-        )
-        for fixture_id in (
-            "141-otel-rerank-no-usage-attributes-omitted",
-            "142-langfuse-rerank-no-usage-usagedetails-omitted",
-        )
-    },
+    # 141/142 -- rerank no-usage (OTel span + Langfuse observation) are wired
+    # with the 0060b rerank observability (see _SUPPORTED_FIXTURES); the
+    # conditional-usage rendering handles the record-null branch.
     # 143 -- embedding no-usage metric; rides the §11 embedding-metrics path
     # (proposal 0067), which is itself deferred (cf. 089).
     "143-embedding-metrics-no-usage-no-token-observation": (
@@ -723,6 +719,22 @@ async def test_observability_fixture(fixture_path: Path) -> None:
         "137-langfuse-embedding-failure-observation",
     }:
         await _run_embedding_fixture(spec)
+    elif fixture_id in {
+        "099-rerank-event-dispatch",
+        "100-rerank-failure-event-dispatch-on-provider-unavailable",
+        "101-rerank-event-mutual-exclusion",
+        "102-rerank-event-call-id-distinct",
+        "103-rerank-event-query-and-documents-populated",
+        "104-rerank-event-request-params-populated",
+        "105-rerank-event-top-k-and-result-count-populated",
+        "106-rerank-event-active-prompt-populated",
+        "107-otel-rerank-span-attributes",
+        "108-langfuse-rerank-observation",
+        "138-langfuse-rerank-failure-observation",
+        "141-otel-rerank-no-usage-attributes-omitted",
+        "142-langfuse-rerank-no-usage-usagedetails-omitted",
+    }:
+        await _run_rerank_fixture(spec)
     elif fixture_id in {
         "043-get-invocation-metadata-roundtrip",
         "044-get-invocation-metadata-fan-out-scoping",
@@ -4029,6 +4041,12 @@ def _build_tool_graph(case: Mapping[str, Any]) -> tuple[Any, type[Any], list[Any
     return builder.compile(), state_cls, providers
 
 
+# Maps a usageDetails key (the SDK's camelCase wire form) to the matching
+# LangfuseUsage dataclass attribute. Only keys whose casing diverges appear
+# here; input / output / total already match their attribute names.
+_USAGE_DETAIL_ATTR: dict[str, str] = {"searchUnits": "search_units"}
+
+
 def _assert_langfuse_observation_tree(
     trace: Any, expected: list[dict[str, Any]], parent_id: str | None = None
 ) -> None:
@@ -4062,10 +4080,30 @@ def _assert_langfuse_observation_tree(
         if "model" in exp:
             assert match.model == exp["model"], f"{exp_name!r}: model {match.model!r} != {exp['model']!r}"
         if "usageDetails" in exp:
-            assert match.usage is not None, f"{exp_name!r}: expected usageDetails but usage is None"
-            for uk, uv in cast("dict[str, Any]", exp["usageDetails"]).items():
-                actual_usage = getattr(match.usage, uk, None)
-                assert actual_usage == uv, f"{exp_name!r}: usageDetails.{uk} {actual_usage!r} != {uv!r}"
+            expected_usage = cast("dict[str, Any]", exp["usageDetails"])
+            if expected_usage:
+                assert match.usage is not None, f"{exp_name!r}: expected usageDetails but usage is None"
+                for uk, uv in expected_usage.items():
+                    # usageDetails keys are the SDK's camelCase form; map to the
+                    # LangfuseUsage snake_case attribute (searchUnits ->
+                    # search_units). Keys already matching an attribute name
+                    # (input / output / total) pass through unchanged.
+                    attr = _USAGE_DETAIL_ATTR.get(uk, uk)
+                    actual_usage = getattr(match.usage, attr, None)
+                    assert actual_usage == uv, f"{exp_name!r}: usageDetails.{uk} {actual_usage!r} != {uv!r}"
+            else:
+                # An empty usageDetails ({}) asserts no usage figures were
+                # reported: the observation carries no usage record, or one whose
+                # figures are all None (the open-map "empty" convention).
+                assert match.usage is None or all(
+                    v is None
+                    for v in (
+                        match.usage.input,
+                        match.usage.output,
+                        match.usage.total,
+                        match.usage.search_units,
+                    )
+                ), f"{exp_name!r}: expected empty usageDetails but usage carries figures: {match.usage!r}"
         if "input" in exp:
             assert match.input == exp["input"], f"{exp_name!r}: input {match.input!r} != {exp['input']!r}"
         if "output" in exp:
@@ -4331,6 +4369,220 @@ async def _run_embedding_case(case: Mapping[str, Any]) -> None:
     graph, state_cls, providers = _build_embedding_graph(
         case, populate_caller_metadata=populate_caller_metadata
     )
+    state = _make_state_instance(case, state_cls)
+
+    exporter: Any = None
+    otel_observer: Any = None
+    langfuse_client: Any = None
+    if "observers" in expected:
+        for collector in collectors.values():
+            graph.attach_observer(collector)
+    if "span_tree" in expected:
+        exporter = InMemorySpanExporter()
+        otel_kwargs: dict[str, Any] = {"span_processor": SimpleSpanProcessor(exporter)}
+        if "disable_provider_payload" in case:
+            otel_kwargs["disable_provider_payload"] = bool(case["disable_provider_payload"])
+        otel_observer = OTelObserver(**otel_kwargs)
+        graph.attach_observer(otel_observer)
+    if "langfuse_trace" in expected:
+        langfuse_client = InMemoryLangfuseClient()
+        lf_kwargs: dict[str, Any] = {"client": langfuse_client}
+        lf_cfg = cast("dict[str, Any] | None", case.get("langfuse_observer")) or {}
+        if "disable_provider_payload" in lf_cfg:
+            lf_kwargs["disable_provider_payload"] = bool(lf_cfg["disable_provider_payload"])
+        graph.attach_observer(LangfuseObserver(**lf_kwargs))
+
+    try:
+        if expected_error is not None:
+            with pytest.raises(NodeException):
+                await graph.invoke(state)
+        else:
+            await graph.invoke(state)
+        await graph.drain()
+    finally:
+        for provider in providers:
+            await provider.aclose()
+        if otel_observer is not None:
+            otel_observer.shutdown()
+
+    if "observers" in expected:
+        for obs_name, obs_spec in cast("dict[str, Any]", expected["observers"]).items():
+            _assert_observer_expectations(obs_name, collectors[obs_name], cast("dict[str, Any]", obs_spec))
+    if "span_tree" in expected and exporter is not None:
+        _check_payload_span_tree(
+            exporter.get_finished_spans(),
+            cast("list[dict[str, Any]]", expected["span_tree"]),
+            full_input_serialization=None,
+            assert_attributes_absent=assert_attributes_absent,
+            assert_attribute_parses_as_messages=assert_attribute_parses_as_messages,
+            assert_attribute_parses_as_object=assert_attribute_parses_as_object,
+            assert_attribute_does_not_contain=assert_attribute_does_not_contain,
+            assert_attribute_truncation=assert_attribute_truncation,
+        )
+    if "langfuse_trace" in expected and langfuse_client is not None:
+        assert len(langfuse_client.traces) == 1, (
+            f"expected 1 Langfuse trace; got {sorted(langfuse_client.traces)}"
+        )
+        trace = next(iter(langfuse_client.traces.values()))
+        _assert_langfuse_observation_tree(
+            trace, cast("list[dict[str, Any]]", expected["langfuse_trace"].get("observations") or [])
+        )
+
+
+# A calls_rerank node constructs a CohereRerankProvider on an httpx.MockTransport
+# built from the fixture's mock_rerank block and awaits provider.rerank(query,
+# documents) INSIDE the node body, so the calling-node ContextVars are set and
+# the RerankEvent / RerankFailedEvent flow through the observer queue. One graph
+# builder serves all three assertion shapes: typed-event-collector (099-106),
+# OTel span_tree (107 / 141), and the Langfuse Retriever observation tree
+# (108 / 138 / 142). Dispatch is by which expected.* key appears, mirroring the
+# embedding path (_run_embedding_case).
+
+
+def _rerank_model_from_first_response(case: Mapping[str, Any]) -> str | None:
+    """Return the ``model`` on the first ``mock_rerank`` response body, so the
+    provider binds to the model the fixture's expected event reports. Failure
+    fixtures return an error body with no model, so this falls back to None."""
+    responses = cast("list[dict[str, Any]] | None", case.get("mock_rerank")) or []
+    if not responses:
+        return None
+    body = cast("dict[str, Any] | None", responses[0].get("body")) or {}
+    model = body.get("model")
+    return model if isinstance(model, str) else None
+
+
+def _build_rerank_runtime_config(config_spec: Mapping[str, Any] | None) -> Any:
+    """Build a RerankRuntimeConfig from a ``calls_rerank.config`` block
+    (fixture 104: ``return_documents``), or None when absent."""
+    if not config_spec:
+        return None
+    from openarmature.retrieval import RerankRuntimeConfig
+
+    return RerankRuntimeConfig(**dict(config_spec))
+
+
+def _make_rerank_node_body(node_spec: Mapping[str, Any], provider: Any, case: Mapping[str, Any]) -> Any:
+    calls_rerank = cast("dict[str, Any]", node_spec["calls_rerank"])
+    stores_in = cast("str | None", calls_rerank.get("stores_response_in"))
+    config = _build_rerank_runtime_config(cast("dict[str, Any] | None", calls_rerank.get("config")))
+    top_k = cast("int | None", calls_rerank.get("top_k"))
+    documents = list(cast("list[str]", calls_rerank.get("documents") or []))
+    # A node may render a query prompt first (106, RAG retrieval): the rendered
+    # PromptResult is stamped active for the rerank() call and supplies the
+    # query when query_from_rendered_prompt is set.
+    renders_prompt_name = cast("str | None", node_spec.get("renders_prompt"))
+    prompt_result = _render_prompt_result(case, renders_prompt_name) if renders_prompt_name else None
+    query_from_rendered = bool(calls_rerank.get("query_from_rendered_prompt", False))
+    explicit_query = cast("str | None", calls_rerank.get("query"))
+
+    async def body(_state: Any) -> Mapping[str, Any]:
+        if query_from_rendered and prompt_result is not None:
+            query = cast("str", prompt_result.messages[0].content)
+        else:
+            query = explicit_query or ""
+        if prompt_result is not None:
+            from openarmature.prompts import with_active_prompt
+
+            with with_active_prompt(prompt_result):
+                response = await provider.rerank(query, documents, top_k=top_k, config=config)
+        else:
+            response = await provider.rerank(query, documents, top_k=top_k, config=config)
+        return {stores_in: response.model_dump()} if stores_in else {}
+
+    return body
+
+
+def _build_rerank_graph(
+    case: Mapping[str, Any],
+    *,
+    populate_caller_metadata: bool,
+) -> tuple[Any, type[Any], list[Any]]:
+    """Build a graph whose nodes are calls_rerank. Every rerank node gets its
+    own CohereRerankProvider sharing one MockTransport that replays the case's
+    ``mock_rerank`` queue in order (102 has two rerank nodes in series).
+    Returns (compiled_graph, state_cls, providers-to-close)."""
+    import json
+
+    import httpx
+
+    from openarmature.graph import END, GraphBuilder
+    from openarmature.retrieval import CohereRerankProvider
+
+    from .adapter import build_state_cls
+
+    state_cls = build_state_cls(
+        "RerankFixtureState", cast("dict[str, dict[str, Any]]", case["state"]["fields"])
+    )
+    builder = GraphBuilder(state_cls)
+    providers: list[Any] = []
+    mock_responses = list(cast("list[dict[str, Any]]", case.get("mock_rerank") or []))
+
+    def _handler(_request: httpx.Request) -> httpx.Response:
+        if not mock_responses:
+            raise AssertionError("mock_rerank queue exhausted")
+        spec_resp = mock_responses.pop(0)
+        body = cast("dict[str, Any]", spec_resp.get("body") or {})
+        return httpx.Response(
+            int(spec_resp.get("status", 200)),
+            content=json.dumps(body).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+        )
+
+    transport = httpx.MockTransport(_handler)
+    bound_model = _rerank_model_from_first_response(case) or "rerank-test"
+
+    nodes = cast("dict[str, Any]", case["nodes"])
+    for node_name, node_spec in nodes.items():
+        nd = cast("dict[str, Any]", node_spec)
+        if "calls_rerank" not in nd:
+            raise AssertionError(f"rerank fixture node {node_name!r} has no calls_rerank directive")
+        provider = CohereRerankProvider(
+            base_url="http://mock-rerank.test",
+            model=bound_model,
+            api_key="test",
+            transport=transport,
+            populate_caller_metadata=populate_caller_metadata,
+        )
+        providers.append(provider)
+        builder.add_node(node_name, _make_rerank_node_body(nd, provider, case))
+
+    for edge in cast("list[dict[str, str]]", case["edges"]):
+        target = END if edge["to"] == "END" else edge["to"]
+        builder.add_edge(edge["from"], target)
+    builder.set_entry(cast("str", case["entry"]))
+    return builder.compile(), state_cls, providers
+
+
+async def _run_rerank_fixture(spec: Mapping[str, Any]) -> None:
+    cases = cast("list[dict[str, Any]]", spec["cases"])
+    for case in cases:
+        try:
+            await _run_rerank_case(case)
+        except AssertionError as e:
+            raise AssertionError(f"case {case.get('name')!r}: {e}") from e
+
+
+async def _run_rerank_case(case: Mapping[str, Any]) -> None:
+    from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import (
+        InMemorySpanExporter,
+    )
+
+    from openarmature.graph import NodeException
+    from openarmature.observability.langfuse import InMemoryLangfuseClient, LangfuseObserver
+
+    from .harness.llm_attribute_assertions import (
+        assert_attribute_does_not_contain,
+        assert_attribute_parses_as_messages,
+        assert_attribute_parses_as_object,
+        assert_attribute_truncation,
+        assert_attributes_absent,
+    )
+
+    expected = cast("dict[str, Any]", case["expected"])
+    expected_error = cast("dict[str, Any] | None", case.get("expected_error"))
+    collectors, populate_caller_metadata = _parse_typed_observers(case)
+    graph, state_cls, providers = _build_rerank_graph(case, populate_caller_metadata=populate_caller_metadata)
     state = _make_state_instance(case, state_cls)
 
     exporter: Any = None
