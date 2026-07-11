@@ -4,10 +4,13 @@
 # EmbeddingRuntimeConfig + RerankRuntimeConfig records). ``raw`` follows
 # charter §3.1 principle 8 (Transparency over abstraction) -- it carries
 # the parsed provider response verbatim alongside the normalized fields, so
-# callers who need un-normalized data can reach through the abstraction. The
-# ``input_type`` config field arrives with proposal 0077; ``dimensions`` is
-# the one declared embedding-config field at this pin. ``return_documents``
-# is the one declared rerank-config field (proposal 0060).
+# callers who need un-normalized data can reach through the abstraction.
+# ``dimensions`` and ``input_type`` are the declared embedding-config fields
+# (``input_type`` added by proposal 0077 -- the cross-vendor query/document
+# knob); ``return_documents`` is the one declared rerank-config field
+# (proposal 0060). ``EmbeddingResponse.usage`` / ``RerankResponse.usage`` are
+# ``record | null`` per proposal 0093 -- null when the provider reports no
+# usage object (e.g. TEI /embed + /rerank), never a fabricated record.
 
 """EmbeddingResponse / RerankResponse types and their runtime configs.
 
@@ -56,35 +59,44 @@ class EmbeddingResponse(BaseModel):
             input length.
         model: The model identifier the provider returned; may be more
             specific than the bound identifier.
-        usage: The token record.
+        usage: The token record, or ``None`` when the provider reports no
+            usage object (e.g. TEI ``/embed``). Never a fabricated record.
         response_id: The provider-returned response id when present;
             ``None`` otherwise.
         dimensions: The output vector dimensionality; equals the length
             of each inner vector.
-        raw: The parsed provider response, populated on every successful
-            return. Carries everything the provider returned.
+        raw: The parsed provider response verbatim -- a dict or a list,
+            matching the provider's top-level JSON shape -- populated on
+            every successful return (a chunked call carries the list of
+            per-request responses in request order).
     """
 
     model_config = ConfigDict(extra="forbid")
 
     vectors: list[list[float]]
     model: str
-    usage: EmbeddingUsage
+    usage: EmbeddingUsage | None = None
     response_id: str | None = None
     dimensions: int
-    raw: dict[str, Any]
+    raw: dict[str, Any] | list[Any]
 
 
-# Spec §2 declared-field surface: an optional ``dimensions`` plus the
-# extras pass-through bag (``extra="allow"``). Undeclared fields supplied
-# by callers are forwarded to the wire body untouched by the §8 wire-format
-# mapping; declared fields with value ``None`` are omitted on the wire.
+# Spec §2 declared-field surface: an optional ``dimensions``, an optional
+# ``input_type`` (proposal 0077), plus the extras pass-through bag
+# (``extra="allow"``). Undeclared fields supplied by callers are forwarded to
+# the wire body untouched by the §8 wire-format mapping; declared fields with
+# value ``None`` are omitted on the wire. ``input_type`` ("query" / "document",
+# an extensible string) declares what the embedded text is for; absent means
+# the symmetric default. Each §8 mapping realizes it per its wire shape (TEI
+# prompt_name, Jina task, client-side prefix, ...); a symmetric model ignores
+# it.
 class EmbeddingRuntimeConfig(BaseModel):
     """Per-call embedding request parameters."""
 
     model_config = ConfigDict(extra="allow")
 
     dimensions: int | None = None
+    input_type: str | None = None
 
     # Pure ergonomic, not a contract: lets callers splat a dict whose
     # entries may be ``None`` without filtering at the call site, mirroring
@@ -145,8 +157,10 @@ class RerankResponse(BaseModel):
             usage object.
         response_id: The provider-returned response id when present;
             ``None`` otherwise.
-        raw: The parsed provider response, populated on every successful
-            return. Carries everything the provider returned.
+        raw: The parsed provider response verbatim -- a dict or a list,
+            matching the provider's top-level JSON shape -- populated on
+            every successful return (a chunked call carries the list of
+            per-request responses in request order).
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -155,7 +169,7 @@ class RerankResponse(BaseModel):
     model: str
     usage: RerankUsage | None = None
     response_id: str | None = None
-    raw: dict[str, Any]
+    raw: dict[str, Any] | list[Any]
 
 
 # Spec §2 rerank runtime config: one declared field ``return_documents``

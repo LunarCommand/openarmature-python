@@ -92,8 +92,9 @@ def _classify_embedding_http_error(resp: httpx.Response) -> LlmProviderError:
 # Absence-is-meaningful per observability §5.5.2: only caller-supplied keys
 # appear in the event's request_params -- "the field was not supplied for
 # this call", distinct from a supplied zero. The input_type field joins this
-# set with proposal 0077. For embedding the event-param names coincide with
-# the wire-body keys, so the same dict feeds both the event and the body.
+# set with proposal 0079 (OpenAI-compatible input_type is its wire mapping's
+# job, not 0077's). For embedding the event-param names coincide with the
+# wire-body keys, so the same dict feeds both the event and the body.
 def _request_params_from_config(config: EmbeddingRuntimeConfig | None) -> dict[str, Any]:
     """Extract the supplied embedding request parameters for the event."""
     if config is None:

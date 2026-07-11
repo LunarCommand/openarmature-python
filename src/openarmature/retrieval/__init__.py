@@ -1,9 +1,9 @@
 """The retrieval-provider capability.
 
 The embedding + rerank provider protocols, their response types, and the
-bundled reference providers (an OpenAI-compatible embedding provider and a
-Cohere-shape reranker). Embedding and rerank are sibling surfaces on the same
-capability.
+bundled reference providers (an OpenAI-compatible embedding provider, a
+Cohere-shape reranker, and the TEI embedding + rerank providers). Embedding and
+rerank are sibling surfaces on the same capability.
 """
 
 from __future__ import annotations
@@ -18,6 +18,7 @@ from .provider import (
 )
 from .providers.cohere import CohereRerankProvider
 from .providers.openai import OpenAIEmbeddingProvider
+from .providers.tei import TeiEmbeddingProvider, TeiRerankProvider
 from .response import (
     EmbeddingResponse,
     EmbeddingRuntimeConfig,
@@ -40,6 +41,8 @@ __all__ = [
     "RerankRuntimeConfig",
     "RerankUsage",
     "ScoredDocument",
+    "TeiEmbeddingProvider",
+    "TeiRerankProvider",
     "validate_embedding_input",
     "validate_embedding_response",
     "validate_rerank_input",
