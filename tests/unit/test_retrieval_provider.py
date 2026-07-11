@@ -32,9 +32,12 @@ from openarmature.llm.errors import (
 from openarmature.observability.correlation import _reset_active_dispatch, _set_active_dispatch
 from openarmature.retrieval import (
     CohereRerankProvider,
+    EmbeddingRuntimeConfig,
     OpenAIEmbeddingProvider,
     RerankRuntimeConfig,
     ScoredDocument,
+    TeiEmbeddingProvider,
+    TeiRerankProvider,
     validate_rerank_input,
     validate_rerank_response,
 )
@@ -315,6 +318,9 @@ async def test_rerank_sorts_results_and_populates_usage() -> None:
     assert response.usage is not None
     assert response.usage.search_units == 1
     assert response.usage.input_tokens is None
+    # Cohere returns an object envelope, so raw is a dict (not the bare-array
+    # form TEI uses); narrow the dict | list union before indexing.
+    assert isinstance(response.raw, dict)
     assert response.raw["id"] == "rerank-id"
     await provider.aclose()
 
@@ -619,3 +625,316 @@ async def test_langfuse_observer_rerank_no_op_without_invocation_context() -> No
     await observer(_rerank_event())
     await observer(_rerank_failed_event())
     assert client.traces == {}
+
+
+# ---------------------------------------------------------------------------
+# TEI wire mapping (proposal 0077)
+# ---------------------------------------------------------------------------
+
+
+def _tei_embed_provider(handler: Any, **kwargs: Any) -> TeiEmbeddingProvider:
+    return TeiEmbeddingProvider(
+        base_url="http://tei-embed.test",
+        model="tei-embed-test",
+        transport=httpx.MockTransport(handler),
+        **kwargs,
+    )
+
+
+def _tei_rerank_provider(handler: Any, *, chunk_size: int = 32) -> TeiRerankProvider:
+    return TeiRerankProvider(
+        base_url="http://tei-rerank.test",
+        model="tei-rerank-test",
+        chunk_size=chunk_size,
+        transport=httpx.MockTransport(handler),
+    )
+
+
+# --- /embed input_type realization ------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("input_type", "expected_prompt"),
+    [("query", "query"), ("document", "passage"), (None, None)],
+)
+async def test_tei_embed_input_type_maps_to_prompt_name(
+    input_type: str | None, expected_prompt: str | None
+) -> None:
+    captured: list[dict[str, Any]] = []
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        captured.append(json.loads(req.content))
+        assert req.url.path == "/embed"
+        return httpx.Response(200, json=[[0.1, 0.2, 0.3, 0.4]])
+
+    provider = _tei_embed_provider(handler, input_type_prompt_map={"query": "query", "document": "passage"})
+    config = EmbeddingRuntimeConfig(input_type=input_type) if input_type is not None else None
+    response = await provider.embed(["how tall is the tower?"], config=config)
+    await provider.aclose()
+
+    body = captured[0]
+    assert body["inputs"] == ["how tall is the tower?"]
+    if expected_prompt is None:
+        # Absent input_type => no prompt_name; byte-identical to the symmetric
+        # path (the body is exactly {"inputs": [...]}).
+        assert set(body) == {"inputs"}
+    else:
+        assert body["prompt_name"] == expected_prompt
+    # TEI /embed returns no usage object -> usage is null (never fabricated).
+    assert response.usage is None
+    assert response.response_id is None
+    assert response.model == "tei-embed-test"
+    assert response.dimensions == 4
+
+
+async def test_tei_embed_dimensions_on_wire_omitted_when_unset() -> None:
+    captured: list[dict[str, Any]] = []
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        captured.append(json.loads(req.content))
+        return httpx.Response(200, json=[[0.1, 0.2, 0.3, 0.4]])
+
+    provider = _tei_embed_provider(handler)
+    r0 = await provider.embed(["x"], config=EmbeddingRuntimeConfig(dimensions=4))
+    # dimensions maps onto the wire when set; a second call without it omits it.
+    await provider.embed(["y"])
+    await provider.aclose()
+
+    assert captured[0] == {"inputs": ["x"], "dimensions": 4}
+    assert captured[1] == {"inputs": ["y"]}
+    # raw is the verbatim deserialized response -- TEI's bare vector array, not
+    # wrapped (proposal 0096: raw is the top-level shape the provider returned).
+    assert r0.raw == [[0.1, 0.2, 0.3, 0.4]]
+
+
+async def test_tei_embed_client_side_prefix_fallback() -> None:
+    # No input_type_prompt_map, only client-side prefixes: the prefix is
+    # prepended to the wire inputs, no prompt_name is sent, and the event's
+    # input_strings carry the ORIGINAL (un-prefixed) caller input.
+    captured: list[dict[str, Any]] = []
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        captured.append(json.loads(req.content))
+        return httpx.Response(200, json=[[0.1, 0.2]])
+
+    provider = _tei_embed_provider(handler, query_prefix="query: ", document_prefix="passage: ")
+    events, token = _collecting_dispatch()
+    try:
+        await provider.embed(["moon phases"], config=EmbeddingRuntimeConfig(input_type="query"))
+        await provider.embed(["the moon is bright"], config=EmbeddingRuntimeConfig(input_type="document"))
+    finally:
+        await provider.aclose()
+        _reset_active_dispatch(token)
+
+    assert captured[0]["inputs"] == ["query: moon phases"]
+    assert "prompt_name" not in captured[0]
+    assert captured[1]["inputs"] == ["passage: the moon is bright"]
+    embed_events = [e for e in events if isinstance(e, EmbeddingEvent)]
+    # The event carries the caller's original input, not the prefixed wire form.
+    assert embed_events[0].input_strings == ["moon phases"]
+    assert embed_events[0].request_params == {"input_type": "query"}
+
+
+async def test_tei_embed_bad_shape_raises_invalid_response() -> None:
+    # TEI /embed must return a bare vector array; a JSON object is malformed.
+    def handler(_req: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"data": [[0.1, 0.2]]})
+
+    provider = _tei_embed_provider(handler)
+    with pytest.raises(ProviderInvalidResponse):
+        await provider.embed(["x"])
+    await provider.aclose()
+
+
+@pytest.mark.parametrize("status", [413, 422])
+async def test_tei_embed_over_length_maps_to_invalid_request(status: int) -> None:
+    def handler(_req: httpx.Request) -> httpx.Response:
+        return httpx.Response(status, json={"error": "too long", "error_type": "Validation"})
+
+    provider = _tei_embed_provider(handler)
+    with pytest.raises(ProviderInvalidRequest):
+        await provider.embed(["a very long input"])
+    await provider.aclose()
+
+
+# --- /rerank wire + chunk-and-stitch ----------------------------------------
+
+
+async def test_tei_rerank_wire_body_and_return_text() -> None:
+    captured: list[dict[str, Any]] = []
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        captured.append(json.loads(req.content))
+        assert req.url.path == "/rerank"
+        return httpx.Response(
+            200,
+            json=[
+                {"index": 0, "score": 0.42, "text": "doc a"},
+                {"index": 1, "score": 0.91, "text": "doc b"},
+            ],
+        )
+
+    provider = _tei_rerank_provider(handler)
+    response = await provider.rerank(
+        "q", ["doc a", "doc b"], config=RerankRuntimeConfig(return_documents=True)
+    )
+    await provider.aclose()
+
+    # truncate: false always (fail-loud); return_text tracks return_documents;
+    # texts maps directly onto documents.
+    assert captured[0] == {"query": "q", "texts": ["doc a", "doc b"], "truncate": False, "return_text": True}
+    # Response sorted descending; echoed text surfaces verbatim on document.
+    assert [(r.index, r.document) for r in response.results] == [(1, "doc b"), (0, "doc a")]
+    assert response.usage is None
+    assert response.response_id is None
+
+
+async def test_tei_rerank_single_batch_sorts_and_null_usage() -> None:
+    def handler(_req: httpx.Request) -> httpx.Response:
+        # Unsorted, chunk-local indices; TEI reports no id / no usage.
+        return httpx.Response(
+            200,
+            json=[{"index": 0, "score": 0.42}, {"index": 1, "score": 0.91}, {"index": 2, "score": 0.08}],
+        )
+
+    provider = _tei_rerank_provider(handler)
+    response = await provider.rerank("q", ["berlin", "paris", "madrid"])
+    await provider.aclose()
+
+    assert [(r.index, r.relevance_score) for r in response.results] == [(1, 0.91), (0, 0.42), (2, 0.08)]
+    assert all(r.document is None for r in response.results)
+    assert response.usage is None
+    # raw is the single response's verbatim bare array (not wrapped, not a
+    # 1-element list) -- proposal 0096.
+    assert response.raw == [
+        {"index": 0, "score": 0.42},
+        {"index": 1, "score": 0.91},
+        {"index": 2, "score": 0.08},
+    ]
+
+
+async def test_tei_rerank_chunk_and_stitch_global_sort_top_k() -> None:
+    # Mirror fixture 015: 9 documents, chunk_size 4 => 3 requests with texts
+    # sizes [4, 4, 1]. Each chunk's response uses CHUNK-LOCAL indices; the
+    # mapping re-bases them to absolute positions, globally sorts across
+    # chunks, and honors top_k=4. A per-chunk sort or a missing re-base would
+    # produce the wrong answer.
+    captured: list[dict[str, Any]] = []
+    chunk_responses = iter(
+        [
+            [
+                {"index": 2, "score": 0.10},
+                {"index": 0, "score": 0.20},
+                {"index": 3, "score": 0.55},
+                {"index": 1, "score": 0.95},
+            ],
+            [
+                {"index": 3, "score": 0.05},
+                {"index": 1, "score": 0.30},
+                {"index": 0, "score": 0.80},
+                {"index": 2, "score": 0.88},
+            ],
+            [{"index": 0, "score": 0.65}],
+        ]
+    )
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        captured.append(json.loads(req.content))
+        return httpx.Response(200, json=next(chunk_responses))
+
+    documents = [f"doc {i}" for i in range(9)]
+    provider = _tei_rerank_provider(handler, chunk_size=4)
+    events, token = _collecting_dispatch()
+    try:
+        response = await provider.rerank("which is fastest?", documents, top_k=4)
+    finally:
+        await provider.aclose()
+        _reset_active_dispatch(token)
+
+    # Exactly 3 requests, texts sizes [4, 4, 1], consecutive slices, same query.
+    assert len(captured) == 3
+    assert [len(b["texts"]) for b in captured] == [4, 4, 1]
+    assert captured[0]["texts"] == documents[0:4]
+    assert captured[1]["texts"] == documents[4:8]
+    assert captured[2]["texts"] == documents[8:9]
+    assert all(b["query"] == "which is fastest?" for b in captured)
+    assert all(b["truncate"] is False for b in captured)
+    # Global top-4 with ABSOLUTE indices, drawn from chunks A, B, B, C.
+    assert [(r.index, r.relevance_score) for r in response.results] == [
+        (1, 0.95),
+        (6, 0.88),
+        (4, 0.80),
+        (8, 0.65),
+    ]
+    # One RerankEvent per rerank() call (not per chunk); documents is the full
+    # input; result_count is the final stitched count.
+    rerank_events = [e for e in events if isinstance(e, RerankEvent)]
+    assert len(rerank_events) == 1
+    assert rerank_events[0].document_count == 9
+    assert rerank_events[0].result_count == 4
+    assert len(rerank_events[0].output_results) == 4
+    # raw is the verbatim per-request list (chunk-and-stitch): the 3 bare
+    # per-chunk responses in request order, not wrapped (proposal 0096).
+    assert response.raw == [
+        [
+            {"index": 2, "score": 0.10},
+            {"index": 0, "score": 0.20},
+            {"index": 3, "score": 0.55},
+            {"index": 1, "score": 0.95},
+        ],
+        [
+            {"index": 3, "score": 0.05},
+            {"index": 1, "score": 0.30},
+            {"index": 0, "score": 0.80},
+            {"index": 2, "score": 0.88},
+        ],
+        [{"index": 0, "score": 0.65}],
+    ]
+
+
+@pytest.mark.parametrize("status", [413, 422])
+async def test_tei_rerank_over_length_maps_to_invalid_request(status: int) -> None:
+    # §8.1 fail-loud: truncate: false makes TEI error on over-length input
+    # (413 / 422); the mapping surfaces provider_invalid_request.
+    captured: list[dict[str, Any]] = []
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        captured.append(json.loads(req.content))
+        return httpx.Response(status, json={"error": "too long", "error_type": "Validation"})
+
+    provider = _tei_rerank_provider(handler)
+    with pytest.raises(ProviderInvalidRequest):
+        await provider.rerank("summarize", ["a very long document"])
+    await provider.aclose()
+    # The wire request still carried truncate: false.
+    assert captured[0]["truncate"] is False
+
+
+async def test_tei_rerank_chunk_local_index_out_of_range_raises() -> None:
+    # A chunk response index outside the chunk range is malformed.
+    def handler(_req: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=[{"index": 5, "score": 0.9}])
+
+    provider = _tei_rerank_provider(handler, chunk_size=4)
+    with pytest.raises(ProviderInvalidResponse):
+        await provider.rerank("q", ["a", "b"])
+    await provider.aclose()
+
+
+def test_tei_base_url_strips_trailing_slash() -> None:
+    provider = TeiEmbeddingProvider(base_url="http://tei-embed.test/", model="m")
+    assert provider.base_url == "http://tei-embed.test"
+    rerank = TeiRerankProvider(base_url="http://tei-rerank.test/", model="m")
+    assert rerank.base_url == "http://tei-rerank.test"
+
+
+def test_tei_chunk_size_must_be_positive() -> None:
+    # A non-positive chunk_size is rejected at construction on both TEI
+    # providers: a zero would raise a raw ValueError from range() mid-call
+    # (escaping the provider's error handling), a negative would silently drop
+    # every document from the rerank pool.
+    for bad in (0, -1):
+        with pytest.raises(ValueError, match="chunk_size must be positive"):
+            TeiRerankProvider(base_url="http://tei-rerank.test", model="m", chunk_size=bad)
+        with pytest.raises(ValueError, match="chunk_size must be positive"):
+            TeiEmbeddingProvider(base_url="http://tei-embed.test", model="m", chunk_size=bad)

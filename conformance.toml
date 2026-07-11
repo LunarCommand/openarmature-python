@@ -770,11 +770,13 @@ note = "The model's output tool calls get an output-side home on the openarmatur
 status = "not-yet"
 
 # Spec v0.72.0 (proposal 0077).  Retrieval-provider TEI wire mapping
-# (§8 / §8.1) plus the input_type embedding knob (§2 / §3).  Python has
-# not yet shipped the retrieval wire mappings; not-yet.  retrieval-
-# provider fixtures 013-017 defer with it.
+# (§8 / §8.1) plus the input_type embedding knob (§2 / §3).  The first
+# concrete §8 mapping; introduces the conformance wire-capture directive
+# family reused by 0078 / 0079 / 0090 / 0091.
 [proposals."0077"]
-status = "not-yet"
+status = "implemented"
+since = "0.16.0"
+note = "Retrieval-provider TEI (Text Embeddings Inference) wire mapping (§8 / §8.1) -- the first concrete §8 mapping. EmbeddingRuntimeConfig gains the declared input_type field (§2 / §3, the cross-vendor query/document knob; absent = symmetric), flowed into EmbeddingEvent.request_params with absence-is-meaningful semantics (graph-engine §6). Two bundled providers ship: TeiEmbeddingProvider posts POST {base_url}/embed with {inputs[, prompt_name][, dimensions]} -- input_type is realized as TEI's native prompt_name looked up from the construction input_type -> prompt_name map (server-side prompts), or a client-side query_prefix / document_prefix prepend when only prefixes are configured; absent input_type sends neither (byte-identical to the symmetric path). TEI /embed returns a bare vector array in input order and no usage object, so EmbeddingResponse.usage = null (never fabricated). TeiRerankProvider posts POST {base_url}/rerank with {query, texts, truncate: false, return_text} -- texts maps directly onto documents, return_documents -> return_text; it parses the bare [{index, score, text?}] response, reads the text echo only when present, sorts by score descending, and carries response_id + usage null. It implements the MANDATORY rerank chunk-and-stitch (§8.1): when len(documents) exceeds the construction chunk_size (default 32, TEI's max-client-batch-size) it splits into consecutive <= chunk_size slices, issues one /rerank per slice (same query), re-bases each chunk's response index to its absolute position, concatenates, then applies §6 -- a GLOBAL sort by score descending and top_k AFTER the stitch, never per-chunk. truncate: false is sent explicitly on /rerank (fail-loud); the resulting TEI over-length error (HTTP 413 / 422) maps to provider_invalid_request (§7), joined by 400; other statuses map like the sibling providers (401/403 auth, 429 rate_limit, 404 invalid_model, else unavailable). Both providers dispatch the typed EmbeddingEvent / RerankEvent (graph-engine §6) per call, mutually exclusive with the failure variant. genai_system = 'tei'. Conformance fixtures 013-017 pass, driven through a new general wire-capture harness (mapping directive; tei_embedding_provider / tei_rerank_provider construction blocks; expected_wire_request as a single body or a per-chunk list + expected_wire_request_count + expected_wire_request_absent_keys, asserting the exact wire key set and the /embed / /rerank path) reused by the deferred 0078 / 0079 / 0090 / 0091 fixtures. The embed client-side chunk-and-stitch (0092, fixture 038) stays deferred."
 
 # Spec v0.73.0 (proposal 0078).  Retrieval-provider Jina hosted wire
 # mapping (§8.2).  Not-yet; retrieval-provider fixtures 018-022 defer
@@ -885,10 +887,10 @@ status = "not-yet"
 # Spec v0.88.0 (proposal 0093).  Nullable provider usage records:
 # EmbeddingResponse.usage / RerankResponse.usage become record|null and
 # the embedding usage emission (OTel §5.5.8 gen_ai.usage.input_tokens,
-# Langfuse §8.4.5 usageDetails.input) becomes conditional.  Not-yet; the
-# no-usage fixtures 139-143 defer with it.  Follow-up when they un-defer:
-# widen the shipped EmbeddingResponse.usage to nullable + make its
-# emission conditional; 0060 builds RerankResponse.usage nullable from
-# the start.
+# Langfuse §8.4.5 usageDetails.input) is conditional.  Partial: the
+# response-type widening ships; the no-usage observability fixtures
+# 139-143 stay deferred as the 0093-last PR.
 [proposals."0093"]
-status = "not-yet"
+status = "partial"
+since = "0.16.0"
+note = "The response-type nullable widening ships: RerankResponse.usage is record | null from the start (0060a), and EmbeddingResponse.usage is widened to EmbeddingUsage | null here with 0077 (the OpenAIEmbeddingProvider still builds an EmbeddingUsage record; the TeiEmbeddingProvider surfaces usage = null since TEI /embed returns no usage object, never fabricated -- §4). Both bundled observers already emit the embedding usage conditionally (OTel §5.5.8 gen_ai.usage.input_tokens guarded by `event.usage is not None`; Langfuse §8.4.5 usageDetails.input built only when event.usage is not None), landed with the embedding observability in 0059b, so a null-usage EmbeddingEvent renders without a usage attribute rather than crashing. partial because the no-usage OBSERVABILITY fixtures (139 / 140 / 143, asserting the conditional-emission contract end-to-end) stay deferred as the 0093-last PR."

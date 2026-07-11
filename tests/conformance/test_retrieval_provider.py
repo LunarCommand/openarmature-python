@@ -14,7 +14,7 @@ cover the observer path).
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any, cast
 
@@ -23,14 +23,36 @@ import pytest
 import yaml
 
 from openarmature.llm import LlmProviderError
+from openarmature.observability.correlation import (
+    _reset_active_dispatch,
+    _reset_namespace_prefix,
+    _set_active_dispatch,
+    _set_namespace_prefix,
+)
 from openarmature.retrieval import (
     CohereRerankProvider,
     EmbeddingRuntimeConfig,
     OpenAIEmbeddingProvider,
     RerankRuntimeConfig,
+    TeiEmbeddingProvider,
+    TeiRerankProvider,
 )
 
 from ._deferral import skip_if_deferred
+
+# The wire endpoint each mapping posts to, keyed by the fixture's ``mapping``
+# directive (None => the harness-internal default). The wire-capture assertion
+# checks the captured request path against this.
+_EMBED_PATHS: dict[str | None, str] = {
+    None: "/v1/embeddings",
+    "openai": "/v1/embeddings",
+    "tei": "/embed",
+}
+_RERANK_PATHS: dict[str | None, str] = {
+    None: "/v2/rerank",
+    "cohere": "/v2/rerank",
+    "tei": "/rerank",
+}
 
 CONFORMANCE_DIR = (
     Path(__file__).resolve().parents[2] / "openarmature-spec" / "spec" / "retrieval-provider" / "conformance"
@@ -49,27 +71,20 @@ _DEFAULT_RERANK_MODEL = "rerank-test"
 #
 # The v0.84.0 pin bump also introduced the retrieval-provider WIRE-MAPPING
 # fixtures (013-027) for proposals 0077 (TEI) / 0078 (Jina) / 0079
-# (OpenAI-compatible), still present at the current pin, none of which python
-# has shipped. This runner drives only the bundled
-# OpenAIEmbeddingProvider's embed() and asserts the response, so it cannot
-# exercise their request-side mappings (TEI server-side prompt_name, Jina's
-# task, the client-side query/document prefix) -- the contracts those
-# fixtures exist to verify. Defer the whole batch until each wire-mapping
-# impl PR (v0.16.0+).
+# (OpenAI-compatible). The TEI batch (013-017) now ships: this runner captures
+# the outbound httpx.Request bodies through the MockTransport and asserts them
+# against expected_wire_request (proposal 0077). The Jina (018-022) and
+# OpenAI-compatible (023-027) mappings remain unshipped, so they stay deferred
+# until their impl PRs.
 #
 # The v0.88.0 pin pulls in the Cohere wire mappings + the general embed
 # batch-chunking rule: 028-031 (0090 Cohere rerank), 032-037 (0091 Cohere
 # embed), 038 (0092 TEI /embed over-cap chunk-and-stitch). None are shipped
-# -- same deferral rationale as 013-027. (0060a ships the RerankProvider
+# -- same deferral rationale as 018-027. (0060a ships the RerankProvider
 # protocol + the Cohere-shape reference reranker for the protocol fixtures
 # 006-012; the 0090 Cohere wire-mapping fixtures 028-031 assert the request-
-# side wire contract this runner cannot capture, so they stay deferred.)
+# side wire contract, deferred until the Cohere wire-mapping impl PR.)
 _DEFERRED_FIXTURES: dict[str, str] = {
-    **{
-        p.stem: "TEI wire mapping (proposal 0077) not implemented"
-        for p in CONFORMANCE_DIR.glob("[0-9][0-9][0-9]-*.yaml")
-        if 13 <= int(p.stem[:3]) <= 17
-    },
     **{
         p.stem: "Jina wire mapping (proposal 0078) not implemented"
         for p in CONFORMANCE_DIR.glob("[0-9][0-9][0-9]-*.yaml")
@@ -146,14 +161,35 @@ def _build_provider(
     responses: list[Mapping[str, Any]],
     *,
     model: str,
-) -> tuple[OpenAIEmbeddingProvider, list[httpx.Request]]:
+    mapping: str | None,
+    spec: Mapping[str, Any],
+) -> tuple[Any, list[httpx.Request]]:
+    """Build the embedding provider selected by the fixture ``mapping``.
+
+    ``mapping: tei`` builds a TeiEmbeddingProvider from the suite-level
+    ``tei_embedding_provider`` block; any other value (or absent) builds the
+    default OpenAIEmbeddingProvider. Both drive the same MockTransport.
+    """
     transport, captured = _build_handler(responses)
-    provider = OpenAIEmbeddingProvider(
-        base_url="http://mock-embed.test",
-        model=model,
-        api_key="test-key",
-        transport=transport,
-    )
+    if mapping == "tei":
+        block = cast("Mapping[str, Any]", spec["tei_embedding_provider"])
+        provider: Any = TeiEmbeddingProvider(
+            base_url=cast("str", block["base_url"]),
+            model=cast("str", block.get("model", model)),
+            api_key="test-key",
+            transport=transport,
+            chunk_size=cast("int", block.get("chunk_size", 32)),
+            input_type_prompt_map=cast("Mapping[str, str] | None", block.get("input_type_prompt_map")),
+            query_prefix=cast("str | None", block.get("query_prefix")),
+            document_prefix=cast("str | None", block.get("document_prefix")),
+        )
+    else:
+        provider = OpenAIEmbeddingProvider(
+            base_url="http://mock-embed.test",
+            model=model,
+            api_key="test-key",
+            transport=transport,
+        )
     return provider, captured
 
 
@@ -171,14 +207,32 @@ def _build_rerank_provider(
     responses: list[Mapping[str, Any]],
     *,
     model: str,
-) -> tuple[CohereRerankProvider, list[httpx.Request]]:
+    mapping: str | None,
+    spec: Mapping[str, Any],
+) -> tuple[Any, list[httpx.Request]]:
+    """Build the rerank provider selected by the fixture ``mapping``.
+
+    ``mapping: tei`` builds a TeiRerankProvider from the suite-level
+    ``tei_rerank_provider`` block; any other value (or absent) builds the
+    default CohereRerankProvider. Both drive the same MockTransport.
+    """
     transport, captured = _build_handler(responses)
-    provider = CohereRerankProvider(
-        base_url="http://mock-rerank.test",
-        model=model,
-        api_key="test-key",
-        transport=transport,
-    )
+    if mapping == "tei":
+        block = cast("Mapping[str, Any]", spec["tei_rerank_provider"])
+        provider: Any = TeiRerankProvider(
+            base_url=cast("str", block["base_url"]),
+            model=cast("str", block.get("model", model)),
+            api_key="test-key",
+            transport=transport,
+            chunk_size=cast("int", block.get("chunk_size", 32)),
+        )
+    else:
+        provider = CohereRerankProvider(
+            base_url="http://mock-rerank.test",
+            model=model,
+            api_key="test-key",
+            transport=transport,
+        )
     return provider, captured
 
 
@@ -215,7 +269,14 @@ def _assert_embedding_response(
         elif key == "response_id":
             assert response.response_id == val
         elif key == "usage":
-            assert response.usage.input_tokens == cast("Mapping[str, Any]", val)["input_tokens"]
+            # usage is nullable (proposal 0093): a fixture asserting ``usage:
+            # null`` (e.g. TEI /embed) expects response.usage is None; otherwise
+            # the record's input_tokens is checked.
+            if val is None:
+                assert response.usage is None
+            else:
+                assert response.usage is not None, "expected a usage record, got None"
+                assert response.usage.input_tokens == cast("Mapping[str, Any]", val)["input_tokens"]
         # Unknown keys are skipped (tolerant, matching the llm-provider
         # harness): a new spec assertion key is a no-op here until wired,
         # rather than breaking the whole parametrized suite.
@@ -302,6 +363,119 @@ def _check_rerank_success_invariants(
         # above cover the core §6 contract.
 
 
+# -- wire-capture assertion (general; reused by 0078 / 0079 / 0090 / 0091) -----
+
+
+def _assert_one_wire_request(
+    request: httpx.Request,
+    want: Mapping[str, Any],
+    absent_keys: list[str],
+    expected_path: str,
+) -> None:
+    """Assert a single captured request against one expected_wire_request body.
+
+    Checks the method (POST), the URL path, each listed key's value, and that
+    the wire body carries no key beyond those in expected_wire_request (the
+    exact key set).
+    """
+    assert request.method == "POST", f"expected POST, got {request.method}"
+    assert request.url.path == expected_path, f"wire path {request.url.path!r} != {expected_path!r}"
+    body = cast("dict[str, Any]", json.loads(request.content))
+    for key, val in want.items():
+        assert key in body, f"wire body missing key {key!r}"
+        assert body[key] == val, f"wire body[{key!r}] = {body[key]!r} != {val!r}"
+    for key in absent_keys:
+        assert key not in body, f"wire body must not carry key {key!r} (absent from expected)"
+    # A field absent from expected_wire_request MUST be absent on the wire:
+    # assert the exact key set (managed keys the mapping always sends are all
+    # listed in expected_wire_request per the fixture headers).
+    assert set(body) == set(want), f"wire body key set {sorted(body)} != expected {sorted(want)}"
+
+
+def _assert_wire_requests(
+    captured: list[httpx.Request],
+    case: Mapping[str, Any],
+    expected_path: str,
+) -> None:
+    """Assert the captured requests against expected_wire_request.
+
+    Supports both forms: a single dict (one request) and a list of dicts (one
+    per chunk, in arrival order) plus expected_wire_request_count. Skips when
+    the fixture declares no expected_wire_request (the pre-0077 fixtures).
+    """
+    expected = case.get("expected_wire_request")
+    if expected is None:
+        return
+    count = cast("int | None", case.get("expected_wire_request_count"))
+    absent_keys = cast("list[str]", case.get("expected_wire_request_absent_keys") or [])
+    if isinstance(expected, list):
+        bodies = cast("list[Mapping[str, Any]]", expected)
+        if count is not None:
+            assert len(captured) == count, f"expected {count} requests, captured {len(captured)}"
+        assert len(captured) == len(bodies), (
+            f"captured {len(captured)} requests, expected_wire_request lists {len(bodies)}"
+        )
+        for request, want in zip(captured, bodies, strict=True):
+            _assert_one_wire_request(request, want, absent_keys, expected_path)
+    else:
+        want = cast("Mapping[str, Any]", expected)
+        if count is not None:
+            assert len(captured) == count, f"expected {count} requests, captured {len(captured)}"
+        assert len(captured) == 1, f"single-body form expects exactly one request, captured {len(captured)}"
+        _assert_one_wire_request(captured[0], want, absent_keys, expected_path)
+
+
+# -- typed-observer assertion (contains_event on the dispatched typed events) --
+
+
+def _install_typed_collector(case: Mapping[str, Any]) -> tuple[list[Any], Callable[[], None]]:
+    """Install a dispatch collector when the case declares typed_observers.
+
+    Returns ``(events, cleanup)``; ``cleanup`` is a no-op when no collector was
+    installed. The harness drives the provider directly (no engine), so the
+    calling-node identity ContextVar is also set to the entry node name so the
+    dispatched event carries the fixture's node_name (contains_event asserts
+    it). The caller invokes ``cleanup`` in a finally.
+    """
+    if not case.get("typed_observers"):
+        return [], lambda: None
+    events: list[Any] = []
+    dispatch_token = _set_active_dispatch(events.append)
+    entry = cast("str", case["entry"])
+    namespace_token = _set_namespace_prefix((entry,))
+
+    def _cleanup() -> None:
+        _reset_namespace_prefix(namespace_token)
+        _reset_active_dispatch(dispatch_token)
+
+    return events, _cleanup
+
+
+def _assert_contains_event(events: list[Any], expected: Mapping[str, Any]) -> None:
+    """Assert each observer's contains_event against the collected events.
+
+    ``contains_event`` names an event_type and a fields mapping; a collected
+    event of that type must match every listed field (dict / scalar equality).
+    """
+    observers = cast("Mapping[str, Any]", expected.get("observers") or {})
+    for obs_name, obs_expect in observers.items():
+        obs = cast("Mapping[str, Any]", obs_expect)
+        contains = cast("Mapping[str, Any] | None", obs.get("contains_event"))
+        if contains is None:
+            continue
+        event_type = cast("str", contains["event_type"])
+        want_fields = cast("Mapping[str, Any]", contains.get("fields") or {})
+        candidates = [e for e in events if type(e).__name__ == event_type]
+        for event in candidates:
+            if all(getattr(event, key, None) == val for key, val in want_fields.items()):
+                break
+        else:
+            raise AssertionError(
+                f"observer {obs_name!r}: no {event_type} with fields {dict(want_fields)}; "
+                f"saw {[type(e).__name__ for e in events]}"
+            )
+
+
 @pytest.mark.parametrize("fixture_path", _fixture_paths(), ids=_fixture_id)
 async def test_retrieval_provider_fixture(fixture_path: Path) -> None:
     fixture_id = fixture_path.stem
@@ -310,26 +484,28 @@ async def test_retrieval_provider_fixture(fixture_path: Path) -> None:
     for case in cast("list[dict[str, Any]]", spec.get("cases", [])):
         case_name = case.get("name", "<unnamed>")
         try:
-            await _run_one_case(case)
+            await _run_one_case(case, spec)
         except AssertionError as e:
             raise AssertionError(f"case {case_name!r}: {e}") from e
 
 
-async def _run_one_case(case: Mapping[str, Any]) -> None:
+async def _run_one_case(case: Mapping[str, Any], spec: Mapping[str, Any]) -> None:
+    mapping = cast("str | None", spec.get("mapping"))
     entry = cast("str", case["entry"])
     node = cast("Mapping[str, Any]", cast("Mapping[str, Any]", case["nodes"])[entry])
     if "calls_rerank" in node:
-        await _run_rerank_case(case, cast("Mapping[str, Any]", node["calls_rerank"]))
+        await _run_rerank_case(case, spec, cast("Mapping[str, Any]", node["calls_rerank"]), mapping)
         return
     calls_embed = cast("Mapping[str, Any]", node["calls_embed"])
     input_strings = cast("list[str]", calls_embed["input"])
     model = cast("str", calls_embed.get("model", _DEFAULT_MODEL))
     config = _build_config(cast("Mapping[str, Any] | None", calls_embed.get("config")))
     responses = cast("list[Mapping[str, Any]]", case.get("mock_embedding") or [])
-    provider, _captured = _build_provider(responses, model=model)
+    provider, captured = _build_provider(responses, model=model, mapping=mapping, spec=spec)
     expected_error = cast("Mapping[str, Any] | None", case.get("expected_error"))
     expected = cast("Mapping[str, Any]", case.get("expected") or {})
     invariants = cast("Mapping[str, Any]", expected.get("invariants") or {})
+    events, cleanup = _install_typed_collector(case)
     try:
         if expected_error is not None:
             with pytest.raises(LlmProviderError) as excinfo:
@@ -350,21 +526,30 @@ async def _run_one_case(case: Mapping[str, Any]) -> None:
             if stored is not None and stored in final_state:
                 _assert_embedding_response(response, cast("Mapping[str, Any]", final_state[stored]))
             _check_success_invariants(response, input_strings, invariants)
+        _assert_wire_requests(captured, case, _EMBED_PATHS[mapping])
+        _assert_contains_event(events, expected)
     finally:
+        cleanup()
         await provider.aclose()
 
 
-async def _run_rerank_case(case: Mapping[str, Any], calls_rerank: Mapping[str, Any]) -> None:
+async def _run_rerank_case(
+    case: Mapping[str, Any],
+    spec: Mapping[str, Any],
+    calls_rerank: Mapping[str, Any],
+    mapping: str | None,
+) -> None:
     query = cast("str", calls_rerank["query"])
     documents = cast("list[str]", calls_rerank["documents"])
     top_k = cast("int | None", calls_rerank.get("top_k"))
     model = cast("str", calls_rerank.get("model", _DEFAULT_RERANK_MODEL))
     config = _build_rerank_config(cast("Mapping[str, Any] | None", calls_rerank.get("config")))
     responses = cast("list[Mapping[str, Any]]", case.get("mock_rerank") or [])
-    provider, _captured = _build_rerank_provider(responses, model=model)
+    provider, captured = _build_rerank_provider(responses, model=model, mapping=mapping, spec=spec)
     expected_error = cast("Mapping[str, Any] | None", case.get("expected_error"))
     expected = cast("Mapping[str, Any]", case.get("expected") or {})
     invariants = cast("Mapping[str, Any]", expected.get("invariants") or {})
+    events, cleanup = _install_typed_collector(case)
     try:
         if expected_error is not None:
             with pytest.raises(LlmProviderError) as excinfo:
@@ -385,5 +570,8 @@ async def _run_rerank_case(case: Mapping[str, Any], calls_rerank: Mapping[str, A
             if stored is not None and stored in final_state:
                 _assert_rerank_response(response, cast("Mapping[str, Any]", final_state[stored]))
             _check_rerank_success_invariants(response, documents, invariants)
+        _assert_wire_requests(captured, case, _RERANK_PATHS[mapping])
+        _assert_contains_event(events, expected)
     finally:
+        cleanup()
         await provider.aclose()
