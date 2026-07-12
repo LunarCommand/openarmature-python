@@ -637,6 +637,40 @@ async def test_rerank_top_k_maps_to_top_n_and_return_documents_not_sent() -> Non
     await provider.aclose()
 
 
+async def test_cohere_rerank_document_echo_shared_rule() -> None:
+    # §6 (0097): Cohere is on the shared document_echo rule -- a TextDoc object
+    # echo unwraps to its text; a text-less object (or absent) yields null.
+    def handler(_req: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json=_rerank_body(
+                results=[
+                    {"index": 0, "relevance_score": 0.9, "document": {"text": "echoed"}},
+                    {"index": 1, "relevance_score": 0.5, "document": {"image": "..."}},
+                ]
+            ),
+        )
+
+    provider = _rerank_provider(handler)
+    response = await provider.rerank("q", ["a", "b"], config=RerankRuntimeConfig(return_documents=True))
+    await provider.aclose()
+    assert {r.index: r.document for r in response.results} == {0: "echoed", 1: None}
+
+
+async def test_cohere_rerank_non_object_document_echo_raises() -> None:
+    # §6 (0097): a non-object scalar echo is wire corruption -> provider_invalid_response.
+    def handler(_req: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json=_rerank_body(results=[{"index": 0, "relevance_score": 0.9, "document": 123}]),
+        )
+
+    provider = _rerank_provider(handler)
+    with pytest.raises(ProviderInvalidResponse):
+        await provider.rerank("q", ["a"], config=RerankRuntimeConfig(return_documents=True))
+    await provider.aclose()
+
+
 # --- typed-event dispatch ---------------------------------------------------
 
 
@@ -1152,6 +1186,19 @@ async def test_tei_rerank_chunk_local_index_out_of_range_raises() -> None:
     await provider.aclose()
 
 
+async def test_tei_rerank_non_object_text_echo_raises() -> None:
+    # §6 (0097): TEI is on the shared document_echo rule -- its `text` echo is a
+    # bare string in practice, but a non-object scalar (wire corruption) raises
+    # provider_invalid_response rather than folding to null.
+    def handler(_req: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=[{"index": 0, "score": 0.9, "text": 123}])
+
+    provider = _tei_rerank_provider(handler)
+    with pytest.raises(ProviderInvalidResponse):
+        await provider.rerank("q", ["a"], config=RerankRuntimeConfig(return_documents=True))
+    await provider.aclose()
+
+
 def test_tei_base_url_strips_trailing_slash() -> None:
     provider = TeiEmbeddingProvider(base_url="http://tei-embed.test/", model="m")
     assert provider.base_url == "http://tei-embed.test"
@@ -1335,9 +1382,10 @@ async def test_jina_rerank_document_echo_unwraps_textdoc_object() -> None:
     # Jina's real /v1/rerank echoes the document as a TextDoc OBJECT
     # ({"text": ...}) when return_documents=true, not a bare string -- its
     # OpenAPI types `document` as anyOf[string, TextDoc, ImageDoc, null]. The
-    # mapping unwraps either shape onto ScoredDocument.document (§6); a shape
-    # with no string text (an ImageDoc, a malformed entry) yields null, and the
-    # verbatim object is preserved on RerankResponse.raw.
+    # mapping unwraps either shape onto ScoredDocument.document (§6); a text-less
+    # object (an ImageDoc) or an absent/null echo yields null, an empty string is
+    # present (surfaced as ""), and the verbatim object is preserved on
+    # RerankResponse.raw.
     def handler(_req: httpx.Request) -> httpx.Response:
         return httpx.Response(
             200,
@@ -1347,21 +1395,45 @@ async def test_jina_rerank_document_echo_unwraps_textdoc_object() -> None:
                 "results": [
                     {"index": 0, "relevance_score": 0.9, "document": {"text": "doc a"}},
                     {"index": 1, "relevance_score": 0.5, "document": "doc b"},
-                    {"index": 2, "relevance_score": 0.1, "document": {"image": "..."}},
+                    {"index": 2, "relevance_score": 0.4, "document": {"image": "..."}},
+                    {"index": 3, "relevance_score": 0.3, "document": ""},
+                    {"index": 4, "relevance_score": 0.1, "document": None},
                 ],
             },
         )
 
     provider = _jina_rerank_provider(handler)
     config = RerankRuntimeConfig(return_documents=True)
-    response = await provider.rerank("q", ["doc a", "doc b", "doc c"], config=config)
+    response = await provider.rerank("q", ["a", "b", "c", "d", "e"], config=config)
     await provider.aclose()
 
-    # TextDoc object -> its text; bare string -> itself; non-text shape -> null.
-    assert {r.index: r.document for r in response.results} == {0: "doc a", 1: "doc b", 2: None}
+    # TextDoc object -> its text; bare string -> itself; text-less object -> null;
+    # empty string -> "" (present, distinct from absent); null -> null.
+    echoes = {r.index: r.document for r in response.results}
+    assert echoes == {0: "doc a", 1: "doc b", 2: None, 3: "", 4: None}
     # The verbatim TextDoc object is still reachable on raw.
     assert isinstance(response.raw, dict)
     assert response.raw["results"][0]["document"] == {"text": "doc a"}
+
+
+async def test_jina_rerank_non_object_document_echo_raises() -> None:
+    # 0097: a non-object scalar echo (number / array / bool -- outside Jina's
+    # documented anyOf[string, TextDoc, ImageDoc, null]) is wire corruption and
+    # raises provider_invalid_response, NOT folded to null.
+    def handler(_req: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "model": "jina-reranker-test",
+                "usage": {"total_tokens": 4},
+                "results": [{"index": 0, "relevance_score": 0.9, "document": 123}],
+            },
+        )
+
+    provider = _jina_rerank_provider(handler)
+    with pytest.raises(ProviderInvalidResponse):
+        await provider.rerank("q", ["doc a"], config=RerankRuntimeConfig(return_documents=True))
+    await provider.aclose()
 
 
 async def test_jina_rerank_relevance_score_parse_sorted_and_usage() -> None:

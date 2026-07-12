@@ -61,6 +61,7 @@ from .._events import (
     build_embedding_failed_event,
     build_rerank_event,
     build_rerank_failed_event,
+    document_echo,
     normalize_base_url,
 )
 from ..provider import (
@@ -150,25 +151,6 @@ def _nonneg_int(value: Any) -> int | None:
     # back to None (the call succeeded; usage is secondary).
     if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
         return value
-    return None
-
-
-# §6: ScoredDocument.document carries the provider's string echo verbatim when
-# present, null otherwise -- never fabricated from the input documents. Jina
-# types `document` as anyOf[string, TextDoc{text}, ImageDoc, null] (its OpenAPI
-# schema); the text reranker returns the TextDoc OBJECT form {"text": "..."}
-# when return_documents=true, while a bare string is also valid. Extract the
-# string from either shape; any other shape (an ImageDoc, a malformed entry, an
-# absent echo) yields null -- the verbatim object is preserved on
-# RerankResponse.raw regardless.
-def _document_echo(value: Any) -> str | None:
-    """Extract the string document echo from Jina's string-or-TextDoc shape."""
-    if isinstance(value, str):
-        return value
-    if isinstance(value, dict):
-        text = cast("dict[str, Any]", value).get("text")
-        if isinstance(text, str):
-            return text
     return None
 
 
@@ -662,12 +644,10 @@ class JinaRerankProvider:
                 raise ProviderInvalidResponse(
                     "rerank response entry has a missing or non-numeric 'relevance_score'"
                 )
-            # Read the document echo only when present; never auto-fill from the
-            # input documents list (§6 -- the provider's echo and the caller's
-            # input are two different surfaces). Jina echoes text as a TextDoc
-            # object ({"text": ...}), so _document_echo unwraps either the object
-            # or a bare-string shape onto the string field.
-            document = _document_echo(entry.get("document"))
+            # Read the document echo per the shared §6 (0097) rule; never
+            # auto-fill from the input documents. Jina echoes text as a TextDoc
+            # object ({"text": ...}), which document_echo unwraps to the string.
+            document = document_echo(entry.get("document"))
             scored.append(ScoredDocument(index=index, relevance_score=float(score), document=document))
         # §6: sort by relevance_score descending before validating / returning.
         scored.sort(key=lambda s: s.relevance_score, reverse=True)

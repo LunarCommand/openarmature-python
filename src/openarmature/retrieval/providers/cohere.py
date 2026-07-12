@@ -44,7 +44,7 @@ from openarmature.llm.errors import (
 )
 from openarmature.observability.correlation import current_dispatch
 
-from .._events import build_rerank_event, build_rerank_failed_event, normalize_base_url
+from .._events import build_rerank_event, build_rerank_failed_event, document_echo, normalize_base_url
 from ..provider import validate_rerank_input, validate_rerank_response
 from ..response import RerankResponse, RerankRuntimeConfig, RerankUsage, ScoredDocument
 
@@ -306,11 +306,10 @@ class CohereRerankProvider:
                 raise ProviderInvalidResponse(
                     "rerank response entry has a missing or non-numeric 'relevance_score'"
                 )
-            # Read ``document`` only when present; never auto-fill from the
-            # input documents list (§6 -- the provider's echo and the caller's
-            # input are two different surfaces).
-            document_raw = entry.get("document")
-            document = document_raw if isinstance(document_raw, str) else None
+            # Read the document echo per the shared §6 (0097) rule; never
+            # auto-fill from the input documents. Cohere v2 does not echo, so
+            # this is null in practice, but a compatible gateway may return one.
+            document = document_echo(entry.get("document"))
             scored.append(ScoredDocument(index=index, relevance_score=float(score), document=document))
         # §6: sort by relevance_score descending before validating / returning.
         scored.sort(key=lambda s: s.relevance_score, reverse=True)
