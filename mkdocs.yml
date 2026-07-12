@@ -163,6 +163,10 @@ nav:
 extra:
   # Hide the "Made with Material for MkDocs" footer.
   generator: false
+  # Google Analytics via Material's native provider (injects gtag.js at build).
+  analytics:
+    provider: google
+    property: G-W2RSTXF729
   social:
     - icon: fontawesome/brands/github
       link: https://github.com/LunarCommand
