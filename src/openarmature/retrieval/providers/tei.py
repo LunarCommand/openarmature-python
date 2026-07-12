@@ -50,13 +50,12 @@ from openarmature.llm.errors import (
 from openarmature.observability.correlation import current_dispatch
 
 from .._events import (
-    apply_client_side_prefix,
     build_embedding_event,
     build_embedding_failed_event,
     build_rerank_event,
     build_rerank_failed_event,
-    document_echo,
 )
+from .._wire import apply_client_side_prefix, document_echo
 from ..provider import (
     validate_embedding_input,
     validate_embedding_response,

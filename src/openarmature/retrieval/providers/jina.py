@@ -61,9 +61,8 @@ from .._events import (
     build_embedding_failed_event,
     build_rerank_event,
     build_rerank_failed_event,
-    document_echo,
-    normalize_base_url,
 )
+from .._wire import document_echo, normalize_base_url
 from ..provider import (
     validate_embedding_input,
     validate_embedding_response,
