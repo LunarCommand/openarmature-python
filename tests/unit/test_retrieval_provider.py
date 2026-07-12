@@ -1184,6 +1184,7 @@ async def test_cohere_embed_embedding_types_extra_merges_float_not_clobbers() ->
 
     cfg_both = EmbeddingRuntimeConfig.model_validate({"embedding_types": ["float", "int8"]})
     cfg_int8 = EmbeddingRuntimeConfig.model_validate({"embedding_types": ["int8"]})
+    cfg_bad = EmbeddingRuntimeConfig.model_validate({"embedding_types": [{"x": 1}]})
     provider = _cohere_embed_provider(handler)
     # Caller adds int8 alongside float -> both reach the wire (float NOT clobbered).
     await provider.embed(["x"], config=cfg_both)
@@ -1191,11 +1192,14 @@ async def test_cohere_embed_embedding_types_extra_merges_float_not_clobbers() ->
     await provider.embed(["x"], config=cfg_int8)
     # No embedding_types extra -> the ["float"] default.
     await provider.embed(["x"])
+    # Malformed (non-string elements) -> falls back to ["float"], not sent verbatim.
+    await provider.embed(["x"], config=cfg_bad)
     await provider.aclose()
 
     assert captured[0]["embedding_types"] == ["float", "int8"]
     assert captured[1]["embedding_types"] == ["int8", "float"]
     assert captured[2]["embedding_types"] == ["float"]
+    assert captured[3]["embedding_types"] == ["float"]
 
 
 async def test_cohere_embed_per_chunk_count_mismatch_raises_despite_matching_total() -> None:

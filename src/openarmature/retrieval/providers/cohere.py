@@ -700,8 +700,12 @@ class CohereEmbeddingProvider:
         # only when a caller's embedding_types omits it (§8.4). A malformed /
         # empty embedding_types extra falls back to ["float"].
         caller_types = request_extras.get("embedding_types")
-        if isinstance(caller_types, list) and caller_types:
-            embedding_types = list(cast("list[Any]", caller_types))
+        if (
+            isinstance(caller_types, list)
+            and caller_types
+            and all(isinstance(t, str) and t for t in cast("list[object]", caller_types))
+        ):
+            embedding_types = list(cast("list[str]", caller_types))
             if "float" not in embedding_types:
                 embedding_types.append("float")
         else:
