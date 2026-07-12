@@ -50,6 +50,7 @@ from openarmature.llm.errors import (
 from openarmature.observability.correlation import current_dispatch
 
 from .._events import (
+    apply_client_side_prefix,
     build_embedding_event,
     build_embedding_failed_event,
     build_rerank_event,
@@ -317,23 +318,18 @@ class TeiEmbeddingProvider:
             else:
                 # Client-side prefix fallback: prepend for models without
                 # configured prompts. Only "query" / "document" have prefixes.
-                prefix = self._prefix_for(input_type)
-                if prefix is not None:
-                    inputs = [prefix + s for s in inputs]
+                inputs = apply_client_side_prefix(
+                    inputs,
+                    input_type,
+                    query_prefix=self._query_prefix,
+                    document_prefix=self._document_prefix,
+                )
         body: dict[str, Any] = {**request_extras, "inputs": inputs}
         if prompt_name is not None:
             body["prompt_name"] = prompt_name
         if dimensions is not None:
             body["dimensions"] = dimensions
         return body
-
-    def _prefix_for(self, input_type: str) -> str | None:
-        """Return the client-side prefix for ``input_type``, or ``None``."""
-        if input_type == "query":
-            return self._query_prefix
-        if input_type == "document":
-            return self._document_prefix
-        return None
 
     def _parse_response(
         self,

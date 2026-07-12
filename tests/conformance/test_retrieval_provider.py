@@ -75,11 +75,11 @@ _DEFAULT_RERANK_MODEL = "rerank-test"
 #
 # The v0.84.0 pin bump also introduced the retrieval-provider WIRE-MAPPING
 # fixtures (013-027) for proposals 0077 (TEI) / 0078 (Jina) / 0079
-# (OpenAI-compatible). The TEI batch (013-017) and the Jina batch (018-022) now
-# ship: this runner captures the outbound httpx.Request bodies + headers through
-# the MockTransport and asserts them against expected_wire_request /
-# expected_wire_headers (proposals 0077 / 0078). The OpenAI-compatible (023-027)
-# mapping remains unshipped, so it stays deferred until its impl PR.
+# (OpenAI-compatible). The TEI batch (013-017), the Jina batch (018-022), and
+# the OpenAI-compatible batch (023-027) now ship: this runner captures the
+# outbound httpx.Request bodies + headers through the MockTransport and asserts
+# them against expected_wire_request / expected_wire_headers (proposals 0077 /
+# 0078 / 0079).
 #
 # The v0.88.0 pin pulls in the Cohere wire mappings + the general embed
 # batch-chunking rule: 028-031 (0090 Cohere rerank), 032-037 (0091 Cohere
@@ -89,16 +89,6 @@ _DEFAULT_RERANK_MODEL = "rerank-test"
 # 006-012; the 0090 Cohere wire-mapping fixtures 028-031 assert the request-
 # side wire contract, deferred until the Cohere wire-mapping impl PR.)
 _DEFERRED_FIXTURES: dict[str, str] = {
-    **{
-        p.stem: (
-            "OpenAI-compatible embed wire ships via the bundled OpenAIEmbeddingProvider "
-            "(proposal 0059); deferred because the harness lacks a wire-capture primitive "
-            "(expected_wire_request / url / headers) and 0079's dimensions / input_type "
-            "request knobs are unimplemented"
-        )
-        for p in CONFORMANCE_DIR.glob("[0-9][0-9][0-9]-*.yaml")
-        if 23 <= int(p.stem[:3]) <= 27
-    },
     **{
         p.stem: "Cohere rerank wire mapping (proposal 0090) not implemented"
         for p in CONFORMANCE_DIR.glob("[0-9][0-9][0-9]-*.yaml")
@@ -168,8 +158,11 @@ def _build_provider(
     ``mapping: tei`` builds a TeiEmbeddingProvider from the suite-level
     ``tei_embedding_provider`` block; ``mapping: jina`` builds a
     JinaEmbeddingProvider from ``jina_embedding_provider`` (api_key from the
-    block, sent as Authorization: Bearer); any other value (or absent) builds
-    the default OpenAIEmbeddingProvider. All drive the same MockTransport.
+    block, sent as Authorization: Bearer). ``mapping: openai`` builds an
+    OpenAIEmbeddingProvider from the ``openai_embedding_provider`` block
+    (base_url / model / api_key + optional query_prefix / document_prefix);
+    any other value (or absent) builds the default OpenAIEmbeddingProvider.
+    All drive the same MockTransport.
     """
     transport, captured = _build_handler(responses)
     if mapping == "tei":
@@ -193,12 +186,33 @@ def _build_provider(
             transport=transport,
         )
     else:
-        provider = OpenAIEmbeddingProvider(
-            base_url="http://mock-embed.test",
-            model=model,
-            api_key="test-key",
-            transport=transport,
-        )
+        block = cast("Mapping[str, Any] | None", spec.get("openai_embedding_provider"))
+        if block is not None:
+            # The §8.3 wire-mapping fixtures (023-027) declare the bound
+            # provider in openai_embedding_provider: base_url / model / api_key
+            # (sent as Authorization: Bearer) + the optional client-side
+            # query_prefix / document_prefix (027's asymmetric-endpoint case).
+            # base_url / api_key are read with defaults -- §8.3 makes base_url
+            # optional (the provider defaults to the OpenAI origin) and api_key
+            # optional (no auth header), so a block that omits either binds the
+            # default rather than raising KeyError.
+            provider = OpenAIEmbeddingProvider(
+                base_url=cast("str", block.get("base_url", "https://api.openai.com")),
+                model=cast("str", block.get("model", model)),
+                api_key=cast("str | None", block.get("api_key")),
+                transport=transport,
+                query_prefix=cast("str | None", block.get("query_prefix")),
+                document_prefix=cast("str | None", block.get("document_prefix")),
+            )
+        else:
+            # The pre-0079 protocol fixtures (001-012, mapping absent) carry no
+            # provider block; the default construction serves them.
+            provider = OpenAIEmbeddingProvider(
+                base_url="http://mock-embed.test",
+                model=model,
+                api_key="test-key",
+                transport=transport,
+            )
     return provider, captured
 
 
@@ -391,6 +405,7 @@ def _assert_one_wire_request(
     absent_keys: list[str],
     expected_path: str,
     expected_headers: Mapping[str, str] | None = None,
+    expected_base_url: str | None = None,
 ) -> None:
     """Assert a single captured request against one expected_wire_request body.
 
@@ -399,9 +414,20 @@ def _assert_one_wire_request(
     exact key set). When ``expected_headers`` is supplied (the hosted-vendor
     mappings' expected_wire_headers), each named request header must be present
     with the given value (subset match; httpx header names are case-insensitive).
+    When ``expected_base_url`` is supplied (the provider's bound base_url), the
+    request's origin (scheme + host + port) must match it -- this is what makes
+    the base_url-override fixtures actually verify routing, since MockTransport
+    intercepts every host and the path alone would pass a hardcoded-origin
+    regression.
     """
     assert request.method == "POST", f"expected POST, got {request.method}"
     assert request.url.path == expected_path, f"wire path {request.url.path!r} != {expected_path!r}"
+    if expected_base_url is not None:
+        want_origin = httpx.URL(expected_base_url)
+        got_origin = (request.url.scheme, request.url.host, request.url.port)
+        assert got_origin == (want_origin.scheme, want_origin.host, want_origin.port), (
+            f"wire request routed to {request.url!r}, expected origin {expected_base_url!r}"
+        )
     body = cast("dict[str, Any]", json.loads(request.content))
     for key, val in want.items():
         assert key in body, f"wire body missing key {key!r}"
@@ -425,12 +451,15 @@ def _assert_wire_requests(
     captured: list[httpx.Request],
     case: Mapping[str, Any],
     expected_path: str,
+    expected_base_url: str | None = None,
 ) -> None:
     """Assert the captured requests against expected_wire_request.
 
     Supports both forms: a single dict (one request) and a list of dicts (one
     per chunk, in arrival order) plus expected_wire_request_count. Skips when
     the fixture declares no expected_wire_request (the pre-0077 fixtures).
+    ``expected_base_url`` (the provider's bound base_url) is asserted as the
+    request origin so the base_url-override fixtures verify routing.
     """
     expected = case.get("expected_wire_request")
     if expected is None:
@@ -446,13 +475,13 @@ def _assert_wire_requests(
             f"captured {len(captured)} requests, expected_wire_request lists {len(bodies)}"
         )
         for request, want in zip(captured, bodies, strict=True):
-            _assert_one_wire_request(request, want, absent_keys, expected_path, headers)
+            _assert_one_wire_request(request, want, absent_keys, expected_path, headers, expected_base_url)
     else:
         want = cast("Mapping[str, Any]", expected)
         if count is not None:
             assert len(captured) == count, f"expected {count} requests, captured {len(captured)}"
         assert len(captured) == 1, f"single-body form expects exactly one request, captured {len(captured)}"
-        _assert_one_wire_request(captured[0], want, absent_keys, expected_path, headers)
+        _assert_one_wire_request(captured[0], want, absent_keys, expected_path, headers, expected_base_url)
 
 
 # -- typed-observer assertion (contains_event on the dispatched typed events) --
@@ -556,7 +585,7 @@ async def _run_one_case(case: Mapping[str, Any], spec: Mapping[str, Any]) -> Non
             if stored is not None and stored in final_state:
                 _assert_embedding_response(response, cast("Mapping[str, Any]", final_state[stored]))
             _check_success_invariants(response, input_strings, invariants)
-        _assert_wire_requests(captured, case, _EMBED_PATHS[mapping])
+        _assert_wire_requests(captured, case, _EMBED_PATHS[mapping], provider.base_url)
         _assert_contains_event(events, expected)
     finally:
         cleanup()
@@ -600,7 +629,7 @@ async def _run_rerank_case(
             if stored is not None and stored in final_state:
                 _assert_rerank_response(response, cast("Mapping[str, Any]", final_state[stored]))
             _check_rerank_success_invariants(response, documents, invariants)
-        _assert_wire_requests(captured, case, _RERANK_PATHS[mapping])
+        _assert_wire_requests(captured, case, _RERANK_PATHS[mapping], provider.base_url)
         _assert_contains_event(events, expected)
     finally:
         cleanup()

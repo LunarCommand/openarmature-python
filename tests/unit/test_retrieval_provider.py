@@ -133,6 +133,234 @@ async def test_readiness_models_probe_raises_on_malformed_catalog() -> None:
     await provider.aclose()
 
 
+# --- OpenAI /v1/embeddings wire mapping (§8.3, fixtures 023-027) -------------
+
+
+def _openai_embed_provider(
+    handler: Any, *, model: str = "text-embedding-test", **kwargs: Any
+) -> OpenAIEmbeddingProvider:
+    return OpenAIEmbeddingProvider(
+        base_url="https://api.openai.invalid",
+        model=model,
+        api_key="test-openai-key",
+        transport=httpx.MockTransport(handler),
+        **kwargs,
+    )
+
+
+def _openai_embed_body(
+    *,
+    model: str = "text-embedding-test",
+    data: list[dict[str, Any]],
+    prompt_tokens: int = 6,
+) -> dict[str, Any]:
+    return {
+        "object": "list",
+        "model": model,
+        "data": data,
+        "usage": {"prompt_tokens": prompt_tokens, "total_tokens": prompt_tokens},
+    }
+
+
+async def test_openai_embed_wire_body_array_form_and_input_order() -> None:
+    captured: list[dict[str, Any]] = []
+    auth: list[str | None] = []
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        captured.append(json.loads(req.content))
+        auth.append(req.headers.get("Authorization"))
+        assert req.url.path == "/v1/embeddings"
+        # `data` emitted OUT of input order (index 2, 0, 1) to make the
+        # index-keyed input-order mapping load-bearing.
+        return httpx.Response(
+            200,
+            json=_openai_embed_body(
+                data=[
+                    {"object": "embedding", "index": 2, "embedding": [0.21, 0.22, 0.23, 0.24]},
+                    {"object": "embedding", "index": 0, "embedding": [0.01, 0.02, 0.03, 0.04]},
+                    {"object": "embedding", "index": 1, "embedding": [0.11, 0.12, 0.13, 0.14]},
+                ],
+                prompt_tokens=6,
+            ),
+        )
+
+    provider = _openai_embed_provider(handler)
+    response = await provider.embed(["alpha string", "beta string", "gamma string"])
+    await provider.aclose()
+
+    # The wire body is exactly the array form {model, input} -- no dimensions /
+    # encoding_format / input_type / task.
+    assert captured[0] == {
+        "model": "text-embedding-test",
+        "input": ["alpha string", "beta string", "gamma string"],
+    }
+    assert auth[0] == "Bearer test-openai-key"
+    # Vectors keyed by INPUT order, not data[] array position.
+    assert response.vectors == [
+        [0.01, 0.02, 0.03, 0.04],
+        [0.11, 0.12, 0.13, 0.14],
+        [0.21, 0.22, 0.23, 0.24],
+    ]
+    assert response.dimensions == 4
+    assert response.usage is not None
+    assert response.usage.input_tokens == 6
+    # OpenAI embeddings carry no id.
+    assert response.response_id is None
+
+
+async def test_openai_embed_dimensions_on_wire_and_in_request_params() -> None:
+    captured: list[dict[str, Any]] = []
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        captured.append(json.loads(req.content))
+        return httpx.Response(
+            200,
+            json=_openai_embed_body(
+                data=[{"object": "embedding", "index": 0, "embedding": [0.01, 0.02, 0.03, 0.04]}],
+                prompt_tokens=2,
+            ),
+        )
+
+    provider = _openai_embed_provider(handler)
+    events, token = _collecting_dispatch()
+    try:
+        response = await provider.embed(["alpha string"], config=EmbeddingRuntimeConfig(dimensions=4))
+    finally:
+        await provider.aclose()
+        _reset_active_dispatch(token)
+
+    # dimensions maps onto the wire alongside {model, input}; no input_type /
+    # task / encoding_format.
+    assert captured[0] == {"model": "text-embedding-test", "input": ["alpha string"], "dimensions": 4}
+    assert response.dimensions == 4
+    embed_events = [e for e in events if isinstance(e, EmbeddingEvent)]
+    assert embed_events[0].request_params == {"dimensions": 4}
+
+
+async def test_openai_embed_input_type_is_wire_noop_on_symmetric_provider() -> None:
+    # No query_prefix / document_prefix bound (pure-symmetric OpenAI): input_type
+    # is a true wire no-op -- byte-identical body, input verbatim -- yet still
+    # reaches EmbeddingEvent.request_params (empty when absent).
+    captured: list[dict[str, Any]] = []
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        captured.append(json.loads(req.content))
+        return httpx.Response(
+            200,
+            json=_openai_embed_body(
+                data=[{"object": "embedding", "index": 0, "embedding": [0.10, 0.20, 0.30, 0.40]}],
+                prompt_tokens=8,
+            ),
+        )
+
+    provider = _openai_embed_provider(handler)
+    events, token = _collecting_dispatch()
+    try:
+        await provider.embed(
+            ["how tall is the eiffel tower?"], config=EmbeddingRuntimeConfig(input_type="query")
+        )
+        await provider.embed(["how tall is the eiffel tower?"])
+    finally:
+        await provider.aclose()
+        _reset_active_dispatch(token)
+
+    # The with-input_type body is byte-identical to the no-input_type body:
+    # exactly {model, input}, input un-prefixed, no input_type / task field.
+    assert captured[0] == {"model": "text-embedding-test", "input": ["how tall is the eiffel tower?"]}
+    assert captured[0] == captured[1]
+    embed_events = [e for e in events if isinstance(e, EmbeddingEvent)]
+    # input_type reaches request_params when supplied, empty when absent.
+    assert embed_events[0].request_params == {"input_type": "query"}
+    assert embed_events[1].request_params == {}
+
+
+async def test_openai_embed_client_side_prefix_prepends_per_input_type() -> None:
+    # An asymmetric model behind a compatible endpoint: query_prefix /
+    # document_prefix bound at construction, so input_type selects which prefix
+    # to prepend client-side. The wire `input` carries the prefixed text; the
+    # event carries the UN-prefixed caller intent + input.
+    captured: list[dict[str, Any]] = []
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        captured.append(json.loads(req.content))
+        return httpx.Response(
+            200,
+            json=_openai_embed_body(
+                model="e5-base-en-test",
+                data=[{"object": "embedding", "index": 0, "embedding": [0.1, 0.2, 0.3, 0.4]}],
+                prompt_tokens=9,
+            ),
+        )
+
+    provider = _openai_embed_provider(
+        handler, model="e5-base-en-test", query_prefix="query: ", document_prefix="passage: "
+    )
+    events, token = _collecting_dispatch()
+    try:
+        await provider.embed(
+            ["how tall is the eiffel tower?"], config=EmbeddingRuntimeConfig(input_type="query")
+        )
+        await provider.embed(
+            ["the eiffel tower is 330 metres tall."], config=EmbeddingRuntimeConfig(input_type="document")
+        )
+    finally:
+        await provider.aclose()
+        _reset_active_dispatch(token)
+
+    # input_type "query" -> query_prefix prepend; "document" -> document_prefix.
+    # No input_type / task field on the wire (the distinction lives in the text).
+    assert captured[0] == {"model": "e5-base-en-test", "input": ["query: how tall is the eiffel tower?"]}
+    assert captured[1] == {
+        "model": "e5-base-en-test",
+        "input": ["passage: the eiffel tower is 330 metres tall."],
+    }
+    embed_events = [e for e in events if isinstance(e, EmbeddingEvent)]
+    assert embed_events[0].request_params == {"input_type": "query"}
+    assert embed_events[0].input_strings == ["how tall is the eiffel tower?"]
+    assert embed_events[1].request_params == {"input_type": "document"}
+
+
+async def test_openai_embed_base_url_override_routes_to_compatible_backend() -> None:
+    # base_url override (a vLLM-style origin): the mapping appends the fixed
+    # /v1/embeddings route to the overridden origin (no doubled /v1).
+    urls: list[str] = []
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        urls.append(str(req.url))
+        return httpx.Response(
+            200,
+            json=_openai_embed_body(
+                data=[
+                    {"object": "embedding", "index": 0, "embedding": [0.01, 0.02, 0.03, 0.04]},
+                    {"object": "embedding", "index": 1, "embedding": [0.11, 0.12, 0.13, 0.14]},
+                ],
+                prompt_tokens=4,
+            ),
+        )
+
+    provider = OpenAIEmbeddingProvider(
+        base_url="http://vllm.invalid",
+        model="text-embedding-test",
+        api_key="test-openai-key",
+        transport=httpx.MockTransport(handler),
+    )
+    response = await provider.embed(["alpha string", "beta string"])
+    await provider.aclose()
+
+    assert urls[0] == "http://vllm.invalid/v1/embeddings"
+    assert len(response.vectors) == 2
+
+
+async def test_openai_embed_base_url_defaults_to_openai_origin() -> None:
+    # base_url is optional per §8.3: an unspecified base_url binds the OpenAI
+    # origin (host root; the provider appends /v1/embeddings itself).
+    provider = OpenAIEmbeddingProvider(model="text-embedding-test", api_key="k")
+    try:
+        assert provider.base_url == "https://api.openai.com"
+    finally:
+        await provider.aclose()
+
+
 def _embedding_event() -> EmbeddingEvent:
     return EmbeddingEvent(
         invocation_id="inv",
