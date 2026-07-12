@@ -32,6 +32,7 @@ from openarmature.llm.errors import (
 )
 from openarmature.observability.correlation import _reset_active_dispatch, _set_active_dispatch
 from openarmature.retrieval import (
+    CohereEmbeddingProvider,
     CohereRerankProvider,
     EmbeddingRuntimeConfig,
     JinaEmbeddingProvider,
@@ -903,6 +904,338 @@ async def test_langfuse_observer_rerank_no_op_without_invocation_context() -> No
     await observer(_rerank_event())
     await observer(_rerank_failed_event())
     assert client.traces == {}
+
+
+# ---------------------------------------------------------------------------
+# Cohere embed wire mapping (proposal 0091, §8.4 /v2/embed)
+# ---------------------------------------------------------------------------
+
+
+def _cohere_embed_provider(
+    handler: Any, *, model: str = "cohere-embed-test", **kwargs: Any
+) -> CohereEmbeddingProvider:
+    return CohereEmbeddingProvider(
+        base_url="https://api.cohere.invalid",
+        model=model,
+        api_key="test-cohere-key",
+        transport=httpx.MockTransport(handler),
+        **kwargs,
+    )
+
+
+def _cohere_embed_body(
+    *,
+    id: str = "cohere-embed-id",
+    vectors: list[list[float]],
+    input_tokens: int | None = 6,
+) -> dict[str, Any]:
+    body: dict[str, Any] = {"id": id, "embeddings": {"float": vectors}}
+    if input_tokens is not None:
+        body["meta"] = {"billed_units": {"input_tokens": input_tokens}}
+    return body
+
+
+async def test_cohere_embed_wire_body_and_input_order() -> None:
+    captured: list[dict[str, Any]] = []
+    auth: list[str | None] = []
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        captured.append(json.loads(req.content))
+        auth.append(req.headers.get("Authorization"))
+        assert req.url.path == "/v2/embed"
+        return httpx.Response(
+            200,
+            json=_cohere_embed_body(
+                id="cohere-embed-032",
+                vectors=[[0.01, 0.02, 0.03, 0.04], [0.11, 0.12, 0.13, 0.14]],
+                input_tokens=6,
+            ),
+        )
+
+    provider = _cohere_embed_provider(handler)
+    response = await provider.embed(["alpha", "beta"])
+    await provider.aclose()
+
+    # The wire body is exactly {model, input_type, texts, embedding_types,
+    # truncate} -- input_type is the mandatory-field default (search_document,
+    # no input_type supplied), no output_dimension (no dimensions supplied).
+    assert captured[0] == {
+        "model": "cohere-embed-test",
+        "input_type": "search_document",
+        "texts": ["alpha", "beta"],
+        "embedding_types": ["float"],
+        "truncate": "NONE",
+    }
+    assert auth[0] == "Bearer test-cohere-key"
+    # embeddings.float assembled in input order (positional, not index-keyed).
+    assert response.vectors == [[0.01, 0.02, 0.03, 0.04], [0.11, 0.12, 0.13, 0.14]]
+    assert response.dimensions == 4
+    assert response.usage is not None
+    assert response.usage.input_tokens == 6
+    assert response.response_id == "cohere-embed-032"
+    # Cohere echoes no model field -> the bound id.
+    assert response.model == "cohere-embed-test"
+    # Single call -> raw is the verbatim object (not a 1-element list).
+    assert response.raw == _cohere_embed_body(
+        id="cohere-embed-032",
+        vectors=[[0.01, 0.02, 0.03, 0.04], [0.11, 0.12, 0.13, 0.14]],
+        input_tokens=6,
+    )
+
+
+async def test_cohere_embed_input_type_query_and_document_map_to_wire() -> None:
+    captured: list[dict[str, Any]] = []
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        captured.append(json.loads(req.content))
+        return httpx.Response(200, json=_cohere_embed_body(vectors=[[0.1, 0.2, 0.3, 0.4]], input_tokens=8))
+
+    provider = _cohere_embed_provider(handler)
+    events, token = _collecting_dispatch()
+    try:
+        await provider.embed(
+            ["how tall is the eiffel tower?"], config=EmbeddingRuntimeConfig(input_type="query")
+        )
+        await provider.embed(
+            ["the eiffel tower is 330 metres tall."], config=EmbeddingRuntimeConfig(input_type="document")
+        )
+    finally:
+        await provider.aclose()
+        _reset_active_dispatch(token)
+
+    # The closed set maps query -> search_query, document -> search_document.
+    assert captured[0]["input_type"] == "search_query"
+    assert captured[1]["input_type"] == "search_document"
+    embed_events = [e for e in events if isinstance(e, EmbeddingEvent)]
+    # request_params carries the caller's ORIGINAL value, not the wire mapping.
+    assert embed_events[0].request_params == {"input_type": "query"}
+    assert embed_events[1].request_params == {"input_type": "document"}
+
+
+async def test_cohere_embed_input_type_absent_sends_search_document_default() -> None:
+    # Cohere v2 requires input_type, so the absent case sends the search_document
+    # default -- but request_params stays EMPTY (absence-is-meaningful: the wire
+    # default MUST NOT leak back onto the event as if the caller set it).
+    captured: list[dict[str, Any]] = []
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        captured.append(json.loads(req.content))
+        return httpx.Response(200, json=_cohere_embed_body(vectors=[[0.5, 0.6, 0.7, 0.8]], input_tokens=9))
+
+    provider = _cohere_embed_provider(handler)
+    events, token = _collecting_dispatch()
+    try:
+        await provider.embed(["the eiffel tower is 330 metres tall."])
+    finally:
+        await provider.aclose()
+        _reset_active_dispatch(token)
+
+    assert captured[0]["input_type"] == "search_document"
+    assert captured[0]["embedding_types"] == ["float"]
+    assert captured[0]["truncate"] == "NONE"
+    assert "output_dimension" not in captured[0]
+    embed_events = [e for e in events if isinstance(e, EmbeddingEvent)]
+    assert embed_events[0].request_params == {}
+
+
+async def test_cohere_embed_unrecognized_input_type_rejected_pre_send() -> None:
+    # An OA input_type outside the closed query / document set is a pre-send
+    # provider_invalid_request; no /v2/embed request is issued (no silent
+    # coercion to the search_document default -- that default is absent-only).
+    def handler(_req: httpx.Request) -> httpx.Response:  # pragma: no cover - never called
+        raise AssertionError("provider must not be contacted on pre-send validation failure")
+
+    provider = _cohere_embed_provider(handler)
+    with pytest.raises(ProviderInvalidRequest):
+        await provider.embed(["alpha"], config=EmbeddingRuntimeConfig(input_type="summarization"))
+    await provider.aclose()
+
+
+async def test_cohere_embed_output_dimension_from_dimensions() -> None:
+    captured: list[dict[str, Any]] = []
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        captured.append(json.loads(req.content))
+        return httpx.Response(
+            200,
+            json=_cohere_embed_body(
+                vectors=[[0.01, 0.02, 0.03, 0.04, 0.05, 0.06, 0.07, 0.08]], input_tokens=2
+            ),
+        )
+
+    provider = _cohere_embed_provider(handler)
+    events, token = _collecting_dispatch()
+    try:
+        response = await provider.embed(["alpha string"], config=EmbeddingRuntimeConfig(dimensions=8))
+    finally:
+        await provider.aclose()
+        _reset_active_dispatch(token)
+
+    # dimensions maps to Cohere's output_dimension wire field (Matryoshka), NOT
+    # the extras bag; the response dimensions equals the inner-vector length.
+    assert captured[0]["output_dimension"] == 8
+    assert response.dimensions == 8
+    embed_events = [e for e in events if isinstance(e, EmbeddingEvent)]
+    assert embed_events[0].request_params == {"dimensions": 8}
+
+
+@pytest.mark.parametrize("status", [400, 422])
+async def test_cohere_embed_over_length_maps_to_invalid_request(status: int) -> None:
+    # §8.4 fail-loud: truncate "NONE" makes Cohere error on an over-length input
+    # (400 / 422); the mapping surfaces provider_invalid_request rather than
+    # returning a silently truncated vector. The wire still carried truncate NONE.
+    captured: list[dict[str, Any]] = []
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        captured.append(json.loads(req.content))
+        return httpx.Response(status, json={"message": "input exceeds the maximum token length"})
+
+    provider = _cohere_embed_provider(handler)
+    with pytest.raises(ProviderInvalidRequest):
+        await provider.embed(["a very long document that exceeds the embedding model context window"])
+    await provider.aclose()
+    assert captured[0]["truncate"] == "NONE"
+
+
+async def test_cohere_embed_no_usage_object_yields_null_usage() -> None:
+    # Cohere reports usage, but a compatible backend that omits meta yields
+    # usage = null (§4 -- never fabricate a record or a zero).
+    def handler(_req: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=_cohere_embed_body(vectors=[[0.1, 0.2]], input_tokens=None))
+
+    provider = _cohere_embed_provider(handler)
+    response = await provider.embed(["alpha"])
+    await provider.aclose()
+    assert response.usage is None
+
+
+async def test_cohere_embed_chunk_and_stitch_over_96_cap() -> None:
+    # 100 inputs, Cohere's 96-input cap => exactly 2 requests with texts sizes
+    # [96, 4] over the consecutive slices input[0:96] / input[96:100], identical
+    # per-call params on each. The per-chunk embeddings.float are stitched in
+    # input order across the chunk boundary; input_tokens summed; response_id
+    # from the FIRST chunk; raw the list of the 2 per-chunk objects (0096). One
+    # EmbeddingEvent per embed() call (the whole stitched call, not per chunk).
+    inputs = [f"doc-{i:03d}" for i in range(100)]
+    chunk_a = [[i / 1000, 0.5] for i in range(96)]
+    chunk_b = [[i / 1000, 0.5] for i in range(96, 100)]
+    responses = iter(
+        [
+            _cohere_embed_body(id="chunk-a", vectors=chunk_a, input_tokens=480),
+            _cohere_embed_body(id="chunk-b", vectors=chunk_b, input_tokens=20),
+        ]
+    )
+    captured: list[dict[str, Any]] = []
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        captured.append(json.loads(req.content))
+        assert req.url.path == "/v2/embed"
+        return httpx.Response(200, json=next(responses))
+
+    provider = _cohere_embed_provider(handler)
+    events, token = _collecting_dispatch()
+    try:
+        response = await provider.embed(inputs)
+    finally:
+        await provider.aclose()
+        _reset_active_dispatch(token)
+
+    # Exactly 2 requests, texts sizes [96, 4], consecutive slices, identical
+    # per-call params on each (no output_dimension on either).
+    assert len(captured) == 2
+    assert [len(b["texts"]) for b in captured] == [96, 4]
+    assert captured[0]["texts"] == inputs[0:96]
+    assert captured[1]["texts"] == inputs[96:100]
+    for b in captured:
+        assert b["model"] == "cohere-embed-test"
+        assert b["input_type"] == "search_document"
+        assert b["embedding_types"] == ["float"]
+        assert b["truncate"] == "NONE"
+        assert "output_dimension" not in b
+    # Stitched in input order across the boundary; usage summed; first-chunk id.
+    assert response.vectors == chunk_a + chunk_b
+    assert len(response.vectors) == 100
+    assert response.dimensions == 2
+    assert response.usage is not None
+    assert response.usage.input_tokens == 500
+    assert response.response_id == "chunk-a"
+    assert response.model == "cohere-embed-test"
+    # raw is the list of the 2 per-chunk objects verbatim, in request order.
+    assert response.raw == [
+        _cohere_embed_body(id="chunk-a", vectors=chunk_a, input_tokens=480),
+        _cohere_embed_body(id="chunk-b", vectors=chunk_b, input_tokens=20),
+    ]
+    embed_events = [e for e in events if isinstance(e, EmbeddingEvent)]
+    assert len(embed_events) == 1
+    assert embed_events[0].input_count == 100
+    assert embed_events[0].dimensions == 2
+
+
+async def test_cohere_embed_embedding_types_extra_merges_float_not_clobbers() -> None:
+    # §8.4: embedding_types MERGES rather than clobbers -- the mapping guarantees
+    # "float" (it reads embeddings.float), but a caller's other precisions ride
+    # the extras bag and are preserved. A caller list missing "float" gets it
+    # appended; a malformed / absent extra falls back to ["float"].
+    captured: list[dict[str, Any]] = []
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        captured.append(json.loads(req.content))
+        return httpx.Response(200, json=_cohere_embed_body(id="c", vectors=[[0.1, 0.2]], input_tokens=3))
+
+    cfg_both = EmbeddingRuntimeConfig.model_validate({"embedding_types": ["float", "int8"]})
+    cfg_int8 = EmbeddingRuntimeConfig.model_validate({"embedding_types": ["int8"]})
+    provider = _cohere_embed_provider(handler)
+    # Caller adds int8 alongside float -> both reach the wire (float NOT clobbered).
+    await provider.embed(["x"], config=cfg_both)
+    # Caller omits float -> "float" is appended (the mapping must read embeddings.float).
+    await provider.embed(["x"], config=cfg_int8)
+    # No embedding_types extra -> the ["float"] default.
+    await provider.embed(["x"])
+    await provider.aclose()
+
+    assert captured[0]["embedding_types"] == ["float", "int8"]
+    assert captured[1]["embedding_types"] == ["int8", "float"]
+    assert captured[2]["embedding_types"] == ["float"]
+
+
+async def test_cohere_embed_per_chunk_count_mismatch_raises_despite_matching_total() -> None:
+    # §4 / §8: the positional stitch validates EACH chunk's vector count, not
+    # just the stitched total. 100 inputs -> chunks [96, 4]; chunk A returns 95
+    # vectors (total could still reach 100 via a compensating chunk B), which
+    # the total-count check alone would pass -- but the per-chunk guard raises on
+    # chunk A's 95 != 96 mismatch, preventing a silent positional misalignment.
+    def handler(req: httpx.Request) -> httpx.Response:
+        n = len(json.loads(req.content)["texts"])
+        count = 95 if n == 96 else 5
+        return httpx.Response(
+            200,
+            json=_cohere_embed_body(id="c", vectors=[[float(i)] for i in range(count)], input_tokens=1),
+        )
+
+    provider = _cohere_embed_provider(handler)
+    with pytest.raises(ProviderInvalidResponse):
+        await provider.embed([f"input-{i}" for i in range(100)])
+    await provider.aclose()
+
+
+async def test_cohere_embed_base_url_rejects_v2_suffix() -> None:
+    with pytest.raises(ValueError, match="host root"):
+        CohereEmbeddingProvider(base_url="https://api.cohere.com/v2", model="m")
+    # The host root is accepted (no doubled /v2/v2). The /v2-suffix rejection
+    # above raises in normalize_base_url before a client is created, so only the
+    # accepted construction here needs closing.
+    provider = CohereEmbeddingProvider(base_url="https://api.cohere.com", model="m")
+    await provider.aclose()
+
+
+async def test_cohere_embed_base_url_defaults_to_cohere_origin() -> None:
+    # base_url is optional per §8.4: an unspecified base_url binds the Cohere
+    # origin (host root; the provider appends /v2/embed itself).
+    provider = CohereEmbeddingProvider(model="cohere-embed-test")
+    try:
+        assert provider.base_url == "https://api.cohere.com"
+    finally:
+        await provider.aclose()
 
 
 # ---------------------------------------------------------------------------
