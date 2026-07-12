@@ -28,12 +28,11 @@ from __future__ import annotations
 
 import time
 import uuid
-from collections.abc import Mapping, Sequence
+from collections.abc import Sequence
 from typing import Any, cast
 
 import httpx
 
-from openarmature.graph.events import RerankEvent, RerankFailedEvent
 from openarmature.llm.errors import (
     LlmProviderError,
     ProviderAuthentication,
@@ -43,17 +42,9 @@ from openarmature.llm.errors import (
     ProviderRateLimit,
     ProviderUnavailable,
 )
-from openarmature.observability.correlation import (
-    current_attempt_index,
-    current_branch_name,
-    current_correlation_id,
-    current_dispatch,
-    current_fan_out_index,
-    current_invocation_id,
-    current_namespace_prefix,
-)
-from openarmature.observability.metadata import AttributeValue, current_invocation_metadata
+from openarmature.observability.correlation import current_dispatch
 
+from .._events import build_rerank_event, build_rerank_failed_event, normalize_base_url
 from ..provider import validate_rerank_input, validate_rerank_response
 from ..response import RerankResponse, RerankRuntimeConfig, RerankUsage, ScoredDocument
 
@@ -140,14 +131,7 @@ class CohereRerankProvider:
         # trailing /v2 would produce a doubled /v2/v2 path that 404s (the
         # sibling embedding provider guards the same footgun for /v1). Trailing
         # slashes are stripped.
-        normalized = base_url.rstrip("/")
-        if normalized.endswith("/v2"):
-            raise ValueError(
-                f"base_url should be the host root (e.g. 'https://api.cohere.com'); "
-                f"the provider appends /v2/rerank itself, so a trailing /v2 would "
-                f"produce a doubled /v2/v2 path. Got {base_url!r}."
-            )
-        self.base_url = normalized
+        self.base_url = normalize_base_url(base_url, guard_prefix="/v2")
         self.model = model
         # ``genai_system`` surfaces as gen_ai.system on the rerank span.
         self._genai_system = genai_system
@@ -215,9 +199,12 @@ class CohereRerankProvider:
             latency_ms_failed = (time.perf_counter() - adapter_start) * 1000.0
             if dispatch is not None:
                 dispatch(
-                    self._build_rerank_failed_event(
+                    build_rerank_failed_event(
                         exc,
                         latency_ms_failed,
+                        provider=self._genai_system,
+                        model=self.model,
+                        populate_caller_metadata=self._populate_caller_metadata,
                         call_id=call_id,
                         query=query,
                         documents=documents_list,
@@ -232,9 +219,12 @@ class CohereRerankProvider:
         latency_ms = (time.perf_counter() - adapter_start) * 1000.0
         if dispatch is not None:
             dispatch(
-                self._build_rerank_event(
+                build_rerank_event(
                     response,
                     latency_ms,
+                    provider=self._genai_system,
+                    model=self.model,
+                    populate_caller_metadata=self._populate_caller_metadata,
                     call_id=call_id,
                     query=query,
                     documents=documents_list,
@@ -365,113 +355,6 @@ class CohereRerankProvider:
         if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
             return value
         return None
-
-    def _build_rerank_event(
-        self,
-        response: RerankResponse,
-        latency_ms: float,
-        *,
-        call_id: str,
-        query: str,
-        documents: list[str],
-        top_k: int | None,
-        request_params: dict[str, Any],
-        request_extras: dict[str, Any],
-        active_prompt: Any,
-        active_prompt_group: Any,
-    ) -> RerankEvent:
-        """Construct the typed RerankEvent for the success path.
-
-        Sources identity / scoping from the calling-node ContextVars and
-        outcome fields from the response.
-        """
-        namespace = current_namespace_prefix()
-        node_name = namespace[-1] if namespace else ""
-        invocation_id = current_invocation_id() or ""
-        caller_metadata: Mapping[str, AttributeValue] | None = None
-        if self._populate_caller_metadata:
-            caller_metadata = dict(current_invocation_metadata())
-        return RerankEvent(
-            invocation_id=invocation_id,
-            correlation_id=current_correlation_id(),
-            node_name=node_name,
-            namespace=namespace,
-            attempt_index=current_attempt_index(),
-            fan_out_index=current_fan_out_index(),
-            branch_name=current_branch_name(),
-            provider=self._genai_system,
-            model=self.model,
-            response_id=response.response_id,
-            response_model=response.model,
-            usage=response.usage,
-            latency_ms=latency_ms,
-            query=query,
-            documents=documents,
-            document_count=len(documents),
-            top_k=top_k,
-            result_count=len(response.results),
-            # Populated unconditionally on success per proposal 0089; privacy
-            # gating is observer-side at rendering (symmetric with query /
-            # documents). Sources output_results from the parsed response.
-            output_results=list(response.results),
-            request_params=request_params,
-            request_extras=request_extras,
-            active_prompt=active_prompt,
-            active_prompt_group=active_prompt_group,
-            call_id=call_id,
-            caller_invocation_metadata=caller_metadata,
-        )
-
-    def _build_rerank_failed_event(
-        self,
-        exc: LlmProviderError,
-        latency_ms: float,
-        *,
-        call_id: str,
-        query: str,
-        documents: list[str],
-        top_k: int | None,
-        request_params: dict[str, Any],
-        request_extras: dict[str, Any],
-        active_prompt: Any,
-        active_prompt_group: Any,
-    ) -> RerankFailedEvent:
-        """Construct the typed RerankFailedEvent for the failure path.
-
-        ``error_type`` defaults to the exception class name (the "upstream
-        exception class name" style).
-        """
-        namespace = current_namespace_prefix()
-        node_name = namespace[-1] if namespace else ""
-        invocation_id = current_invocation_id() or ""
-        caller_metadata: Mapping[str, AttributeValue] | None = None
-        if self._populate_caller_metadata:
-            caller_metadata = dict(current_invocation_metadata())
-        return RerankFailedEvent(
-            invocation_id=invocation_id,
-            correlation_id=current_correlation_id(),
-            node_name=node_name,
-            namespace=namespace,
-            attempt_index=current_attempt_index(),
-            fan_out_index=current_fan_out_index(),
-            branch_name=current_branch_name(),
-            provider=self._genai_system,
-            model=self.model,
-            latency_ms=latency_ms,
-            query=query,
-            documents=documents,
-            document_count=len(documents),
-            top_k=top_k,
-            request_params=request_params,
-            request_extras=request_extras,
-            active_prompt=active_prompt,
-            active_prompt_group=active_prompt_group,
-            call_id=call_id,
-            error_category=exc.category,
-            error_type=type(exc).__name__,
-            error_message=str(exc),
-            caller_invocation_metadata=caller_metadata,
-        )
 
 
 __all__ = ["CohereRerankProvider"]
