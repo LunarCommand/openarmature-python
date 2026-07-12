@@ -41,7 +41,12 @@ from openarmature.llm.errors import (
 )
 from openarmature.observability.correlation import current_dispatch
 
-from .._events import build_embedding_event, build_embedding_failed_event, normalize_base_url
+from .._events import (
+    apply_client_side_prefix,
+    build_embedding_event,
+    build_embedding_failed_event,
+    normalize_base_url,
+)
 from ..provider import validate_embedding_input, validate_embedding_response
 from ..response import EmbeddingResponse, EmbeddingRuntimeConfig, EmbeddingUsage
 
@@ -82,10 +87,11 @@ def _classify_embedding_http_error(resp: httpx.Response) -> LlmProviderError:
 
 # Absence-is-meaningful per observability §5.5.2: only caller-supplied keys
 # appear in the event's request_params -- "the field was not supplied for
-# this call", distinct from a supplied zero. The input_type field joins this
-# set with proposal 0079 (OpenAI-compatible input_type is its wire mapping's
-# job, not 0077's). For embedding the event-param names coincide with the
-# wire-body keys, so the same dict feeds both the event and the body.
+# this call", distinct from a supplied zero. For OpenAI, input_type joins
+# dimensions in this set (proposal 0079). input_type does NOT feed the wire
+# body verbatim -- the OpenAI wire has no query/document field, so input_type
+# is a wire no-op (realized only as a client-side prefix when one is bound),
+# and the wire body is built separately.
 def _request_params_from_config(config: EmbeddingRuntimeConfig | None) -> dict[str, Any]:
     """Extract the supplied embedding request parameters for the event."""
     if config is None:
@@ -93,6 +99,8 @@ def _request_params_from_config(config: EmbeddingRuntimeConfig | None) -> dict[s
     out: dict[str, Any] = {}
     if config.dimensions is not None:
         out["dimensions"] = config.dimensions
+    if config.input_type is not None:
+        out["input_type"] = config.input_type
     return out
 
 
@@ -102,9 +110,16 @@ _VALID_READINESS_PROBES = frozenset({"embed", "models", "both"})
 class OpenAIEmbeddingProvider:
     """OpenAI ``/v1/embeddings`` wire-compatible embedding provider.
 
-    Construct with a base URL (host root), the bound embedding model, and
-    an optional API key + transport. ``embed()`` posts to
-    ``/v1/embeddings``.
+    Construct with the bound embedding model and an optional API key +
+    transport. ``base_url`` is the host root and defaults to the OpenAI
+    origin (``https://api.openai.com``), overridable for any OpenAI-compatible
+    backend. ``embed()`` posts to ``/v1/embeddings``.
+
+    The optional ``query_prefix`` / ``document_prefix`` bind the client-side
+    asymmetric prefixes -- off by default (pure-symmetric OpenAI). When bound
+    (for an asymmetric model served behind a compatible endpoint),
+    ``input_type`` selects which prefix to prepend to each input before
+    sending, since the OpenAI wire carries no query/document field.
 
     ``ready()`` verifies the bound model per the ``readiness_probe``
     argument:
@@ -120,13 +135,15 @@ class OpenAIEmbeddingProvider:
     def __init__(
         self,
         *,
-        base_url: str,
+        base_url: str = "https://api.openai.com",
         model: str,
         api_key: str | None = None,
         transport: httpx.AsyncBaseTransport | None = None,
         timeout: float = 60.0,
         genai_system: str = "openai",
         readiness_probe: Literal["embed", "models", "both"] = "embed",
+        query_prefix: str | None = None,
+        document_prefix: str | None = None,
         populate_caller_metadata: bool = True,
     ) -> None:
         # base_url is the host root; the provider appends the /v1 routes, so
@@ -143,6 +160,11 @@ class OpenAIEmbeddingProvider:
                 f"readiness_probe must be one of {sorted(_VALID_READINESS_PROBES)} (got {readiness_probe!r})"
             )
         self._readiness_probe = readiness_probe
+        # Optional client-side asymmetric prefixes (§8.1, reused by §8.3): the
+        # OpenAI wire has no query/document field, so input_type is realized as
+        # a prefix prepend only when these are bound. Off by default (symmetric).
+        self._query_prefix = query_prefix
+        self._document_prefix = document_prefix
         # ``genai_system`` surfaces as gen_ai.system on the embedding span.
         self._genai_system = genai_system
         self._populate_caller_metadata = populate_caller_metadata
@@ -229,10 +251,12 @@ class OpenAIEmbeddingProvider:
         input_strings = list(input)
         request_params = _request_params_from_config(config)
         request_extras = dict(config.model_extra or {}) if config is not None else {}
+        input_type = config.input_type if config is not None else None
+        dimensions = config.dimensions if config is not None else None
         adapter_start = time.perf_counter()
         try:
             validate_embedding_input(input_strings)
-            body = self._build_request_body(input_strings, request_params, request_extras)
+            body = self._build_request_body(input_strings, input_type, dimensions, request_extras)
             try:
                 resp = await self._client.post("/v1/embeddings", json=body)
             except httpx.HTTPError as exc:
@@ -281,18 +305,38 @@ class OpenAIEmbeddingProvider:
     def _build_request_body(
         self,
         input_strings: list[str],
-        request_params: dict[str, Any],
+        input_type: str | None,
+        dimensions: int | None,
         request_extras: dict[str, Any],
     ) -> dict[str, Any]:
-        """Build the /v1/embeddings request body."""
-        # Extras are merged FIRST so the bound model, the input list, and the
-        # declared request params always win: a caller's undeclared extra
-        # named "model" or "input" must not clobber the wire identity. The
-        # request params are the same dict the event carries (dimensions for
-        # embedding), keeping the wire body and the observed request_params
-        # provably identical. Proposal 0077's input_type maps to a per-vendor
-        # wire key at the wire layer.
-        return {**request_extras, "model": self.model, "input": input_strings, **request_params}
+        """Build the /v1/embeddings request body.
+
+        The OpenAI wire has no query/document field, so ``input_type`` is not
+        realized on the wire -- it selects a client-side ``query_prefix`` /
+        ``document_prefix`` prepend when one is bound, and is otherwise a wire
+        no-op (``input`` sent verbatim). ``dimensions`` maps to the wire
+        ``dimensions`` field (Matryoshka) when set.
+        """
+        # input_type is realized as a client-side prefix (§8.1, reused by §8.3):
+        # the OpenAI wire has NO query/document/input_type/task field, so an
+        # input_type with no bound prefix leaves the input VERBATIM (the
+        # symmetric no-op). input_type MUST NEVER land on the wire. Extras merge
+        # FIRST so the managed keys (model, input, dimensions) always win: a
+        # caller's undeclared extra named "model" or "input" must not clobber
+        # the wire identity. encoding_format ("base64") rides the extras bag as
+        # a request pass-through only -- _parse_response decodes float embeddings
+        # (not base64 strings), so a base64 response raises
+        # provider_invalid_response; base64 is not an end-to-end response format.
+        inputs = apply_client_side_prefix(
+            input_strings,
+            input_type,
+            query_prefix=self._query_prefix,
+            document_prefix=self._document_prefix,
+        )
+        body: dict[str, Any] = {**request_extras, "model": self.model, "input": inputs}
+        if dimensions is not None:
+            body["dimensions"] = dimensions
+        return body
 
     def _parse_response(
         self,
