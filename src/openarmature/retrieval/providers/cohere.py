@@ -108,8 +108,10 @@ def _request_params_from_config(config: RerankRuntimeConfig | None) -> dict[str,
 class CohereRerankProvider:
     """Cohere ``/v2/rerank`` wire-shape rerank provider.
 
-    Construct with a base URL (host root), the bound rerank model, and an
-    optional API key + transport. ``rerank()`` posts to ``/v2/rerank``.
+    Construct with the bound rerank model and an optional API key +
+    transport. ``base_url`` is the host root and defaults to the Cohere
+    origin (``https://api.cohere.com``), overridable for a proxy / gateway.
+    ``rerank()`` posts to ``/v2/rerank``.
 
     ``ready()`` verifies the bound model with a minimal one-document
     ``/v2/rerank`` probe. The Cohere ``/v2/rerank`` wire exposes no
@@ -120,7 +122,7 @@ class CohereRerankProvider:
     def __init__(
         self,
         *,
-        base_url: str,
+        base_url: str = "https://api.cohere.com",
         model: str,
         api_key: str | None = None,
         transport: httpx.AsyncBaseTransport | None = None,

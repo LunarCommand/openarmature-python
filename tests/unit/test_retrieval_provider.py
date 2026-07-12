@@ -799,6 +799,13 @@ def test_rerank_base_url_rejects_v2_suffix() -> None:
     CohereRerankProvider(base_url="https://api.cohere.com", model="m")
 
 
+def test_rerank_base_url_defaults_to_cohere_origin() -> None:
+    # base_url is optional per §8.4: an unspecified base_url binds the Cohere
+    # origin (host root; the provider appends /v2/rerank itself).
+    provider = CohereRerankProvider(model="rerank-test")
+    assert provider.base_url == "https://api.cohere.com"
+
+
 async def test_rerank_ready_probe_surfaces_invalid_model_on_404() -> None:
     def handler(_req: httpx.Request) -> httpx.Response:
         return httpx.Response(404, json={"message": "model not found"})

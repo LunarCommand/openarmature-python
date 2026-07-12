@@ -867,10 +867,11 @@ note = "The embedding half shipped in 0059b (#198): EmbeddingEvent.output_vector
 
 # Spec v0.85.0 (proposal 0090).  Cohere rerank wire mapping
 # (retrieval-provider §8.4, POST /v2/rerank; backs 0060's Cohere-shaped
-# reference reranker).  Not-yet; the rerank capability (0060) is
-# unshipped, so its wire fixtures 028-031 defer with it.
+# reference reranker).
 [proposals."0090"]
-status = "not-yet"
+status = "implemented"
+since = "0.16.0"
+note = "Retrieval-provider Cohere /v2/rerank wire mapping (§8.4) -- formalizes the wire the CohereRerankProvider reference reranker (shipped in 0060) already implements. POST {base_url}/v2/rerank with {model, query, documents (string array), top_n from top_k (omitted when None)}; documents sent as the string-array form (Cohere v2 takes strings only -- no per-document object / rank_fields). return_documents is NOT realized: the /v2/rerank wire has no such field and never echoes document text, so it is a silent no-op (ScoredDocument.document stays null on every result regardless of the config value, and the mapping does not error) -- the §8.3 'knob with no wire to land on' pattern. max_tokens_per_doc / truncation has no fail-loud option (Cohere truncates server-side to its 4096 default), so unlike §8.1 TEI / §8.2 Jina no truncate flag is sent; max_tokens_per_doc rides the extras-pass-through bag. The response {id, results: [{index, relevance_score}], meta.billed_units.search_units} maps onto §6: index / relevance_score to ScoredDocument, meta.billed_units.search_units to RerankUsage.search_units (input_tokens null), id to response_id; Cohere echoes no model field, so RerankResponse.model is the bound model; results sorted descending with the §6 valid-index / no-duplicate / result-count invariants enforced. base_url defaults to https://api.cohere.com per §8.4 (was a required arg), sent with api_key as Authorization: Bearer. Conformance fixtures 028-031 pass via the general wire-capture harness (cohere_rerank_provider block; request-origin asserted against base_url). The error map + rerank observability ride 0060 / 0060b."
 
 # Spec v0.86.0 (proposal 0091).  Cohere embeddings wire mapping
 # (retrieval-provider §8.4, POST /v2/embed) extending §8.4 to both

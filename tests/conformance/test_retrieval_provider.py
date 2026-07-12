@@ -90,11 +90,6 @@ _DEFAULT_RERANK_MODEL = "rerank-test"
 # side wire contract, deferred until the Cohere wire-mapping impl PR.)
 _DEFERRED_FIXTURES: dict[str, str] = {
     **{
-        p.stem: "Cohere rerank wire mapping (proposal 0090) not implemented"
-        for p in CONFORMANCE_DIR.glob("[0-9][0-9][0-9]-*.yaml")
-        if 28 <= int(p.stem[:3]) <= 31
-    },
-    **{
         p.stem: "Cohere embed wire mapping (proposal 0091) not implemented"
         for p in CONFORMANCE_DIR.glob("[0-9][0-9][0-9]-*.yaml")
         if 32 <= int(p.stem[:3]) <= 37
@@ -238,8 +233,10 @@ def _build_rerank_provider(
     ``mapping: tei`` builds a TeiRerankProvider from the suite-level
     ``tei_rerank_provider`` block; ``mapping: jina`` builds a JinaRerankProvider
     from ``jina_rerank_provider`` (api_key from the block, sent as
-    Authorization: Bearer); any other value (or absent) builds the default
-    CohereRerankProvider. All drive the same MockTransport.
+    Authorization: Bearer); any other value (or absent) builds a
+    CohereRerankProvider, from the ``cohere_rerank_provider`` block
+    (base_url / model / api_key) when the fixture declares one, else the
+    default construction. All drive the same MockTransport.
     """
     transport, captured = _build_handler(responses)
     if mapping == "tei":
@@ -260,12 +257,29 @@ def _build_rerank_provider(
             transport=transport,
         )
     else:
-        provider = CohereRerankProvider(
-            base_url="http://mock-rerank.test",
-            model=model,
-            api_key="test-key",
-            transport=transport,
-        )
+        block = cast("Mapping[str, Any] | None", spec.get("cohere_rerank_provider"))
+        if block is not None:
+            # The §8.4 wire-mapping fixtures (028-031) declare the bound provider
+            # in cohere_rerank_provider: base_url / model / api_key (sent as
+            # Authorization: Bearer). base_url / api_key are read with defaults --
+            # §8.4 makes base_url optional (the provider defaults to the Cohere
+            # origin) and api_key optional (no auth header) -- so a block that
+            # omits either binds the default rather than raising KeyError.
+            provider = CohereRerankProvider(
+                base_url=cast("str", block.get("base_url", "https://api.cohere.com")),
+                model=cast("str", block.get("model", model)),
+                api_key=cast("str | None", block.get("api_key")),
+                transport=transport,
+            )
+        else:
+            # The 0060 protocol fixtures (006-012, mapping absent) carry no
+            # provider block; the default construction serves them.
+            provider = CohereRerankProvider(
+                base_url="http://mock-rerank.test",
+                model=model,
+                api_key="test-key",
+                transport=transport,
+            )
     return provider, captured
 
 
