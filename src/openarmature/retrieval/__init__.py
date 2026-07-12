@@ -17,6 +17,7 @@ from .provider import (
     validate_rerank_response,
 )
 from .providers.cohere import CohereRerankProvider
+from .providers.jina import JinaEmbeddingProvider, JinaRerankProvider
 from .providers.openai import OpenAIEmbeddingProvider
 from .providers.tei import TeiEmbeddingProvider, TeiRerankProvider
 from .response import (
@@ -35,6 +36,8 @@ __all__ = [
     "EmbeddingResponse",
     "EmbeddingRuntimeConfig",
     "EmbeddingUsage",
+    "JinaEmbeddingProvider",
+    "JinaRerankProvider",
     "OpenAIEmbeddingProvider",
     "RerankProvider",
     "RerankResponse",
