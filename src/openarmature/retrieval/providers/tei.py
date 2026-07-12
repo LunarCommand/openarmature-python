@@ -38,12 +38,6 @@ from typing import Any, cast
 
 import httpx
 
-from openarmature.graph.events import (
-    EmbeddingEvent,
-    EmbeddingFailedEvent,
-    RerankEvent,
-    RerankFailedEvent,
-)
 from openarmature.llm.errors import (
     LlmProviderError,
     ProviderAuthentication,
@@ -53,17 +47,14 @@ from openarmature.llm.errors import (
     ProviderRateLimit,
     ProviderUnavailable,
 )
-from openarmature.observability.correlation import (
-    current_attempt_index,
-    current_branch_name,
-    current_correlation_id,
-    current_dispatch,
-    current_fan_out_index,
-    current_invocation_id,
-    current_namespace_prefix,
-)
-from openarmature.observability.metadata import AttributeValue, current_invocation_metadata
+from openarmature.observability.correlation import current_dispatch
 
+from .._events import (
+    build_embedding_event,
+    build_embedding_failed_event,
+    build_rerank_event,
+    build_rerank_failed_event,
+)
 from ..provider import (
     validate_embedding_input,
     validate_embedding_response,
@@ -261,9 +252,12 @@ class TeiEmbeddingProvider:
             latency_ms_failed = (time.perf_counter() - adapter_start) * 1000.0
             if dispatch is not None:
                 dispatch(
-                    self._build_embedding_failed_event(
+                    build_embedding_failed_event(
                         exc,
                         latency_ms_failed,
+                        provider=self._genai_system,
+                        model=self.model,
+                        populate_caller_metadata=self._populate_caller_metadata,
                         call_id=call_id,
                         input_strings=input_strings,
                         request_params=request_params,
@@ -276,9 +270,12 @@ class TeiEmbeddingProvider:
         latency_ms = (time.perf_counter() - adapter_start) * 1000.0
         if dispatch is not None:
             dispatch(
-                self._build_embedding_event(
+                build_embedding_event(
                     response,
                     latency_ms,
+                    provider=self._genai_system,
+                    model=self.model,
+                    populate_caller_metadata=self._populate_caller_metadata,
                     call_id=call_id,
                     input_strings=input_strings,
                     request_params=request_params,
@@ -381,93 +378,6 @@ class TeiEmbeddingProvider:
             response_id=None,
             dimensions=dimensions,
             raw=rows,
-        )
-
-    def _build_embedding_event(
-        self,
-        response: EmbeddingResponse,
-        latency_ms: float,
-        *,
-        call_id: str,
-        input_strings: list[str],
-        request_params: dict[str, Any],
-        request_extras: dict[str, Any],
-        active_prompt: Any,
-        active_prompt_group: Any,
-    ) -> EmbeddingEvent:
-        """Construct the typed EmbeddingEvent for the success path."""
-        namespace = current_namespace_prefix()
-        node_name = namespace[-1] if namespace else ""
-        invocation_id = current_invocation_id() or ""
-        caller_metadata: Mapping[str, AttributeValue] | None = None
-        if self._populate_caller_metadata:
-            caller_metadata = dict(current_invocation_metadata())
-        return EmbeddingEvent(
-            invocation_id=invocation_id,
-            correlation_id=current_correlation_id(),
-            node_name=node_name,
-            namespace=namespace,
-            attempt_index=current_attempt_index(),
-            fan_out_index=current_fan_out_index(),
-            branch_name=current_branch_name(),
-            provider=self._genai_system,
-            model=self.model,
-            response_id=response.response_id,
-            response_model=response.model,
-            usage=response.usage,
-            latency_ms=latency_ms,
-            input_strings=input_strings,
-            input_count=len(input_strings),
-            dimensions=response.dimensions,
-            output_vectors=response.vectors,
-            request_params=request_params,
-            request_extras=request_extras,
-            active_prompt=active_prompt,
-            active_prompt_group=active_prompt_group,
-            call_id=call_id,
-            caller_invocation_metadata=caller_metadata,
-        )
-
-    def _build_embedding_failed_event(
-        self,
-        exc: LlmProviderError,
-        latency_ms: float,
-        *,
-        call_id: str,
-        input_strings: list[str],
-        request_params: dict[str, Any],
-        request_extras: dict[str, Any],
-        active_prompt: Any,
-        active_prompt_group: Any,
-    ) -> EmbeddingFailedEvent:
-        """Construct the typed EmbeddingFailedEvent for the failure path."""
-        namespace = current_namespace_prefix()
-        node_name = namespace[-1] if namespace else ""
-        invocation_id = current_invocation_id() or ""
-        caller_metadata: Mapping[str, AttributeValue] | None = None
-        if self._populate_caller_metadata:
-            caller_metadata = dict(current_invocation_metadata())
-        return EmbeddingFailedEvent(
-            invocation_id=invocation_id,
-            correlation_id=current_correlation_id(),
-            node_name=node_name,
-            namespace=namespace,
-            attempt_index=current_attempt_index(),
-            fan_out_index=current_fan_out_index(),
-            branch_name=current_branch_name(),
-            provider=self._genai_system,
-            model=self.model,
-            latency_ms=latency_ms,
-            input_strings=input_strings,
-            request_params=request_params,
-            request_extras=request_extras,
-            active_prompt=active_prompt,
-            active_prompt_group=active_prompt_group,
-            call_id=call_id,
-            error_category=exc.category,
-            error_type=type(exc).__name__,
-            error_message=str(exc),
-            caller_invocation_metadata=caller_metadata,
         )
 
 
@@ -576,9 +486,12 @@ class TeiRerankProvider:
             latency_ms_failed = (time.perf_counter() - adapter_start) * 1000.0
             if dispatch is not None:
                 dispatch(
-                    self._build_rerank_failed_event(
+                    build_rerank_failed_event(
                         exc,
                         latency_ms_failed,
+                        provider=self._genai_system,
+                        model=self.model,
+                        populate_caller_metadata=self._populate_caller_metadata,
                         call_id=call_id,
                         query=query,
                         documents=documents_list,
@@ -593,9 +506,12 @@ class TeiRerankProvider:
         latency_ms = (time.perf_counter() - adapter_start) * 1000.0
         if dispatch is not None:
             dispatch(
-                self._build_rerank_event(
+                build_rerank_event(
                     response,
                     latency_ms,
+                    provider=self._genai_system,
+                    model=self.model,
+                    populate_caller_metadata=self._populate_caller_metadata,
                     call_id=call_id,
                     query=query,
                     documents=documents_list,
@@ -731,106 +647,6 @@ class TeiRerankProvider:
                 ScoredDocument(index=offset + index, relevance_score=float(score), document=document)
             )
         return scored, entries
-
-    def _build_rerank_event(
-        self,
-        response: RerankResponse,
-        latency_ms: float,
-        *,
-        call_id: str,
-        query: str,
-        documents: list[str],
-        top_k: int | None,
-        request_params: dict[str, Any],
-        request_extras: dict[str, Any],
-        active_prompt: Any,
-        active_prompt_group: Any,
-    ) -> RerankEvent:
-        """Construct the typed RerankEvent for the success path.
-
-        One event per rerank() call -- documents is the full input, the results
-        are the stitched output, not per-chunk.
-        """
-        namespace = current_namespace_prefix()
-        node_name = namespace[-1] if namespace else ""
-        invocation_id = current_invocation_id() or ""
-        caller_metadata: Mapping[str, AttributeValue] | None = None
-        if self._populate_caller_metadata:
-            caller_metadata = dict(current_invocation_metadata())
-        return RerankEvent(
-            invocation_id=invocation_id,
-            correlation_id=current_correlation_id(),
-            node_name=node_name,
-            namespace=namespace,
-            attempt_index=current_attempt_index(),
-            fan_out_index=current_fan_out_index(),
-            branch_name=current_branch_name(),
-            provider=self._genai_system,
-            model=self.model,
-            response_id=response.response_id,
-            response_model=response.model,
-            usage=response.usage,
-            latency_ms=latency_ms,
-            query=query,
-            documents=documents,
-            document_count=len(documents),
-            top_k=top_k,
-            result_count=len(response.results),
-            output_results=list(response.results),
-            request_params=request_params,
-            request_extras=request_extras,
-            active_prompt=active_prompt,
-            active_prompt_group=active_prompt_group,
-            call_id=call_id,
-            caller_invocation_metadata=caller_metadata,
-        )
-
-    def _build_rerank_failed_event(
-        self,
-        exc: LlmProviderError,
-        latency_ms: float,
-        *,
-        call_id: str,
-        query: str,
-        documents: list[str],
-        top_k: int | None,
-        request_params: dict[str, Any],
-        request_extras: dict[str, Any],
-        active_prompt: Any,
-        active_prompt_group: Any,
-    ) -> RerankFailedEvent:
-        """Construct the typed RerankFailedEvent for the failure path."""
-        namespace = current_namespace_prefix()
-        node_name = namespace[-1] if namespace else ""
-        invocation_id = current_invocation_id() or ""
-        caller_metadata: Mapping[str, AttributeValue] | None = None
-        if self._populate_caller_metadata:
-            caller_metadata = dict(current_invocation_metadata())
-        return RerankFailedEvent(
-            invocation_id=invocation_id,
-            correlation_id=current_correlation_id(),
-            node_name=node_name,
-            namespace=namespace,
-            attempt_index=current_attempt_index(),
-            fan_out_index=current_fan_out_index(),
-            branch_name=current_branch_name(),
-            provider=self._genai_system,
-            model=self.model,
-            latency_ms=latency_ms,
-            query=query,
-            documents=documents,
-            document_count=len(documents),
-            top_k=top_k,
-            request_params=request_params,
-            request_extras=request_extras,
-            active_prompt=active_prompt,
-            active_prompt_group=active_prompt_group,
-            call_id=call_id,
-            error_category=exc.category,
-            error_type=type(exc).__name__,
-            error_message=str(exc),
-            caller_invocation_metadata=caller_metadata,
-        )
 
 
 __all__ = ["TeiEmbeddingProvider", "TeiRerankProvider"]

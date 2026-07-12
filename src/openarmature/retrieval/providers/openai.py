@@ -25,12 +25,11 @@ from __future__ import annotations
 
 import time
 import uuid
-from collections.abc import Mapping, Sequence
+from collections.abc import Sequence
 from typing import Any, Literal, cast
 
 import httpx
 
-from openarmature.graph.events import EmbeddingEvent, EmbeddingFailedEvent
 from openarmature.llm.errors import (
     LlmProviderError,
     ProviderAuthentication,
@@ -40,17 +39,9 @@ from openarmature.llm.errors import (
     ProviderRateLimit,
     ProviderUnavailable,
 )
-from openarmature.observability.correlation import (
-    current_attempt_index,
-    current_branch_name,
-    current_correlation_id,
-    current_dispatch,
-    current_fan_out_index,
-    current_invocation_id,
-    current_namespace_prefix,
-)
-from openarmature.observability.metadata import AttributeValue, current_invocation_metadata
+from openarmature.observability.correlation import current_dispatch
 
+from .._events import build_embedding_event, build_embedding_failed_event, normalize_base_url
 from ..provider import validate_embedding_input, validate_embedding_response
 from ..response import EmbeddingResponse, EmbeddingRuntimeConfig, EmbeddingUsage
 
@@ -142,15 +133,8 @@ class OpenAIEmbeddingProvider:
         # a trailing /v1 would produce a doubled /v1/v1 path that 404s (the
         # sibling llm provider guards the same footgun). Trailing slashes are
         # stripped. Proposal 0079 pins the full base_url-override contract
-        # (fixture 025); lifting a shared base_url helper is a follow-up.
-        normalized = base_url.rstrip("/")
-        if normalized.endswith("/v1"):
-            raise ValueError(
-                f"base_url should be the host root (e.g. 'https://api.openai.com'); "
-                f"the provider appends /v1/embeddings and /v1/models itself, so a "
-                f"trailing /v1 would produce a doubled /v1/v1 path. Got {base_url!r}."
-            )
-        self.base_url = normalized
+        # (fixture 025).
+        self.base_url = normalize_base_url(base_url, guard_prefix="/v1")
         self.model = model
         # ``readiness_probe`` modes are documented on the class docstring;
         # the default "embed" is the universal probe. Reject an unknown mode.
@@ -260,9 +244,12 @@ class OpenAIEmbeddingProvider:
             latency_ms_failed = (time.perf_counter() - adapter_start) * 1000.0
             if dispatch is not None:
                 dispatch(
-                    self._build_embedding_failed_event(
+                    build_embedding_failed_event(
                         exc,
                         latency_ms_failed,
+                        provider=self._genai_system,
+                        model=self.model,
+                        populate_caller_metadata=self._populate_caller_metadata,
                         call_id=call_id,
                         input_strings=input_strings,
                         request_params=request_params,
@@ -275,9 +262,12 @@ class OpenAIEmbeddingProvider:
         latency_ms = (time.perf_counter() - adapter_start) * 1000.0
         if dispatch is not None:
             dispatch(
-                self._build_embedding_event(
+                build_embedding_event(
                     response,
                     latency_ms,
+                    provider=self._genai_system,
+                    model=self.model,
+                    populate_caller_metadata=self._populate_caller_metadata,
                     call_id=call_id,
                     input_strings=input_strings,
                     request_params=request_params,
@@ -378,105 +368,6 @@ class OpenAIEmbeddingProvider:
             response_id=response_id if isinstance(response_id, str) else None,
             dimensions=dimensions,
             raw=body,
-        )
-
-    def _build_embedding_event(
-        self,
-        response: EmbeddingResponse,
-        latency_ms: float,
-        *,
-        call_id: str,
-        input_strings: list[str],
-        request_params: dict[str, Any],
-        request_extras: dict[str, Any],
-        active_prompt: Any,
-        active_prompt_group: Any,
-    ) -> EmbeddingEvent:
-        """Construct the typed EmbeddingEvent for the success path.
-
-        Sources identity / scoping from the calling-node ContextVars and
-        outcome fields from the response.
-        """
-        namespace = current_namespace_prefix()
-        node_name = namespace[-1] if namespace else ""
-        invocation_id = current_invocation_id() or ""
-        caller_metadata: Mapping[str, AttributeValue] | None = None
-        if self._populate_caller_metadata:
-            caller_metadata = dict(current_invocation_metadata())
-        return EmbeddingEvent(
-            invocation_id=invocation_id,
-            correlation_id=current_correlation_id(),
-            node_name=node_name,
-            namespace=namespace,
-            attempt_index=current_attempt_index(),
-            fan_out_index=current_fan_out_index(),
-            branch_name=current_branch_name(),
-            provider=self._genai_system,
-            model=self.model,
-            response_id=response.response_id,
-            response_model=response.model,
-            usage=response.usage,
-            latency_ms=latency_ms,
-            input_strings=input_strings,
-            input_count=len(input_strings),
-            dimensions=response.dimensions,
-            # Populated unconditionally on success per observability §5.5.9;
-            # privacy gating is observer-side at rendering (symmetric with
-            # input_strings). Sources EmbeddingEvent.output_vectors from the
-            # parsed response vectors for the §8.4.5 embedding.output mapping.
-            output_vectors=response.vectors,
-            request_params=request_params,
-            request_extras=request_extras,
-            active_prompt=active_prompt,
-            active_prompt_group=active_prompt_group,
-            call_id=call_id,
-            caller_invocation_metadata=caller_metadata,
-        )
-
-    def _build_embedding_failed_event(
-        self,
-        exc: LlmProviderError,
-        latency_ms: float,
-        *,
-        call_id: str,
-        input_strings: list[str],
-        request_params: dict[str, Any],
-        request_extras: dict[str, Any],
-        active_prompt: Any,
-        active_prompt_group: Any,
-    ) -> EmbeddingFailedEvent:
-        """Construct the typed EmbeddingFailedEvent for the failure path.
-
-        ``error_type`` defaults to the exception class name (the
-        "upstream exception class name" style).
-        """
-        namespace = current_namespace_prefix()
-        node_name = namespace[-1] if namespace else ""
-        invocation_id = current_invocation_id() or ""
-        caller_metadata: Mapping[str, AttributeValue] | None = None
-        if self._populate_caller_metadata:
-            caller_metadata = dict(current_invocation_metadata())
-        return EmbeddingFailedEvent(
-            invocation_id=invocation_id,
-            correlation_id=current_correlation_id(),
-            node_name=node_name,
-            namespace=namespace,
-            attempt_index=current_attempt_index(),
-            fan_out_index=current_fan_out_index(),
-            branch_name=current_branch_name(),
-            provider=self._genai_system,
-            model=self.model,
-            latency_ms=latency_ms,
-            input_strings=input_strings,
-            request_params=request_params,
-            request_extras=request_extras,
-            active_prompt=active_prompt,
-            active_prompt_group=active_prompt_group,
-            call_id=call_id,
-            error_category=exc.category,
-            error_type=type(exc).__name__,
-            error_message=str(exc),
-            caller_invocation_metadata=caller_metadata,
         )
 
 
