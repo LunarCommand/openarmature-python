@@ -41,12 +41,8 @@ from openarmature.llm.errors import (
 )
 from openarmature.observability.correlation import current_dispatch
 
-from .._events import (
-    apply_client_side_prefix,
-    build_embedding_event,
-    build_embedding_failed_event,
-    normalize_base_url,
-)
+from .._events import build_embedding_event, build_embedding_failed_event
+from .._wire import apply_client_side_prefix, normalize_base_url
 from ..provider import validate_embedding_input, validate_embedding_response
 from ..response import EmbeddingResponse, EmbeddingRuntimeConfig, EmbeddingUsage
 

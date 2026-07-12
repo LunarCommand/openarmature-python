@@ -44,7 +44,8 @@ from openarmature.llm.errors import (
 )
 from openarmature.observability.correlation import current_dispatch
 
-from .._events import build_rerank_event, build_rerank_failed_event, document_echo, normalize_base_url
+from .._events import build_rerank_event, build_rerank_failed_event
+from .._wire import document_echo, normalize_base_url
 from ..provider import validate_rerank_input, validate_rerank_response
 from ..response import RerankResponse, RerankRuntimeConfig, RerankUsage, ScoredDocument
 
