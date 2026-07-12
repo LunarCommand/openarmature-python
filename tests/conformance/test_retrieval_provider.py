@@ -32,6 +32,8 @@ from openarmature.observability.correlation import (
 from openarmature.retrieval import (
     CohereRerankProvider,
     EmbeddingRuntimeConfig,
+    JinaEmbeddingProvider,
+    JinaRerankProvider,
     OpenAIEmbeddingProvider,
     RerankRuntimeConfig,
     TeiEmbeddingProvider,
@@ -47,11 +49,13 @@ _EMBED_PATHS: dict[str | None, str] = {
     None: "/v1/embeddings",
     "openai": "/v1/embeddings",
     "tei": "/embed",
+    "jina": "/v1/embeddings",
 }
 _RERANK_PATHS: dict[str | None, str] = {
     None: "/v2/rerank",
     "cohere": "/v2/rerank",
     "tei": "/rerank",
+    "jina": "/v1/rerank",
 }
 
 CONFORMANCE_DIR = (
@@ -71,11 +75,11 @@ _DEFAULT_RERANK_MODEL = "rerank-test"
 #
 # The v0.84.0 pin bump also introduced the retrieval-provider WIRE-MAPPING
 # fixtures (013-027) for proposals 0077 (TEI) / 0078 (Jina) / 0079
-# (OpenAI-compatible). The TEI batch (013-017) now ships: this runner captures
-# the outbound httpx.Request bodies through the MockTransport and asserts them
-# against expected_wire_request (proposal 0077). The Jina (018-022) and
-# OpenAI-compatible (023-027) mappings remain unshipped, so they stay deferred
-# until their impl PRs.
+# (OpenAI-compatible). The TEI batch (013-017) and the Jina batch (018-022) now
+# ship: this runner captures the outbound httpx.Request bodies + headers through
+# the MockTransport and asserts them against expected_wire_request /
+# expected_wire_headers (proposals 0077 / 0078). The OpenAI-compatible (023-027)
+# mapping remains unshipped, so it stays deferred until its impl PR.
 #
 # The v0.88.0 pin pulls in the Cohere wire mappings + the general embed
 # batch-chunking rule: 028-031 (0090 Cohere rerank), 032-037 (0091 Cohere
@@ -85,11 +89,6 @@ _DEFAULT_RERANK_MODEL = "rerank-test"
 # 006-012; the 0090 Cohere wire-mapping fixtures 028-031 assert the request-
 # side wire contract, deferred until the Cohere wire-mapping impl PR.)
 _DEFERRED_FIXTURES: dict[str, str] = {
-    **{
-        p.stem: "Jina wire mapping (proposal 0078) not implemented"
-        for p in CONFORMANCE_DIR.glob("[0-9][0-9][0-9]-*.yaml")
-        if 18 <= int(p.stem[:3]) <= 22
-    },
     **{
         p.stem: (
             "OpenAI-compatible embed wire ships via the bundled OpenAIEmbeddingProvider "
@@ -167,8 +166,10 @@ def _build_provider(
     """Build the embedding provider selected by the fixture ``mapping``.
 
     ``mapping: tei`` builds a TeiEmbeddingProvider from the suite-level
-    ``tei_embedding_provider`` block; any other value (or absent) builds the
-    default OpenAIEmbeddingProvider. Both drive the same MockTransport.
+    ``tei_embedding_provider`` block; ``mapping: jina`` builds a
+    JinaEmbeddingProvider from ``jina_embedding_provider`` (api_key from the
+    block, sent as Authorization: Bearer); any other value (or absent) builds
+    the default OpenAIEmbeddingProvider. All drive the same MockTransport.
     """
     transport, captured = _build_handler(responses)
     if mapping == "tei":
@@ -182,6 +183,14 @@ def _build_provider(
             input_type_prompt_map=cast("Mapping[str, str] | None", block.get("input_type_prompt_map")),
             query_prefix=cast("str | None", block.get("query_prefix")),
             document_prefix=cast("str | None", block.get("document_prefix")),
+        )
+    elif mapping == "jina":
+        block = cast("Mapping[str, Any]", spec["jina_embedding_provider"])
+        provider = JinaEmbeddingProvider(
+            base_url=cast("str", block["base_url"]),
+            model=cast("str", block.get("model", model)),
+            api_key=cast("str", block["api_key"]),
+            transport=transport,
         )
     else:
         provider = OpenAIEmbeddingProvider(
@@ -213,8 +222,10 @@ def _build_rerank_provider(
     """Build the rerank provider selected by the fixture ``mapping``.
 
     ``mapping: tei`` builds a TeiRerankProvider from the suite-level
-    ``tei_rerank_provider`` block; any other value (or absent) builds the
-    default CohereRerankProvider. Both drive the same MockTransport.
+    ``tei_rerank_provider`` block; ``mapping: jina`` builds a JinaRerankProvider
+    from ``jina_rerank_provider`` (api_key from the block, sent as
+    Authorization: Bearer); any other value (or absent) builds the default
+    CohereRerankProvider. All drive the same MockTransport.
     """
     transport, captured = _build_handler(responses)
     if mapping == "tei":
@@ -225,6 +236,14 @@ def _build_rerank_provider(
             api_key="test-key",
             transport=transport,
             chunk_size=cast("int", block.get("chunk_size", 32)),
+        )
+    elif mapping == "jina":
+        block = cast("Mapping[str, Any]", spec["jina_rerank_provider"])
+        provider = JinaRerankProvider(
+            base_url=cast("str", block["base_url"]),
+            model=cast("str", block.get("model", model)),
+            api_key=cast("str", block["api_key"]),
+            transport=transport,
         )
     else:
         provider = CohereRerankProvider(
@@ -371,12 +390,15 @@ def _assert_one_wire_request(
     want: Mapping[str, Any],
     absent_keys: list[str],
     expected_path: str,
+    expected_headers: Mapping[str, str] | None = None,
 ) -> None:
     """Assert a single captured request against one expected_wire_request body.
 
     Checks the method (POST), the URL path, each listed key's value, and that
     the wire body carries no key beyond those in expected_wire_request (the
-    exact key set).
+    exact key set). When ``expected_headers`` is supplied (the hosted-vendor
+    mappings' expected_wire_headers), each named request header must be present
+    with the given value (subset match; httpx header names are case-insensitive).
     """
     assert request.method == "POST", f"expected POST, got {request.method}"
     assert request.url.path == expected_path, f"wire path {request.url.path!r} != {expected_path!r}"
@@ -390,6 +412,13 @@ def _assert_one_wire_request(
     # assert the exact key set (managed keys the mapping always sends are all
     # listed in expected_wire_request per the fixture headers).
     assert set(body) == set(want), f"wire body key set {sorted(body)} != expected {sorted(want)}"
+    # expected_wire_headers (§8.2's hosted-vendor auth surface): a subset match
+    # against the captured request headers, locking e.g. Authorization: Bearer
+    # <api_key> without asserting the exact header set (content-type etc. remain).
+    if expected_headers:
+        for name, header_val in expected_headers.items():
+            got = request.headers.get(name)
+            assert got == header_val, f"wire header {name!r} = {got!r} != {header_val!r}"
 
 
 def _assert_wire_requests(
@@ -408,6 +437,7 @@ def _assert_wire_requests(
         return
     count = cast("int | None", case.get("expected_wire_request_count"))
     absent_keys = cast("list[str]", case.get("expected_wire_request_absent_keys") or [])
+    headers = cast("Mapping[str, str] | None", case.get("expected_wire_headers"))
     if isinstance(expected, list):
         bodies = cast("list[Mapping[str, Any]]", expected)
         if count is not None:
@@ -416,13 +446,13 @@ def _assert_wire_requests(
             f"captured {len(captured)} requests, expected_wire_request lists {len(bodies)}"
         )
         for request, want in zip(captured, bodies, strict=True):
-            _assert_one_wire_request(request, want, absent_keys, expected_path)
+            _assert_one_wire_request(request, want, absent_keys, expected_path, headers)
     else:
         want = cast("Mapping[str, Any]", expected)
         if count is not None:
             assert len(captured) == count, f"expected {count} requests, captured {len(captured)}"
         assert len(captured) == 1, f"single-body form expects exactly one request, captured {len(captured)}"
-        _assert_one_wire_request(captured[0], want, absent_keys, expected_path)
+        _assert_one_wire_request(captured[0], want, absent_keys, expected_path, headers)
 
 
 # -- typed-observer assertion (contains_event on the dispatched typed events) --

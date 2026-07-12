@@ -27,12 +27,15 @@ from openarmature.llm.errors import (
     ProviderInvalidModel,
     ProviderInvalidRequest,
     ProviderInvalidResponse,
+    ProviderRateLimit,
     ProviderUnavailable,
 )
 from openarmature.observability.correlation import _reset_active_dispatch, _set_active_dispatch
 from openarmature.retrieval import (
     CohereRerankProvider,
     EmbeddingRuntimeConfig,
+    JinaEmbeddingProvider,
+    JinaRerankProvider,
     OpenAIEmbeddingProvider,
     RerankRuntimeConfig,
     ScoredDocument,
@@ -938,3 +941,328 @@ def test_tei_chunk_size_must_be_positive() -> None:
             TeiRerankProvider(base_url="http://tei-rerank.test", model="m", chunk_size=bad)
         with pytest.raises(ValueError, match="chunk_size must be positive"):
             TeiEmbeddingProvider(base_url="http://tei-embed.test", model="m", chunk_size=bad)
+
+
+# --- Jina embed + rerank (§8.2 hosted wire mapping) --------------------------
+
+
+def _jina_embed_provider(handler: Any, **kwargs: Any) -> JinaEmbeddingProvider:
+    return JinaEmbeddingProvider(
+        model="jina-embeddings-test",
+        api_key="test-jina-key",
+        base_url="https://api.jina.invalid",
+        transport=httpx.MockTransport(handler),
+        **kwargs,
+    )
+
+
+def _jina_rerank_provider(handler: Any, **kwargs: Any) -> JinaRerankProvider:
+    return JinaRerankProvider(
+        model="jina-reranker-test",
+        api_key="test-jina-key",
+        base_url="https://api.jina.invalid",
+        transport=httpx.MockTransport(handler),
+        **kwargs,
+    )
+
+
+@pytest.mark.parametrize(
+    ("input_type", "expected_task"),
+    [("query", "retrieval.query"), ("document", "retrieval.passage"), (None, None)],
+)
+async def test_jina_embed_input_type_maps_to_task(input_type: str | None, expected_task: str | None) -> None:
+    captured: list[dict[str, Any]] = []
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        captured.append(json.loads(req.content))
+        assert req.url.path == "/v1/embeddings"
+        return httpx.Response(
+            200,
+            json={
+                "model": "jina-embeddings-test",
+                "usage": {"total_tokens": 8},
+                "data": [{"index": 0, "embedding": [0.1, 0.2, 0.3, 0.4]}],
+            },
+        )
+
+    provider = _jina_embed_provider(handler)
+    config = EmbeddingRuntimeConfig(input_type=input_type) if input_type is not None else None
+    response = await provider.embed(["how tall is the tower?"], config=config)
+    await provider.aclose()
+
+    body = captured[0]
+    assert body["model"] == "jina-embeddings-test"
+    assert body["input"] == ["how tall is the tower?"]
+    # truncate: false is always sent (fail-loud).
+    assert body["truncate"] is False
+    if expected_task is None:
+        # Absent input_type => no task (the symmetric default); the body is
+        # exactly {model, input, truncate}.
+        assert set(body) == {"model", "input", "truncate"}
+    else:
+        assert body["task"] == expected_task
+    assert response.model == "jina-embeddings-test"
+    assert response.dimensions == 4
+
+
+async def test_jina_embed_unrecognized_input_type_raises_before_send() -> None:
+    # An input_type outside the closed set (query / document) is a pre-send
+    # provider_invalid_request; NO request is issued.
+    captured: list[dict[str, Any]] = []
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        captured.append(json.loads(req.content))
+        return httpx.Response(200, json={"model": "m", "data": []})
+
+    provider = _jina_embed_provider(handler)
+    with pytest.raises(ProviderInvalidRequest):
+        await provider.embed(["x"], config=EmbeddingRuntimeConfig(input_type="clustering"))
+    await provider.aclose()
+    # No POST reached the transport (pre-send validation).
+    assert captured == []
+
+
+async def test_jina_embed_object_envelope_ordered_by_index_and_usage() -> None:
+    # Jina returns an object envelope with data[] out of order; the mapping
+    # orders vectors by data[i].index into input order, and maps
+    # usage.total_tokens onto EmbeddingUsage.input_tokens (never fabricated).
+    body_json = {
+        "model": "jina-embeddings-test",
+        "usage": {"total_tokens": 11},
+        "data": [
+            {"index": 1, "embedding": [0.5, 0.6]},
+            {"index": 0, "embedding": [0.1, 0.2]},
+        ],
+    }
+
+    def handler(_req: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=body_json)
+
+    provider = _jina_embed_provider(handler)
+    response = await provider.embed(["alpha", "beta"])
+    await provider.aclose()
+
+    # data[1] (index 0) is alpha; data[0] (index 1) is beta -- input order.
+    assert response.vectors == [[0.1, 0.2], [0.5, 0.6]]
+    assert response.usage is not None
+    assert response.usage.input_tokens == 11
+    # raw is the verbatim response dict (object envelope, not a bare array).
+    assert isinstance(response.raw, dict)
+    assert response.raw == body_json
+
+
+async def test_jina_embed_dimensions_on_wire_and_null_usage_when_absent() -> None:
+    captured: list[dict[str, Any]] = []
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        captured.append(json.loads(req.content))
+        # No usage block -> usage stays null (never fabricated).
+        return httpx.Response(
+            200, json={"model": "m", "data": [{"index": 0, "embedding": [0.1, 0.2, 0.3, 0.4]}]}
+        )
+
+    provider = _jina_embed_provider(handler)
+    response = await provider.embed(["x"], config=EmbeddingRuntimeConfig(dimensions=4))
+    await provider.aclose()
+
+    assert captured[0]["dimensions"] == 4
+    assert "task" not in captured[0]
+    assert response.usage is None
+
+
+@pytest.mark.parametrize("return_documents", [True, False])
+async def test_jina_rerank_wire_body_return_documents_and_truncation(return_documents: bool) -> None:
+    captured: list[dict[str, Any]] = []
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        captured.append(json.loads(req.content))
+        assert req.url.path == "/v1/rerank"
+        result: dict[str, Any] = {"index": 0, "relevance_score": 0.9}
+        if return_documents:
+            result["document"] = "doc a"
+        return httpx.Response(
+            200, json={"model": "jina-reranker-test", "usage": {"total_tokens": 5}, "results": [result]}
+        )
+
+    provider = _jina_rerank_provider(handler)
+    config = RerankRuntimeConfig(return_documents=return_documents)
+    response = await provider.rerank("q", ["doc a", "doc b"], config=config)
+    await provider.aclose()
+
+    body = captured[0]
+    # return_documents is sent EXPLICITLY (Jina's wire default is true, OA's is
+    # False); truncation: false is sent explicitly (fail-loud); top_n is omitted
+    # when no top_k is supplied.
+    assert body["return_documents"] is return_documents
+    assert body["truncation"] is False
+    assert "top_n" not in body
+    assert body["model"] == "jina-reranker-test"
+    assert body["documents"] == ["doc a", "doc b"]
+    # The echo surfaces verbatim when Jina returns it; null when it does not
+    # (never auto-filled from the input documents list).
+    assert response.results[0].document == ("doc a" if return_documents else None)
+
+
+async def test_jina_rerank_document_echo_unwraps_textdoc_object() -> None:
+    # Jina's real /v1/rerank echoes the document as a TextDoc OBJECT
+    # ({"text": ...}) when return_documents=true, not a bare string -- its
+    # OpenAPI types `document` as anyOf[string, TextDoc, ImageDoc, null]. The
+    # mapping unwraps either shape onto ScoredDocument.document (§6); a shape
+    # with no string text (an ImageDoc, a malformed entry) yields null, and the
+    # verbatim object is preserved on RerankResponse.raw.
+    def handler(_req: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "model": "jina-reranker-test",
+                "usage": {"total_tokens": 9},
+                "results": [
+                    {"index": 0, "relevance_score": 0.9, "document": {"text": "doc a"}},
+                    {"index": 1, "relevance_score": 0.5, "document": "doc b"},
+                    {"index": 2, "relevance_score": 0.1, "document": {"image": "..."}},
+                ],
+            },
+        )
+
+    provider = _jina_rerank_provider(handler)
+    config = RerankRuntimeConfig(return_documents=True)
+    response = await provider.rerank("q", ["doc a", "doc b", "doc c"], config=config)
+    await provider.aclose()
+
+    # TextDoc object -> its text; bare string -> itself; non-text shape -> null.
+    assert {r.index: r.document for r in response.results} == {0: "doc a", 1: "doc b", 2: None}
+    # The verbatim TextDoc object is still reachable on raw.
+    assert isinstance(response.raw, dict)
+    assert response.raw["results"][0]["document"] == {"text": "doc a"}
+
+
+async def test_jina_rerank_relevance_score_parse_sorted_and_usage() -> None:
+    def handler(_req: httpx.Request) -> httpx.Response:
+        # UNSORTED, Cohere-shaped relevance_score; Jina reports total_tokens.
+        return httpx.Response(
+            200,
+            json={
+                "model": "jina-reranker-test",
+                "usage": {"total_tokens": 57},
+                "results": [
+                    {"index": 0, "relevance_score": 0.42},
+                    {"index": 1, "relevance_score": 0.91},
+                    {"index": 2, "relevance_score": 0.08},
+                ],
+            },
+        )
+
+    provider = _jina_rerank_provider(handler)
+    response = await provider.rerank("q", ["berlin", "paris", "madrid"])
+    await provider.aclose()
+
+    assert [(r.index, r.relevance_score) for r in response.results] == [(1, 0.91), (0, 0.42), (2, 0.08)]
+    # usage.total_tokens -> RerankUsage.input_tokens; search_units always null
+    # (Jina meters rerank by tokens, not search units).
+    assert response.usage is not None
+    assert response.usage.input_tokens == 57
+    assert response.usage.search_units is None
+    assert response.response_id is None
+    # raw is the verbatim response dict.
+    assert isinstance(response.raw, dict)
+    assert response.raw["usage"] == {"total_tokens": 57}
+
+
+async def test_jina_rerank_top_n_maps_from_top_k() -> None:
+    captured: list[dict[str, Any]] = []
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        captured.append(json.loads(req.content))
+        return httpx.Response(
+            200,
+            json={
+                "model": "m",
+                "usage": {"total_tokens": 3},
+                "results": [{"index": 0, "relevance_score": 0.9}],
+            },
+        )
+
+    provider = _jina_rerank_provider(handler)
+    await provider.rerank("q", ["a", "b", "c"], top_k=2)
+    await provider.aclose()
+    assert captured[0]["top_n"] == 2
+
+
+@pytest.mark.parametrize("surface", ["embed", "rerank"])
+async def test_jina_429_maps_to_rate_limit(surface: str) -> None:
+    # §8.2 *Errors*: 429 -> provider_rate_limit on BOTH surfaces (NOT
+    # provider_unavailable, the misclassification the fixture pins).
+    def handler(_req: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            429, json={"detail": "Rate limit exceeded.", "code": "RATE_TOKEN_LIMIT_EXCEEDED"}
+        )
+
+    with pytest.raises(ProviderRateLimit):
+        if surface == "embed":
+            provider = _jina_embed_provider(handler)
+            try:
+                await provider.embed(["x"])
+            finally:
+                await provider.aclose()
+        else:
+            rprovider = _jina_rerank_provider(handler)
+            try:
+                await rprovider.rerank("q", ["a", "b"])
+            finally:
+                await rprovider.aclose()
+
+
+async def test_jina_rerank_over_length_422_maps_to_invalid_request() -> None:
+    # §8.2 fail-loud: truncation: false makes Jina error on over-length input
+    # (422); the mapping surfaces provider_invalid_request.
+    captured: list[dict[str, Any]] = []
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        captured.append(json.loads(req.content))
+        return httpx.Response(
+            422,
+            json={
+                "detail": "Input validation failed.",
+                "errors": [{"field": "documents", "type": "too_long"}],
+            },
+        )
+
+    provider = _jina_rerank_provider(handler)
+    with pytest.raises(ProviderInvalidRequest):
+        await provider.rerank("summarize", ["a very long document"])
+    await provider.aclose()
+    # The wire request still carried truncation: false.
+    assert captured[0]["truncation"] is False
+
+
+async def test_jina_bearer_auth_header_present() -> None:
+    # Jina is a hosted vendor; the api_key is sent as Authorization: Bearer.
+    captured: list[httpx.Request] = []
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        captured.append(req)
+        return httpx.Response(
+            200,
+            json={
+                "model": "m",
+                "usage": {"total_tokens": 1},
+                "data": [{"index": 0, "embedding": [0.1, 0.2]}],
+            },
+        )
+
+    provider = _jina_embed_provider(handler)
+    await provider.embed(["x"])
+    await provider.aclose()
+    assert captured[0].headers.get("Authorization") == "Bearer test-jina-key"
+
+
+def test_jina_base_url_default_and_v1_guard() -> None:
+    # base_url defaults to the Jina endpoint origin and strips trailing slashes;
+    # a trailing /v1 is rejected (the doubled /v1/v1 footgun).
+    embed = JinaEmbeddingProvider(model="m", api_key="k")
+    assert embed.base_url == "https://api.jina.ai"
+    rerank = JinaRerankProvider(model="m", api_key="k", base_url="https://gw.example/")
+    assert rerank.base_url == "https://gw.example"
+    for cls in (JinaEmbeddingProvider, JinaRerankProvider):
+        with pytest.raises(ValueError, match="v1/v1"):
+            cls(model="m", api_key="k", base_url="https://api.jina.ai/v1")
