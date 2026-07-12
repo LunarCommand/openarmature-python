@@ -792,11 +792,24 @@ async def test_rerank_invalid_request_dispatches_failed_event_before_send() -> N
 # --- construction guards + readiness ----------------------------------------
 
 
-def test_rerank_base_url_rejects_v2_suffix() -> None:
+async def test_rerank_base_url_rejects_v2_suffix() -> None:
     with pytest.raises(ValueError, match="host root"):
         CohereRerankProvider(base_url="https://api.cohere.com/v2", model="m")
-    # The host root is accepted (no doubled /v2/v2).
-    CohereRerankProvider(base_url="https://api.cohere.com", model="m")
+    # The host root is accepted (no doubled /v2/v2). The /v2-suffix rejection
+    # above raises in normalize_base_url before a client is created, so only the
+    # accepted construction here needs closing.
+    provider = CohereRerankProvider(base_url="https://api.cohere.com", model="m")
+    await provider.aclose()
+
+
+async def test_rerank_base_url_defaults_to_cohere_origin() -> None:
+    # base_url is optional per §8.4: an unspecified base_url binds the Cohere
+    # origin (host root; the provider appends /v2/rerank itself).
+    provider = CohereRerankProvider(model="rerank-test")
+    try:
+        assert provider.base_url == "https://api.cohere.com"
+    finally:
+        await provider.aclose()
 
 
 async def test_rerank_ready_probe_surfaces_invalid_model_on_404() -> None:
