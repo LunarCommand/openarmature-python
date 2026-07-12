@@ -55,6 +55,7 @@ from .._events import (
     build_embedding_failed_event,
     build_rerank_event,
     build_rerank_failed_event,
+    document_echo,
 )
 from ..provider import (
     validate_embedding_input,
@@ -634,11 +635,10 @@ class TeiRerankProvider:
             score = entry.get("score")
             if not isinstance(score, (int, float)) or isinstance(score, bool):
                 raise ProviderInvalidResponse("rerank response entry has a missing or non-numeric 'score'")
-            # Read ``text`` only when present; never auto-fill from the input
-            # documents list (§6 -- the provider's echo and the caller's input
-            # are two different surfaces).
-            text_raw = entry.get("text")
-            document = text_raw if isinstance(text_raw, str) else None
+            # Read the ``text`` echo per the shared §6 (0097) rule; never
+            # auto-fill from the input documents. TEI's return_text echo is a
+            # bare string, so this is the identity path in practice.
+            document = document_echo(entry.get("text"))
             scored.append(
                 ScoredDocument(index=offset + index, relevance_score=float(score), document=document)
             )

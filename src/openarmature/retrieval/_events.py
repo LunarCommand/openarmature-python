@@ -19,7 +19,7 @@ from the response or exception.
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import Any
+from typing import Any, cast
 
 from openarmature.graph.events import (
     EmbeddingEvent,
@@ -27,7 +27,7 @@ from openarmature.graph.events import (
     RerankEvent,
     RerankFailedEvent,
 )
-from openarmature.llm.errors import LlmProviderError
+from openarmature.llm.errors import LlmProviderError, ProviderInvalidResponse
 from openarmature.observability.correlation import (
     current_attempt_index,
     current_branch_name,
@@ -106,6 +106,31 @@ def apply_client_side_prefix(
     if prefix is None:
         return input_strings
     return [prefix + s for s in input_strings]
+
+
+# §6 (0097): the rerank document-echo shape rule, shared by every RerankProvider
+# (Cohere / TEI / Jina). ScoredDocument.document carries the provider's string
+# echo verbatim when present, null otherwise -- never fabricated from the input
+# documents. Vendors echo it in several shapes: a bare string, a TextDoc object
+# {"text": "..."} (Jina's return_documents form), a text-less object (an
+# ImageDoc), or absent/null. Unwrap the string from a string or a TextDoc; a
+# text-less object or absent/null yields null (an empty string is present --
+# surfaced as "", not folded to null). A NON-object scalar (number / array /
+# bool -- outside the documented anyOf[string, object, null]) is wire corruption
+# and raises provider_invalid_response (§7), NOT folded to null. The verbatim
+# echo is preserved on RerankResponse.raw regardless.
+def document_echo(value: Any) -> str | None:
+    """Extract the string document echo from a rerank result's documented shapes."""
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return value
+    if isinstance(value, dict):
+        text = cast("dict[str, Any]", value).get("text")
+        return text if isinstance(text, str) else None
+    raise ProviderInvalidResponse(
+        f"rerank document echo must be a string, object, or null (got {type(value).__name__})"
+    )
 
 
 def build_embedding_event(
@@ -334,5 +359,6 @@ __all__ = [
     "build_rerank_event",
     "build_rerank_failed_event",
     "client_side_prefix",
+    "document_echo",
     "normalize_base_url",
 ]
