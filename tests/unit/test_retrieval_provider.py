@@ -1492,6 +1492,19 @@ async def test_tei_embed_single_request_path_when_within_chunk_size() -> None:
     assert response.response_id is None
 
 
+async def test_chunk_and_stitch_embed_rejects_non_positive_cap() -> None:
+    # The shared helper guards a caller passing cap <= 0 (a misconfigured per-call
+    # limit): fail loudly rather than a raw range() error (0) or an empty stitch.
+    from openarmature.retrieval._wire import chunk_and_stitch_embed
+
+    async def _noop(chunk: list[str]) -> tuple[list[list[float]], None, None, list[Any]]:
+        return [], None, None, []
+
+    for bad_cap in (0, -1):
+        with pytest.raises(ValueError, match="cap must be positive"):
+            await chunk_and_stitch_embed(["a"], model="m", cap=bad_cap, embed_chunk=_noop)
+
+
 # --- /rerank wire + chunk-and-stitch ----------------------------------------
 
 

@@ -117,6 +117,11 @@ async def chunk_and_stitch_embed(
     per-mapping wire shaping, POST, and parse live in the closure. Returns the
     stitched :class:`EmbeddingResponse`.
     """
+    # cap is the provider's per-call input limit; a non-positive cap is a caller
+    # misconfiguration -- fail loudly rather than surfacing a raw range() error
+    # (cap == 0) or a misleading empty-stitched validation failure (cap < 0).
+    if cap <= 0:
+        raise ValueError(f"cap must be positive (got {cap})")
     stitched_vectors: list[list[float]] = []
     chunk_bodies: list[Any] = []
     input_tokens_total: int | None = None
