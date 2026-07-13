@@ -1505,6 +1505,18 @@ async def test_chunk_and_stitch_embed_rejects_non_positive_cap() -> None:
             await chunk_and_stitch_embed(["a"], model="m", cap=bad_cap, embed_chunk=_noop)
 
 
+async def test_chunk_and_stitch_embed_rejects_empty_input() -> None:
+    # An empty input reaching the helper is a caller error -> provider_invalid_request
+    # (validate_embedding_input), NOT a misclassified provider_invalid_response.
+    from openarmature.retrieval._wire import chunk_and_stitch_embed
+
+    async def _noop(chunk: list[str]) -> tuple[list[list[float]], None, None, list[Any]]:
+        return [], None, None, []
+
+    with pytest.raises(ProviderInvalidRequest):
+        await chunk_and_stitch_embed([], model="m", cap=4, embed_chunk=_noop)
+
+
 # --- /rerank wire + chunk-and-stitch ----------------------------------------
 
 

@@ -15,7 +15,7 @@ from typing import Any, cast
 
 from openarmature.llm.errors import ProviderInvalidResponse
 
-from .provider import validate_embedding_response
+from .provider import validate_embedding_input, validate_embedding_response
 from .response import EmbeddingResponse, EmbeddingUsage
 
 
@@ -122,6 +122,12 @@ async def chunk_and_stitch_embed(
     # (cap == 0) or a misleading empty-stitched validation failure (cap < 0).
     if cap <= 0:
         raise ValueError(f"cap must be positive (got {cap})")
+    # Validate the input up front (empty / non-string) so an empty input raises
+    # provider_invalid_request -- the caller-side contract error -- rather than
+    # falling through to a misclassified provider_invalid_response from the
+    # empty stitched-count check. Providers already call this before the helper;
+    # this protects a direct / future caller.
+    validate_embedding_input(input_strings)
     stitched_vectors: list[list[float]] = []
     chunk_bodies: list[Any] = []
     input_tokens_total: int | None = None
