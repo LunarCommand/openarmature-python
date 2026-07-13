@@ -122,7 +122,7 @@ async def chunk_and_stitch_embed(
     # (cap == 0) or a misleading empty-stitched validation failure (cap < 0).
     if cap <= 0:
         raise ValueError(f"cap must be positive (got {cap})")
-    # Validate the input up front (empty / non-string) so an empty input raises
+    # Validate the input up front so an empty input raises
     # provider_invalid_request -- the caller-side contract error -- rather than
     # falling through to a misclassified provider_invalid_response from the
     # empty stitched-count check. Providers already call this before the helper;
