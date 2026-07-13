@@ -56,6 +56,34 @@ async def test_tei_embed_returns_vectors_with_null_usage() -> None:
 
 
 @pytest.mark.integration
+@requires_embed
+async def test_tei_embed_chunk_and_stitch_over_chunk_size() -> None:
+    """A chunk_size smaller than the input list exercises the mandatory
+    /embed chunk-and-stitch: one vector per input, in input order, with the
+    same dimensionality across the chunk boundary and no fabricated usage."""
+    inputs = [
+        "the moon orbits the earth",
+        "lunar regolith is abrasive",
+        "the far side never faces earth",
+    ]
+    # chunk_size 2 over 3 inputs => 2 /embed requests (sizes 2, 1).
+    provider = TeiEmbeddingProvider(base_url=str(_EMBED_URL), model=_EMBED_MODEL, chunk_size=2)
+    try:
+        response = await provider.embed(inputs)
+    finally:
+        await provider.aclose()
+
+    assert len(response.vectors) == len(inputs)
+    dim = len(response.vectors[0])
+    assert dim > 0
+    assert all(len(v) == dim for v in response.vectors)
+    assert response.dimensions == dim
+    # TEI /embed reports no usage object and no id -> both null across the stitch.
+    assert response.usage is None
+    assert response.response_id is None
+
+
+@pytest.mark.integration
 @requires_rerank
 async def test_tei_rerank_returns_sorted_results() -> None:
     """rerank() on a small pool returns results sorted by relevance

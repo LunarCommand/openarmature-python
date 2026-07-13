@@ -55,10 +55,9 @@ from .._events import (
     build_rerank_event,
     build_rerank_failed_event,
 )
-from .._wire import apply_client_side_prefix, document_echo
+from .._wire import apply_client_side_prefix, chunk_and_stitch_embed, document_echo
 from ..provider import (
     validate_embedding_input,
-    validate_embedding_response,
     validate_rerank_input,
     validate_rerank_response,
 )
@@ -178,9 +177,9 @@ class TeiEmbeddingProvider:
         if chunk_size <= 0:
             raise ValueError(f"chunk_size must be positive (got {chunk_size})")
         # chunk_size is TEI's max-client-batch-size (default 32); it bounds the
-        # /embed batch per the §8 batch-chunking rule. Client-side embed chunk-
-        # and-stitch is proposal 0092, out of scope here -- chunk_size is bound
-        # for construction parity so an operator can already pin it.
+        # /embed batch per the §8 batch-chunking rule (proposal 0092) -- an
+        # over-cap embed call chunk-and-stitches over consecutive <=chunk_size
+        # slices.
         self._chunk_size = chunk_size
         # input_type -> TEI prompt_name map (server-side prompts) with an
         # optional client-side prefix fallback (§8.1 input_type realization).
@@ -241,14 +240,7 @@ class TeiEmbeddingProvider:
         adapter_start = time.perf_counter()
         try:
             validate_embedding_input(input_strings)
-            body = self._build_request_body(input_strings, input_type, dimensions, request_extras)
-            try:
-                resp = await self._client.post("/embed", json=body)
-            except httpx.HTTPError as exc:
-                raise ProviderUnavailable(f"embedding request failed: {exc}") from exc
-            if resp.status_code != 200:
-                raise _classify_tei_http_error(resp)
-            response = self._parse_response(resp, input_strings)
+            response = await self._embed_chunked(input_strings, input_type, dimensions, request_extras)
         except LlmProviderError as exc:
             latency_ms_failed = (time.perf_counter() - adapter_start) * 1000.0
             if dispatch is not None:
@@ -331,18 +323,64 @@ class TeiEmbeddingProvider:
             body["dimensions"] = dimensions
         return body
 
-    def _parse_response(
+    async def _embed_chunked(
+        self,
+        input_strings: list[str],
+        input_type: str | None,
+        dimensions: int | None,
+        request_extras: dict[str, Any],
+    ) -> EmbeddingResponse:
+        """Issue one /embed per <=chunk_size chunk and stitch the vectors."""
+
+        # THE chunk-and-stitch (§8.1 /embed max-client-batch-size cap / the §8
+        # general embed rule, proposal 0092) via the shared chunk_and_stitch_embed
+        # helper. When len(input) <= chunk_size this issues a single request (the
+        # helper's single-iteration path -- preserving the pre-0092 one-request
+        # behavior); otherwise it splits the inputs into consecutive <=chunk_size
+        # slices with IDENTICAL per-call params (the input_type realization --
+        # prompt_name or client-side prefix -- is identical per chunk; only inputs
+        # differ), concatenates the vectors IN INPUT ORDER, and stitches usage /
+        # response_id. TEI /embed reports NO usage and NO id, so the per-chunk
+        # tokens + id slots are None: the stitched usage is null (no chunk reports
+        # tokens) and response_id is null (§8 step 4 / §4). Valid because each
+        # input's embedding is independent of the others in its batch.
+        async def _embed_one(
+            chunk: list[str],
+        ) -> tuple[list[list[float]], None, None, list[Any]]:
+            body = self._build_request_body(chunk, input_type, dimensions, request_extras)
+            try:
+                resp = await self._client.post("/embed", json=body)
+            except httpx.HTTPError as exc:
+                raise ProviderUnavailable(f"embedding request failed: {exc}") from exc
+            if resp.status_code != 200:
+                raise _classify_tei_http_error(resp)
+            return self._parse_chunk(resp)
+
+        return await chunk_and_stitch_embed(
+            input_strings,
+            model=self.model,
+            cap=self._chunk_size,
+            embed_chunk=_embed_one,
+        )
+
+    def _parse_chunk(
         self,
         resp: httpx.Response,
-        input_strings: list[str],
-    ) -> EmbeddingResponse:
-        """Parse TEI's bare vector-array response into an EmbeddingResponse."""
+    ) -> tuple[list[list[float]], None, None, list[Any]]:
+        """Parse one TEI /embed chunk into (vectors, None, None, raw)."""
         # TEI /embed returns a bare JSON array of vector arrays in input order
         # ([[float, ...], ...]) -- no envelope, no id, no usage object. The
         # vectors are already in input order (position == input index), so no
         # index-keyed reordering is needed (unlike the OpenAI data[] shape).
-        # Validates the §4 invariants (count + consistent dimensionality) via
-        # validate_embedding_response, and rejects non-numeric vector values.
+        # Rejects non-numeric vector values. TEI reports no usage and no
+        # response id, so the tokens + id slots are None; the shared
+        # chunk_and_stitch_embed helper enforces the §4 count / dimensionality
+        # invariants against the stitched result and (since no chunk reports
+        # tokens / an id) produces usage = null + response_id = null (MUST NOT
+        # fabricate). raw is the verbatim deserialized chunk response: TEI's bare
+        # vector array carried as a list, not wrapped (§4 / §8.1 per proposal
+        # 0096 -- raw is dict | list, the top-level shape the provider returned;
+        # a chunked call stitches to the LIST of these per-chunk arrays).
         try:
             body_raw = resp.json()
         except ValueError as exc:
@@ -362,19 +400,7 @@ class TeiEmbeddingProvider:
             if not all(isinstance(x, (int, float)) and not isinstance(x, bool) for x in values):
                 raise ProviderInvalidResponse("TEI /embed response has a non-numeric vector value")
             vectors.append([float(x) for x in values])
-        dimensions = validate_embedding_response(vectors, len(input_strings))
-        # TEI returns no usage object, so usage = null (§4 -- MUST NOT
-        # fabricate). raw is the verbatim deserialized response: TEI's bare
-        # vector array carried as a list, not wrapped (§4 / §8.1 per proposal
-        # 0096 -- raw is dict | list, the top-level shape the provider returned).
-        return EmbeddingResponse(
-            vectors=vectors,
-            model=self.model,
-            usage=None,
-            response_id=None,
-            dimensions=dimensions,
-            raw=rows,
-        )
+        return vectors, None, None, rows
 
 
 class TeiRerankProvider:
