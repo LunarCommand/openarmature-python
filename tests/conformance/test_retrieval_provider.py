@@ -30,6 +30,7 @@ from openarmature.observability.correlation import (
     _set_namespace_prefix,
 )
 from openarmature.retrieval import (
+    CohereEmbeddingProvider,
     CohereRerankProvider,
     EmbeddingRuntimeConfig,
     JinaEmbeddingProvider,
@@ -50,6 +51,7 @@ _EMBED_PATHS: dict[str | None, str] = {
     "openai": "/v1/embeddings",
     "tei": "/embed",
     "jina": "/v1/embeddings",
+    "cohere": "/v2/embed",
 }
 _RERANK_PATHS: dict[str | None, str] = {
     None: "/v2/rerank",
@@ -83,17 +85,12 @@ _DEFAULT_RERANK_MODEL = "rerank-test"
 #
 # The v0.88.0 pin pulls in the Cohere wire mappings + the general embed
 # batch-chunking rule: 028-031 (0090 Cohere rerank), 032-037 (0091 Cohere
-# embed), 038 (0092 TEI /embed over-cap chunk-and-stitch). None are shipped
-# -- same deferral rationale as 018-027. (0060a ships the RerankProvider
-# protocol + the Cohere-shape reference reranker for the protocol fixtures
-# 006-012; the 0090 Cohere wire-mapping fixtures 028-031 assert the request-
-# side wire contract, deferred until the Cohere wire-mapping impl PR.)
+# embed), 038 (0092 TEI /embed over-cap chunk-and-stitch). 028-031 ship with
+# 0090 and 032-037 with 0091 (CohereEmbeddingProvider against POST /v2/embed,
+# driven through the general wire-capture harness). 038 stays deferred: the TEI
+# /embed over-cap chunk-and-stitch rides the general 0092 embed rule against the
+# TEI embed wire mapping, unshipped at this pin.
 _DEFERRED_FIXTURES: dict[str, str] = {
-    **{
-        p.stem: "Cohere embed wire mapping (proposal 0091) not implemented"
-        for p in CONFORMANCE_DIR.glob("[0-9][0-9][0-9]-*.yaml")
-        if 32 <= int(p.stem[:3]) <= 37
-    },
     **{
         p.stem: (
             "embedding batch-chunking general rule (proposal 0092); the TEI "
@@ -153,7 +150,9 @@ def _build_provider(
     ``mapping: tei`` builds a TeiEmbeddingProvider from the suite-level
     ``tei_embedding_provider`` block; ``mapping: jina`` builds a
     JinaEmbeddingProvider from ``jina_embedding_provider`` (api_key from the
-    block, sent as Authorization: Bearer). ``mapping: openai`` builds an
+    block, sent as Authorization: Bearer); ``mapping: cohere`` builds a
+    CohereEmbeddingProvider from ``cohere_embedding_provider`` (base_url / model
+    / api_key with defaults). ``mapping: openai`` builds an
     OpenAIEmbeddingProvider from the ``openai_embedding_provider`` block
     (base_url / model / api_key + optional query_prefix / document_prefix);
     any other value (or absent) builds the default OpenAIEmbeddingProvider.
@@ -178,6 +177,21 @@ def _build_provider(
             base_url=cast("str", block["base_url"]),
             model=cast("str", block.get("model", model)),
             api_key=cast("str", block["api_key"]),
+            transport=transport,
+        )
+    elif mapping == "cohere":
+        # The §8.4 embed wire-mapping fixtures (032-037) declare the bound
+        # provider in cohere_embedding_provider: base_url / model / api_key
+        # (sent as Authorization: Bearer). base_url / api_key are read with
+        # defaults -- §8.4 makes base_url optional (the provider defaults to the
+        # Cohere origin) and api_key optional (no auth header) -- so a block that
+        # omits either binds the default rather than raising KeyError (the §8.4
+        # cohere_rerank_provider pattern).
+        block = cast("Mapping[str, Any]", spec["cohere_embedding_provider"])
+        provider = CohereEmbeddingProvider(
+            base_url=cast("str", block.get("base_url", "https://api.cohere.com")),
+            model=cast("str", block.get("model", model)),
+            api_key=cast("str | None", block.get("api_key")),
             transport=transport,
         )
     else:

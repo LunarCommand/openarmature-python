@@ -1,20 +1,34 @@
-# Spec: realizes the retrieval-provider §5 RerankProvider protocol against a
-# Cohere v2 POST /v2/rerank endpoint (retrieval-provider §8.4) -- the reference
-# rerank provider. The §7 error categories are shared with llm-provider; the
-# rerank-applicable subset (no unsupported_content_block, no
-# structured_output_invalid) is mapped from the Cohere-shape HTTP error
-# envelope below. Typed RerankEvent / RerankFailedEvent dispatch mirrors the
-# embedding path via current_dispatch(). FOLLOW-UP: classify_http_error /
-# base_url normalization are duplicated in spirit from the embedding + llm
-# OpenAI providers; lifting a shared HTTP helper is a multi-provider follow-on.
+# Spec: realizes the retrieval-provider §5 RerankProvider protocol (POST
+# /v2/rerank) and the §3 EmbeddingProvider protocol (POST /v2/embed) against the
+# Cohere v2 API (retrieval-provider §8.4) -- the reference Cohere providers. The
+# §7 error categories are shared with llm-provider; the retrieval-applicable
+# subset (no unsupported_content_block, no structured_output_invalid) is mapped
+# from the Cohere-shape HTTP error envelope below. Typed RerankEvent /
+# EmbeddingEvent dispatch (with their failure variants) mirrors the sibling
+# providers via current_dispatch(). The §8.4 embed half sends the mandatory
+# input_type wire field (query -> search_query, document -> search_document,
+# absent -> search_document, unrecognized -> pre-send provider_invalid_request),
+# embedding_types ["float"] + truncate "NONE" explicitly (fail-loud), maps
+# dimensions -> output_dimension, and chunk-and-stitches over Cohere's 96-input
+# per-call cap. FOLLOW-UP: classify_http_error / base_url normalization are
+# duplicated in spirit from the jina / openai retrieval providers; lifting a
+# shared HTTP helper is a multi-provider follow-on.
 
-"""Cohere-shape rerank provider.
+"""Cohere-shape rerank + embedding providers.
 
 ``CohereRerankProvider`` issues ``POST {base_url}/v2/rerank`` and parses the
 Cohere ``{id, model?, results: [{index, relevance_score, document?}], meta}``
-envelope into a :class:`RerankResponse`. ``base_url`` is the host root (the
-provider appends ``/v2/rerank``), overridable for a proxy / private gateway.
-The ``transport`` parameter is the test seam (``httpx.MockTransport``).
+envelope into a :class:`RerankResponse`. ``CohereEmbeddingProvider`` issues
+``POST {base_url}/v2/embed`` (chunk-and-stitching across Cohere's 96-input
+per-call cap when the input list is larger) and parses the Cohere
+``{id, embeddings: {float: [[float, ...], ...]}, texts, meta}`` envelope into an
+:class:`EmbeddingResponse`. ``base_url`` is the host root (the provider appends
+``/v2/rerank`` / ``/v2/embed``), overridable for a proxy / private gateway.
+``api_key`` is optional and sent as ``Authorization: Bearer <key>``. The
+``transport`` parameter is the test seam (``httpx.MockTransport``).
+
+A Cohere rerank instance and an embedding instance are distinct providers (one
+model each) sharing the hosted endpoint.
 
 The Cohere ``/v2/rerank`` wire has no ``return_documents`` parameter, so
 ``RerankRuntimeConfig.return_documents`` is a silent no-op on this wire (the
@@ -44,10 +58,28 @@ from openarmature.llm.errors import (
 )
 from openarmature.observability.correlation import current_dispatch
 
-from .._events import build_rerank_event, build_rerank_failed_event
+from .._events import (
+    build_embedding_event,
+    build_embedding_failed_event,
+    build_rerank_event,
+    build_rerank_failed_event,
+)
 from .._wire import document_echo, normalize_base_url
-from ..provider import validate_rerank_input, validate_rerank_response
-from ..response import RerankResponse, RerankRuntimeConfig, RerankUsage, ScoredDocument
+from ..provider import (
+    validate_embedding_input,
+    validate_embedding_response,
+    validate_rerank_input,
+    validate_rerank_response,
+)
+from ..response import (
+    EmbeddingResponse,
+    EmbeddingRuntimeConfig,
+    EmbeddingUsage,
+    RerankResponse,
+    RerankRuntimeConfig,
+    RerankUsage,
+    ScoredDocument,
+)
 
 
 def _classify_cohere_http_error(resp: httpx.Response) -> LlmProviderError:
@@ -103,6 +135,91 @@ def _request_params_from_config(config: RerankRuntimeConfig | None) -> dict[str,
     if "return_documents" in config.model_fields_set:
         out["return_documents"] = config.return_documents
     return out
+
+
+# §8.4 *Batch chunking (96-input cap)*: Cohere /v2/embed accepts at most 96
+# inputs per request, so an over-cap embed call chunk-and-stitches over
+# consecutive <=96 slices (the §8 general embed chunk-and-stitch rule; the
+# fixed vendor cap, not a construction-configured chunk_size like TEI).
+_COHERE_EMBED_MAX_INPUTS = 96
+
+# §8.4 *input_type (mandatory wire field)*: the closed set the mapping
+# recognizes, translated into Cohere's mandatory input_type wire value. OA's
+# input_type is {query, document}; Cohere's other input_type values
+# (classification / clustering / image) are OUTSIDE that value space and are NOT
+# reachable through this mapping -- input_type is a declared config field (so it
+# cannot ride the extras bag) and an unrecognized value is rejected pre-send.
+# Widening input_type's normative value space is a deferred §2 / 0077 change.
+_INPUT_TYPE_TO_COHERE: dict[str, str] = {
+    "query": "search_query",
+    "document": "search_document",
+}
+
+
+def _cohere_input_type(input_type: str | None) -> str:
+    """Resolve the mandatory Cohere ``/v2/embed`` ``input_type`` wire value.
+
+    ``"query"`` maps to ``"search_query"``, ``"document"`` to
+    ``"search_document"``, and an absent ``input_type`` to ``"search_document"``
+    (the bulk-indexing default -- the wire requires a value). Raises
+    :class:`ProviderInvalidRequest` pre-send for an ``input_type`` outside the
+    recognized set.
+    """
+    # Cohere v2 /v2/embed REQUIRES input_type on every request (unlike §8.1 /
+    # §8.2, which omit the field when input_type is absent, and §8.3, which has
+    # no field), so the mapping ALWAYS sends a value. An absent input_type MUST
+    # map to search_document (§8.4 -- the wire needs a value; storing document
+    # vectors is the dominant case); an unrecognized OA input_type is a pre-send
+    # provider_invalid_request (§7), NOT silently coerced to the default.
+    if input_type is None:
+        return "search_document"
+    resolved = _INPUT_TYPE_TO_COHERE.get(input_type)
+    if resolved is None:
+        raise ProviderInvalidRequest(
+            f"Cohere input_type must be one of {sorted(_INPUT_TYPE_TO_COHERE)} (got {input_type!r})"
+        )
+    return resolved
+
+
+# Absence-is-meaningful per observability §5.5.2: only caller-supplied keys
+# appear in the event's request_params -- "the field was not supplied for this
+# call", distinct from a supplied default. For Cohere embed, input_type joins
+# dimensions in this set. input_type in request_params is the caller's ORIGINAL
+# value (query / document), NOT the resolved search_document default the wire
+# carries -- the wire's mandatory default MUST NOT leak back onto the event, and
+# the wire body is built separately.
+def _embedding_request_params(config: EmbeddingRuntimeConfig | None) -> dict[str, Any]:
+    """Extract the supplied embedding request parameters for the event."""
+    if config is None:
+        return {}
+    out: dict[str, Any] = {}
+    if config.dimensions is not None:
+        out["dimensions"] = config.dimensions
+    if config.input_type is not None:
+        out["input_type"] = config.input_type
+    return out
+
+
+def _nonneg_int(value: Any) -> int | None:
+    """Return a non-negative int value, or None (bool excluded)."""
+    # bool is an int subclass, so exclude it explicitly; a malformed value falls
+    # back to None (the call succeeded; usage is secondary).
+    if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+        return value
+    return None
+
+
+def _billed_units(body: dict[str, Any]) -> dict[str, Any] | None:
+    """Return the Cohere ``meta.billed_units`` object, or None."""
+    # Both /v2/rerank and /v2/embed report usage under meta.billed_units; the
+    # descent + isinstance guards are shared, each caller reads its own figures.
+    meta_raw = body.get("meta")
+    if not isinstance(meta_raw, dict):
+        return None
+    billed_raw = cast("dict[str, Any]", meta_raw).get("billed_units")
+    if not isinstance(billed_raw, dict):
+        return None
+    return cast("dict[str, Any]", billed_raw)
 
 
 class CohereRerankProvider:
@@ -336,27 +453,333 @@ class CohereRerankProvider:
         Cohere reports ``search_units``; ``input_tokens`` is read too so a
         Cohere-compatible backend that surfaces it is honored.
         """
-        meta_raw = body.get("meta")
-        if not isinstance(meta_raw, dict):
+        billed = _billed_units(body)
+        if billed is None:
             return None
-        billed_raw = cast("dict[str, Any]", meta_raw).get("billed_units")
-        if not isinstance(billed_raw, dict):
-            return None
-        billed = cast("dict[str, Any]", billed_raw)
-        search_units = self._nonneg_int(billed.get("search_units"))
-        input_tokens = self._nonneg_int(billed.get("input_tokens"))
+        search_units = _nonneg_int(billed.get("search_units"))
+        input_tokens = _nonneg_int(billed.get("input_tokens"))
         if search_units is None and input_tokens is None:
             return None
         return RerankUsage(search_units=search_units, input_tokens=input_tokens)
 
-    @staticmethod
-    def _nonneg_int(value: Any) -> int | None:
-        """Return a non-negative int value, or None (bool excluded)."""
-        # bool is an int subclass, so exclude it explicitly; a malformed value
-        # falls back to None (the rerank succeeded; usage is secondary).
-        if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
-            return value
-        return None
+
+class CohereEmbeddingProvider:
+    """Cohere ``/v2/embed`` wire-shape embedding provider.
+
+    Construct with the bound embedding model and an optional API key +
+    transport. ``base_url`` is the host root and defaults to the Cohere
+    origin (``https://api.cohere.com``), overridable for a proxy / gateway.
+    ``embed()`` posts to ``/v2/embed``, chunk-and-stitching across Cohere's
+    96-input per-call cap when the input list is larger.
+
+    Cohere ``/v2/embed`` requires ``input_type`` on every request, so the
+    mapping always sends a value: ``"query"`` becomes ``"search_query"``,
+    ``"document"`` becomes ``"search_document"``, and an absent ``input_type``
+    becomes ``"search_document"`` (the bulk-indexing default). An unrecognized
+    ``input_type`` is rejected before the request is sent. ``embedding_types``
+    always requests ``"float"`` (the mapping reads ``embeddings.float``) and
+    ``truncate: "NONE"`` is sent explicitly (an over-length input errors rather
+    than being silently truncated); ``dimensions`` maps to Cohere's
+    ``output_dimension`` when set. Other precisions (``int8`` / ``base64`` /
+    ...) ride the extras pass-through bag; Cohere's other ``input_type`` values
+    (``classification`` / ...) are outside OA's ``input_type`` value space and
+    are not reachable through this mapping.
+
+    ``ready()`` verifies the bound model with a minimal one-input ``/v2/embed``
+    probe. The Cohere ``/v2/embed`` wire exposes no model-catalog probe, so
+    there is a single universal probe.
+    """
+
+    def __init__(
+        self,
+        *,
+        base_url: str = "https://api.cohere.com",
+        model: str,
+        api_key: str | None = None,
+        transport: httpx.AsyncBaseTransport | None = None,
+        timeout: float = 60.0,
+        genai_system: str = "cohere",
+        populate_caller_metadata: bool = True,
+    ) -> None:
+        # base_url is the host root; the provider appends /v2/embed, so a
+        # trailing /v2 would produce a doubled /v2/v2 path that 404s (the
+        # sibling rerank / jina / openai providers guard the same footgun).
+        # Trailing slashes are stripped.
+        self.base_url = normalize_base_url(base_url, guard_prefix="/v2")
+        self.model = model
+        # ``genai_system`` surfaces as gen_ai.system on the embedding span.
+        self._genai_system = genai_system
+        self._populate_caller_metadata = populate_caller_metadata
+        self._headers: dict[str, str] = {"Content-Type": "application/json"}
+        if api_key is not None:
+            self._headers["Authorization"] = f"Bearer {api_key}"
+        self._client: httpx.AsyncClient = httpx.AsyncClient(
+            base_url=self.base_url,
+            headers=self._headers,
+            transport=transport,
+            timeout=timeout,
+        )
+
+    async def aclose(self) -> None:
+        """Close the underlying HTTP client (releases the connection pool)."""
+        await self._client.aclose()
+
+    async def ready(self) -> None:
+        """Verify the bound embedding model is reachable and serving."""
+        # A minimal one-input /v2/embed probe surfaces provider_invalid_model
+        # (404) / provider_rate_limit (429) / provider_unavailable (5xx) /
+        # provider_authentication exactly as a real embed() would. input_type is
+        # mandatory on the wire, so the probe sends the search_document default.
+        body = {
+            "model": self.model,
+            "input_type": "search_document",
+            "texts": ["ready"],
+            "embedding_types": ["float"],
+            "truncate": "NONE",
+        }
+        try:
+            resp = await self._client.post("/v2/embed", json=body)
+        except httpx.HTTPError as exc:
+            raise ProviderUnavailable(f"readiness probe failed: {exc}") from exc
+        if resp.status_code != 200:
+            raise _classify_cohere_http_error(resp)
+
+    async def embed(
+        self,
+        input: Sequence[str],
+        *,
+        config: EmbeddingRuntimeConfig | None = None,
+    ) -> EmbeddingResponse:
+        """Embed ``input`` into one vector per string, in input order."""
+        dispatch = current_dispatch()
+        call_id = str(uuid.uuid4())
+        # Snapshot prompt context at dispatch time (the node task's context);
+        # the delivery worker has a stale ContextVar view. Lazy import avoids
+        # the prompts -> graph -> ... cycle.
+        from openarmature.prompts.context import current_prompt_group, current_prompt_result
+
+        active_prompt = current_prompt_result()
+        active_prompt_group = current_prompt_group()
+        input_strings = list(input)
+        request_params = _embedding_request_params(config)
+        request_extras = dict(config.model_extra or {}) if config is not None else {}
+        input_type = config.input_type if config is not None else None
+        dimensions = config.dimensions if config is not None else None
+        adapter_start = time.perf_counter()
+        try:
+            validate_embedding_input(input_strings)
+            # Resolve the mandatory wire input_type before any POST: an
+            # unrecognized value raises provider_invalid_request here (pre-send
+            # validation), so no request is issued. The resolved value is
+            # identical across every chunk (§8.4 batch chunking).
+            resolved_input_type = _cohere_input_type(input_type)
+            response = await self._embed_chunked(
+                input_strings, resolved_input_type, dimensions, request_extras
+            )
+        except LlmProviderError as exc:
+            latency_ms_failed = (time.perf_counter() - adapter_start) * 1000.0
+            if dispatch is not None:
+                dispatch(
+                    build_embedding_failed_event(
+                        exc,
+                        latency_ms_failed,
+                        provider=self._genai_system,
+                        model=self.model,
+                        populate_caller_metadata=self._populate_caller_metadata,
+                        call_id=call_id,
+                        input_strings=input_strings,
+                        request_params=request_params,
+                        request_extras=request_extras,
+                        active_prompt=active_prompt,
+                        active_prompt_group=active_prompt_group,
+                    ),
+                )
+            raise
+        latency_ms = (time.perf_counter() - adapter_start) * 1000.0
+        if dispatch is not None:
+            dispatch(
+                build_embedding_event(
+                    response,
+                    latency_ms,
+                    provider=self._genai_system,
+                    model=self.model,
+                    populate_caller_metadata=self._populate_caller_metadata,
+                    call_id=call_id,
+                    input_strings=input_strings,
+                    request_params=request_params,
+                    request_extras=request_extras,
+                    active_prompt=active_prompt,
+                    active_prompt_group=active_prompt_group,
+                ),
+            )
+        return response
+
+    async def _embed_chunked(
+        self,
+        input_strings: list[str],
+        input_type: str,
+        dimensions: int | None,
+        request_extras: dict[str, Any],
+    ) -> EmbeddingResponse:
+        """Issue one /v2/embed per <=96 chunk and stitch the vectors."""
+        # THE chunk-and-stitch (§8.4 *Batch chunking (96-input cap)* / the §8
+        # general embed rule). When len(input) <= 96 this issues a single
+        # request; otherwise it splits the inputs into consecutive <=96 slices,
+        # issues one /v2/embed per slice with IDENTICAL per-call params (only
+        # texts differs), concatenates the per-chunk embeddings.float IN INPUT
+        # ORDER, sums meta.billed_units.input_tokens across chunks, and takes
+        # response_id from the FIRST chunk. This is valid because each input's
+        # embedding is independent of the others in its batch.
+        stitched_vectors: list[list[float]] = []
+        chunk_bodies: list[Any] = []
+        input_tokens_total: int | None = None
+        response_id: str | None = None
+        for offset in range(0, len(input_strings), _COHERE_EMBED_MAX_INPUTS):
+            chunk = input_strings[offset : offset + _COHERE_EMBED_MAX_INPUTS]
+            body = self._build_request_body(chunk, input_type, dimensions, request_extras)
+            try:
+                resp = await self._client.post("/v2/embed", json=body)
+            except httpx.HTTPError as exc:
+                raise ProviderUnavailable(f"embedding request failed: {exc}") from exc
+            if resp.status_code != 200:
+                raise _classify_cohere_http_error(resp)
+            chunk_vectors, chunk_tokens, chunk_id, chunk_body = self._parse_chunk(resp)
+            # Per-chunk count MUST match the chunk's inputs before stitching: the
+            # stitch is positional (no index re-basing), so a chunk returning the
+            # wrong vector count would silently misalign vectors that a
+            # compensating chunk lets the stitched total pass (§4 input-order).
+            if len(chunk_vectors) != len(chunk):
+                raise ProviderInvalidResponse(
+                    f"embedding response returned {len(chunk_vectors)} vectors for {len(chunk)} inputs"
+                )
+            stitched_vectors.extend(chunk_vectors)
+            chunk_bodies.append(chunk_body)
+            if offset == 0:
+                response_id = chunk_id
+            # Sum input_tokens across chunks; a chunk that omits usage does not
+            # contribute, and usage stays null only when NO chunk reports it
+            # (§4 / §8 batch-chunking step 4 -- never fabricate).
+            if chunk_tokens is not None:
+                input_tokens_total = (input_tokens_total or 0) + chunk_tokens
+        # §4 cross-impl invariants (one vector per input, uniform
+        # dimensionality) are enforced against the STITCHED result.
+        dimensions_out = validate_embedding_response(stitched_vectors, len(input_strings))
+        usage = EmbeddingUsage(input_tokens=input_tokens_total) if input_tokens_total is not None else None
+        # raw is the verbatim deserialized response (§4 / §8 per proposal 0096,
+        # dict | list): a single /v2/embed call carries that response's object;
+        # a chunked call carries the LIST of per-chunk objects in request order,
+        # discriminated by whether the input exceeded the 96-input cap.
+        raw: dict[str, Any] | list[Any] = chunk_bodies[0] if len(chunk_bodies) == 1 else chunk_bodies
+        return EmbeddingResponse(
+            vectors=stitched_vectors,
+            model=self.model,
+            usage=usage,
+            response_id=response_id,
+            dimensions=dimensions_out,
+            raw=raw,
+        )
+
+    def _build_request_body(
+        self,
+        chunk: list[str],
+        input_type: str,
+        dimensions: int | None,
+        request_extras: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Build one /v2/embed request body for a chunk of inputs."""
+        # Extras merge FIRST so the managed keys (model, input_type, texts,
+        # truncate, output_dimension) always win: a caller's undeclared extra
+        # named "texts" must not clobber the wire identity, and one named
+        # "truncate" cannot defeat the fail-loud guarantee. input_type is the
+        # resolved mandatory wire value (search_query / search_document).
+        # truncate "NONE" is sent explicitly so an over-length input errors
+        # rather than being silently truncated (fail-loud, §8.4).
+        #
+        # embedding_types is the ONE managed key that MERGES rather than
+        # clobbers: the mapping reads embeddings.float, so "float" MUST be
+        # present, but a caller's other precisions (int8 / uint8 / binary /
+        # base64) ride the extras bag and are preserved -- "float" is merged in
+        # only when a caller's embedding_types omits it (§8.4). A malformed /
+        # empty embedding_types extra falls back to ["float"].
+        caller_types = request_extras.get("embedding_types")
+        if (
+            isinstance(caller_types, list)
+            and caller_types
+            and all(isinstance(t, str) and t for t in cast("list[object]", caller_types))
+        ):
+            embedding_types = list(cast("list[str]", caller_types))
+            if "float" not in embedding_types:
+                embedding_types.append("float")
+        else:
+            embedding_types = ["float"]
+        body: dict[str, Any] = {
+            **request_extras,
+            "model": self.model,
+            "input_type": input_type,
+            "texts": list(chunk),
+            "embedding_types": embedding_types,
+            "truncate": "NONE",
+        }
+        # output_dimension is the wire mapping of the dimensions parameter, so it
+        # is a managed key like model / texts: a caller extra named
+        # "output_dimension" must not set it. dimensions is the sole source; drop
+        # any extras copy, then set it only when supplied (omitted otherwise so
+        # Cohere's model default applies).
+        body.pop("output_dimension", None)
+        if dimensions is not None:
+            body["output_dimension"] = dimensions
+        return body
+
+    def _parse_chunk(
+        self,
+        resp: httpx.Response,
+    ) -> tuple[list[list[float]], int | None, str | None, dict[str, Any]]:
+        """Parse one /v2/embed chunk into (vectors, input_tokens, id, raw)."""
+        # Cohere /v2/embed returns an object envelope {id, embeddings: {float:
+        # [[float, ...], ...]}, texts, meta: {billed_units: {input_tokens}}}.
+        # embeddings.float is a list of vector lists IN INPUT ORDER (positional
+        # -- Cohere returns them in request order, NOT index-keyed like the
+        # OpenAI / Jina data[] shape). Rejects non-numeric vector values (JSON
+        # strings, bools) rather than coercing them.
+        try:
+            body_raw = resp.json()
+        except ValueError as exc:
+            raise ProviderInvalidResponse("embedding response is not valid JSON") from exc
+        if not isinstance(body_raw, dict):
+            raise ProviderInvalidResponse("embedding response is not a JSON object")
+        body = cast("dict[str, Any]", body_raw)
+        embeddings_raw = body.get("embeddings")
+        if not isinstance(embeddings_raw, dict):
+            raise ProviderInvalidResponse("embedding response missing 'embeddings' object")
+        float_raw = cast("dict[str, Any]", embeddings_raw).get("float")
+        if not isinstance(float_raw, list):
+            raise ProviderInvalidResponse("embedding response missing 'embeddings.float' array")
+        rows = cast("list[Any]", float_raw)
+        vectors: list[list[float]] = []
+        for row in rows:
+            if not isinstance(row, list) or not row:
+                raise ProviderInvalidResponse("embedding response has a missing or empty vector")
+            values = cast("list[Any]", row)
+            # bool is an int subclass, and float("0.1") would silently accept a
+            # string, so the strict isinstance check is what makes "non-numeric
+            # is malformed" hold.
+            if not all(isinstance(x, (int, float)) and not isinstance(x, bool) for x in values):
+                raise ProviderInvalidResponse("embedding response has a non-numeric vector value")
+            vectors.append([float(x) for x in values])
+        input_tokens = self._parse_input_tokens(body)
+        response_id = body.get("id")
+        return vectors, input_tokens, response_id if isinstance(response_id, str) else None, body
+
+    def _parse_input_tokens(self, body: dict[str, Any]) -> int | None:
+        """Extract meta.billed_units.input_tokens, or None.
+
+        A value is read only when the provider surfaces it; a token count is
+        never fabricated.
+        """
+        billed = _billed_units(body)
+        if billed is None:
+            return None
+        return _nonneg_int(billed.get("input_tokens"))
 
 
-__all__ = ["CohereRerankProvider"]
+__all__ = ["CohereEmbeddingProvider", "CohereRerankProvider"]
