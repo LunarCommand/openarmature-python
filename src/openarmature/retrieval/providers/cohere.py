@@ -144,10 +144,12 @@ def _request_params_from_config(config: RerankRuntimeConfig | None) -> dict[str,
 _COHERE_EMBED_MAX_INPUTS = 96
 
 # §8.4 *input_type (mandatory wire field)*: the closed set the mapping
-# recognizes, translated into Cohere's mandatory input_type wire value. Cohere's
-# other input_type values (classification / clustering / image) ride the extras
-# pass-through bag, not OA's input_type (widening input_type's normative value
-# space is a §2 / 0077 protocol-level change, deferred until a consumer needs it).
+# recognizes, translated into Cohere's mandatory input_type wire value. OA's
+# input_type is {query, document}; Cohere's other input_type values
+# (classification / clustering / image) are OUTSIDE that value space and are NOT
+# reachable through this mapping -- input_type is a declared config field (so it
+# cannot ride the extras bag) and an unrecognized value is rejected pre-send.
+# Widening input_type's normative value space is a deferred §2 / 0077 change.
 _INPUT_TYPE_TO_COHERE: dict[str, str] = {
     "query": "search_query",
     "document": "search_document",
@@ -174,8 +176,7 @@ def _cohere_input_type(input_type: str | None) -> str:
     resolved = _INPUT_TYPE_TO_COHERE.get(input_type)
     if resolved is None:
         raise ProviderInvalidRequest(
-            f"Cohere input_type must be one of {sorted(_INPUT_TYPE_TO_COHERE)} (got {input_type!r}); "
-            "other Cohere input_type values ride the extras pass-through bag"
+            f"Cohere input_type must be one of {sorted(_INPUT_TYPE_TO_COHERE)} (got {input_type!r})"
         )
     return resolved
 
@@ -480,8 +481,9 @@ class CohereEmbeddingProvider:
     ``truncate: "NONE"`` is sent explicitly (an over-length input errors rather
     than being silently truncated); ``dimensions`` maps to Cohere's
     ``output_dimension`` when set. Other precisions (``int8`` / ``base64`` /
-    ...) and ``input_type`` values (``classification`` / ...) ride the extras
-    pass-through bag.
+    ...) ride the extras pass-through bag; Cohere's other ``input_type`` values
+    (``classification`` / ...) are outside OA's ``input_type`` value space and
+    are not reachable through this mapping.
 
     ``ready()`` verifies the bound model with a minimal one-input ``/v2/embed``
     probe. The Cohere ``/v2/embed`` wire exposes no model-catalog probe, so
