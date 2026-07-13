@@ -64,17 +64,15 @@ from .._events import (
     build_rerank_event,
     build_rerank_failed_event,
 )
-from .._wire import document_echo, normalize_base_url
+from .._wire import chunk_and_stitch_embed, document_echo, normalize_base_url
 from ..provider import (
     validate_embedding_input,
-    validate_embedding_response,
     validate_rerank_input,
     validate_rerank_response,
 )
 from ..response import (
     EmbeddingResponse,
     EmbeddingRuntimeConfig,
-    EmbeddingUsage,
     RerankResponse,
     RerankRuntimeConfig,
     RerankUsage,
@@ -622,20 +620,20 @@ class CohereEmbeddingProvider:
         request_extras: dict[str, Any],
     ) -> EmbeddingResponse:
         """Issue one /v2/embed per <=96 chunk and stitch the vectors."""
+
         # THE chunk-and-stitch (§8.4 *Batch chunking (96-input cap)* / the §8
-        # general embed rule). When len(input) <= 96 this issues a single
-        # request; otherwise it splits the inputs into consecutive <=96 slices,
-        # issues one /v2/embed per slice with IDENTICAL per-call params (only
-        # texts differs), concatenates the per-chunk embeddings.float IN INPUT
-        # ORDER, sums meta.billed_units.input_tokens across chunks, and takes
-        # response_id from the FIRST chunk. This is valid because each input's
-        # embedding is independent of the others in its batch.
-        stitched_vectors: list[list[float]] = []
-        chunk_bodies: list[Any] = []
-        input_tokens_total: int | None = None
-        response_id: str | None = None
-        for offset in range(0, len(input_strings), _COHERE_EMBED_MAX_INPUTS):
-            chunk = input_strings[offset : offset + _COHERE_EMBED_MAX_INPUTS]
+        # general embed rule) via the shared chunk_and_stitch_embed helper. The
+        # per-chunk closure builds the /v2/embed body with IDENTICAL per-call
+        # params (only texts differs), POSTs, classifies the HTTP error, and
+        # parses the chunk into (vectors, input_tokens, id, body); the helper
+        # loops the consecutive <=96 slices, concatenates the vectors IN INPUT
+        # ORDER, sums input_tokens, takes response_id from the FIRST chunk, and
+        # validates the §4 invariants against the stitched result. When
+        # len(input) <= 96 this issues a single request. Valid because each
+        # input's embedding is independent of the others in its batch.
+        async def _embed_one(
+            chunk: list[str],
+        ) -> tuple[list[list[float]], int | None, str | None, dict[str, Any]]:
             body = self._build_request_body(chunk, input_type, dimensions, request_extras)
             try:
                 resp = await self._client.post("/v2/embed", json=body)
@@ -643,40 +641,13 @@ class CohereEmbeddingProvider:
                 raise ProviderUnavailable(f"embedding request failed: {exc}") from exc
             if resp.status_code != 200:
                 raise _classify_cohere_http_error(resp)
-            chunk_vectors, chunk_tokens, chunk_id, chunk_body = self._parse_chunk(resp)
-            # Per-chunk count MUST match the chunk's inputs before stitching: the
-            # stitch is positional (no index re-basing), so a chunk returning the
-            # wrong vector count would silently misalign vectors that a
-            # compensating chunk lets the stitched total pass (§4 input-order).
-            if len(chunk_vectors) != len(chunk):
-                raise ProviderInvalidResponse(
-                    f"embedding response returned {len(chunk_vectors)} vectors for {len(chunk)} inputs"
-                )
-            stitched_vectors.extend(chunk_vectors)
-            chunk_bodies.append(chunk_body)
-            if offset == 0:
-                response_id = chunk_id
-            # Sum input_tokens across chunks; a chunk that omits usage does not
-            # contribute, and usage stays null only when NO chunk reports it
-            # (§4 / §8 batch-chunking step 4 -- never fabricate).
-            if chunk_tokens is not None:
-                input_tokens_total = (input_tokens_total or 0) + chunk_tokens
-        # §4 cross-impl invariants (one vector per input, uniform
-        # dimensionality) are enforced against the STITCHED result.
-        dimensions_out = validate_embedding_response(stitched_vectors, len(input_strings))
-        usage = EmbeddingUsage(input_tokens=input_tokens_total) if input_tokens_total is not None else None
-        # raw is the verbatim deserialized response (§4 / §8 per proposal 0096,
-        # dict | list): a single /v2/embed call carries that response's object;
-        # a chunked call carries the LIST of per-chunk objects in request order,
-        # discriminated by whether the input exceeded the 96-input cap.
-        raw: dict[str, Any] | list[Any] = chunk_bodies[0] if len(chunk_bodies) == 1 else chunk_bodies
-        return EmbeddingResponse(
-            vectors=stitched_vectors,
+            return self._parse_chunk(resp)
+
+        return await chunk_and_stitch_embed(
+            input_strings,
             model=self.model,
-            usage=usage,
-            response_id=response_id,
-            dimensions=dimensions_out,
-            raw=raw,
+            cap=_COHERE_EMBED_MAX_INPUTS,
+            embed_chunk=_embed_one,
         )
 
     def _build_request_body(

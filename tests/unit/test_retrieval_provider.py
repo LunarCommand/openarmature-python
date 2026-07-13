@@ -1372,6 +1372,151 @@ async def test_tei_embed_over_length_maps_to_invalid_request(status: int) -> Non
     await provider.aclose()
 
 
+# --- /embed chunk-and-stitch (proposal 0092) --------------------------------
+
+
+async def test_tei_embed_chunk_and_stitch_by_chunk_size() -> None:
+    # Mirror fixture 038: 5 inputs, chunk_size 2 => exactly 3 /embed requests
+    # with `inputs` sizes [2, 2, 1] over the consecutive slices input[0:2],
+    # input[2:4], input[4:5], identical per-call params on each (bare {inputs}
+    # form, no prompt_name / dimensions). The per-chunk bare vector arrays are
+    # stitched IN INPUT ORDER across the chunk boundaries; TEI reports no usage
+    # and no id, so usage + response_id are null. One EmbeddingEvent per embed()
+    # call (the whole stitched call, not per chunk).
+    inputs = [f"e{i}" for i in range(5)]
+    chunks = [
+        [[0.0, 0.5], [0.1, 0.5]],
+        [[0.2, 0.5], [0.3, 0.5]],
+        [[0.4, 0.5]],
+    ]
+    responses = iter(chunks)
+    captured: list[dict[str, Any]] = []
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        captured.append(json.loads(req.content))
+        assert req.url.path == "/embed"
+        return httpx.Response(200, json=next(responses))
+
+    provider = _tei_embed_provider(handler, chunk_size=2)
+    events, token = _collecting_dispatch()
+    try:
+        response = await provider.embed(inputs)
+    finally:
+        await provider.aclose()
+        _reset_active_dispatch(token)
+
+    # Exactly 3 requests, `inputs` sizes [2, 2, 1], consecutive slices, identical
+    # per-call params on each (bare {inputs} form; no prompt_name / dimensions).
+    assert len(captured) == 3
+    assert [len(b["inputs"]) for b in captured] == [2, 2, 1]
+    assert captured[0]["inputs"] == inputs[0:2]
+    assert captured[1]["inputs"] == inputs[2:4]
+    assert captured[2]["inputs"] == inputs[4:5]
+    for b in captured:
+        assert set(b) == {"inputs"}
+    # Stitched in input order across the boundaries (vector i == input i).
+    assert response.vectors == [[0.0, 0.5], [0.1, 0.5], [0.2, 0.5], [0.3, 0.5], [0.4, 0.5]]
+    assert len(response.vectors) == 5
+    assert response.dimensions == 2
+    # TEI /embed reports no usage object and no id -> both stitch to null.
+    assert response.usage is None
+    assert response.response_id is None
+    assert response.model == "tei-embed-test"
+    # raw is the list of the 3 per-chunk bare vector arrays, in request order.
+    assert response.raw == chunks
+    embed_events = [e for e in events if isinstance(e, EmbeddingEvent)]
+    assert len(embed_events) == 1
+    assert embed_events[0].input_count == 5
+    assert embed_events[0].dimensions == 2
+
+
+async def test_tei_embed_chunk_params_identical_across_chunks() -> None:
+    # >chunk_size inputs with an input_type_prompt_map + input_type=query: every
+    # /embed chunk carries the SAME prompt_name -- identical per-call params, only
+    # `inputs` differs across chunks (a param that drifted across chunks fails).
+    captured: list[dict[str, Any]] = []
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        body = json.loads(req.content)
+        captured.append(body)
+        return httpx.Response(200, json=[[0.1, 0.2] for _ in body["inputs"]])
+
+    provider = _tei_embed_provider(
+        handler, chunk_size=2, input_type_prompt_map={"query": "query", "document": "passage"}
+    )
+    await provider.embed([f"q{i}" for i in range(5)], config=EmbeddingRuntimeConfig(input_type="query"))
+    await provider.aclose()
+
+    assert [len(b["inputs"]) for b in captured] == [2, 2, 1]
+    # prompt_name identical on every chunk request; the wire key set is stable.
+    assert all(b["prompt_name"] == "query" for b in captured)
+    assert all(set(b) == {"inputs", "prompt_name"} for b in captured)
+
+
+async def test_tei_embed_per_chunk_count_mismatch_raises() -> None:
+    # The positional stitch validates EACH chunk's vector count. chunk_size 2
+    # over 5 inputs => chunks [2, 2, 1]; the first chunk returns 1 vector for its
+    # 2 inputs, which raises provider_invalid_response before a silent positional
+    # misalignment (the shared helper's per-chunk guard).
+    def handler(req: httpx.Request) -> httpx.Response:
+        n = len(json.loads(req.content)["inputs"])
+        count = 1 if n == 2 else n
+        return httpx.Response(200, json=[[0.1, 0.2] for _ in range(count)])
+
+    provider = _tei_embed_provider(handler, chunk_size=2)
+    with pytest.raises(ProviderInvalidResponse):
+        await provider.embed([f"e{i}" for i in range(5)])
+    await provider.aclose()
+
+
+async def test_tei_embed_single_request_path_when_within_chunk_size() -> None:
+    # len(input) <= chunk_size issues exactly ONE /embed request (the pre-0092
+    # single-request behavior preserved): 3 inputs, chunk_size 4 => 1 request,
+    # and raw is the single bare array, not a one-element list.
+    captured: list[dict[str, Any]] = []
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        captured.append(json.loads(req.content))
+        return httpx.Response(200, json=[[0.1, 0.2], [0.3, 0.4], [0.5, 0.6]])
+
+    provider = _tei_embed_provider(handler, chunk_size=4)
+    response = await provider.embed(["a", "b", "c"])
+    await provider.aclose()
+
+    assert len(captured) == 1
+    assert captured[0]["inputs"] == ["a", "b", "c"]
+    assert response.vectors == [[0.1, 0.2], [0.3, 0.4], [0.5, 0.6]]
+    # A single-request call's raw is the ONE bare array, not a one-element list.
+    assert response.raw == [[0.1, 0.2], [0.3, 0.4], [0.5, 0.6]]
+    assert response.usage is None
+    assert response.response_id is None
+
+
+async def test_chunk_and_stitch_embed_rejects_non_positive_cap() -> None:
+    # The shared helper guards a caller passing cap <= 0 (a misconfigured per-call
+    # limit): fail loudly rather than a raw range() error (0) or an empty stitch.
+    from openarmature.retrieval._wire import chunk_and_stitch_embed
+
+    async def _noop(chunk: list[str]) -> tuple[list[list[float]], None, None, list[Any]]:
+        return [], None, None, []
+
+    for bad_cap in (0, -1):
+        with pytest.raises(ValueError, match="cap must be positive"):
+            await chunk_and_stitch_embed(["a"], model="m", cap=bad_cap, embed_chunk=_noop)
+
+
+async def test_chunk_and_stitch_embed_rejects_empty_input() -> None:
+    # An empty input reaching the helper is a caller error -> provider_invalid_request
+    # (validate_embedding_input), NOT a misclassified provider_invalid_response.
+    from openarmature.retrieval._wire import chunk_and_stitch_embed
+
+    async def _noop(chunk: list[str]) -> tuple[list[list[float]], None, None, list[Any]]:
+        return [], None, None, []
+
+    with pytest.raises(ProviderInvalidRequest):
+        await chunk_and_stitch_embed([], model="m", cap=4, embed_chunk=_noop)
+
+
 # --- /rerank wire + chunk-and-stitch ----------------------------------------
 
 

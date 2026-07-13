@@ -87,20 +87,11 @@ _DEFAULT_RERANK_MODEL = "rerank-test"
 # batch-chunking rule: 028-031 (0090 Cohere rerank), 032-037 (0091 Cohere
 # embed), 038 (0092 TEI /embed over-cap chunk-and-stitch). 028-031 ship with
 # 0090 and 032-037 with 0091 (CohereEmbeddingProvider against POST /v2/embed,
-# driven through the general wire-capture harness). 038 stays deferred: the TEI
-# /embed over-cap chunk-and-stitch rides the general 0092 embed rule against the
-# TEI embed wire mapping, unshipped at this pin.
-_DEFERRED_FIXTURES: dict[str, str] = {
-    **{
-        p.stem: (
-            "embedding batch-chunking general rule (proposal 0092); the TEI "
-            "/embed over-cap chunk-and-stitch fixture rides the unshipped TEI "
-            "embed wire mapping (proposal 0077)"
-        )
-        for p in CONFORMANCE_DIR.glob("[0-9][0-9][0-9]-*.yaml")
-        if int(p.stem[:3]) == 38
-    },
-}
+# driven through the general wire-capture harness). 038 ships with 0092:
+# TeiEmbeddingProvider.embed() chunk-and-stitches by its construction chunk_size
+# via the shared chunk_and_stitch_embed helper (also adopted by Cohere /v2/embed),
+# so no retrieval fixtures remain deferred.
+_DEFERRED_FIXTURES: dict[str, str] = {}
 
 
 def _fixture_paths() -> list[Path]:
