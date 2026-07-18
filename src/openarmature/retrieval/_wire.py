@@ -2,14 +2,15 @@
 
 Pure, stateless primitives reused across the vendor wire mappings:
 request-body shaping (the client-side ``input_type`` prefix), endpoint
-normalization (``base_url``), and response parsing (the rerank document echo).
-Types live in ``response.py``, the observability event builders in
-``_events.py``, and the provider protocols in ``provider.py``; only the
-mapping helpers belong here.
+normalization (``base_url``), batch chunking, and response parsing (the rerank
+document echo, usage figures). Types live in ``response.py``, the observability
+event builders in ``_events.py``, and the provider protocols in ``provider.py``;
+only the mapping helpers belong here.
 """
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Awaitable, Callable
 from typing import Any, cast
 
@@ -17,6 +18,46 @@ from openarmature.llm.errors import ProviderInvalidResponse
 
 from .provider import validate_embedding_input, validate_embedding_response
 from .response import EmbeddingResponse, EmbeddingUsage
+
+_log = logging.getLogger(__name__)
+
+
+# retrieval-provider §4 / §6 (proposal 0093): a usage figure is reported or it
+# is not -- a mapping MUST NOT fabricate one (an empty record, a zero, or a
+# client-side estimate). This reads ONE figure out of a vendor's usage block:
+# a non-negative int is the reported count, anything else is "not reported"
+# -> None. A malformed figure does NOT fail the call: the embed / rerank itself
+# succeeded and its payload is sound, so a corrupt secondary accounting field
+# surfaces as unknown rather than sinking the whole response (unlike the §6
+# document echo, where the corrupt field IS the payload -- proposal 0097).
+# Callers fold the Nones into a record-or-null per their vendor's shape.
+#
+# Two "not reported" cases with different signals: an ABSENT figure (None -- the
+# key was missing or the value was JSON null) is the ordinary no-usage case
+# (e.g. every TEI call) and returns quietly; a PRESENT-but-unusable figure (a
+# string, a negative, a bool, a float) means the provider / gateway is
+# misbehaving on a field it did populate, so it logs at WARNING before returning
+# None -- otherwise a corrupt count is indistinguishable from the healthy absent
+# case and usage silently goes missing. ``field`` names the figure in the log.
+def nonneg_int(value: Any, *, field: str = "usage figure") -> int | None:
+    """Return ``value`` when it is a non-negative int, else ``None``.
+
+    ``None`` (the figure was not reported) returns quietly; any other
+    non-conforming value is logged at WARNING as a misbehaving provider before
+    returning ``None``. ``field`` names the figure in that log line.
+    """
+    # bool is an int subclass, so exclude it explicitly.
+    if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+        return value
+    if value is not None:
+        _log.warning(
+            "retrieval provider reported a %s that is not a non-negative int "
+            "(got %s %.80r); recording usage as unknown",
+            field,
+            type(value).__name__,
+            value,
+        )
+    return None
 
 
 def normalize_base_url(base_url: str, *, guard_prefix: str) -> str:
@@ -99,23 +140,32 @@ def apply_client_side_prefix(
 # that request's id). raw is that one response for a single-request call, or the
 # LIST of per-chunk responses in request order for a chunked call (proposal
 # 0096). embed_chunk owns the per-mapping wire shaping / POST / parse and returns
-# (vectors, input_tokens, response_id, raw_body) for its slice -- so the loop /
-# stitch / validation is mapping-agnostic. When len(input) <= cap this issues a
-# single request (the single-iteration path). Valid because each input's
-# embedding is independent of the others in its batch.
+# (vectors, input_tokens, response_id, response_model, raw_body) for its slice --
+# so the loop / stitch / validation is mapping-agnostic. The RESPONSE IDENTITY
+# (response_id + response_model) is the FIRST chunk's, since every chunk is the
+# same call with the same params; a mapping whose wire carries no id / model
+# (TEI's bare array, Cohere /v2/embed) reports None and the bound model is the
+# fallback (§4: the response model is the provider-returned identifier, which may
+# be more specific than the bound one, when the body carries one). When
+# len(input) <= cap this issues a single request (the single-iteration path).
+# Valid because each input's embedding is independent of the others in its batch.
 async def chunk_and_stitch_embed(
     input_strings: list[str],
     *,
     model: str,
     cap: int,
-    embed_chunk: Callable[[list[str]], Awaitable[tuple[list[list[float]], int | None, str | None, Any]]],
+    embed_chunk: Callable[
+        [list[str]],
+        Awaitable[tuple[list[list[float]], int | None, str | None, str | None, Any]],
+    ],
 ) -> EmbeddingResponse:
     """Issue one embed request per ``<= cap`` chunk and stitch the vectors.
 
     ``embed_chunk`` sends one chunk's request and returns
-    ``(vectors, input_tokens, response_id, raw_body)`` for that chunk; the
-    per-mapping wire shaping, POST, and parse live in the closure. Returns the
-    stitched :class:`EmbeddingResponse`.
+    ``(vectors, input_tokens, response_id, response_model, raw_body)`` for that
+    chunk; the per-mapping wire shaping, POST, and parse live in the closure.
+    ``model`` is the bound identifier, reported when the chunk bodies carry no
+    model of their own. Returns the stitched :class:`EmbeddingResponse`.
     """
     # cap is the provider's per-call input limit; a non-positive cap is a caller
     # misconfiguration -- fail loudly rather than surfacing a raw range() error
@@ -132,9 +182,10 @@ async def chunk_and_stitch_embed(
     chunk_bodies: list[Any] = []
     input_tokens_total: int | None = None
     response_id: str | None = None
+    response_model: str | None = None
     for offset in range(0, len(input_strings), cap):
         chunk = input_strings[offset : offset + cap]
-        chunk_vectors, chunk_tokens, chunk_id, chunk_body = await embed_chunk(chunk)
+        chunk_vectors, chunk_tokens, chunk_id, chunk_model, chunk_body = await embed_chunk(chunk)
         # Per-chunk count MUST match the chunk's inputs before stitching: the
         # stitch is positional (no index re-basing), so a chunk returning the
         # wrong vector count would silently misalign vectors that a compensating
@@ -145,8 +196,12 @@ async def chunk_and_stitch_embed(
             )
         stitched_vectors.extend(chunk_vectors)
         chunk_bodies.append(chunk_body)
+        # The response identity is the FIRST chunk's (every chunk is the same
+        # call with the same params -- §8 batch chunking step 4 for the id, and
+        # the same reasoning for the model).
         if offset == 0:
             response_id = chunk_id
+            response_model = chunk_model
         # Sum input_tokens across chunks; a chunk that omits usage does not
         # contribute, and usage stays null only when NO chunk reports it (§4 /
         # §8 batch-chunking step 4 -- never fabricate).
@@ -162,7 +217,7 @@ async def chunk_and_stitch_embed(
     raw: dict[str, Any] | list[Any] = chunk_bodies[0] if len(chunk_bodies) == 1 else chunk_bodies
     return EmbeddingResponse(
         vectors=stitched_vectors,
-        model=model,
+        model=response_model if response_model is not None else model,
         usage=usage,
         response_id=response_id,
         dimensions=dimensions,
@@ -200,5 +255,6 @@ __all__ = [
     "chunk_and_stitch_embed",
     "client_side_prefix",
     "document_echo",
+    "nonneg_int",
     "normalize_base_url",
 ]

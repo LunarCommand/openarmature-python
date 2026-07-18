@@ -62,7 +62,7 @@ from .._events import (
     build_rerank_event,
     build_rerank_failed_event,
 )
-from .._wire import document_echo, normalize_base_url
+from .._wire import document_echo, nonneg_int, normalize_base_url
 from ..provider import (
     validate_embedding_input,
     validate_embedding_response,
@@ -142,15 +142,6 @@ def _task_for_input_type(input_type: str | None) -> str | None:
             "other Jina task values ride the extras pass-through bag"
         )
     return task
-
-
-def _nonneg_int(value: Any) -> int | None:
-    """Return a non-negative int value, or None (bool excluded)."""
-    # bool is an int subclass, so exclude it explicitly; a malformed value falls
-    # back to None (the call succeeded; usage is secondary).
-    if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
-        return value
-    return None
 
 
 # Absence-is-meaningful per observability §5.5.2: only caller-supplied keys
@@ -428,7 +419,9 @@ class JinaEmbeddingProvider:
         usage_block = body.get("usage")
         if not isinstance(usage_block, dict):
             return None
-        total_tokens = _nonneg_int(cast("dict[str, Any]", usage_block).get("total_tokens"))
+        total_tokens = nonneg_int(
+            cast("dict[str, Any]", usage_block).get("total_tokens"), field="total_tokens"
+        )
         if total_tokens is None:
             return None
         return EmbeddingUsage(input_tokens=total_tokens)
@@ -675,7 +668,9 @@ class JinaRerankProvider:
         usage_block = body.get("usage")
         if not isinstance(usage_block, dict):
             return None
-        total_tokens = _nonneg_int(cast("dict[str, Any]", usage_block).get("total_tokens"))
+        total_tokens = nonneg_int(
+            cast("dict[str, Any]", usage_block).get("total_tokens"), field="total_tokens"
+        )
         if total_tokens is None:
             return None
         return RerankUsage(input_tokens=total_tokens)
