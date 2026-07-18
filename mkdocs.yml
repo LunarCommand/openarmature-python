@@ -72,6 +72,8 @@ plugins:
           - examples/*.md
         Model Providers:
           - model-providers/*.md
+        Retrieval Providers:
+          - retrieval-providers/*.md
         Reference:
           - reference/*.md
 
@@ -114,6 +116,7 @@ nav:
       - Fan-out: concepts/fan-out.md
       - Parallel branches: concepts/parallel-branches.md
       - LLMs: concepts/llms.md
+      - Retrieval: concepts/retrieval.md
       - Prompts: concepts/prompts.md
       - Observability: concepts/observability.md
       - Checkpointing: concepts/checkpointing.md
@@ -121,10 +124,15 @@ nav:
       - model-providers/index.md
       - Self-hosted vLLM: model-providers/vllm.md
       - Authoring a Provider: model-providers/authoring.md
+    - Retrieval Providers:
+      - retrieval-providers/index.md
+      - Self-hosting TEI: retrieval-providers/tei.md
+      - Authoring a Provider: retrieval-providers/authoring.md
     - Reference:
       - reference/index.md
       - openarmature.graph: reference/graph.md
       - openarmature.llm: reference/llm.md
+      - openarmature.retrieval: reference/retrieval.md
       - openarmature.prompts: reference/prompts.md
       - openarmature.checkpoint: reference/checkpoint.md
       - openarmature.observability: reference/observability.md

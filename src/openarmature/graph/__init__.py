@@ -39,6 +39,8 @@ from .errors import (
     UnreachableNode,
 )
 from .events import (
+    EmbeddingEvent,
+    EmbeddingFailedEvent,
     FailureIsolatedEvent,
     InvocationCompletedEvent,
     InvocationStartedEvent,
@@ -47,6 +49,8 @@ from .events import (
     LlmRetryAttemptEvent,
     MetadataAugmentationEvent,
     NodeEvent,
+    RerankEvent,
+    RerankFailedEvent,
 )
 from .fan_out import FanOutConfig, FanOutNode
 from .middleware import (
@@ -82,6 +86,8 @@ __all__ = [
     "DegradedUpdate",
     "DrainSummary",
     "EdgeException",
+    "EmbeddingEvent",
+    "EmbeddingFailedEvent",
     "EndSentinel",
     "ExplicitMapping",
     "FailureIsolatedEvent",
@@ -123,6 +129,8 @@ __all__ = [
     "Reducer",
     "ReducerError",
     "RemoveHandle",
+    "RerankEvent",
+    "RerankFailedEvent",
     "RetryConfig",
     "RetryMiddleware",
     "RoutingError",
