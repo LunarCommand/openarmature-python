@@ -106,6 +106,25 @@ with a hard turn cap to prevent runaway loops. Demonstrates:
 `ToolMessage(tool_call_id=...)` round-trip, multi-turn
 tool-calling loop as a graph cycle.
 
+### Retrieval
+
+#### [`retrieval-rag/`](./retrieval-rag/main.py)
+
+Retrieval-augmented answering over a lunar knowledge base, using the
+two-stage retrieve-then-rerank pattern before generation. Batch-embeds a
+small corpus once into an index (`OpenAIEmbeddingProvider.embed` over a
+list, one vector per passage), then per query embeds the question, ranks
+the corpus by cosine similarity for a broad shortlist, reranks that
+shortlist with a cross-encoder (`CohereRerankProvider.rerank`) for
+precision, and grounds an LLM answer in the reranked top passages. The
+retrieve and rerank steps run as graph nodes, so their `EmbeddingEvent` /
+`RerankEvent` reach any attached observer. Demonstrates:
+`OpenAIEmbeddingProvider` and `CohereRerankProvider` from
+`openarmature.retrieval`, the `input_type` query/document knob (a wire
+no-op on symmetric OpenAI, meaningful on asymmetric providers), mapping
+`ScoredDocument` results back by `.index`, and retrieval feeding an
+`OpenAIProvider` answer node. Needs `OPENAI_API_KEY` and `COHERE_API_KEY`.
+
 ### Reliability
 
 #### [`checkpointing-and-migration/`](./checkpointing-and-migration/main.py)

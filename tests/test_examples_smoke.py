@@ -43,6 +43,7 @@ DEMOS = [
     "observer-hooks",
     "langfuse-observability",
     "production-observability",
+    "retrieval-rag",
 ]
 
 

@@ -1617,6 +1617,7 @@ _Runnable example programs shipped in the source tree at `examples/`. The full c
 - **`examples/observer-hooks/main.py`** — openarmature demo: observer hooks for structured logging, per-call metrics, and OTel spans.
 - **`examples/parallel-branches/main.py`** — openarmature demo: enrich a lunar-mission news article with several independent analyses running concurrently.
 - **`examples/production-observability/main.py`** — openarmature demo: production observability with dual OTel + Langfuse observers, caller hooks for trace.input/output, and the canonical TimingMiddleware.
+- **`examples/retrieval-rag/main.py`** — Retrieval-augmented answering over a lunar knowledge base.
 - **`examples/routing-and-subgraphs/main.py`** — openarmature demo: conditional routing + subgraph with a custom projection.
 - **`examples/tool-use/main.py`** — openarmature demo: a lunar-mission assistant that calls local Python functions as tools to answer fact and physics questions about Apollo / Artemis missions.
 
