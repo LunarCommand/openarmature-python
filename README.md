@@ -180,7 +180,7 @@ A few things to notice:
 - **Concepts**: typed state, reducers, graphs, composition, fan-out, parallel branches, LLMs, retrieval, prompts, observability, checkpointing. [openarmature.ai/concepts](https://openarmature.ai/concepts/)
 - **Model Providers**: implement the Provider Protocol for a custom LLM backend. [openarmature.ai/model-providers/authoring](https://openarmature.ai/model-providers/authoring/)
 - **API reference**: auto-generated from docstrings. [openarmature.ai/reference](https://openarmature.ai/reference/)
-- **Examples**: ten runnable demos with walk-throughs. [openarmature.ai/examples](https://openarmature.ai/examples/) (source at [./examples/](./examples/))
+- **Examples**: runnable demos with walk-throughs. [openarmature.ai/examples](https://openarmature.ai/examples/) (source at [./examples/](./examples/))
 - **Spec**: behavioral contract this implementation conforms to. [LunarCommand/openarmature-spec](https://github.com/LunarCommand/openarmature-spec)
 
 ## For AI agents
