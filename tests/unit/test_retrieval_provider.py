@@ -445,6 +445,38 @@ async def test_openai_embed_single_request_when_within_cap() -> None:
     assert isinstance(response.raw, dict)
 
 
+async def test_openai_embed_chunked_usage_is_all_or_nothing() -> None:
+    # Usage is summed ONLY when every chunk reports it. A 2049-input call
+    # (2 chunks) where chunk 1 reports prompt_tokens but chunk 2 omits the usage
+    # block yields usage = null for the WHOLE call, not a confident partial sum:
+    # the total is unaccountable, and a partial sum would both undercount and
+    # diverge from the single-request path (which returns null for the same
+    # unaccountable figure). Guards against the chunked/unchunked inconsistency.
+    inputs = [f"doc-{i:04d}" for i in range(2049)]
+    chunk_a = [[i / 10000, 0.5] for i in range(2048)]
+    body_a = _openai_embed_body(
+        data=[{"object": "embedding", "index": i, "embedding": v} for i, v in enumerate(chunk_a)],
+        prompt_tokens=4096,
+    )
+    body_b = _openai_embed_body(data=[{"object": "embedding", "index": 0, "embedding": [0.2048, 0.5]}])
+    del body_b["usage"]  # chunk 2 reports no usage block at all
+    responses = iter([body_a, body_b])
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        assert req.url.path == "/v1/embeddings"
+        return httpx.Response(200, json=next(responses))
+
+    provider = _openai_embed_provider(handler)
+    try:
+        response = await provider.embed(inputs)
+    finally:
+        await provider.aclose()
+
+    assert len(response.vectors) == 2049
+    # Chunk 2 reported nothing, so the whole-call total is unaccountable -> null.
+    assert response.usage is None
+
+
 # --- nonneg_int: warn on a present-but-corrupt usage figure (proposal 0093) --
 #
 # The shared usage-figure reader distinguishes "not reported" (None -- the

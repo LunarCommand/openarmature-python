@@ -39,6 +39,10 @@ _log = logging.getLogger(__name__)
 # misbehaving on a field it did populate, so it logs at WARNING before returning
 # None -- otherwise a corrupt count is indistinguishable from the healthy absent
 # case and usage silently goes missing. ``field`` names the figure in the log.
+# Under batch chunking this fires once per chunk, so a persistently-corrupt
+# gateway logs N warnings for one embed() call; that per-chunk multiplicity is
+# accepted -- deduping would move the warning out of this single-request-shaped
+# reader and lose it for the non-chunked providers (Cohere / Jina rerank).
 def nonneg_int(value: Any, *, field: str = "usage figure") -> int | None:
     """Return ``value`` when it is a non-negative int, else ``None``.
 
@@ -135,8 +139,9 @@ def apply_client_side_prefix(
 # chunked input list identical across slices, concatenate the per-chunk vectors
 # IN INPUT ORDER (so §4's one-vector-per-input + input-order invariants hold
 # across the whole call), and combine the per-chunk usage per §4's nullable
-# usage contract -- sum input_tokens when the provider reports usage, else
-# usage = null. response_id is the FIRST chunk's id (a single-request call uses
+# usage contract ALL-OR-NOTHING -- sum input_tokens only when EVERY chunk reports
+# a figure, else usage = null (a mixed report is an unaccountable total, never a
+# partial sum). response_id is the FIRST chunk's id (a single-request call uses
 # that request's id). raw is that one response for a single-request call, or the
 # LIST of per-chunk responses in request order for a chunked call (proposal
 # 0096). embed_chunk owns the per-mapping wire shaping / POST / parse and returns
@@ -166,6 +171,12 @@ async def chunk_and_stitch_embed(
     chunk; the per-mapping wire shaping, POST, and parse live in the closure.
     ``model`` is the bound identifier, reported when the chunk bodies carry no
     model of their own. Returns the stitched :class:`EmbeddingResponse`.
+
+    A chunked call issues its per-chunk requests sequentially and is NOT atomic:
+    if a later chunk fails, the earlier chunks have already been sent (and billed
+    by the provider) but their vectors are discarded and the call raises. There
+    is no rollback over a non-transactional wire, and the failure event carries
+    no usage, so a mid-call failure may leave earlier chunks billed unobservably.
     """
     # cap is the provider's per-call input limit; a non-positive cap is a caller
     # misconfiguration -- fail loudly rather than surfacing a raw range() error
@@ -180,7 +191,8 @@ async def chunk_and_stitch_embed(
     validate_embedding_input(input_strings)
     stitched_vectors: list[list[float]] = []
     chunk_bodies: list[Any] = []
-    input_tokens_total: int | None = None
+    input_tokens_total = 0
+    usage_fully_reported = True
     response_id: str | None = None
     response_model: str | None = None
     for offset in range(0, len(input_strings), cap):
@@ -202,15 +214,23 @@ async def chunk_and_stitch_embed(
         if offset == 0:
             response_id = chunk_id
             response_model = chunk_model
-        # Sum input_tokens across chunks; a chunk that omits usage does not
-        # contribute, and usage stays null only when NO chunk reports it (§4 /
-        # §8 batch-chunking step 4 -- never fabricate).
-        if chunk_tokens is not None:
-            input_tokens_total = (input_tokens_total or 0) + chunk_tokens
+        # Sum input_tokens ALL-OR-NOTHING: a total is reported only when EVERY
+        # chunk reported one. Any chunk that omits usage (a None figure, incl. an
+        # absent OR a corrupt one via nonneg_int) makes the whole-call total
+        # unaccountable -- so usage = null rather than a partial sum that would
+        # present a confident undercount and diverge from the single-request
+        # path (which returns null for the same unaccountable figure). All report
+        # (hosted OpenAI / Cohere) -> sum; none report (TEI) -> null; mixed (an
+        # inconsistent gateway) -> null (§4 / §8 batch-chunking step 4 -- never
+        # fabricate a figure you cannot fully account for).
+        if chunk_tokens is None:
+            usage_fully_reported = False
+        else:
+            input_tokens_total += chunk_tokens
     # §4 cross-impl invariants (one vector per input, uniform dimensionality)
     # are enforced against the STITCHED result.
     dimensions = validate_embedding_response(stitched_vectors, len(input_strings))
-    usage = EmbeddingUsage(input_tokens=input_tokens_total) if input_tokens_total is not None else None
+    usage = EmbeddingUsage(input_tokens=input_tokens_total) if usage_fully_reported else None
     # raw is the verbatim deserialized response (§4 / §8 per proposal 0096, dict
     # | list): a single call carries that response's body; a chunked call carries
     # the LIST of per-chunk bodies in request order.

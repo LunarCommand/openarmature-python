@@ -446,13 +446,17 @@ class OpenAIEmbeddingProvider:
             if isinstance(usage_block, dict)
             else None
         )
+        # An empty-string id / model carries no provider identifier (§4: the
+        # reported identifier is used only when the body carries one), so treat
+        # "" as absent -> None. For the model that lets the stitch fall back to
+        # the bound identifier rather than surfacing "".
         response_id = body.get("id")
         model = body.get("model")
         return (
             vectors,
             input_tokens,
-            response_id if isinstance(response_id, str) else None,
-            model if isinstance(model, str) else None,
+            response_id if isinstance(response_id, str) and response_id else None,
+            model if isinstance(model, str) and model else None,
             body,
         )
 

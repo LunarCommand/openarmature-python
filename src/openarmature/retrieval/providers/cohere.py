@@ -616,9 +616,11 @@ class CohereEmbeddingProvider:
         # general embed rule) via the shared chunk_and_stitch_embed helper. The
         # per-chunk closure builds the /v2/embed body with IDENTICAL per-call
         # params (only texts differs), POSTs, classifies the HTTP error, and
-        # parses the chunk into (vectors, input_tokens, id, body); the helper
-        # loops the consecutive <=96 slices, concatenates the vectors IN INPUT
-        # ORDER, sums input_tokens, takes response_id from the FIRST chunk, and
+        # parses the chunk into (vectors, input_tokens, id, model, body) -- model
+        # is always None (the /v2/embed envelope carries no model), so the stitch
+        # falls back to the bound model; the helper loops the consecutive <=96
+        # slices, concatenates the vectors IN INPUT ORDER, sums input_tokens,
+        # takes the response identity (id + model) from the FIRST chunk, and
         # validates the §4 invariants against the stitched result. When
         # len(input) <= 96 this issues a single request. Valid because each
         # input's embedding is independent of the others in its batch.
