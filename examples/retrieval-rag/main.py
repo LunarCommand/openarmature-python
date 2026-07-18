@@ -62,6 +62,8 @@ import os
 from collections.abc import Mapping, Sequence
 from typing import Any
 
+from pydantic import Field
+
 from openarmature.graph import (
     END,
     CompiledGraph,
@@ -185,10 +187,12 @@ def _cosine(a: Sequence[float], b: Sequence[float]) -> float:
 class SearchState(State):
     query: str
     # Corpus indices of the cosine-retrieved candidates, best-first.
-    candidate_indices: list[int] = []
+    # (default_factory takes the typed list[int] so it stays clean under
+    # strict typing, where a bare default_factory=list infers list[Unknown].)
+    candidate_indices: list[int] = Field(default_factory=list[int])
     # Corpus indices after reranking, best-first (a reordered, trimmed
     # subset of candidate_indices).
-    ranked_indices: list[int] = []
+    ranked_indices: list[int] = Field(default_factory=list[int])
     answer: str | None = None
 
 
