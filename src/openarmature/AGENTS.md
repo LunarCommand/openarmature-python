@@ -1,6 +1,6 @@
 # OpenArmature — Agent documentation
 
-*This is the agent guide bundled with the openarmature Python package, version 0.15.0 (spec v0.88.0). For the full docs site see [openarmature.ai](https://openarmature.ai). For the canonical spec text see [openarmature.org/capabilities](https://openarmature.org/capabilities/). For project-specific conventions for the code you're editing, see the host project's `AGENTS.md` or `CLAUDE.md`.*
+*This is the agent guide bundled with the openarmature Python package, version 0.16.0 (spec v0.88.0). For the full docs site see [openarmature.ai](https://openarmature.ai). For the canonical spec text see [openarmature.org/capabilities](https://openarmature.org/capabilities/). For project-specific conventions for the code you're editing, see the host project's `AGENTS.md` or `CLAUDE.md`.*
 
 ## TL;DR
 
