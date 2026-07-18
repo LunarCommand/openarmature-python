@@ -219,9 +219,10 @@ _SUPPORTED_FIXTURES = frozenset(
         # node body; the typed EmbeddingEvent / EmbeddingFailedEvent drive the
         # typed-event collector (074-081), the OTel embedding span
         # (082, openarmature.embedding.complete), and the Langfuse Embedding
-        # observation (083 success, 137 failure -- the proposal 0089
-        # output_vectors-sourced rendering). 089 (embedding metrics) stays
-        # deferred with the §11 embedding-metrics path.
+        # observation (083 success, 137 failure, 140 no-usage -- the proposal
+        # 0089 output_vectors-sourced rendering + the proposal 0093
+        # nullable-usage path; 139 is its OTel counterpart). 089 (embedding
+        # metrics) stays deferred with the §11 embedding-metrics path.
         "074-embedding-event-dispatch",
         "075-embedding-failure-event-dispatch-on-provider-unavailable",
         "076-embedding-event-mutual-exclusion",
@@ -233,6 +234,8 @@ _SUPPORTED_FIXTURES = frozenset(
         "082-otel-embedding-span-attributes",
         "083-langfuse-embedding-observation",
         "137-langfuse-embedding-failure-observation",
+        "139-otel-embedding-no-usage-input-tokens-omitted",
+        "140-langfuse-embedding-no-usage-usagedetails-omitted",
         # v0.16.0 — proposal 0060 rerank observability (0060b). A calls_rerank
         # node awaits CohereRerankProvider.rerank() inside the node body; the
         # typed RerankEvent / RerankFailedEvent drive the typed-event collector
@@ -393,27 +396,17 @@ _DEFERRED_FIXTURES: dict[str, str] = {
     "136-langfuse-parallel-branches-dispatch-span": (
         "Langfuse parallel-branches dispatch-span parity (proposal 0088) not-yet implemented"
     ),
-    # ---- v0.88.0 spec-pin bump (v0.84.0 -> v0.88.0): proposal 0093
-    # nullable provider usage records. The no-usage rendering fixtures defer
-    # with the conditional-emission follow-up (widen the shipped
-    # EmbeddingResponse.usage to nullable + omit the usage attribute /
-    # usageDetails when the provider reports none). ----
-    # 139/140 -- embedding no-usage (OTel span + Langfuse observation).
-    **{
-        fixture_id: "nullable provider usage records (proposal 0093) not-yet implemented"
-        for fixture_id in (
-            "139-otel-embedding-no-usage-input-tokens-omitted",
-            "140-langfuse-embedding-no-usage-usagedetails-omitted",
-        )
-    },
-    # 141/142 -- rerank no-usage (OTel span + Langfuse observation) are wired
-    # with the 0060b rerank observability (see _SUPPORTED_FIXTURES); the
-    # conditional-usage rendering handles the record-null branch.
-    # 143 -- embedding no-usage metric; rides the §11 embedding-metrics path
-    # (proposal 0067), which is itself deferred (cf. 089).
+    # ---- Proposal 0093 (nullable provider usage records). 139/140 (embedding
+    # no-usage) and 141/142 (rerank no-usage) are wired -- see
+    # _SUPPORTED_FIXTURES. Only 143 stays deferred, and NOT for a 0093 reason:
+    # it asserts the §11 GenAI token METRIC is not observed when a call reports
+    # no usage, and the OTelObserver records metrics from the LLM per-attempt
+    # event only -- the embedding metric path does not exist yet. It defers
+    # behind the same gate as 089 (proposal 0067), whose implementation would
+    # realize it. 0093 itself changes nothing in §11. ----
     "143-embedding-metrics-no-usage-no-token-observation": (
-        "embedding no-usage metric (proposal 0093) rides the deferred §11 "
-        "embedding-metrics path (proposal 0067; cf. 089)"
+        "embedding no-usage metric rides the deferred §11 embedding-metrics "
+        "path (proposal 0067; cf. 089), not a proposal 0093 gap"
     ),
 }
 
@@ -717,6 +710,8 @@ async def test_observability_fixture(fixture_path: Path) -> None:
         "082-otel-embedding-span-attributes",
         "083-langfuse-embedding-observation",
         "137-langfuse-embedding-failure-observation",
+        "139-otel-embedding-no-usage-input-tokens-omitted",
+        "140-langfuse-embedding-no-usage-usagedetails-omitted",
     }:
         await _run_embedding_fixture(spec)
     elif fixture_id in {

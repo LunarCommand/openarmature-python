@@ -64,7 +64,7 @@ from .._events import (
     build_rerank_event,
     build_rerank_failed_event,
 )
-from .._wire import chunk_and_stitch_embed, document_echo, normalize_base_url
+from .._wire import chunk_and_stitch_embed, document_echo, nonneg_int, normalize_base_url
 from ..provider import (
     validate_embedding_input,
     validate_rerank_input,
@@ -196,15 +196,6 @@ def _embedding_request_params(config: EmbeddingRuntimeConfig | None) -> dict[str
     if config.input_type is not None:
         out["input_type"] = config.input_type
     return out
-
-
-def _nonneg_int(value: Any) -> int | None:
-    """Return a non-negative int value, or None (bool excluded)."""
-    # bool is an int subclass, so exclude it explicitly; a malformed value falls
-    # back to None (the call succeeded; usage is secondary).
-    if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
-        return value
-    return None
 
 
 def _billed_units(body: dict[str, Any]) -> dict[str, Any] | None:
@@ -454,8 +445,8 @@ class CohereRerankProvider:
         billed = _billed_units(body)
         if billed is None:
             return None
-        search_units = _nonneg_int(billed.get("search_units"))
-        input_tokens = _nonneg_int(billed.get("input_tokens"))
+        search_units = nonneg_int(billed.get("search_units"), field="search_units")
+        input_tokens = nonneg_int(billed.get("input_tokens"), field="input_tokens")
         if search_units is None and input_tokens is None:
             return None
         return RerankUsage(search_units=search_units, input_tokens=input_tokens)
@@ -625,15 +616,17 @@ class CohereEmbeddingProvider:
         # general embed rule) via the shared chunk_and_stitch_embed helper. The
         # per-chunk closure builds the /v2/embed body with IDENTICAL per-call
         # params (only texts differs), POSTs, classifies the HTTP error, and
-        # parses the chunk into (vectors, input_tokens, id, body); the helper
-        # loops the consecutive <=96 slices, concatenates the vectors IN INPUT
-        # ORDER, sums input_tokens, takes response_id from the FIRST chunk, and
+        # parses the chunk into (vectors, input_tokens, id, model, body) -- model
+        # is always None (the /v2/embed envelope carries no model), so the stitch
+        # falls back to the bound model; the helper loops the consecutive <=96
+        # slices, concatenates the vectors IN INPUT ORDER, sums input_tokens,
+        # takes the response identity (id + model) from the FIRST chunk, and
         # validates the §4 invariants against the stitched result. When
         # len(input) <= 96 this issues a single request. Valid because each
         # input's embedding is independent of the others in its batch.
         async def _embed_one(
             chunk: list[str],
-        ) -> tuple[list[list[float]], int | None, str | None, dict[str, Any]]:
+        ) -> tuple[list[list[float]], int | None, str | None, None, dict[str, Any]]:
             body = self._build_request_body(chunk, input_type, dimensions, request_extras)
             try:
                 resp = await self._client.post("/v2/embed", json=body)
@@ -704,8 +697,8 @@ class CohereEmbeddingProvider:
     def _parse_chunk(
         self,
         resp: httpx.Response,
-    ) -> tuple[list[list[float]], int | None, str | None, dict[str, Any]]:
-        """Parse one /v2/embed chunk into (vectors, input_tokens, id, raw)."""
+    ) -> tuple[list[list[float]], int | None, str | None, None, dict[str, Any]]:
+        """Parse one /v2/embed chunk into (vectors, input_tokens, id, None, raw)."""
         # Cohere /v2/embed returns an object envelope {id, embeddings: {float:
         # [[float, ...], ...]}, texts, meta: {billed_units: {input_tokens}}}.
         # embeddings.float is a list of vector lists IN INPUT ORDER (positional
@@ -739,7 +732,9 @@ class CohereEmbeddingProvider:
             vectors.append([float(x) for x in values])
         input_tokens = self._parse_input_tokens(body)
         response_id = body.get("id")
-        return vectors, input_tokens, response_id if isinstance(response_id, str) else None, body
+        # The /v2/embed envelope carries an id but no model, so the stitched
+        # response reports the bound model.
+        return vectors, input_tokens, response_id if isinstance(response_id, str) else None, None, body
 
     def _parse_input_tokens(self, body: dict[str, Any]) -> int | None:
         """Extract meta.billed_units.input_tokens, or None.
@@ -750,7 +745,7 @@ class CohereEmbeddingProvider:
         billed = _billed_units(body)
         if billed is None:
             return None
-        return _nonneg_int(billed.get("input_tokens"))
+        return nonneg_int(billed.get("input_tokens"), field="input_tokens")
 
 
 __all__ = ["CohereEmbeddingProvider", "CohereRerankProvider"]

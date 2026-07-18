@@ -42,9 +42,23 @@ from openarmature.llm.errors import (
 from openarmature.observability.correlation import current_dispatch
 
 from .._events import build_embedding_event, build_embedding_failed_event
-from .._wire import apply_client_side_prefix, normalize_base_url
-from ..provider import validate_embedding_input, validate_embedding_response
-from ..response import EmbeddingResponse, EmbeddingRuntimeConfig, EmbeddingUsage
+from .._wire import (
+    apply_client_side_prefix,
+    chunk_and_stitch_embed,
+    nonneg_int,
+    normalize_base_url,
+)
+from ..provider import validate_embedding_input
+from ..response import EmbeddingResponse, EmbeddingRuntimeConfig
+
+# §8.3 *Batch chunking (2048-input cap)*: OpenAI /v1/embeddings accepts at most
+# 2048 inputs per request, so an over-cap embed call chunk-and-stitches over
+# consecutive <=2048 slices (the §8 general embed rule; a fixed vendor cap like
+# Cohere's 96, not a construction-configured chunk_size like TEI). OpenAI also
+# enforces a summed-token ceiling per request, which the count-based rule does
+# not address: an over-token chunk still fails loud as provider_invalid_request
+# (§8's rule chunks by input count).
+_OPENAI_EMBED_MAX_INPUTS = 2048
 
 
 def _classify_embedding_http_error(resp: httpx.Response) -> LlmProviderError:
@@ -252,14 +266,7 @@ class OpenAIEmbeddingProvider:
         adapter_start = time.perf_counter()
         try:
             validate_embedding_input(input_strings)
-            body = self._build_request_body(input_strings, input_type, dimensions, request_extras)
-            try:
-                resp = await self._client.post("/v1/embeddings", json=body)
-            except httpx.HTTPError as exc:
-                raise ProviderUnavailable(f"embedding request failed: {exc}") from exc
-            if resp.status_code != 200:
-                raise _classify_embedding_http_error(resp)
-            response = self._parse_response(resp, input_strings)
+            response = await self._embed_chunked(input_strings, input_type, dimensions, request_extras)
         except LlmProviderError as exc:
             latency_ms_failed = (time.perf_counter() - adapter_start) * 1000.0
             if dispatch is not None:
@@ -298,6 +305,47 @@ class OpenAIEmbeddingProvider:
             )
         return response
 
+    async def _embed_chunked(
+        self,
+        input_strings: list[str],
+        input_type: str | None,
+        dimensions: int | None,
+        request_extras: dict[str, Any],
+    ) -> EmbeddingResponse:
+        """Issue one /v1/embeddings per <=2048 chunk and stitch the vectors."""
+
+        # THE chunk-and-stitch (§8.3 *Batch chunking (2048-input cap)* / the §8
+        # general embed rule) via the shared chunk_and_stitch_embed helper. The
+        # per-chunk closure builds the /v1/embeddings body with IDENTICAL
+        # per-call params (only input differs), POSTs, classifies the HTTP
+        # error, and parses the chunk into (vectors, input_tokens, id, model,
+        # body); the helper loops the consecutive <=2048 slices, concatenates
+        # the vectors IN INPUT ORDER, sums input_tokens, takes the response
+        # identity from the FIRST chunk, and validates the §4 invariants against
+        # the stitched result. When len(input) <= 2048 this issues a single
+        # request. Valid because each input's embedding is independent of the
+        # others in its batch. The client-side input_type prefix is applied
+        # per-chunk inside _build_request_body, which is equivalent to prefixing
+        # the whole list up front (the prefix is per-string).
+        async def _embed_one(
+            chunk: list[str],
+        ) -> tuple[list[list[float]], int | None, str | None, str | None, dict[str, Any]]:
+            body = self._build_request_body(chunk, input_type, dimensions, request_extras)
+            try:
+                resp = await self._client.post("/v1/embeddings", json=body)
+            except httpx.HTTPError as exc:
+                raise ProviderUnavailable(f"embedding request failed: {exc}") from exc
+            if resp.status_code != 200:
+                raise _classify_embedding_http_error(resp)
+            return self._parse_chunk(resp)
+
+        return await chunk_and_stitch_embed(
+            input_strings,
+            model=self.model,
+            cap=_OPENAI_EMBED_MAX_INPUTS,
+            embed_chunk=_embed_one,
+        )
+
     def _build_request_body(
         self,
         input_strings: list[str],
@@ -334,19 +382,19 @@ class OpenAIEmbeddingProvider:
             body["dimensions"] = dimensions
         return body
 
-    def _parse_response(
+    def _parse_chunk(
         self,
         resp: httpx.Response,
-        input_strings: list[str],
-    ) -> EmbeddingResponse:
-        """Parse the OpenAI embeddings envelope into an EmbeddingResponse."""
-        # Orders ``data`` by the per-entry ``index`` so output position
-        # matches input position, then validates the §4 invariants (count +
-        # consistent dimensionality, via validate_embedding_response). The
-        # index set MUST be a 0..n-1 permutation so each vector maps to
-        # exactly one input, and every entry MUST carry a non-empty numeric
-        # embedding -- a missing / empty / non-numeric vector is a malformed
-        # response, not a zero-dim result.
+    ) -> tuple[list[list[float]], int | None, str | None, str | None, dict[str, Any]]:
+        """Parse one /v1/embeddings chunk into (vectors, input_tokens, id, model, raw)."""
+        # Orders ``data`` by the per-entry ``index`` so output position matches
+        # input position WITHIN THE CHUNK. The index set MUST be a 0..n-1
+        # permutation of the chunk's inputs so each vector maps to exactly one
+        # input, and every entry MUST carry a non-empty numeric embedding -- a
+        # missing / empty / non-numeric vector is a malformed response, not a
+        # zero-dim result. The §4 cross-input invariants (one vector per input,
+        # uniform dimensionality) are validated by the caller against the
+        # STITCHED result, and the per-chunk vector count by the helper.
         try:
             body_raw = resp.json()
         except ValueError as exc:
@@ -385,29 +433,31 @@ class OpenAIEmbeddingProvider:
             if not all(isinstance(x, (int, float)) and not isinstance(x, bool) for x in values):
                 raise ProviderInvalidResponse("embedding response has a non-numeric vector value")
             vectors.append([float(x) for x in values])
-        dimensions = validate_embedding_response(vectors, len(input_strings))
+        # §4 (proposal 0093): usage is a record or null -- an absent or malformed
+        # usage block yields usage = null, NEVER a fabricated record or a zero
+        # (a zero would assert "zero tokens billed", a claim the provider never
+        # made). A REPORTED zero is a different thing and does yield a record
+        # carrying 0. The hosted OpenAI wire always reports usage; the null path
+        # is what an OpenAI-compatible backend that omits it produces. Under
+        # chunking the helper sums the per-chunk figures.
         usage_block = body.get("usage")
-        prompt_tokens = (
-            cast("dict[str, Any]", usage_block).get("prompt_tokens")
+        input_tokens = (
+            nonneg_int(cast("dict[str, Any]", usage_block).get("prompt_tokens"), field="prompt_tokens")
             if isinstance(usage_block, dict)
             else None
         )
-        # bool is an int subclass, so exclude it explicitly; a malformed or
-        # absent usage falls back to 0 (the embed succeeded; usage is secondary).
-        input_tokens = (
-            prompt_tokens
-            if isinstance(prompt_tokens, int) and not isinstance(prompt_tokens, bool) and prompt_tokens >= 0
-            else 0
-        )
+        # An empty-string id / model carries no provider identifier (§4: the
+        # reported identifier is used only when the body carries one), so treat
+        # "" as absent -> None. For the model that lets the stitch fall back to
+        # the bound identifier rather than surfacing "".
         response_id = body.get("id")
         model = body.get("model")
-        return EmbeddingResponse(
-            vectors=vectors,
-            model=model if isinstance(model, str) else self.model,
-            usage=EmbeddingUsage(input_tokens=input_tokens),
-            response_id=response_id if isinstance(response_id, str) else None,
-            dimensions=dimensions,
-            raw=body,
+        return (
+            vectors,
+            input_tokens,
+            response_id if isinstance(response_id, str) and response_id else None,
+            model if isinstance(model, str) and model else None,
+            body,
         )
 
 

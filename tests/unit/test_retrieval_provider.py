@@ -11,6 +11,7 @@ NodeEvent phase dispatch).
 from __future__ import annotations
 
 import json
+import logging
 from typing import Any, Literal
 
 import httpx
@@ -360,6 +361,245 @@ async def test_openai_embed_base_url_defaults_to_openai_origin() -> None:
         assert provider.base_url == "https://api.openai.com"
     finally:
         await provider.aclose()
+
+
+async def test_openai_embed_chunk_and_stitch_over_2048_cap() -> None:
+    # 2049 inputs, OpenAI's 2048-input cap => exactly 2 requests with input
+    # sizes [2048, 1] over the consecutive slices input[0:2048] / input[2048:],
+    # identical per-call params on each. The per-chunk data[] are stitched in
+    # input order across the chunk boundary; input_tokens summed; the response
+    # identity (id + model) from the FIRST chunk; raw the list of the 2
+    # per-chunk objects (0096). One EmbeddingEvent per embed() call.
+    inputs = [f"doc-{i:04d}" for i in range(2049)]
+    chunk_a = [[i / 10000, 0.5] for i in range(2048)]
+    chunk_b = [[2048 / 10000, 0.5]]
+    responses = iter(
+        [
+            _openai_embed_body(
+                data=[{"object": "embedding", "index": i, "embedding": v} for i, v in enumerate(chunk_a)],
+                prompt_tokens=4096,
+            )
+            | {"id": "chunk-a"},
+            _openai_embed_body(
+                data=[{"object": "embedding", "index": 0, "embedding": chunk_b[0]}],
+                prompt_tokens=2,
+            )
+            | {"id": "chunk-b"},
+        ]
+    )
+    captured: list[dict[str, Any]] = []
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        captured.append(json.loads(req.content))
+        assert req.url.path == "/v1/embeddings"
+        return httpx.Response(200, json=next(responses))
+
+    provider = _openai_embed_provider(handler)
+    try:
+        response = await provider.embed(inputs)
+    finally:
+        await provider.aclose()
+
+    # Exactly 2 requests, input sizes [2048, 1], consecutive slices, identical
+    # per-call params on each. The mapping MUST NOT send an over-cap request.
+    assert len(captured) == 2
+    assert [len(b["input"]) for b in captured] == [2048, 1]
+    assert captured[0]["input"] == inputs[0:2048]
+    assert captured[1]["input"] == inputs[2048:2049]
+    for b in captured:
+        assert b["model"] == "text-embedding-test"
+        assert "dimensions" not in b
+    # Stitched in input order across the boundary; usage summed; the response
+    # identity from the first chunk.
+    assert response.vectors == chunk_a + chunk_b
+    assert len(response.vectors) == 2049
+    assert response.dimensions == 2
+    assert response.usage is not None
+    assert response.usage.input_tokens == 4098
+    assert response.response_id == "chunk-a"
+    assert response.model == "text-embedding-test"
+    # raw is the list of the 2 per-chunk objects verbatim, in request order.
+    assert isinstance(response.raw, list)
+    assert len(response.raw) == 2
+
+
+async def test_openai_embed_single_request_when_within_cap() -> None:
+    # <= 2048 inputs is the single-request path (no chunking), and raw is that
+    # one response object -- NOT a one-element list (0096).
+    captured: list[dict[str, Any]] = []
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        captured.append(json.loads(req.content))
+        return httpx.Response(
+            200,
+            json=_openai_embed_body(data=[{"object": "embedding", "index": 0, "embedding": [0.1, 0.2]}]),
+        )
+
+    provider = _openai_embed_provider(handler)
+    try:
+        response = await provider.embed(["alpha string"])
+    finally:
+        await provider.aclose()
+
+    assert len(captured) == 1
+    assert isinstance(response.raw, dict)
+
+
+async def test_openai_embed_chunked_usage_is_all_or_nothing() -> None:
+    # Usage is summed ONLY when every chunk reports it. A 2049-input call
+    # (2 chunks) where chunk 1 reports prompt_tokens but chunk 2 omits the usage
+    # block yields usage = null for the WHOLE call, not a confident partial sum:
+    # the total is unaccountable, and a partial sum would both undercount and
+    # diverge from the single-request path (which returns null for the same
+    # unaccountable figure). Guards against the chunked/unchunked inconsistency.
+    inputs = [f"doc-{i:04d}" for i in range(2049)]
+    chunk_a = [[i / 10000, 0.5] for i in range(2048)]
+    body_a = _openai_embed_body(
+        data=[{"object": "embedding", "index": i, "embedding": v} for i, v in enumerate(chunk_a)],
+        prompt_tokens=4096,
+    )
+    body_b = _openai_embed_body(data=[{"object": "embedding", "index": 0, "embedding": [0.2048, 0.5]}])
+    del body_b["usage"]  # chunk 2 reports no usage block at all
+    responses = iter([body_a, body_b])
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        assert req.url.path == "/v1/embeddings"
+        return httpx.Response(200, json=next(responses))
+
+    provider = _openai_embed_provider(handler)
+    try:
+        response = await provider.embed(inputs)
+    finally:
+        await provider.aclose()
+
+    assert len(response.vectors) == 2049
+    # Chunk 2 reported nothing, so the whole-call total is unaccountable -> null.
+    assert response.usage is None
+
+
+# --- nonneg_int: warn on a present-but-corrupt usage figure (proposal 0093) --
+#
+# The shared usage-figure reader distinguishes "not reported" (None -- the
+# ordinary no-usage case, every TEI call) from "present but unusable" (a
+# misbehaving provider / gateway populated the field with garbage). The former
+# is quiet; the latter logs a WARNING so a corrupt count is not silently
+# indistinguishable from the healthy absent case. Both still return None.
+
+
+def test_nonneg_int_passes_through_a_non_negative_int_without_warning(caplog: Any) -> None:
+    from openarmature.retrieval._wire import nonneg_int
+
+    with caplog.at_level(logging.WARNING):
+        assert nonneg_int(6, field="prompt_tokens") == 6
+        assert nonneg_int(0, field="prompt_tokens") == 0
+    assert caplog.records == []
+
+
+def test_nonneg_int_absent_is_quiet(caplog: Any) -> None:
+    from openarmature.retrieval._wire import nonneg_int
+
+    # None is "not reported" -- the common no-usage case. It MUST NOT warn, else
+    # every TEI call would log noise.
+    with caplog.at_level(logging.WARNING):
+        assert nonneg_int(None, field="prompt_tokens") is None
+    assert caplog.records == []
+
+
+@pytest.mark.parametrize(
+    "corrupt",
+    [
+        pytest.param("six", id="string"),
+        pytest.param(-1, id="negative"),
+        pytest.param(True, id="bool"),
+        pytest.param(6.0, id="float"),
+    ],
+)
+def test_nonneg_int_present_but_corrupt_warns(corrupt: Any, caplog: Any) -> None:
+    from openarmature.retrieval._wire import nonneg_int
+
+    with caplog.at_level(logging.WARNING):
+        assert nonneg_int(corrupt, field="prompt_tokens") is None
+    # Exactly one WARNING, naming the field so the log is actionable.
+    assert len(caplog.records) == 1
+    assert caplog.records[0].levelno == logging.WARNING
+    assert "prompt_tokens" in caplog.text
+
+
+# --- Nullable usage, OpenAI-compatible embeddings (proposal 0093, §4) --------
+#
+# usage is a record or null. An absent or malformed usage block MUST NOT be
+# fabricated into a record (nor a zero -- a zero asserts "zero tokens billed",
+# which the provider never claimed). The hosted OpenAI wire always reports
+# usage; the null path is what an OpenAI-COMPATIBLE backend that omits the
+# block produces. Fixtures 139 / 140 render this case through the observers.
+
+
+async def test_openai_embed_absent_usage_block_yields_null_usage() -> None:
+    def handler(_req: httpx.Request) -> httpx.Response:
+        body = _openai_embed_body(data=[{"object": "embedding", "index": 0, "embedding": [0.1, 0.2]}])
+        del body["usage"]
+        return httpx.Response(200, json=body)
+
+    provider = _openai_embed_provider(handler)
+    try:
+        response = await provider.embed(["alpha string"])
+    finally:
+        await provider.aclose()
+
+    # No usage object on the wire -> no record. The vectors are unaffected.
+    assert response.usage is None
+    assert response.vectors == [[0.1, 0.2]]
+
+
+@pytest.mark.parametrize(
+    "prompt_tokens",
+    [
+        pytest.param("six", id="string"),
+        pytest.param(-1, id="negative"),
+        pytest.param(True, id="bool"),
+        pytest.param(None, id="null"),
+    ],
+)
+async def test_openai_embed_malformed_prompt_tokens_yields_null_usage(prompt_tokens: Any) -> None:
+    def handler(_req: httpx.Request) -> httpx.Response:
+        body = _openai_embed_body(data=[{"object": "embedding", "index": 0, "embedding": [0.1, 0.2]}])
+        body["usage"] = {"prompt_tokens": prompt_tokens}
+        return httpx.Response(200, json=body)
+
+    provider = _openai_embed_provider(handler)
+    try:
+        response = await provider.embed(["alpha string"])
+    finally:
+        await provider.aclose()
+
+    # A corrupt figure reads as "not reported" rather than failing the call:
+    # the embed succeeded and the vectors are sound, so a bad secondary
+    # accounting field surfaces as unknown (usage = null), not as a
+    # provider_invalid_response. Matches the Cohere / Jina mappings.
+    assert response.usage is None
+    assert response.vectors == [[0.1, 0.2]]
+
+
+async def test_openai_embed_reported_zero_prompt_tokens_yields_a_record() -> None:
+    def handler(_req: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json=_openai_embed_body(
+                data=[{"object": "embedding", "index": 0, "embedding": [0.1, 0.2]}],
+                prompt_tokens=0,
+            ),
+        )
+
+    provider = _openai_embed_provider(handler)
+    try:
+        response = await provider.embed(["alpha string"])
+    finally:
+        await provider.aclose()
+
+    # A REPORTED zero is a claim the provider actually made -- distinct from an
+    # absent figure. It yields a record carrying 0, NOT usage = null.
+    assert response.usage is not None
+    assert response.usage.input_tokens == 0
 
 
 def _embedding_event() -> EmbeddingEvent:
@@ -1497,8 +1737,8 @@ async def test_chunk_and_stitch_embed_rejects_non_positive_cap() -> None:
     # limit): fail loudly rather than a raw range() error (0) or an empty stitch.
     from openarmature.retrieval._wire import chunk_and_stitch_embed
 
-    async def _noop(chunk: list[str]) -> tuple[list[list[float]], None, None, list[Any]]:
-        return [], None, None, []
+    async def _noop(chunk: list[str]) -> tuple[list[list[float]], None, None, None, list[Any]]:
+        return [], None, None, None, []
 
     for bad_cap in (0, -1):
         with pytest.raises(ValueError, match="cap must be positive"):
@@ -1510,8 +1750,8 @@ async def test_chunk_and_stitch_embed_rejects_empty_input() -> None:
     # (validate_embedding_input), NOT a misclassified provider_invalid_response.
     from openarmature.retrieval._wire import chunk_and_stitch_embed
 
-    async def _noop(chunk: list[str]) -> tuple[list[list[float]], None, None, list[Any]]:
-        return [], None, None, []
+    async def _noop(chunk: list[str]) -> tuple[list[list[float]], None, None, None, list[Any]]:
+        return [], None, None, None, []
 
     with pytest.raises(ProviderInvalidRequest):
         await chunk_and_stitch_embed([], model="m", cap=4, embed_chunk=_noop)

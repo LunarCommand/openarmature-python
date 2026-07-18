@@ -346,7 +346,7 @@ class TeiEmbeddingProvider:
         # input's embedding is independent of the others in its batch.
         async def _embed_one(
             chunk: list[str],
-        ) -> tuple[list[list[float]], None, None, list[Any]]:
+        ) -> tuple[list[list[float]], None, None, None, list[Any]]:
             body = self._build_request_body(chunk, input_type, dimensions, request_extras)
             try:
                 resp = await self._client.post("/embed", json=body)
@@ -366,8 +366,8 @@ class TeiEmbeddingProvider:
     def _parse_chunk(
         self,
         resp: httpx.Response,
-    ) -> tuple[list[list[float]], None, None, list[Any]]:
-        """Parse one TEI /embed chunk into (vectors, None, None, raw)."""
+    ) -> tuple[list[list[float]], None, None, None, list[Any]]:
+        """Parse one TEI /embed chunk into (vectors, None, None, None, raw)."""
         # TEI /embed returns a bare JSON array of vector arrays in input order
         # ([[float, ...], ...]) -- no envelope, no id, no usage object. The
         # vectors are already in input order (position == input index), so no
@@ -400,7 +400,9 @@ class TeiEmbeddingProvider:
             if not all(isinstance(x, (int, float)) and not isinstance(x, bool) for x in values):
                 raise ProviderInvalidResponse("TEI /embed response has a non-numeric vector value")
             vectors.append([float(x) for x in values])
-        return vectors, None, None, rows
+        # No id, no usage, and no model on the wire (a bare array) -- the bound
+        # model is what the stitched response reports.
+        return vectors, None, None, None, rows
 
 
 class TeiRerankProvider:
