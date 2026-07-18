@@ -70,10 +70,15 @@ class MyEmbeddingProvider:
         if resp.status_code != 200:
             raise _classify(resp)
 
-        payload = resp.json()
-        # Order the returned data by index so vectors line up with input.
-        entries = sorted(payload["data"], key=lambda e: e["index"])
-        vectors = [[float(x) for x in e["embedding"]] for e in entries]
+        # A malformed 200 body (bad JSON, missing keys, wrong types) is a
+        # provider_invalid_response, not a leaked KeyError/ValueError.
+        try:
+            payload = resp.json()
+            # Order the returned data by index so vectors line up with input.
+            entries = sorted(payload["data"], key=lambda e: e["index"])
+            vectors = [[float(x) for x in e["embedding"]] for e in entries]
+        except (ValueError, KeyError, TypeError) as exc:
+            raise ProviderInvalidResponse("malformed embeddings response") from exc
         # Validates the count and uniform dimensionality, returns the dim.
         dimensions = validate_embedding_response(vectors, len(input_strings))
 
