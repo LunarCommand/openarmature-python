@@ -541,8 +541,10 @@ async def test_openai_embed_absent_usage_block_yields_null_usage() -> None:
         return httpx.Response(200, json=body)
 
     provider = _openai_embed_provider(handler)
-    response = await provider.embed(["alpha string"])
-    await provider.aclose()
+    try:
+        response = await provider.embed(["alpha string"])
+    finally:
+        await provider.aclose()
 
     # No usage object on the wire -> no record. The vectors are unaffected.
     assert response.usage is None
@@ -565,8 +567,10 @@ async def test_openai_embed_malformed_prompt_tokens_yields_null_usage(prompt_tok
         return httpx.Response(200, json=body)
 
     provider = _openai_embed_provider(handler)
-    response = await provider.embed(["alpha string"])
-    await provider.aclose()
+    try:
+        response = await provider.embed(["alpha string"])
+    finally:
+        await provider.aclose()
 
     # A corrupt figure reads as "not reported" rather than failing the call:
     # the embed succeeded and the vectors are sound, so a bad secondary
@@ -587,8 +591,10 @@ async def test_openai_embed_reported_zero_prompt_tokens_yields_a_record() -> Non
         )
 
     provider = _openai_embed_provider(handler)
-    response = await provider.embed(["alpha string"])
-    await provider.aclose()
+    try:
+        response = await provider.embed(["alpha string"])
+    finally:
+        await provider.aclose()
 
     # A REPORTED zero is a claim the provider actually made -- distinct from an
     # absent figure. It yields a record carrying 0, NOT usage = null.
