@@ -23,6 +23,7 @@ import httpx
 
 from openarmature.llm import (
     ProviderAuthentication,
+    ProviderInvalidModel,
     ProviderInvalidRequest,
     ProviderInvalidResponse,
     ProviderRateLimit,
@@ -99,6 +100,8 @@ def _classify(resp: httpx.Response) -> Exception:
     status = resp.status_code
     if status in (401, 403):
         return ProviderAuthentication(f"HTTP {status}")
+    if status == 404:
+        return ProviderInvalidModel("model not found")
     if status == 429:
         return ProviderRateLimit("HTTP 429")
     if status in (400, 413, 422):

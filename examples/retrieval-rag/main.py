@@ -84,22 +84,38 @@ from openarmature.retrieval import (
 # self-contained. The passages deliberately overlap in topic so reranking
 # has something to disambiguate.
 CORPUS: list[str] = [
-    "The Moon's south pole holds water ice in permanently shadowed crater floors "
-    "that never see sunlight, a candidate resource for future crews.",
-    "Apollo 11 landed in the Sea of Tranquility in July 1969; Armstrong and Aldrin "
-    "spent about two and a half hours walking on the surface.",
-    "The lunar maria are vast basaltic plains that formed when ancient impact basins "
-    "flooded with lava, giving the near side its dark patches.",
-    "A lunar day lasts about 29.5 Earth days, so any point on the surface sees roughly "
-    "two weeks of sunlight followed by two weeks of night.",
-    "The Moon is slowly receding from Earth at about 3.8 centimeters per year, measured "
-    "by bouncing lasers off the retroreflectors Apollo crews left behind.",
-    "Regolith, the layer of loose dust and broken rock covering the Moon, is abrasive "
-    "and clings to everything, a persistent hazard for equipment and spacesuits.",
-    "Apollo 13 aborted its landing after an oxygen tank ruptured; the crew looped around "
-    "the Moon and returned safely using the lunar module as a lifeboat.",
-    "Permanently shadowed regions near the poles are among the coldest places in the "
-    "solar system, cold enough to trap water ice for billions of years.",
+    (
+        "The Moon's south pole holds water ice in permanently shadowed crater floors "
+        "that never see sunlight, a candidate resource for future crews."
+    ),
+    (
+        "Apollo 11 landed in the Sea of Tranquility in July 1969; Armstrong and Aldrin "
+        "spent about two and a half hours walking on the surface."
+    ),
+    (
+        "The lunar maria are vast basaltic plains that formed when ancient impact basins "
+        "flooded with lava, giving the near side its dark patches."
+    ),
+    (
+        "A lunar day lasts about 29.5 Earth days, so any point on the surface sees roughly "
+        "two weeks of sunlight followed by two weeks of night."
+    ),
+    (
+        "The Moon is slowly receding from Earth at about 3.8 centimeters per year, measured "
+        "by bouncing lasers off the retroreflectors Apollo crews left behind."
+    ),
+    (
+        "Regolith, the layer of loose dust and broken rock covering the Moon, is abrasive "
+        "and clings to everything, a persistent hazard for equipment and spacesuits."
+    ),
+    (
+        "Apollo 13 aborted its landing after an oxygen tank ruptured; the crew looped around "
+        "the Moon and returned safely using the lunar module as a lifeboat."
+    ),
+    (
+        "Permanently shadowed regions near the poles are among the coldest places in the "
+        "solar system, cold enough to trap water ice for billions of years."
+    ),
 ]
 
 # How many candidates cosine retrieval hands to the reranker, and how many
