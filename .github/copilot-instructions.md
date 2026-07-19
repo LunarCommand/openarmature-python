@@ -51,11 +51,11 @@ the source of truth, not local style preference.
   that would break strict typing or ruff formatting is not useful; the CI gate
   runs all three.
 
-- Provider error handling maps to the canonical `Provider*` categories from
-  `openarmature.llm.errors` (authentication, rate-limit, invalid-model,
-  invalid-request, unavailable, invalid-response). A non-200 response is
-  classified by status; a 200 with a malformed body maps to
-  `ProviderInvalidResponse`.
+- Provider error handling maps to the canonical error categories in
+  `openarmature.llm.errors`. For the retrieval providers the applicable subset
+  is: 401/403 to authentication, 404 to invalid-model, 429 to rate-limit,
+  400/413/422 to invalid-request, other 5xx to unavailable, and a 200 with a
+  malformed body to `ProviderInvalidResponse`.
 
 ## Generated files (do not review as hand-written)
 
