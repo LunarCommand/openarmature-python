@@ -602,6 +602,24 @@ async def test_openai_embed_reported_zero_prompt_tokens_yields_a_record() -> Non
     assert response.usage.input_tokens == 0
 
 
+@pytest.mark.parametrize("status", [400, 422])
+async def test_openai_embed_invalid_request_maps_to_provider_invalid_request(status: int) -> None:
+    # The OpenAI embed error path: a 400 / 422 (malformed or over-length
+    # request) surfaces provider_invalid_request. This is the fail-loud behavior
+    # the count-based batch chunking relies on -- an over-token chunk (each
+    # slice within the 2048-input count cap but exceeding OpenAI's summed-token
+    # ceiling) aborts the whole call rather than returning a partial or a
+    # truncated result. The sibling Cohere / TEI mappings have the equivalent
+    # test; this closes the gap for the OpenAI mapping.
+    def handler(_req: httpx.Request) -> httpx.Response:
+        return httpx.Response(status, json={"error": {"message": "input exceeds the maximum context length"}})
+
+    provider = _openai_embed_provider(handler)
+    with pytest.raises(ProviderInvalidRequest):
+        await provider.embed(["a very long document that exceeds the embedding model context window"])
+    await provider.aclose()
+
+
 def _embedding_event() -> EmbeddingEvent:
     return EmbeddingEvent(
         invocation_id="inv",
