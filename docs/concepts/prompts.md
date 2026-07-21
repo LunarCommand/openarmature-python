@@ -73,6 +73,32 @@ recent = await manager.get(
 )
 ```
 
+### A service-wide default
+
+If most fetches want the same freshness bound, set it once at construction
+with `default_cache_ttl_seconds` instead of passing `cache_ttl_seconds` on
+every call:
+
+```python
+# `backend` is any backend with a client-side cache (e.g. the Langfuse backend);
+# a cacheless backend ignores the TTL regardless of where it comes from.
+manager = PromptManager(backend, default_cache_ttl_seconds=60)
+
+# Uses the default (60s); no per-call value needed:
+prompt = await manager.fetch("greeting", "production")
+
+# A per-call value always wins, so this still force-refreshes:
+fresh = await manager.fetch("greeting", "production", cache_ttl_seconds=0)
+```
+
+Resolution follows a precedence chain: an explicit per-call value (including
+`0`) wins; otherwise the manager default applies; otherwise nothing is
+forwarded and the backend's own caching governs. A negative default is
+rejected at construction. Once a default is set, an omitted per-call value
+resolves to it, so there is no per-call way to defer to the backend's own
+behavior for a single fetch while a default is configured. Configure no
+default, or pass an explicit value, if you need that.
+
 ## Prompt identity
 
 Every `Prompt` carries five identity fields:

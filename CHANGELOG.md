@@ -4,6 +4,12 @@ All notable changes to `openarmature-python` are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). The package follows [Semantic Versioning](https://semver.org/); pre-1.0 minor bumps may carry behavioral changes per [spec governance](https://github.com/LunarCommand/openarmature-spec/blob/main/GOVERNANCE.md).
 
+## [0.17.0] — 2026-07-20
+
+### Added
+
+- **PromptManager service-wide default cache TTL** (proposal 0086, prompt-management §6, spec v0.79.0). `PromptManager` construction accepts an optional `default_cache_ttl_seconds`, applied to any `fetch` or `get` that omits a per-call `cache_ttl_seconds`. Resolution follows a precedence chain: an explicit per-call value (including `0` force-fresh) wins; otherwise the manager default applies; otherwise nothing is forwarded and the backend's own caching governs. An omitted or explicit-`None` per-call value both select the default, so resolution does not depend on argument presence. A negative default is rejected at construction, and the per-call negative rejection is unchanged. `get` delegates to `fetch` and inherits the chain, and the bundled caching backends need no change (they already honor a resolved `cache_ttl_seconds`). Conformance fixture 036 is un-deferred.
+
 ## [0.16.0] — 2026-07-18
 
 ### Added
