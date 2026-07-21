@@ -150,7 +150,8 @@ class PromptManager:
         if cache_ttl_seconds is not None and cache_ttl_seconds < 0:
             raise ValueError(
                 f"cache_ttl_seconds must be >= 0 (got {cache_ttl_seconds!r}); "
-                "None preserves current behavior, 0 forces a fresh read"
+                "None selects the manager default or the backend's own caching, "
+                "0 forces a fresh read"
             )
         # Proposal 0086 precedence: an explicit per-call value (including
         # 0) wins; else the manager default; else None (the backend's own
