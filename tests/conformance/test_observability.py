@@ -100,6 +100,14 @@ _SUPPORTED_FIXTURES = frozenset(
         "044-get-invocation-metadata-fan-out-scoping",
         "045-get-invocation-metadata-retry-scoping",
         "046-get-invocation-metadata-outside-invocation",
+        # proposal 0087 (within-node directive execution order, spec
+        # v0.82.0). 135 places augment_metadata + capture_invocation_
+        # metadata_into in opposite document order across two cases; the
+        # captured snapshot diverges only if a node's sibling directives
+        # run in fixture order. Reuses the 043/045 metadata driver, which
+        # iterates node directives in key order -- see
+        # _apply_metadata_directives.
+        "135-within-node-directive-execution-order",
         "001-otel-basic-trace",
         "002-otel-subgraph-hierarchy",
         "003-otel-error-status",
@@ -384,12 +392,6 @@ _DEFERRED_FIXTURES: dict[str, str] = {
             "134-langfuse-nested-fan-out-parent-resolution",
         )
     },
-    # Proposal 0087 (within-node directive execution order, spec v0.82.0).
-    # The conformance-adapter document-order directive rule is unimplemented
-    # until a later v0.16.0 PR.
-    "135-within-node-directive-execution-order": (
-        "within-node directive execution order (proposal 0087) not-yet implemented"
-    ),
     # Proposal 0088 (Langfuse parallel-branches mapping parity, spec
     # v0.83.0). The §8.4.8 per-branch dispatch-span Langfuse observation is
     # unimplemented until a later v0.16.0 PR.
@@ -735,6 +737,7 @@ async def test_observability_fixture(fixture_path: Path) -> None:
         "044-get-invocation-metadata-fan-out-scoping",
         "045-get-invocation-metadata-retry-scoping",
         "046-get-invocation-metadata-outside-invocation",
+        "135-within-node-directive-execution-order",
     }:
         await _run_get_invocation_metadata_fixture(spec)
     else:

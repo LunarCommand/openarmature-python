@@ -846,10 +846,12 @@ note = "The SAVE-side enclosing_fan_out_lineage keying (pipeline-utilities §10.
 status = "not-yet"
 
 # Spec v0.82.0 (proposal 0087).  Conformance-adapter within-node
-# directive execution order (§8.3).  Not-yet; observability fixture 135
-# defers with it.
+# directive execution order (§8.3).  Implemented since 0.17.0;
+# observability fixture 135 pins it.
 [proposals."0087"]
-status = "not-yet"
+status = "implemented"
+since = "0.17.0"
+note = "Within-node directive execution order (conformance-adapter §8.3): a node's sibling directives execute in fixture-document order (mapping insertion order, not sorted-by-key). Python was already conformant -- the fixture loader uses yaml.safe_load, which preserves mapping insertion order, and the hand-built metadata driver (_apply_metadata_directives) iterates a node's directives in key order, so fixtures 043 / 045 (augment-then-capture vs capture-then-augment) already passed. This proposal ratifies that rule; the dedicated pin fixture observability/135 (the SAME two order-sensitive directives -- augment_metadata write + capture_invocation_metadata_into read -- in opposite document order across two cases, the captured snapshot diverging) is un-deferred and wired onto the existing metadata driver. No src change: the order-preserving load + key-order execution already satisfy §8.3, and a loader guard-comment pins the safe_load dependence per §8.2."
 
 # Spec v0.83.0 (proposal 0088).  Langfuse parallel-branches mapping
 # parity (observability §8.4.8).  Not-yet; observability fixture 136

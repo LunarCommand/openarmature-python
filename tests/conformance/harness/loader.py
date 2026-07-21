@@ -68,6 +68,11 @@ def load_fixture(path: Path) -> Fixture:
     directives we haven't modelled yet.
     """
     with path.open() as f:
+        # yaml.safe_load preserves mapping insertion (document) order in
+        # Python, so a node's sibling directives keep their fixture order.
+        # Conformance-adapter §8.3 (proposal 0087) requires directives to
+        # execute in document order, and observability/135 pins the
+        # divergence -- do not swap in an order-losing loader.
         raw = yaml.safe_load(f)
     return _FIXTURE_ADAPTER.validate_python(raw)
 
