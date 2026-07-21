@@ -628,8 +628,13 @@ _DEFERRED_FIXTURES: dict[str, str] = {
         "Proposal 0084 nested-fan-out span lineage; not implemented"
     ),
     # Proposal 0087 (within-node directive execution order, v0.82.0).
+    # 135 reuses the augment_metadata / capture_invocation_metadata_into
+    # directive shapes (as 043-046 above) the cross-cap parser does not
+    # model; runtime-driven via test_observability, so parse stays deferred.
     "observability/135-within-node-directive-execution-order": (
-        "Proposal 0087 within-node directive execution order; not implemented"
+        "Proposal 0087 implemented; reuses the 043-046 augment/capture "
+        "directive shapes the cross-cap parser does not model, "
+        "runtime-driven in test_observability"
     ),
     # Proposal 0086 (PromptManager default cache_ttl_seconds, v0.79.0) -- the
     # manager default-cache-ttl directive shape.

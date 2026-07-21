@@ -105,8 +105,8 @@ _SUPPORTED_FIXTURES = frozenset(
         # metadata_into in opposite document order across two cases; the
         # captured snapshot diverges only if a node's sibling directives
         # run in fixture order. Reuses the 043/045 metadata driver, which
-        # iterates node directives in key order -- see
-        # _apply_metadata_directives.
+        # iterates node directives in document (dict insertion) order --
+        # see _apply_metadata_directives.
         "135-within-node-directive-execution-order",
         "001-otel-basic-trace",
         "002-otel-subgraph-hierarchy",
@@ -1590,8 +1590,9 @@ def _apply_metadata_directives(
 ) -> tuple[dict[str, Any], bool]:
     """Run a node's (or per-attempt's) in-node metadata directives, returning the
     resulting state update and whether the node should then raise."""
-    # Directives run IN KEY ORDER -- 043 augments then captures, 045 attempt 1
-    # captures then augments, and the YAML key order encodes that. The capture
+    # Directives run IN DOCUMENT ORDER -- 043 augments then captures, 045
+    # attempt 1 captures then augments, and the YAML document order encodes
+    # that. The capture
     # records the read's type so the immutability invariant can verify it was a
     # MappingProxyType. ``raises`` is terminal (a real node body that raises runs
     # nothing after), so stop at it rather than processing later directives.
