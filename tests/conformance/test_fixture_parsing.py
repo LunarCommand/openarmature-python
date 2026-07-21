@@ -636,11 +636,6 @@ _DEFERRED_FIXTURES: dict[str, str] = {
         "directive shapes the cross-cap parser does not model, "
         "runtime-driven in test_observability"
     ),
-    # Proposal 0086 (PromptManager default cache_ttl_seconds, v0.79.0) -- the
-    # manager default-cache-ttl directive shape.
-    "prompt-management/036-prompt-manager-default-cache-ttl": (
-        "Proposal 0086 default cache_ttl_seconds; not implemented"
-    ),
 }
 
 

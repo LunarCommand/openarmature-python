@@ -43,10 +43,12 @@ from openarmature.prompts import (
 from ._deferral import skip_if_deferred
 from .harness.loader import CONFORMANCE_ROOT
 from .harness.prompt_management import (
+    BackendTarget,
     FixtureBackendSpec,
     FixtureCall,
     FixtureExpectedResultEquivalence,
     FixtureManagerSpec,
+    ManagerTarget,
     PromptManagementFixture,
 )
 
@@ -339,10 +341,13 @@ async def _run_call(
             members = [captures[ref] for ref in call.members_refs]
             return PromptGroup(group_name=call.group_name, members=members), None
 
-        if isinstance(target, str) and target in {"manager", "secondary_manager", "tertiary_manager"}:
-            # All three manager targets dispatch to the currently-active
-            # manager in the per-pair iteration loop. The naming exists
-            # only to keep fixture YAML self-describing under a
+        if isinstance(target, ManagerTarget) or (
+            isinstance(target, str) and target in {"manager", "secondary_manager", "tertiary_manager"}
+        ):
+            # The bare-string manager targets and the ``{manager: true}``
+            # dict form (fixture 036, proposal 0086) both dispatch to the
+            # currently-active manager in the per-pair iteration loop. The
+            # string naming keeps fixture YAML self-describing under a
             # multi-manager shape (e.g., fixture 015).
             assert manager is not None
             if operation == "fetch":
@@ -392,7 +397,7 @@ async def _run_call(
             raise AssertionError(f"unsupported manager operation: {operation!r}")
 
         # ``target: {backend: <name>}`` — direct backend op.
-        assert not isinstance(target, str)
+        assert isinstance(target, BackendTarget)
         backend = backends[target.backend]
         if operation == "fetch":
             assert call.name is not None and call.label is not None
@@ -528,13 +533,23 @@ def _build_manager(
     backends_map: dict[str, MockPromptBackend],
     resolvers_map: dict[str, MappingLabelResolver],
 ) -> PromptManager:
-    ordered = [backends_map[name] for name in spec.backends]
+    # A manager spec that omits ``backends`` uses all declared backends in
+    # declaration order (fixture 036's single-backend default-cache-ttl shape).
+    ordered = (
+        [backends_map[name] for name in spec.backends]
+        if spec.backends is not None
+        else list(backends_map.values())
+    )
     resolver: MappingLabelResolver | None = None
     if spec.label_resolver_ref is not None:
         if spec.label_resolver_ref not in resolvers_map:
             raise AssertionError(f"unknown label_resolver_ref: {spec.label_resolver_ref!r}")
         resolver = resolvers_map[spec.label_resolver_ref]
-    return PromptManager(*ordered, label_resolver=resolver)
+    return PromptManager(
+        *ordered,
+        label_resolver=resolver,
+        default_cache_ttl_seconds=spec.default_cache_ttl_seconds,
+    )
 
 
 def _assert_capture_attrs(capture_name: str, actual: Any, expected: dict[str, Any]) -> None:
@@ -611,12 +626,6 @@ _DEFERRED_FIXTURES: dict[str, str] = {
     # accept, and asserts the construct-time prompt_group_invalid raise that
     # python does not yet implement. Defers until a later v0.16.0 PR.
     "035-prompt-group-arity-rejection": ("Proposal 0080 PromptGroup arity enforcement; not implemented"),
-    # Proposal 0086 (PromptManager default cache_ttl_seconds, spec v0.79.0)
-    # -- fixture 036 uses the manager default-cache-ttl construction slot
-    # python does not yet implement. Defers until a later v0.16.0 PR.
-    "036-prompt-manager-default-cache-ttl": (
-        "Proposal 0086 PromptManager default cache_ttl_seconds; not implemented"
-    ),
 }
 
 

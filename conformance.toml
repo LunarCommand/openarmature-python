@@ -840,10 +840,12 @@ since = "0.16.0"
 note = "The SAVE-side enclosing_fan_out_lineage keying (pipeline-utilities §10.11) shipped in #194: a fan-out instance's checkpoint tracking key carries the enclosing fan-out instance lineage in the in-memory dict and through the checkpoint projection / lookup / cleanup / restore, so concurrent outer instances no longer collide. partial because the RESUME consume-side is not yet shipped: a fan-out nested inside an outer instance re-runs rather than skipping on resume, since the saved record format carries no lineage (tracked as a follow-up). pipeline-utilities fixture 076 is not collected by the test_pipeline_utilities.py _LAST_DRIVEN_FIXTURE number gate (it is not deferred); the resume consume-side plus its fixture wiring land in a later PR."
 
 # Spec v0.79.0 (proposal 0086).  Service-wide default cache_ttl_seconds
-# on PromptManager (prompt-management §6).  Not-yet; prompt-management
-# fixture 036 defers with it.
+# on PromptManager (prompt-management §6).  Implemented since 0.17.0;
+# prompt-management fixture 036 pins it.
 [proposals."0086"]
-status = "not-yet"
+status = "implemented"
+since = "0.17.0"
+note = "PromptManager construction gains an optional default_cache_ttl_seconds (prompt-management §6). fetch/get resolve cache_ttl_seconds by precedence: an explicit per-call value (including 0 force-fresh) wins; else the manager default; else None (the backend's own caching governs). An omitted or explicit-None per-call value both select the default, so resolution does not depend on argument-presence semantics. A negative default is rejected at construction; the per-call negative rejection from 0072 is unchanged and applies to the per-call value before resolution. get() delegates to fetch, so it inherits the chain unchanged; the bundled caching backends already honor a resolved cache_ttl_seconds (0072), so no backend change. Fixture 036 (default applied on omit + advance-clock aging + per-call 0 override) is un-deferred and driven via a manager: {default_cache_ttl_seconds} construction slot + target: {manager: true} fetches."
 
 # Spec v0.82.0 (proposal 0087).  Conformance-adapter within-node
 # directive execution order (§8.3).  Implemented since 0.17.0;

@@ -269,6 +269,87 @@ async def test_fetch_rejects_negative_cache_ttl_seconds() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Proposal 0086: PromptManager service-wide default_cache_ttl_seconds
+# ---------------------------------------------------------------------------
+
+
+class _RecordingCacheTtlBackend:
+    # Records the cache_ttl_seconds the manager forwarded on the last fetch,
+    # so the resolution precedence can be asserted at the backend boundary.
+    def __init__(self, prompt: Prompt) -> None:
+        self._prompt = prompt
+        self.last_cache_ttl_seconds: int | None = None
+
+    async def fetch(
+        self, name: str, label: str = "production", *, cache_ttl_seconds: int | None = None
+    ) -> Prompt:
+        self.last_cache_ttl_seconds = cache_ttl_seconds
+        return self._prompt
+
+
+def test_construction_rejects_negative_default_cache_ttl() -> None:
+    # A negative service-wide default is invalid and is rejected at
+    # construction, before any fetch.
+    backend = _RecordingCacheTtlBackend(_make_prompt())
+    with pytest.raises(ValueError, match="default_cache_ttl_seconds must be >= 0"):
+        PromptManager(backend, default_cache_ttl_seconds=-1)
+
+
+async def test_default_cache_ttl_applies_when_per_call_omitted() -> None:
+    # Precedence step 2: an omitted per-call value resolves to the manager
+    # default, which is forwarded to the backend verbatim.
+    backend = _RecordingCacheTtlBackend(_make_prompt())
+    manager = PromptManager(backend, default_cache_ttl_seconds=60)
+    await manager.fetch("greeting", "production")
+    assert backend.last_cache_ttl_seconds == 60
+
+
+async def test_explicit_none_selects_default_cache_ttl() -> None:
+    # Resolution is presence-independent: an explicit None selects the
+    # default exactly as an omitted argument does.
+    backend = _RecordingCacheTtlBackend(_make_prompt())
+    manager = PromptManager(backend, default_cache_ttl_seconds=60)
+    await manager.fetch("greeting", "production", cache_ttl_seconds=None)
+    assert backend.last_cache_ttl_seconds == 60
+
+
+async def test_per_call_zero_overrides_positive_default_cache_ttl() -> None:
+    # Precedence step 1: an explicit per-call value wins, so a 0 force-fresh
+    # overrides a positive manager default.
+    backend = _RecordingCacheTtlBackend(_make_prompt())
+    manager = PromptManager(backend, default_cache_ttl_seconds=60)
+    await manager.fetch("greeting", "production", cache_ttl_seconds=0)
+    assert backend.last_cache_ttl_seconds == 0
+
+
+async def test_no_default_forwards_none_cache_ttl() -> None:
+    # Precedence step 3: with no manager default and no per-call value, None
+    # is forwarded, so the backend's own caching governs (unchanged).
+    backend = _RecordingCacheTtlBackend(_make_prompt())
+    manager = PromptManager(backend)
+    await manager.fetch("greeting", "production")
+    assert backend.last_cache_ttl_seconds is None
+
+
+async def test_zero_default_cache_ttl_is_valid_and_forwarded() -> None:
+    # A default of 0 is valid (force-fresh-always): accepted at construction,
+    # and an omitted per-call value resolves to 0, forwarded to the backend.
+    backend = _RecordingCacheTtlBackend(_make_prompt())
+    manager = PromptManager(backend, default_cache_ttl_seconds=0)
+    await manager.fetch("greeting", "production")
+    assert backend.last_cache_ttl_seconds == 0
+
+
+async def test_get_inherits_default_cache_ttl() -> None:
+    # get() delegates to fetch(), so the manager default resolves for get()
+    # too when the per-call value is omitted.
+    backend = _RecordingCacheTtlBackend(_make_prompt())
+    manager = PromptManager(backend, default_cache_ttl_seconds=60)
+    await manager.get("greeting", "production", {"user": "Alice"})
+    assert backend.last_cache_ttl_seconds == 60
+
+
+# ---------------------------------------------------------------------------
 # FilesystemPromptBackend
 # ---------------------------------------------------------------------------
 

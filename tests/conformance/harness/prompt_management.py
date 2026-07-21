@@ -74,8 +74,12 @@ class FixtureLabelResolverSpec(_StrictModel):
 
 
 class FixtureManagerSpec(_StrictModel):
-    backends: list[str]
+    # backends is optional: fixture 036's manager block omits it and
+    # defaults to all declared backends in order (proposal 0086).
+    backends: list[str] | None = None
     label_resolver_ref: str | None = None
+    # Proposal 0086: the manager's service-wide default cache_ttl_seconds.
+    default_cache_ttl_seconds: int | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -87,8 +91,17 @@ class BackendTarget(_StrictModel):
     backend: str
 
 
+class ManagerTarget(_StrictModel):
+    # Proposal 0086: fixture 036 routes fetches through the manager via the
+    # dict form ``target: {manager: true}`` (mirroring ``{backend: <name>}``),
+    # alongside the bare-string ``manager`` the other fixtures use. Fixed to
+    # ``true`` -- ``{manager: false}`` is nonsensical and rejected at parse.
+    manager: Literal[True]
+
+
 CallTarget = (
     BackendTarget
+    | ManagerTarget
     | Literal[
         "manager",
         "secondary_manager",

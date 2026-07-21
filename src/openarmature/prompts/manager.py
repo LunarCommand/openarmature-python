@@ -76,12 +76,24 @@ class PromptManager:
         self,
         *backends: PromptBackend,
         label_resolver: LabelResolver | None = None,
+        default_cache_ttl_seconds: int | None = None,
         jinja_undefined: type[jinja2.Undefined] = jinja2.StrictUndefined,
     ) -> None:
         if not backends:
             raise ValueError("PromptManager requires at least one backend")
+        # Proposal 0086 (prompt-management §6): a service-wide default
+        # cache_ttl_seconds, applied to any fetch/get that omits a per-call
+        # value. Same per-fetch semantics as the per-call lever (0 = force
+        # fresh, N > 0 = bound staleness to N seconds); a negative default
+        # is invalid and is rejected at construction.
+        if default_cache_ttl_seconds is not None and default_cache_ttl_seconds < 0:
+            raise ValueError(
+                f"default_cache_ttl_seconds must be >= 0 (got {default_cache_ttl_seconds!r}); "
+                "None leaves per-fetch cache control to the backend, 0 forces fresh reads"
+            )
         self._backends: tuple[PromptBackend, ...] = backends
         self._label_resolver = label_resolver
+        self._default_cache_ttl_seconds = default_cache_ttl_seconds
         # autoescape disabled by design: render output goes to an LLM
         # API call (plain text), not an HTML response. The env is
         # per-manager (was module-level) so jinja_undefined can be
@@ -127,21 +139,30 @@ class PromptManager:
           failures, the manager raises ``PromptStoreUnavailable``.
 
         ``cache_ttl_seconds`` is a read-side cache control forwarded to
-        each backend's ``fetch``: ``None`` keeps
-        current behavior, ``0`` forces a fresh read, ``N > 0`` bounds a
-        served entry's staleness to N seconds; a negative value is
-        rejected. Cacheless backends ignore it.
+        each backend's ``fetch``: ``0`` forces a fresh read, ``N > 0``
+        bounds a served entry's staleness to N seconds, and a negative
+        value is rejected. When omitted (or ``None``), the manager's
+        ``default_cache_ttl_seconds`` applies if one was configured;
+        otherwise nothing is forwarded and the backend's own caching
+        governs. An explicit per-call value always overrides the default.
+        Cacheless backends ignore the resolved value.
         """
         if cache_ttl_seconds is not None and cache_ttl_seconds < 0:
             raise ValueError(
                 f"cache_ttl_seconds must be >= 0 (got {cache_ttl_seconds!r}); "
-                "None preserves current behavior, 0 forces a fresh read"
+                "None selects the manager default or the backend's own caching, "
+                "0 forces a fresh read"
             )
+        # Proposal 0086 precedence: an explicit per-call value (including
+        # 0) wins; else the manager default; else None (the backend's own
+        # caching governs). An omitted or explicit-None per-call value both
+        # select the default, so resolution is presence-independent.
+        resolved_ttl = cache_ttl_seconds if cache_ttl_seconds is not None else self._default_cache_ttl_seconds
         resolved_label = self._resolve_label(label, name)
         causes: list[BaseException] = []
         for backend in self._backends:
             try:
-                return await backend.fetch(name, resolved_label, cache_ttl_seconds=cache_ttl_seconds)
+                return await backend.fetch(name, resolved_label, cache_ttl_seconds=resolved_ttl)
             except PromptNotFound:
                 raise
             except PromptStoreUnavailable as exc:
