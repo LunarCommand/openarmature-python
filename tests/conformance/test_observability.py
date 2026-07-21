@@ -1590,8 +1590,9 @@ def _apply_metadata_directives(
 ) -> tuple[dict[str, Any], bool]:
     """Run a node's (or per-attempt's) in-node metadata directives, returning the
     resulting state update and whether the node should then raise."""
-    # Directives run IN KEY ORDER -- 043 augments then captures, 045 attempt 1
-    # captures then augments, and the YAML key order encodes that. The capture
+    # Directives run IN DOCUMENT ORDER -- 043 augments then captures, 045
+    # attempt 1 captures then augments, and the YAML document order encodes
+    # that. The capture
     # records the read's type so the immutability invariant can verify it was a
     # MappingProxyType. ``raises`` is terminal (a real node body that raises runs
     # nothing after), so stop at it rather than processing later directives.
