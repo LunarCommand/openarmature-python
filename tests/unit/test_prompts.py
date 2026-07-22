@@ -20,6 +20,7 @@ import pytest
 
 from openarmature.llm.messages import Message, UserMessage
 from openarmature.prompts import (
+    PROMPT_GROUP_INVALID,
     PROMPT_NOT_FOUND,
     PROMPT_RENDER_ERROR,
     PROMPT_STORE_UNAVAILABLE,
@@ -56,6 +57,7 @@ def test_error_categories_match_spec() -> None:
     assert PROMPT_NOT_FOUND == "prompt_not_found"
     assert PROMPT_RENDER_ERROR == "prompt_render_error"
     assert PROMPT_STORE_UNAVAILABLE == "prompt_store_unavailable"
+    assert PROMPT_GROUP_INVALID == "prompt_group_invalid"
 
 
 def test_transient_categories_contains_only_store_unavailable() -> None:
