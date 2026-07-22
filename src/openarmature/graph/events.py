@@ -629,9 +629,19 @@ class LlmFailedEvent:
 
     Identity / scoping / request-side field set mirrors
     ``LlmCompletionEvent`` 1:1 — same field semantics, same nullability
-    rules. Response-side fields (``response_id``, ``response_model``,
-    ``usage``, ``output_content``, ``finish_reason``) are ABSENT from
-    this variant — no response was received.
+    rules. The response-side fields (``output_content``,
+    ``finish_reason``, ``usage``, ``response_id``, ``response_model``)
+    are populated ONLY for a ``structured_output_invalid`` failure — the
+    one category where the provider returned a response (content that
+    failed downstream parse or validation), so this event is in effect a
+    completion whose final validation gate failed. They are ``None`` for
+    every other category (no response was received). ``output_content``
+    is payload-bearing (gated observer-side by ``disable_provider_payload``
+    like the success variant); the other four are not gated.
+    ``error_message`` carries the failure summary plus the failing-locator
+    description for this category, so observers read the diagnostic there
+    without a dedicated field. The validated value is not carried, as on
+    the completion event.
 
     Failure-specific fields:
 
@@ -673,6 +683,17 @@ class LlmFailedEvent:
     error_message: str
     error_type: str | None = None
     caller_invocation_metadata: Mapping[str, AttributeValue] | None = None
+    # Response-side surface, populated only for structured_output_invalid
+    # (the failure is a downstream parse/validation step on an intact wire
+    # response). None for every other category. output_content is
+    # payload-bearing; the other four are not gated. Mirrors the same fields
+    # on LlmCompletionEvent, less output_tool_calls (a structured-output
+    # failure never carries tool calls).
+    output_content: str | None = None
+    finish_reason: str | None = None
+    usage: "Usage | None" = None
+    response_id: str | None = None
+    response_model: str | None = None
 
 
 # Python-internal per-attempt LLM event. NOT a spec-normative event type

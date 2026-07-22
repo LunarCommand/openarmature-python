@@ -181,10 +181,39 @@ def assert_error_carries(exc: BaseException, carries: Mapping[str, Any]) -> None
                 )
         else:
             actual = _get_carries_attr(exc, key)
-            if actual != expected:
+            if isinstance(expected, Mapping):
+                # A mapping-valued field (e.g. usage) is a subset match: each
+                # named key must equal the actual's value, reading a pydantic
+                # record's fields (Usage) or a plain mapping. Keys the fixture
+                # omits are ignored (the record MAY carry optional extras).
+                actual_map = _as_carries_mapping(actual)
+                if actual_map is None:
+                    raise AssertionError(
+                        f"carries check failed: {key!r} is not a mapping/record "
+                        f"(got {type(actual).__name__}); cannot subset-match {expected!r}"
+                    )
+                for subkey, subval in cast("Mapping[str, Any]", expected).items():
+                    if actual_map.get(subkey) != subval:
+                        raise AssertionError(
+                            f"carries check failed: {key!r}[{subkey!r}] "
+                            f"actual={actual_map.get(subkey)!r}, expected={subval!r}"
+                        )
+            elif actual != expected:
                 raise AssertionError(
                     f"carries check failed: {key!r} actual={actual!r}, expected={expected!r}"
                 )
+
+
+def _as_carries_mapping(value: Any) -> Mapping[str, Any] | None:
+    """Coerce a carries attribute to a mapping for subset comparison: a plain
+    Mapping passes through; a pydantic record (e.g. Usage) is dumped to a dict;
+    anything else returns None (not comparable as a mapping)."""
+    if isinstance(value, Mapping):
+        return cast("Mapping[str, Any]", value)
+    dump = getattr(value, "model_dump", None)
+    if callable(dump):
+        return cast("Mapping[str, Any]", dump())
+    return None
 
 
 def _get_carries_attr(exc: BaseException, name: str) -> Any:

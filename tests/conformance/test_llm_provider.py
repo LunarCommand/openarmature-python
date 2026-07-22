@@ -112,22 +112,6 @@ _DEFERRED_FIXTURES: dict[str, str] = {
     "056-call-level-retry-transient": ("per-attempt LLM spans; see test_observability_otel.py"),
     "057-call-level-retry-exhaustion": ("per-attempt LLM spans; see test_observability_otel.py"),
     "058-call-level-retry-non-transient-no-retry": ("per-attempt LLM spans; see test_observability_otel.py"),
-    # ----- v0.16.0 spec-pin bump (v0.70.1 -> v0.84.0) -------------------
-    # Proposal 0082 (structured-output failure diagnostics, spec v0.77.0)
-    # extended fixtures 022/023 to additionally assert the now-required
-    # finish_reason + usage on the structured_output_invalid error. The
-    # base structured_output_invalid mapping still has coverage in
-    # tests/unit/test_structured_output.py::
-    # test_pydantic_validation_failure_wraps_in_structured_output_invalid;
-    # only 0082's additive finish_reason / usage-on-error response-side
-    # fields are unimplemented, which is why the conformance fixtures defer
-    # until a later v0.16.0 PR lands 0082.
-    "022-structured-output-parse-failure": (
-        "Proposal 0082 finish_reason/usage on structured_output_invalid; not implemented"
-    ),
-    "023-structured-output-validation-failure": (
-        "Proposal 0082 finish_reason/usage on structured_output_invalid; not implemented"
-    ),
     # Proposal 0062 (LLM completion streaming, spec v0.71.0) -- the stream
     # flag on complete() + SSE wire handling + the streaming-unsupported
     # rejection. Unimplemented until a later v0.16.0 PR.

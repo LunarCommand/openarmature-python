@@ -16,7 +16,10 @@ it.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from openarmature.llm.response import Usage
 
 # ---------------------------------------------------------------------------
 # Canonical category strings (llm-provider spec §7)
@@ -199,12 +202,29 @@ class StructuredOutputInvalid(LlmProviderError):
         raw_content: The raw response content the model produced.
         failure_description: A description of the parse or validation
             failure.
+        finish_reason: The normalized finish reason of the response that
+            failed validation (``"length"`` signals a truncation, the key
+            retry signal; ``"stop"`` a clean-finish schema/parse failure).
+        usage: Token usage of the response that failed validation, for
+            cost attribution and truncation corroboration.
+        response_id: The provider's response identifier, when present.
+        response_model: The model identifier the provider reported, when
+            present.
+
+    The failure is a downstream parse/validation step on an intact wire
+    response, so the response-side context genuinely exists. It is
+    attached at the parse/validate call site (which holds the parsed
+    Response); the four fields default to ``None`` until enriched there.
     """
 
     category = STRUCTURED_OUTPUT_INVALID
     response_schema: dict[str, Any]
     raw_content: str
     failure_description: str
+    finish_reason: str | None
+    usage: Usage | None
+    response_id: str | None
+    response_model: str | None
 
     def __init__(
         self,
@@ -212,11 +232,19 @@ class StructuredOutputInvalid(LlmProviderError):
         response_schema: dict[str, Any],
         raw_content: str,
         failure_description: str,
+        finish_reason: str | None = None,
+        usage: Usage | None = None,
+        response_id: str | None = None,
+        response_model: str | None = None,
     ) -> None:
         super().__init__(*args)
         self.response_schema = response_schema
         self.raw_content = raw_content
         self.failure_description = failure_description
+        self.finish_reason = finish_reason
+        self.usage = usage
+        self.response_id = response_id
+        self.response_model = response_model
 
 
 __all__ = [

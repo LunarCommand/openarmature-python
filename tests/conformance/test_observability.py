@@ -184,6 +184,12 @@ _SUPPORTED_FIXTURES = frozenset(
         "068-llm-completion-event-response-model-distinct-from-request",
         "071-llm-failure-event-call-id-distinct-from-completion-event",
         "072-llm-failure-event-mutual-exclusion-with-completion-event",
+        # proposal 0082: the LlmFailedEvent response-side surface on a
+        # structured_output_invalid failure (120/121) + the null-on-non-body
+        # companion (122). Rendering fixtures 123-125 stay deferred (later PRs).
+        "120-llm-failure-event-structured-output-truncation",
+        "121-llm-failure-event-structured-output-schema-mismatch",
+        "122-llm-failure-event-response-side-null-on-non-body-failure",
         # proposal 0052 attribution fixture (case 1) + proposal 0061
         # (case 2: the §5.1 attribution lands on the detached trace's own
         # openarmature.invocation span). Wired together now that 0061
@@ -342,15 +348,12 @@ _DEFERRED_FIXTURES: dict[str, str] = {
         "case not yet wired -- harness gap, not unimplemented"
     ),
     # Proposal 0082 (structured-output failure diagnostics, spec v0.77.0).
-    # The LlmFailedEvent response-side surface (output_content / finish_reason
-    # / usage on structured_output_invalid) is unimplemented until a later
-    # v0.16.0 PR; the OTel / Langfuse / metrics rendering fixtures defer too.
+    # The event-level response-side surface (120-122) is implemented; the
+    # OTel / Langfuse / metrics RENDERING fixtures defer to later PRs of the
+    # 0082 split (they render the surface the event now carries).
     **{
-        fixture_id: "structured-output failure diagnostics (proposal 0082) not-yet implemented"
+        fixture_id: "structured-output failure diagnostics rendering (proposal 0082) not-yet implemented"
         for fixture_id in (
-            "120-llm-failure-event-structured-output-truncation",
-            "121-llm-failure-event-structured-output-schema-mismatch",
-            "122-llm-failure-event-response-side-null-on-non-body-failure",
             "123-langfuse-failed-generation-renders-output-usage-finish-reason",
             "124-otel-error-span-renders-output-usage-finish-reason",
             "125-metrics-token-usage-on-structured-output-failure",
@@ -655,7 +658,12 @@ async def test_observability_fixture(fixture_path: Path) -> None:
         "068-llm-completion-event-response-model-distinct-from-request",
     }:
         await _run_typed_event_cases(spec)
-    elif fixture_id == "072-llm-failure-event-mutual-exclusion-with-completion-event":
+    elif fixture_id in {
+        "072-llm-failure-event-mutual-exclusion-with-completion-event",
+        "120-llm-failure-event-structured-output-truncation",
+        "121-llm-failure-event-structured-output-schema-mismatch",
+        "122-llm-failure-event-response-side-null-on-non-body-failure",
+    }:
         await _run_typed_event_cases(spec, expect_failure=True)
     elif fixture_id == "067-llm-completion-event-call-id-always-present-and-distinct":
         await _run_typed_event_chain_cases(spec)
@@ -4799,9 +4807,15 @@ def _build_simple_llm_graph(
     else:
         messages = []
 
+    response_schema = cast("dict[str, Any] | None", calls_llm_spec.get("response_schema"))
+
     async def ask_body(_s: Any) -> dict[str, str]:
         response = await _complete_with_optional_prompt(
-            provider, messages, config=runtime_config, prompt_result=prompt_result
+            provider,
+            messages,
+            config=runtime_config,
+            prompt_result=prompt_result,
+            response_schema=response_schema,
         )
         return {stores_in: response.message.content or ""}
 
@@ -4941,9 +4955,14 @@ async def _complete_with_optional_prompt(
     *,
     config: Any,
     prompt_result: Any,
+    response_schema: Any = None,
 ) -> Any:
     """Call ``provider.complete`` inside the active-prompt context when the node
     rendered a prompt, otherwise call it directly.
+
+    A ``response_schema`` drives the structured-output path (proposal 0082
+    fixtures 120/121): complete() validates the content and raises
+    structured_output_invalid on a parse/schema failure.
     """
     if prompt_result is not None:
         from openarmature.prompts import with_active_prompt
@@ -4951,8 +4970,8 @@ async def _complete_with_optional_prompt(
         # Inside with_active_prompt so the provider stamps active_prompt onto
         # the typed event.
         with with_active_prompt(prompt_result):
-            return await provider.complete(messages, config=config)
-    return await provider.complete(messages, config=config)
+            return await provider.complete(messages, config=config, response_schema=response_schema)
+    return await provider.complete(messages, config=config, response_schema=response_schema)
 
 
 def _build_chain_llm_graph(

@@ -752,6 +752,27 @@ class OpenAIProvider:
         caller_metadata: Mapping[str, AttributeValue] | None = None
         if self._populate_caller_metadata:
             caller_metadata = dict(current_invocation_metadata())
+        # Response-side surface, populated only for structured_output_invalid
+        # (proposal 0082): the failure is a downstream validation step on an
+        # intact wire response, so the model's output genuinely exists and was
+        # attached to the error at the parse/validate call site. None for every
+        # other category (no response received).
+        output_content: str | None = None
+        finish_reason: str | None = None
+        usage: Usage | None = None
+        response_id: str | None = None
+        response_model: str | None = None
+        error_message = str(exc)
+        if isinstance(exc, StructuredOutputInvalid):
+            output_content = exc.raw_content
+            finish_reason = exc.finish_reason
+            usage = exc.usage
+            response_id = exc.response_id
+            response_model = exc.response_model
+            # error_message carries the failing locator (proposal 0082): the
+            # terse category summary alone drops the which-field detail, so
+            # combine it with the failure_description observers triage on.
+            error_message = f"{exc}: {exc.failure_description}"
         return LlmFailedEvent(
             invocation_id=invocation_id,
             correlation_id=current_correlation_id(),
@@ -771,8 +792,13 @@ class OpenAIProvider:
             call_id=call_id,
             error_category=exc.category,
             error_type=type(exc).__name__,
-            error_message=str(exc),
+            error_message=error_message,
             caller_invocation_metadata=caller_metadata,
+            output_content=output_content,
+            finish_reason=finish_reason,
+            usage=usage,
+            response_id=response_id,
+            response_model=response_model,
         )
 
     def _build_llm_retry_attempt_event(
@@ -1065,22 +1091,35 @@ class OpenAIProvider:
         except ValidationError as exc:
             raise ProviderInvalidResponse(f"invalid usage record: {exc}") from exc
 
+        # gen_ai.response.id / gen_ai.response.model semconv (spec
+        # §5.5.3) read these off the Response. The wire fields are
+        # optional — providers MAY omit either or both. ``None`` when
+        # absent or not a string. Parsed before structured-output
+        # validation so a structured_output_invalid failure can carry the
+        # response identity (proposal 0082).
+        response_id_raw = payload.get("id")
+        response_id: str | None = response_id_raw if isinstance(response_id_raw, str) else None
+        response_model_raw = payload.get("model")
+        response_model: str | None = response_model_raw if isinstance(response_model_raw, str) else None
+
         # Structured-output parsing. parsed is absent when no schema
         # was requested AND when the response is a tool-call response
         # — the tool-call path and structured-content path are
         # mutually exclusive at the response level.
         parsed: ParsedValue = None
         if schema_dict is not None and finish_reason_typed != "tool_calls":
-            parsed = _parse_and_validate(assistant_msg.content, schema_dict, schema_class)
-
-        # gen_ai.response.id / gen_ai.response.model semconv (spec
-        # §5.5.3) read these off the Response. The wire fields are
-        # optional — providers MAY omit either or both. ``None`` when
-        # absent or not a string.
-        response_id_raw = payload.get("id")
-        response_id: str | None = response_id_raw if isinstance(response_id_raw, str) else None
-        response_model_raw = payload.get("model")
-        response_model: str | None = response_model_raw if isinstance(response_model_raw, str) else None
+            try:
+                parsed = _parse_and_validate(assistant_msg.content, schema_dict, schema_class)
+            except StructuredOutputInvalid as exc:
+                # The wire response is intact; attach its response-side
+                # context so the failed event / §7 error carries finish_reason
+                # (truncation triage), usage, and the response identity
+                # (proposal 0082). raw_content is already set by the helper.
+                exc.finish_reason = finish_reason_typed
+                exc.usage = usage
+                exc.response_id = response_id
+                exc.response_model = response_model
+                raise
 
         return Response(
             message=assistant_msg,

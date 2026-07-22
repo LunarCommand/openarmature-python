@@ -2171,8 +2171,11 @@ class LangfuseObserver:
         typed LLM event. Shared between the success path
         (LlmCompletionEvent) and the failure path (LlmFailedEvent);
         response-side metadata (finish_reason / response_model /
-        response_id) lands only on the success variant since those
-        fields don't exist on LlmFailedEvent."""
+        response_id) lands only on the success variant for now. The
+        failure variant carries those fields too (populated only for a
+        structured_output_invalid failure, proposal 0082), but rendering
+        them on a failed Generation is deferred to the failed-generation
+        rendering PR via the isinstance guard below."""
         metadata: dict[str, Any] = {}
         if correlation_id is not None:
             metadata["correlation_id"] = correlation_id
@@ -2198,11 +2201,13 @@ class LangfuseObserver:
             metadata["prompt_group_name"] = active_group.group_name
         if event.caller_invocation_metadata is not None:
             _apply_caller_metadata(metadata, event.caller_invocation_metadata)
-        # Response-side fields are LlmCompletionEvent-only — absent
-        # from LlmFailedEvent. The type guard keeps the success-path
-        # metadata complete while the failure-path metadata stays
-        # focused on the request-side + the failure-specific fields
-        # the caller adds separately.
+        # Response-side rendering is success-path-only for now. The failure
+        # variant carries these fields too (populated only for a
+        # structured_output_invalid failure, proposal 0082), but this
+        # deliberate isinstance guard defers rendering them on a failed
+        # Generation to the failed-generation rendering PR; the failure-path
+        # metadata stays focused on the request-side + the failure-specific
+        # fields the caller adds separately.
         if isinstance(event, LlmCompletionEvent):
             if event.finish_reason is not None:
                 metadata["finish_reason"] = event.finish_reason

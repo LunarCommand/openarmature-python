@@ -1335,6 +1335,77 @@ async def test_complete_failure_emits_typed_llm_failed_event_only() -> None:
     assert len(failed_events) == 1
     assert failed_events[0].error_category == "provider_unavailable"
     assert failed_events[0].error_type == "ProviderUnavailable"
+    # Proposal 0082: the response-side surface is null for a non-structured
+    # (no-response) failure category.
+    assert failed_events[0].output_content is None
+    assert failed_events[0].finish_reason is None
+    assert failed_events[0].usage is None
+    assert failed_events[0].response_id is None
+    assert failed_events[0].response_model is None
+
+
+async def test_complete_structured_output_failure_event_carries_response_surface() -> None:
+    # Proposal 0082: a structured_output_invalid failure is a completion
+    # whose validation gate failed, so the LlmFailedEvent carries the
+    # response-side surface (finish_reason for retry triage, output_content,
+    # usage, response identity), and error_message carries the failing
+    # locator (the failure_description) rather than just the terse summary.
+    from openarmature.graph.events import LlmFailedEvent
+    from openarmature.llm import StructuredOutputInvalid
+
+    schema = {
+        "type": "object",
+        "properties": {"name": {"type": "string"}, "age": {"type": "integer"}},
+        "required": ["name", "age"],
+        "additionalProperties": False,
+    }
+
+    def _handler(_req: httpx.Request) -> httpx.Response:
+        # Valid JSON missing the required 'age' -> schema-validation failure,
+        # finish_reason "stop" (a clean-finish malformed output, not a truncation).
+        return httpx.Response(
+            200,
+            json={
+                "id": "cc-xyz",
+                "object": "chat.completion",
+                "model": "gpt-test-v2",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": '{"name": "Alice"}'},
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {"prompt_tokens": 20, "completion_tokens": 8, "total_tokens": 28},
+            },
+        )
+
+    events, token = _collecting_dispatch()
+    provider = OpenAIProvider(
+        base_url="http://test", model="m", api_key="k", transport=httpx.MockTransport(_handler)
+    )
+    try:
+        with pytest.raises(StructuredOutputInvalid) as excinfo:
+            await provider.complete([UserMessage(content="hi")], response_schema=schema)
+    finally:
+        await provider.aclose()
+        _release_dispatch(token)
+
+    failed = [e for e in events if isinstance(e, LlmFailedEvent)]
+    assert len(failed) == 1
+    ev = failed[0]
+    assert ev.error_category == "structured_output_invalid"
+    assert ev.finish_reason == "stop"
+    assert ev.output_content == '{"name": "Alice"}'
+    assert ev.usage is not None
+    assert ev.usage.completion_tokens == 8
+    assert ev.response_id == "cc-xyz"
+    assert ev.response_model == "gpt-test-v2"
+    # error_message carries the failing-field locator, not just the terse
+    # category summary (proposal 0082).
+    assert "age" in ev.error_message
+    assert str(excinfo.value) in ev.error_message
+    assert ev.error_message != str(excinfo.value)
 
 
 async def test_complete_populates_output_tool_calls_on_typed_events() -> None:
@@ -1585,7 +1656,10 @@ def test_build_llm_failed_event_maps_category_and_type_per_exception(
     )
     assert event.error_category == expected_category
     assert event.error_type == expected_cls_name
-    assert event.error_message == "boom"
+    # error_message is str(exc) for all categories except
+    # structured_output_invalid, which appends the failure_description
+    # locator (proposal 0082); startswith covers both.
+    assert event.error_message.startswith("boom")
     assert event.latency_ms == 12.0
     assert event.call_id == "cc-test"
 
