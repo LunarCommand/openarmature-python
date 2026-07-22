@@ -7,6 +7,7 @@ from typing import Any, ClassVar
 PROMPT_NOT_FOUND = "prompt_not_found"
 PROMPT_RENDER_ERROR = "prompt_render_error"
 PROMPT_STORE_UNAVAILABLE = "prompt_store_unavailable"
+PROMPT_GROUP_INVALID = "prompt_group_invalid"
 
 # Mirrors openarmature.llm.errors.TRANSIENT_CATEGORIES. Retry-middleware
 # classifiers MAY import this to identify transient prompt-management
@@ -123,3 +124,17 @@ class PromptStoreUnavailable(PromptError):
         self.label = label
         self.backends_tried = backends_tried
         self.causes = causes
+
+
+class PromptGroupInvalid(PromptError):
+    """Raised when a ``PromptGroup`` construction violates a
+    group-validity rule. Currently raised when ``members`` contains
+    fewer than two elements (an empty or single-member group). Raised
+    at construction time, before any render or LLM call, so an invalid
+    group never reaches observability emission.
+
+    Non-transient: a caller-contract violation. Constructing again with
+    the same members will not succeed without changing them.
+    """
+
+    category = PROMPT_GROUP_INVALID

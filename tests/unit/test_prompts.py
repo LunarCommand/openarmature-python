@@ -20,6 +20,7 @@ import pytest
 
 from openarmature.llm.messages import Message, UserMessage
 from openarmature.prompts import (
+    PROMPT_GROUP_INVALID,
     PROMPT_NOT_FOUND,
     PROMPT_RENDER_ERROR,
     PROMPT_STORE_UNAVAILABLE,
@@ -28,6 +29,7 @@ from openarmature.prompts import (
     Prompt,
     PromptError,
     PromptGroup,
+    PromptGroupInvalid,
     PromptManager,
     PromptNotFound,
     PromptRenderError,
@@ -51,9 +53,11 @@ def test_error_categories_match_spec() -> None:
     assert PromptNotFound.category == "prompt_not_found"
     assert PromptRenderError.category == "prompt_render_error"
     assert PromptStoreUnavailable.category == "prompt_store_unavailable"
+    assert PromptGroupInvalid.category == "prompt_group_invalid"
     assert PROMPT_NOT_FOUND == "prompt_not_found"
     assert PROMPT_RENDER_ERROR == "prompt_render_error"
     assert PROMPT_STORE_UNAVAILABLE == "prompt_store_unavailable"
+    assert PROMPT_GROUP_INVALID == "prompt_group_invalid"
 
 
 def test_transient_categories_contains_only_store_unavailable() -> None:
@@ -167,8 +171,13 @@ def test_prompt_result_rejects_empty_messages() -> None:
 
 
 def test_prompt_group_rejects_zero_members() -> None:
-    with pytest.raises(ValueError, match="at least two"):
+    # Categorized prompt_group_invalid (proposal 0080), not a bare ValueError:
+    # PromptGroupInvalid is not a ValueError, so pydantic propagates it
+    # unwrapped from the model validator rather than folding it into a
+    # ValidationError.
+    with pytest.raises(PromptGroupInvalid, match="at least two") as exc_info:
         PromptGroup(group_name="g", members=[])
+    assert exc_info.value.category == "prompt_group_invalid"
 
 
 def test_prompt_group_rejects_one_member() -> None:
@@ -184,8 +193,9 @@ def test_prompt_group_rejects_one_member() -> None:
         fetched_at=prompt.fetched_at,
         rendered_at=datetime.now(UTC),
     )
-    with pytest.raises(ValueError, match="at least two"):
+    with pytest.raises(PromptGroupInvalid, match="at least two") as exc_info:
         PromptGroup(group_name="g", members=[pr])
+    assert exc_info.value.category == "prompt_group_invalid"
 
 
 def test_prompt_group_accepts_two_or_more_members() -> None:

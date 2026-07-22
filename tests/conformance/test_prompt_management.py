@@ -620,12 +620,6 @@ _DEFERRED_FIXTURES: dict[str, str] = {
     "032-cross-variable-substring-stability": (
         "Proposal 0047 wire-byte stability (expected_shared_prefix directive); queued for v0.13.0"
     ),
-    # ----- v0.16.0 spec-pin bump (v0.70.1 -> v0.84.0) -------------------
-    # Proposal 0080 (PromptGroup arity enforcement, spec v0.75.0) -- fixture
-    # 035 uses a cases-only shape (no backends) the PM fixture model doesn't
-    # accept, and asserts the construct-time prompt_group_invalid raise that
-    # python does not yet implement. Defers until a later v0.16.0 PR.
-    "035-prompt-group-arity-rejection": ("Proposal 0080 PromptGroup arity enforcement; not implemented"),
 }
 
 
@@ -671,8 +665,11 @@ async def test_prompt_management_fixture(fixture_path: Path) -> None:
             if call.capture_as is not None and raised is None:
                 captures[call.capture_as] = result
 
-    # Cases-form fixtures (016) split into independent sub-cases that
-    # share the backends but use their own per-case manager + calls.
+    # Cases-form fixtures split into independent sub-cases sharing the
+    # captures dict. Fixture 016 shares the top-level backends across cases;
+    # fixture 035 (proposal 0080) declares backends per case (one case needs
+    # none), so a case that brings its own ``backends`` key gets fresh
+    # backends and any other shares the top-level set.
     cases = raw.get("cases")
     if cases:
         for case in cases:
@@ -684,18 +681,32 @@ async def test_prompt_management_fixture(fixture_path: Path) -> None:
                 **{k: v for k, v in case.items() if k not in {"name", "description"}},
             }
             case_fixture = PromptManagementFixture.model_validate(case_payload)
+            # A case that declares its own ``backends`` REPLACES the top-level
+            # set (not a union) -- the payload merge already gives case keys
+            # override semantics. No current fixture needs a case to add to the
+            # shared backends; if one ever does, merge here instead.
+            case_backends = (
+                {spec.name: MockPromptBackend(spec) for spec in case_fixture.backends}
+                if "backends" in case
+                else backends
+            )
             case_manager_pairs = [
                 (case_fixture.manager, case_fixture.calls),
                 (case_fixture.secondary_manager, case_fixture.secondary_calls),
                 (case_fixture.tertiary_manager, case_fixture.tertiary_calls),
             ]
             for manager_spec, manager_calls in case_manager_pairs:
-                if manager_spec is None:
-                    continue
-                manager = _build_manager(manager_spec, backends, resolvers_map)
+                # Build a manager only when one is declared; a manager-less
+                # case still runs its direct-target calls (035's empty-group
+                # construct_prompt_group needs no manager).
+                manager = (
+                    _build_manager(manager_spec, case_backends, resolvers_map)
+                    if manager_spec is not None
+                    else None
+                )
                 for call in manager_calls:
-                    result, raised = await _run_call(call, backends, manager, captures)
-                    _assert_per_call(call, result, raised, backends)
+                    result, raised = await _run_call(call, case_backends, manager, captures)
+                    _assert_per_call(call, result, raised, case_backends)
                     if call.capture_as is not None and raised is None:
                         captures[call.capture_as] = result
             if case_fixture.expected is not None:

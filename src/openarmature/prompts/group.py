@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pydantic import BaseModel, ConfigDict, model_validator
 
+from .errors import PromptGroupInvalid
 from .prompt import PromptResult
 
 
@@ -31,6 +32,10 @@ class PromptGroup(BaseModel):
 
     @model_validator(mode="after")
     def _check_min_two_members(self) -> PromptGroup:
+        # PromptGroupInvalid is not a ValueError, so pydantic propagates it
+        # unwrapped from the validator (only ValueError / AssertionError get
+        # folded into a ValidationError) -- the categorized error reaches the
+        # caller with its ``category``.
         if len(self.members) < 2:
-            raise ValueError("prompt group: members MUST contain at least two PromptResult instances")
+            raise PromptGroupInvalid("prompt group: members MUST contain at least two PromptResult instances")
         return self

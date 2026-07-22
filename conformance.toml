@@ -795,10 +795,12 @@ note = "Retrieval-provider OpenAI-compatible embeddings wire mapping (§8 / §8.
 
 # Spec v0.75.0 (proposal 0080).  PromptGroup arity enforcement
 # (prompt-management §10 / §11 -- construct-time raise plus the new
-# prompt_group_invalid error category).  Not-yet; prompt-management
-# fixture 035 defers with it.
+# prompt_group_invalid error category).  Implemented since 0.17.0;
+# prompt-management fixture 035 pins it.
 [proposals."0080"]
-status = "not-yet"
+status = "implemented"
+since = "0.17.0"
+note = "PromptGroup already rejected fewer than two members, but as a bare ValueError (pydantic folds it into a ValidationError, which has no category). Now raises a categorized PromptGroupInvalid (new category prompt_group_invalid, prompt-management §11) at construction: PromptGroupInvalid is a PromptError (not a ValueError), so pydantic propagates it unwrapped from the model validator and the caller sees .category. Non-transient, not in PROMPT_TRANSIENT_CATEGORIES; exported from openarmature.prompts. Fixture 035 (single-member + empty group, each asserting raises.category = prompt_group_invalid) is un-deferred. Harness: PromptManagementFixture.backends is now optional (035 is cases-only with per-case backends, one case needing none) and the cases-runner builds per-case backends when a case declares its own backends key (else shares the top-level, preserving 016) and runs a manager-less case's direct-target calls instead of skipping them (035's empty-group construct_prompt_group needs no manager)."
 
 # Spec v0.76.0 (proposal 0081).  Conformance-adapter value-matcher
 # vocabulary (§5.10) -- ratifies the fixture matcher tokens already in
