@@ -556,6 +556,14 @@ async def test_pydantic_validation_failure_wraps_in_structured_output_invalid() 
     err = excinfo.value
     assert err.raw_content == '{"name":"Alice","age":"thirty"}'
     assert "age" in err.failure_description
+    # Proposal 0082: the error carries the intact response's response-side
+    # context (finish_reason for retry triage, usage, response identity),
+    # attached at the parse/validate call site.
+    assert err.finish_reason == "stop"
+    assert err.response_id == "test"
+    assert err.response_model == "test-model"
+    assert err.usage is not None
+    assert err.usage.completion_tokens == 5
 
 
 async def test_pydantic_class_wire_body_matches_dict_form() -> None:

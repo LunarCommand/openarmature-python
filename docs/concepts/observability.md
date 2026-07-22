@@ -1017,10 +1017,14 @@ async def my_llm_observer(event):
 The two variants are **mutually exclusive on a single `complete()`
 call** — implementations MUST NOT emit both for the same call.
 Conformance fixture 072 locks this down. The failure variant carries
-the same identity + request-side fields as the completion variant,
-minus the response-side fields (`response_id`, `response_model`,
-`usage`, `output_content`, `finish_reason`) — there was no response
-to record.
+the same identity + request-side fields as the completion variant. The
+response-side fields (`output_content`, `finish_reason`, `usage`,
+`response_id`, `response_model`) are populated only for a
+`structured_output_invalid` failure, where the model returned a
+response whose content failed downstream parse or validation, so
+`finish_reason` (`"length"` signals a truncation) and the token usage
+genuinely exist; they are `None` for every other category, where there
+was no response to record.
 
 A custom `Provider` that wants observers to see the same events
 dispatches `LlmCompletionEvent(...)` on success and

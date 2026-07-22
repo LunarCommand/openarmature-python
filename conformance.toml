@@ -816,10 +816,13 @@ since = "0.16.0"
 # Spec v0.77.0 (proposal 0082).  Structured-output failure diagnostics
 # (graph-engine §6 -- LlmFailedEvent response-side surface for
 # structured_output_invalid + llm-provider §7 finish_reason / usage).
-# Not-yet; llm-provider fixtures 022/023 and observability fixtures
-# 120-125 defer with it.
+# Partial since 0.17.0: the event + error surface is implemented (PR A);
+# the OTel / Langfuse / metrics RENDERING (observability fixtures 123-125)
+# lands in later PRs of the split.
 [proposals."0082"]
-status = "not-yet"
+status = "partial"
+since = "0.17.0"
+note = "The graph-engine §6 event surface + llm-provider §7 error surface (PR A). LlmFailedEvent gains five response-side fields (output_content / finish_reason / usage / response_id / response_model), populated ONLY for structured_output_invalid (None for every other category); output_content is payload-bearing, the other four are not gated. StructuredOutputInvalid gains finish_reason / usage (the §7-mandated pair) plus response_id / response_model (internal, for the event builder), attached at the OpenAI provider's parse/validate call site where the intact wire response is in hand; the failed-event builder reads them off the enriched error. Un-defers observability fixtures 120 (truncation, finish_reason=length) / 121 (schema-mismatch, finish_reason=stop) / 122 (null-on-non-body companion), driven via the typed-event collector with a new calls_llm.response_schema harness lever; and llm-provider fixtures 022 / 023, whose carries block now asserts finish_reason + usage (the carries reader gained subset matching for a mapping-valued field like usage). PARTIAL: the OTel error-span rendering (124), Langfuse failed-Generation rendering (123), and the §11.2 token-usage-on-failure metric (125) are deferred to the OTel+metrics and Langfuse PRs -- they render the surface the event now carries."
 
 # Spec v0.78.0 (proposal 0083).  Per-prompt token-budget observability
 # (prompt-management §3 / graph-engine §6 / observability §5.5.15).

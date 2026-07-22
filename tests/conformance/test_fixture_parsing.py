@@ -597,16 +597,18 @@ _DEFERRED_FIXTURES: dict[str, str] = {
     "observability/119-otel-callable-branch-attempt-index-under-node-retry": (
         "Proposal 0075 callable-branch coverage round-out; harness shape not modelled"
     ),
-    # Proposal 0082 (structured-output failure diagnostics, v0.77.0) -- the
-    # LlmFailedEvent response-side directive shape.
+    # Proposal 0082 (structured-output failure diagnostics, v0.77.0) --
+    # fixtures 120-122 share the same typed_event_collector shape as 069-073
+    # that the cross-cap parser doesn't model; the response-side surface IS
+    # implemented and runtime-driven in test_observability.
     "observability/120-llm-failure-event-structured-output-truncation": (
-        "Proposal 0082 structured-output failure diagnostics; not implemented"
+        "Proposal 0082 structured-output failure event; harness typed_event_collector schema pending"
     ),
     "observability/121-llm-failure-event-structured-output-schema-mismatch": (
-        "Proposal 0082 structured-output failure diagnostics; not implemented"
+        "Proposal 0082 structured-output failure event; harness typed_event_collector schema pending"
     ),
     "observability/122-llm-failure-event-response-side-null-on-non-body-failure": (
-        "Proposal 0082 structured-output failure diagnostics; not implemented"
+        "Proposal 0082 structured-output failure event; harness typed_event_collector schema pending"
     ),
     # Proposal 0083 (per-prompt token-budget observability, v0.78.0) -- the
     # token_budget directive shape + budget-exceeded expectations.
