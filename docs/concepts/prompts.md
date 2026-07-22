@@ -329,10 +329,11 @@ Canonical patterns the primitive covers:
 - **Map-reduce over chunks**: `[chunk_classify_1..N, synthesize]`.
 
 The N=2 case ("classifier + follow-up") is the simplest;
-larger groups work under the same primitive. The group rejects
-empty and single-member shapes; single-prompt tagging is
-already served by the per-prompt observability attributes
-below.
+larger groups work under the same primitive. Constructing a
+group with fewer than two members raises `PromptGroupInvalid`
+at construction time, before any render or call; single-prompt
+tagging is already served by the per-prompt observability
+attributes below.
 
 ## Observability propagation
 

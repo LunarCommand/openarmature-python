@@ -235,7 +235,10 @@ class FixtureExpectedTopLevel(_PermissiveModel):
 
 
 class PromptManagementFixture(_StrictModel):
-    backends: list[FixtureBackendSpec]
+    # Optional: fixture 035 is cases-only with per-case backends (and an
+    # empty-group case that needs no backend at all), so the top level
+    # declares none (proposal 0080).
+    backends: list[FixtureBackendSpec] = []
     # Fixture 016 uses a top-level ``cases:`` list to split into
     # independent sub-cases that share the backends declaration but
     # each have their own manager + calls. The runner walks the list

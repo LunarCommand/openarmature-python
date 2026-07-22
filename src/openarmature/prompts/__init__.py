@@ -9,11 +9,13 @@ from .context import (
     with_active_prompt_group,
 )
 from .errors import (
+    PROMPT_GROUP_INVALID,
     PROMPT_NOT_FOUND,
     PROMPT_RENDER_ERROR,
     PROMPT_STORE_UNAVAILABLE,
     PROMPT_TRANSIENT_CATEGORIES,
     PromptError,
+    PromptGroupInvalid,
     PromptNotFound,
     PromptRenderError,
     PromptStoreUnavailable,
@@ -38,6 +40,7 @@ from .prompt import (
 )
 
 __all__ = [
+    "PROMPT_GROUP_INVALID",
     "PROMPT_NOT_FOUND",
     "PROMPT_RENDER_ERROR",
     "PROMPT_STORE_UNAVAILABLE",
@@ -57,6 +60,7 @@ __all__ = [
     "PromptBackend",
     "PromptError",
     "PromptGroup",
+    "PromptGroupInvalid",
     "PromptManager",
     "PromptNotFound",
     "PromptRenderError",
