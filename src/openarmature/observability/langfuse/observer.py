@@ -1757,9 +1757,11 @@ class LangfuseObserver:
 
     def _handle_typed_llm_failed(self, event: LlmFailedEvent) -> None:
         """Open + close an ERROR-level Generation observation from the
-        typed LlmFailedEvent (failure path). Same shape as the success
-        path with ERROR level + error_category as the Generation
-        observation's statusMessage."""
+        typed LlmFailedEvent (failure path): ERROR level + error_category
+        as the Generation's statusMessage. A structured_output_invalid
+        failure additionally carries the response-side surface (payload-gated
+        output, usage, metadata.finish_reason) like a completion, since its
+        wire response was intact."""
         from openarmature.observability.correlation import (
             current_correlation_id,
             current_invocation_id,
@@ -1798,11 +1800,24 @@ class LangfuseObserver:
         metadata["error_message"] = event.error_message
         model_parameters: dict[str, Any] = dict(event.request_params or {})
         input_value: Any = None
+        output_value: Any = None
+        end_kwargs: dict[str, Any] = {}
         if not self.disable_provider_payload:
             if event.input_messages:
                 input_value = self._maybe_truncate_for_input(event.input_messages)
             if event.request_extras:
                 metadata["request_extras"] = self._maybe_truncate_for_extras(dict(event.request_extras))
+        # Proposal 0082: a structured_output_invalid failure has an intact wire
+        # response, so the failed Generation carries the response-side surface
+        # (output payload-gated, usage) like a completion, alongside the ERROR
+        # level + category. metadata.finish_reason is added for this category by
+        # _typed_event_metadata.
+        if event.error_category == "structured_output_invalid":
+            if not self.disable_provider_payload and event.output_content is not None:
+                output_value = self._maybe_truncate_for_output(event.output_content)
+            usage = self._usage_from_typed_event(event)
+            if usage is not None:
+                end_kwargs["usage"] = usage
         target_trace_id = self._trace_id_for(inv_state, event.namespace, event.fan_out_index)
         handle = self.client.generation(
             trace_id=target_trace_id,
@@ -1810,6 +1825,7 @@ class LangfuseObserver:
             model=event.model,
             model_parameters=model_parameters,
             input=input_value,
+            output=output_value,
             metadata=metadata,
             parent_observation_id=parent_observation_id,
             prompt=self._resolve_prompt_link_from_typed_event(event),
@@ -1820,6 +1836,7 @@ class LangfuseObserver:
             end_time=end_time,
             level="ERROR",
             status_message=event.error_category,
+            **end_kwargs,
         )
 
     # Spec proposal 0063: dedicated Langfuse Tool observation (asType="tool").
@@ -2169,13 +2186,11 @@ class LangfuseObserver:
     ) -> dict[str, Any]:
         """Build the Generation observation's metadata dict from a
         typed LLM event. Shared between the success path
-        (LlmCompletionEvent) and the failure path (LlmFailedEvent);
-        response-side metadata (finish_reason / response_model /
-        response_id) lands only on the success variant for now. The
-        failure variant carries those fields too (populated only for a
-        structured_output_invalid failure, proposal 0082), but rendering
-        them on a failed Generation is deferred to the failed-generation
-        rendering PR via the isinstance guard below."""
+        (LlmCompletionEvent) and the failure path (LlmFailedEvent).
+        Response-side metadata (finish_reason / response_model /
+        response_id) renders for a completion and for a
+        structured_output_invalid failure (its wire response was intact);
+        every other failure category renders none, per the guard below."""
         metadata: dict[str, Any] = {}
         if correlation_id is not None:
             metadata["correlation_id"] = correlation_id
@@ -2201,14 +2216,17 @@ class LangfuseObserver:
             metadata["prompt_group_name"] = active_group.group_name
         if event.caller_invocation_metadata is not None:
             _apply_caller_metadata(metadata, event.caller_invocation_metadata)
-        # Response-side rendering is success-path-only for now. The failure
-        # variant carries these fields too (populated only for a
-        # structured_output_invalid failure, proposal 0082), but this
-        # deliberate isinstance guard defers rendering them on a failed
-        # Generation to the failed-generation rendering PR; the failure-path
-        # metadata stays focused on the request-side + the failure-specific
-        # fields the caller adds separately.
+        # Response-side metadata. A completion always carries it; a
+        # structured_output_invalid failure also carries it (proposal 0082),
+        # since its wire response was intact, so finish_reason (the truncation
+        # signal) and the response identity render on the failed Generation too.
+        # Every other failure category received no response and renders none.
         if isinstance(event, LlmCompletionEvent):
+            renders_response_side = True
+        else:
+            # event narrows to LlmFailedEvent (the only other union member).
+            renders_response_side = event.error_category == "structured_output_invalid"
+        if renders_response_side:
             if event.finish_reason is not None:
                 metadata["finish_reason"] = event.finish_reason
             if event.response_model is not None:
@@ -2217,7 +2235,7 @@ class LangfuseObserver:
                 metadata["response_id"] = event.response_id
         return metadata
 
-    def _usage_from_typed_event(self, event: LlmCompletionEvent) -> LangfuseUsage | None:
+    def _usage_from_typed_event(self, event: LlmCompletionEvent | LlmFailedEvent) -> LangfuseUsage | None:
         """Map the typed event's Usage onto the Langfuse Usage record.
         Returns None when no usage was reported."""
         # Spec observability §8.4.3 (Langfuse usage mapping).

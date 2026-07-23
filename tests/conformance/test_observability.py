@@ -355,10 +355,11 @@ _DEFERRED_FIXTURES: dict[str, str] = {
     ),
     # Proposal 0082 (structured-output failure diagnostics, spec v0.77.0).
     # The event surface (120-122), the OTel error-span rendering (124) and the
-    # §11 token-usage metric (125) are implemented; only the Langfuse
-    # failed-Generation rendering (123) defers to the final PR of the 0082 split.
+    # §11 token-usage metric (125) run here; the Langfuse failed-Generation
+    # rendering (123) is driven in the dedicated test_observability_langfuse
+    # harness (its langfuse_trace shape lives there, like 022-024).
     "123-langfuse-failed-generation-renders-output-usage-finish-reason": (
-        "structured-output failure Langfuse rendering (proposal 0082) not-yet implemented"
+        "Langfuse failed-Generation rendering; driven in test_observability_langfuse"
     ),
     # Proposal 0083 (per-prompt token-budget observability, spec v0.78.0).
     # The Prompt.token_budget advisory + budget-exceeded span attribute /

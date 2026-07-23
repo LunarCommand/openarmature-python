@@ -764,7 +764,10 @@ class OpenAIProvider:
         response_model: str | None = None
         error_message = str(exc)
         if isinstance(exc, StructuredOutputInvalid):
-            output_content = exc.raw_content
+            # Empty content projects to None (as the success path does with
+            # ``content or None``), so both observers omit it identically
+            # rather than one rendering "" and the other dropping it.
+            output_content = exc.raw_content or None
             finish_reason = exc.finish_reason
             usage = exc.usage
             response_id = exc.response_id
@@ -875,7 +878,9 @@ class OpenAIProvider:
         response_fields: dict[str, Any] = {}
         if isinstance(exc, StructuredOutputInvalid):
             response_fields = {
-                "output_content": exc.raw_content,
+                # Empty content -> None (as the success path projects), so both
+                # observers omit it identically.
+                "output_content": exc.raw_content or None,
                 "finish_reason": exc.finish_reason,
                 "usage": exc.usage,
                 "response_id": exc.response_id,

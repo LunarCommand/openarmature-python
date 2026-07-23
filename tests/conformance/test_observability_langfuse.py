@@ -117,6 +117,11 @@ _LANGFUSE_FIXTURES = frozenset(
         # cases 1 + 2 are TEMPORARILY deferred via _DEFERRED_CASES pending the
         # shared nested-dispatch-keying fix (see that note).
         "039-nested-lineage-augmentation",
+        # 123 (proposal 0082): a structured_output_invalid failure renders the
+        # response-side surface (payload-gated output, usage, metadata.finish_reason)
+        # on the ERROR failed Generation. Drives the real failure path via
+        # calls_llm.response_schema + expected_error.
+        "123-langfuse-failed-generation-renders-output-usage-finish-reason",
     }
 )
 
@@ -1148,7 +1153,26 @@ async def _run_case(case: Mapping[str, Any], *, fixture_stem: str | None = None)
             await provider.aclose()
         return
 
-    await graph.invoke(initial_state_factory(), **invoke_kwargs)
+    expected_error = cast("dict[str, Any] | None", case.get("expected_error"))
+    if expected_error is not None:
+        from openarmature.graph import NodeException  # noqa: PLC0415
+
+        # A structured_output_invalid failure (fixture 123) raises out of the
+        # node; the failed Generation is still emitted (proposal 0058), and its
+        # ERROR level / statusMessage / response surface is asserted below. The
+        # §7 error category rides on the Generation's statusMessage (checked in
+        # _assert_observation), NOT on the outer NodeException (whose category
+        # is always "node_exception"), so category is not re-asserted here.
+        with pytest.raises(NodeException) as exc_info:
+            await graph.invoke(initial_state_factory(), **invoke_kwargs)
+        expected_raised_from = expected_error.get("raised_from")
+        if expected_raised_from is not None:
+            assert exc_info.value.node_name == expected_raised_from, (
+                f"expected error raised_from: expected {expected_raised_from!r}, "
+                f"got {exc_info.value.node_name!r}"
+            )
+    else:
+        await graph.invoke(initial_state_factory(), **invoke_kwargs)
     await graph.drain()
     if provider is not None:
         await provider.aclose()
@@ -1413,6 +1437,10 @@ def _build_node_body(
         )
         config_spec = cast("dict[str, Any] | None", (calls_llm_spec or {}).get("config"))
         stores_in = cast("str", (calls_llm_spec or {}).get("stores_response_in", "msg"))
+        # A calls_llm carrying a response_schema drives the structured-output
+        # path (proposal 0082 fixture 123): complete() raises
+        # structured_output_invalid on a parse/schema failure.
+        response_schema = cast("dict[str, Any] | None", (calls_llm_spec or {}).get("response_schema"))
         if renders_prompt_name is not None:
             assert prompt_manager is not None, "renders_prompt requires a prompt_backend block"
             prompt = await prompt_manager.fetch(renders_prompt_name)
@@ -1422,12 +1450,14 @@ def _build_node_body(
                 response = await provider.complete(
                     cast("Sequence[Any]", llm_messages),
                     config=_runtime_config_from_spec(config_spec),
+                    response_schema=response_schema,
                 )
         else:
             llm_messages = _materialize_messages(messages_spec or [])
             response = await provider.complete(
                 cast("Sequence[Any]", llm_messages),
                 config=_runtime_config_from_spec(config_spec),
+                response_schema=response_schema,
             )
         return {stores_in: response.message.content or ""}
 
@@ -1703,6 +1733,12 @@ def _assert_observation(
     if "level" in expected:
         assert actual.level == expected["level"], (
             f"observation {actual.name!r} level: expected {expected['level']!r}, got {actual.level!r}"
+        )
+    if "statusMessage" in expected:
+        # §8.4.2 error-category mapping: statusMessage = the §7 error category.
+        assert actual.status_message == expected["statusMessage"], (
+            f"observation {actual.name!r} statusMessage: "
+            f"expected {expected['statusMessage']!r}, got {actual.status_message!r}"
         )
     if "model" in expected:
         assert actual.model == expected["model"], (
