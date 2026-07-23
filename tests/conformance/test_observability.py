@@ -3906,6 +3906,11 @@ def _assert_error_span_extras(spans: Sequence[Any], expected_tree: list[dict[str
             name = cast("str", entry["name"])
             candidates = by_name.get(name, [])
             assert candidates, f"expected a span named {name!r}; got {sorted(by_name)}"
+            assert len(candidates) == 1, (
+                f"_assert_error_span_extras assumes unique span names; {name!r} matched "
+                f"{len(candidates)}. Add name+attribute disambiguation if a fixture emits "
+                f"multiple same-named spans (e.g. call-level retry)."
+            )
             span = candidates[0]
             desc = entry.get("status_description")
             if desc is not None:
