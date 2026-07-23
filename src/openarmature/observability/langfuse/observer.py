@@ -2221,12 +2221,11 @@ class LangfuseObserver:
         # since its wire response was intact, so finish_reason (the truncation
         # signal) and the response identity render on the failed Generation too.
         # Every other failure category received no response and renders none.
-        # In the second operand ``event`` narrows to LlmFailedEvent (the only
-        # non-completion in the union), so error_category is valid there and is
-        # never read for a completion (short-circuit).
-        renders_response_side = (
-            isinstance(event, LlmCompletionEvent) or event.error_category == "structured_output_invalid"
-        )
+        if isinstance(event, LlmCompletionEvent):
+            renders_response_side = True
+        else:
+            # event narrows to LlmFailedEvent (the only other union member).
+            renders_response_side = event.error_category == "structured_output_invalid"
         if renders_response_side:
             if event.finish_reason is not None:
                 metadata["finish_reason"] = event.finish_reason

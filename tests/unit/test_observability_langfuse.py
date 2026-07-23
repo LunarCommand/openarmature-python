@@ -1418,6 +1418,7 @@ async def test_structured_output_failure_generation_renders_response_surface() -
     assert gen.usage == LangfuseUsage(input=20, output=16, total=36)
     assert gen.metadata.get("finish_reason") == "length"
     assert gen.metadata.get("response_model") == "gpt-test-v2"
+    assert gen.metadata.get("response_id") == "cc-xyz"
 
 
 async def test_structured_output_failure_generation_redacts_output_when_payload_disabled() -> None:

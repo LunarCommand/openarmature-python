@@ -1159,9 +1159,18 @@ async def _run_case(case: Mapping[str, Any], *, fixture_stem: str | None = None)
 
         # A structured_output_invalid failure (fixture 123) raises out of the
         # node; the failed Generation is still emitted (proposal 0058), and its
-        # ERROR level / statusMessage / response surface is asserted below.
-        with pytest.raises(NodeException):
+        # ERROR level / statusMessage / response surface is asserted below. The
+        # §7 error category rides on the Generation's statusMessage (checked in
+        # _assert_observation), NOT on the outer NodeException (whose category
+        # is always "node_exception"), so category is not re-asserted here.
+        with pytest.raises(NodeException) as exc_info:
             await graph.invoke(initial_state_factory(), **invoke_kwargs)
+        expected_raised_from = expected_error.get("raised_from")
+        if expected_raised_from is not None:
+            assert exc_info.value.node_name == expected_raised_from, (
+                f"expected error raised_from: expected {expected_raised_from!r}, "
+                f"got {exc_info.value.node_name!r}"
+            )
     else:
         await graph.invoke(initial_state_factory(), **invoke_kwargs)
     await graph.drain()
