@@ -670,6 +670,82 @@ async def test_otel_observer_ignores_terminal_llm_events() -> None:
     assert llm_spans == []
 
 
+async def test_structured_output_failure_span_renders_response_surface() -> None:
+    # Proposal 0082: a structured_output_invalid failed attempt renders the
+    # response-side surface on the ERROR openarmature.llm.complete span
+    # (finish_reason, usage, payload-gated output.content) in addition to
+    # ERROR status + category -- unlike other failure categories, which carry
+    # no response.
+    from opentelemetry.trace import StatusCode
+
+    from openarmature.llm.response import Usage
+    from openarmature.observability.correlation import _reset_invocation_id, _set_invocation_id
+    from tests._helpers.typed_event import make_retry_attempt_event
+
+    exporter = InMemorySpanExporter()
+    observer = OTelObserver(span_processor=SimpleSpanProcessor(exporter), disable_provider_payload=False)
+    token = _set_invocation_id("inv-soi")
+    try:
+        await observer(
+            make_retry_attempt_event(
+                error_category="structured_output_invalid",
+                error_type="StructuredOutputInvalid",
+                finish_reason="length",
+                output_content='{"name":"Alice","age":',
+                usage=Usage(prompt_tokens=20, completion_tokens=16, total_tokens=36),
+                response_id="cc-xyz",
+                response_model="gpt-test-v2",
+            )
+        )
+    finally:
+        _reset_invocation_id(token)
+    observer.shutdown()
+
+    llm_spans = [s for s in exporter.get_finished_spans() if s.name == "openarmature.llm.complete"]
+    assert len(llm_spans) == 1
+    span = llm_spans[0]
+    assert span.status.status_code == StatusCode.ERROR
+    attrs = dict(span.attributes or {})
+    assert attrs["openarmature.error.category"] == "structured_output_invalid"
+    assert attrs["openarmature.llm.finish_reason"] == "length"
+    assert attrs["openarmature.llm.output.content"] == '{"name":"Alice","age":'
+    assert attrs["openarmature.llm.usage.completion_tokens"] == 16
+    assert attrs["gen_ai.response.id"] == "cc-xyz"
+
+
+async def test_structured_output_failure_span_redacts_output_when_payload_disabled() -> None:
+    # Payload-gated: with disable_provider_payload=True, output.content is
+    # redacted while finish_reason / usage / ERROR status stay (proposal 0082).
+    from opentelemetry.trace import StatusCode
+
+    from openarmature.llm.response import Usage
+    from openarmature.observability.correlation import _reset_invocation_id, _set_invocation_id
+    from tests._helpers.typed_event import make_retry_attempt_event
+
+    exporter = InMemorySpanExporter()
+    observer = OTelObserver(span_processor=SimpleSpanProcessor(exporter), disable_provider_payload=True)
+    token = _set_invocation_id("inv-soi2")
+    try:
+        await observer(
+            make_retry_attempt_event(
+                error_category="structured_output_invalid",
+                finish_reason="length",
+                output_content='{"name":"Alice","age":',
+                usage=Usage(prompt_tokens=20, completion_tokens=16, total_tokens=36),
+            )
+        )
+    finally:
+        _reset_invocation_id(token)
+    observer.shutdown()
+
+    span = next(s for s in exporter.get_finished_spans() if s.name == "openarmature.llm.complete")
+    attrs = dict(span.attributes or {})
+    assert span.status.status_code == StatusCode.ERROR
+    assert "openarmature.llm.output.content" not in attrs
+    assert attrs["openarmature.llm.finish_reason"] == "length"
+    assert attrs["openarmature.llm.usage.completion_tokens"] == 16
+
+
 async def _drive_llm_span_with_cached_tokens(
     *,
     cached_tokens: int | None,

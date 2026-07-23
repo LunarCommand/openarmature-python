@@ -217,6 +217,12 @@ _SUPPORTED_FIXTURES = frozenset(
         "088-llm-metrics-token-and-duration",
         "090-metrics-error-type-on-duration",
         "091-metrics-disabled-no-measurements",
+        # proposal 0082: the OTel error span (124) renders the response-side
+        # surface on a structured_output_invalid failure, and the §11 token
+        # metric (125) records the failure's usage. The Langfuse rendering
+        # (123) stays deferred to the final PR of the split.
+        "124-otel-error-span-renders-output-usage-finish-reason",
+        "125-metrics-token-usage-on-structured-output-failure",
         # v0.69.0 — proposal 0063 (tool-execution observability). A
         # calls_tool node enters the with_tool_call scope; the typed
         # ToolCallEvent / ToolCallFailedEvent drive the OTel tool span +
@@ -348,17 +354,12 @@ _DEFERRED_FIXTURES: dict[str, str] = {
         "case not yet wired -- harness gap, not unimplemented"
     ),
     # Proposal 0082 (structured-output failure diagnostics, spec v0.77.0).
-    # The event-level response-side surface (120-122) is implemented; the
-    # OTel / Langfuse / metrics RENDERING fixtures defer to later PRs of the
-    # 0082 split (they render the surface the event now carries).
-    **{
-        fixture_id: "structured-output failure diagnostics rendering (proposal 0082) not-yet implemented"
-        for fixture_id in (
-            "123-langfuse-failed-generation-renders-output-usage-finish-reason",
-            "124-otel-error-span-renders-output-usage-finish-reason",
-            "125-metrics-token-usage-on-structured-output-failure",
-        )
-    },
+    # The event surface (120-122), the OTel error-span rendering (124) and the
+    # §11 token-usage metric (125) are implemented; only the Langfuse
+    # failed-Generation rendering (123) defers to the final PR of the 0082 split.
+    "123-langfuse-failed-generation-renders-output-usage-finish-reason": (
+        "structured-output failure Langfuse rendering (proposal 0082) not-yet implemented"
+    ),
     # Proposal 0083 (per-prompt token-budget observability, spec v0.78.0).
     # The Prompt.token_budget advisory + budget-exceeded span attribute /
     # WARNING / metrics are unimplemented until a later v0.16.0 PR.
@@ -696,8 +697,11 @@ async def test_observability_fixture(fixture_path: Path) -> None:
         "088-llm-metrics-token-and-duration",
         "090-metrics-error-type-on-duration",
         "091-metrics-disabled-no-measurements",
+        "125-metrics-token-usage-on-structured-output-failure",
     }:
         await _run_metrics_fixture(spec)
+    elif fixture_id == "124-otel-error-span-renders-output-usage-finish-reason":
+        await _run_structured_output_error_span_fixture(spec)
     elif fixture_id in {
         "092-tool-call-event-dispatch",
         "093-tool-call-failed-event-dispatch",
@@ -3886,6 +3890,91 @@ async def _run_metrics_case(case: Mapping[str, Any]) -> None:
     points = _collect_metric_points(reader)
     expected_metrics = cast("list[dict[str, Any]]", case["expected"].get("metrics") or [])
     _assert_metric_points(points, expected_metrics)
+
+
+def _assert_error_span_extras(spans: Sequence[Any], expected_tree: list[dict[str, Any]]) -> None:
+    """Assert the span-tree keys ``_assert_span_tree_matches`` ignores:
+    ``status_description``, ``attributes_absent``, and ``exception_recorded``
+    (an event named ``exception`` on the span). Fixture 124's central
+    payload-redaction and §4.2 exception-event claims live in these keys."""
+    by_name: dict[str, list[Any]] = {}
+    for s in spans:
+        by_name.setdefault(s.name, []).append(s)
+
+    def _walk(entries: list[dict[str, Any]]) -> None:
+        for entry in entries:
+            name = cast("str", entry["name"])
+            candidates = by_name.get(name, [])
+            assert candidates, f"expected a span named {name!r}; got {sorted(by_name)}"
+            span = candidates[0]
+            desc = entry.get("status_description")
+            if desc is not None:
+                assert span.status.description == desc, (
+                    f"span {name!r} status_description: expected {desc!r}, got {span.status.description!r}"
+                )
+            attrs = dict(span.attributes or {})
+            for absent in cast("list[str]", entry.get("attributes_absent") or []):
+                assert absent not in attrs, f"span {name!r} MUST NOT carry {absent!r}; got {sorted(attrs)}"
+            if entry.get("exception_recorded"):
+                assert any(getattr(e, "name", None) == "exception" for e in span.events), (
+                    f"span {name!r} MUST record an exception event; got {[e.name for e in span.events]}"
+                )
+            _walk(cast("list[dict[str, Any]]", entry.get("children") or []))
+
+    _walk(expected_tree)
+
+
+async def _run_structured_output_error_span_fixture(spec: Mapping[str, Any]) -> None:
+    """Proposal 0082 OTel error-span fixture (124): a structured_output_invalid
+    failure renders the response-side surface on the ERROR
+    openarmature.llm.complete span, payload-gated by disable_provider_payload."""
+    for case in cast("list[dict[str, Any]]", spec["cases"]):
+        try:
+            await _run_structured_output_error_span_case(case)
+        except AssertionError as e:
+            raise AssertionError(f"case {case.get('name')!r}: {e}") from e
+
+
+async def _run_structured_output_error_span_case(case: Mapping[str, Any]) -> None:
+    from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import (
+        InMemorySpanExporter,
+    )
+
+    from openarmature.graph import NodeException
+
+    # _build_simple_llm_graph threads calls_llm.response_schema (proposal 0082),
+    # so the mocked structured-output failure raises structured_output_invalid.
+    graph, state_cls, provider = _build_simple_llm_graph(case, populate_caller_metadata=False)
+    exporter = InMemorySpanExporter()
+    # disable_provider_payload defaults to True per observability §5.5.4; case 1
+    # sets it false to keep output.content, case 2 relies on the default to redact.
+    observer = OTelObserver(
+        span_processor=SimpleSpanProcessor(exporter),
+        disable_provider_payload=bool(case.get("disable_provider_payload", True)),
+    )
+    graph.attach_observer(observer)
+    state = _make_state_instance(case, state_cls)
+    try:
+        with pytest.raises(NodeException):
+            await graph.invoke(state)
+        await graph.drain()
+    finally:
+        await provider.aclose()
+        observer.shutdown()
+
+    spans = exporter.get_finished_spans()
+    expected_tree = cast("list[dict[str, Any]]", case["expected"]["span_tree"])
+    inv_root = next(
+        (s for s in spans if s.name == "openarmature.invocation" and cast("Any", s.parent) is None),
+        None,
+    )
+    assert inv_root is not None, f"invocation root span missing; got {[s.name for s in spans]}"
+    _assert_span_tree_matches(spans, [inv_root], expected_tree)
+    # _assert_span_tree_matches ignores status_description / attributes_absent /
+    # exception_recorded; assert those (124's payload redaction + §4.2 exception
+    # event) explicitly so the fixture's central claims are actually verified.
+    _assert_error_span_extras(spans, expected_tree)
 
 
 def _collect_metric_points(reader: Any) -> list[tuple[str, float, int, dict[str, Any]]]:

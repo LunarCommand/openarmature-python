@@ -867,11 +867,27 @@ class OpenAIProvider:
             )
         if exc is None:
             raise ValueError("_build_llm_retry_attempt_event requires response or exc")
+        # Proposal 0082: a structured_output_invalid failed attempt carries the
+        # response-side surface (the wire response was intact); the OTel observer
+        # renders it on the error span and the §11 token metric records from it.
+        # None for every other category. error_message carries the failing locator.
+        error_message = str(exc)
+        response_fields: dict[str, Any] = {}
+        if isinstance(exc, StructuredOutputInvalid):
+            response_fields = {
+                "output_content": exc.raw_content,
+                "finish_reason": exc.finish_reason,
+                "usage": exc.usage,
+                "response_id": exc.response_id,
+                "response_model": exc.response_model,
+            }
+            error_message = f"{exc}: {exc.failure_description}"
         return LlmRetryAttemptEvent(
             **base,
             error_category=exc.category,
             error_type=type(exc).__name__,
-            error_message=str(exc),
+            error_message=error_message,
+            **response_fields,
         )
 
     async def _do_complete(
