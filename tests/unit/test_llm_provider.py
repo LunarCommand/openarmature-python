@@ -1408,6 +1408,35 @@ async def test_complete_structured_output_failure_event_carries_response_surface
     assert ev.error_message != str(excinfo.value)
 
 
+def test_structured_output_builder_projects_empty_content_to_none() -> None:
+    # Proposal 0082 cross-observer parity (defensive): a structured failure whose
+    # raw_content is empty projects output_content to None in the built event
+    # (like the success path's `content or None`), so both observers omit it
+    # identically rather than one rendering "" and the other dropping it on a
+    # truthiness gate. The OpenAI wire can't currently produce empty content on
+    # the structured path -- an empty assistant message with no tool calls fails
+    # earlier as provider_invalid_response, and a tool_calls response skips
+    # structured validation -- so this pins the projection at the builder.
+    from openarmature.llm import StructuredOutputInvalid
+
+    provider = OpenAIProvider(base_url="http://test", model="m", api_key="k")
+    exc = StructuredOutputInvalid(
+        "empty content", response_schema={}, raw_content="", failure_description="empty"
+    )
+    event = provider._build_llm_failed_event(  # noqa: SLF001
+        exc,
+        latency_ms=1.0,
+        call_id="cc",
+        input_messages=[],
+        request_params={},
+        request_extras={},
+        active_prompt=None,
+        active_prompt_group=None,
+    )
+    assert event.error_category == "structured_output_invalid"
+    assert event.output_content is None
+
+
 async def test_complete_populates_output_tool_calls_on_typed_events() -> None:
     # Proposal 0076: provider.complete() populates output_tool_calls
     # (the ToolCall records) on BOTH the terminal LlmCompletionEvent and

@@ -1384,6 +1384,72 @@ async def test_typed_llm_event_emits_generation_with_expected_fields() -> None:
     assert obs.ended is True
 
 
+async def test_structured_output_failure_generation_renders_response_surface() -> None:
+    # Proposal 0082: a structured_output_invalid failure renders the response-side
+    # surface (output payload-gated, usage, metadata.finish_reason) on the ERROR
+    # Generation, alongside level=ERROR + statusMessage=category.
+    from openarmature.llm.response import Usage
+    from openarmature.observability.correlation import _reset_invocation_id, _set_invocation_id
+    from tests._helpers.typed_event import make_failed_event
+
+    client = InMemoryLangfuseClient()
+    observer = LangfuseObserver(client=client, disable_provider_payload=False)
+    token = _set_invocation_id("inv-soi")
+    try:
+        await observer(
+            make_failed_event(
+                invocation_id="inv-soi",
+                error_category="structured_output_invalid",
+                error_type="StructuredOutputInvalid",
+                output_content='{"name":"Alice","age":',
+                finish_reason="length",
+                usage=Usage(prompt_tokens=20, completion_tokens=16, total_tokens=36),
+                response_id="cc-xyz",
+                response_model="gpt-test-v2",
+            )
+        )
+    finally:
+        _reset_invocation_id(token)
+
+    gen = next(o for o in client.traces["inv-soi"].observations if o.type == "generation")
+    assert gen.level == "ERROR"
+    assert gen.status_message == "structured_output_invalid"
+    assert gen.output == '{"name":"Alice","age":'
+    assert gen.usage == LangfuseUsage(input=20, output=16, total=36)
+    assert gen.metadata.get("finish_reason") == "length"
+    assert gen.metadata.get("response_model") == "gpt-test-v2"
+
+
+async def test_structured_output_failure_generation_redacts_output_when_payload_disabled() -> None:
+    # Payload-gated: with disable_provider_payload=True, output is redacted while
+    # usage / metadata.finish_reason / ERROR level stay (proposal 0082).
+    from openarmature.llm.response import Usage
+    from openarmature.observability.correlation import _reset_invocation_id, _set_invocation_id
+    from tests._helpers.typed_event import make_failed_event
+
+    client = InMemoryLangfuseClient()
+    observer = LangfuseObserver(client=client, disable_provider_payload=True)
+    token = _set_invocation_id("inv-soi2")
+    try:
+        await observer(
+            make_failed_event(
+                invocation_id="inv-soi2",
+                error_category="structured_output_invalid",
+                output_content='{"name":"Alice","age":',
+                finish_reason="length",
+                usage=Usage(prompt_tokens=20, completion_tokens=16, total_tokens=36),
+            )
+        )
+    finally:
+        _reset_invocation_id(token)
+
+    gen = next(o for o in client.traces["inv-soi2"].observations if o.type == "generation")
+    assert gen.level == "ERROR"
+    assert gen.output is None
+    assert gen.usage == LangfuseUsage(input=20, output=16, total=36)
+    assert gen.metadata.get("finish_reason") == "length"
+
+
 async def test_typed_llm_event_back_dates_generation_using_latency_ms() -> None:
     # Generation observation's start/end timestamps reflect the
     # adapter-boundary latency rather than the typed event's arrival
