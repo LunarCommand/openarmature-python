@@ -713,7 +713,10 @@ class LlmRetryAttemptEvent:
     ``error_category`` discriminates the outcome: ``None`` for a
     successful attempt (the response-side fields are populated), a
     category string for a failed attempt (the response-side fields are
-    ``None`` — no response was received).
+    ``None`` — no response was received — with one exception: a
+    ``structured_output_invalid`` failure carries the response-side surface,
+    since its wire response was intact and failed only downstream
+    validation, mirroring :class:`LlmFailedEvent`).
 
     Field set:
 
@@ -729,9 +732,13 @@ class LlmRetryAttemptEvent:
     - response side (``response_id`` / ``response_model`` / ``usage`` /
       ``finish_reason`` / ``output_content`` / ``output_tool_calls``):
       populated on a successful attempt; ``None`` / empty list on a
-      failed attempt. ``output_tool_calls`` is the source the OTel
-      observer renders the output tool-call attributes
-      from (this is the per-attempt event that drives the LLM span).
+      failed attempt, except a ``structured_output_invalid`` failure,
+      which populates ``output_content`` / ``finish_reason`` / ``usage`` /
+      ``response_id`` / ``response_model`` from its intact wire response
+      (``output_tool_calls`` stays empty — a structured failure carries no
+      tool calls). ``output_tool_calls`` is the source the OTel observer
+      renders the output tool-call attributes from (this is the per-attempt
+      event that drives the LLM span).
     - failure side (``error_category`` / ``error_message`` /
       ``error_type``): populated on a failed attempt; ``None`` on a
       successful one.

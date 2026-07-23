@@ -1402,11 +1402,13 @@ class OTelObserver:
         attempt.
 
         Duration is recorded for every attempt (including a failed one,
-        carrying ``error.type``); token usage only when the attempt
-        returned a usage record (a failed attempt has none). Sourced from
-        the per-attempt ``LlmRetryAttemptEvent`` — one duration sample per
-        attempt under call-level retry, matching the per-attempt span
-        model. The attempt index is deliberately not a dimension
+        carrying ``error.type``); token usage only when the attempt carries
+        a usage record. Most failed attempts have none, but a
+        ``structured_output_invalid`` failure does (proposal 0082): the wire
+        response was intact, so its token usage records like a completion's.
+        Sourced from the per-attempt ``LlmRetryAttemptEvent`` — one duration
+        sample per attempt under call-level retry, matching the per-attempt
+        span model. The attempt index is deliberately not a dimension
         (cardinality control).
         """
         if self._duration_histogram is None or self._token_histogram is None:
@@ -1426,9 +1428,10 @@ class OTelObserver:
             if event.error_category is not None:
                 duration_dims["error.type"] = event.error_category
             self._duration_histogram.record(event.latency_ms / 1000.0, duration_dims)
-        # Token usage: only when a usage record is present (a failed
-        # attempt has none). Two observations for an LLM completion —
-        # input + output — each only when its count was reported.
+        # Token usage: only when a usage record is present. Most failed
+        # attempts have none; a structured_output_invalid failure does
+        # (proposal 0082). Two observations for an LLM completion --
+        # input + output -- each only when its count was reported.
         usage = event.usage
         if usage is not None:
             if usage.prompt_tokens is not None:
@@ -1450,8 +1453,11 @@ class OTelObserver:
         the calling node span, each carrying
         ``openarmature.llm.attempt_index`` 0..N-1. A successful attempt
         (``error_category is None``) carries the full response surface
-        with OK status; a failed attempt carries ERROR status + the
-        error category and no response attributes.
+        with OK status; a failed attempt carries ERROR status + the error
+        category + the §4.2 exception event. Most failed categories add no
+        response attributes, but a ``structured_output_invalid`` failure
+        also carries the response surface (payload-gated output), since its
+        wire response was intact (proposal 0082).
         """
         # Mid-call metadata augmentation can't reach this span: the
         # typed event arrives only after complete() returns, and the
@@ -1542,13 +1548,30 @@ class OTelObserver:
             start_time=start_time_ns,
         )
         if event.error_category is not None:
-            # Failed attempt: ERROR + the §4 category, no response
-            # attributes (no response was received).
+            # Failed attempt: ERROR + the §4 category + the §4.2 exception
+            # event. The per-attempt event carries the error type/message (not
+            # the exception object the node span records via record_exception),
+            # so add the OTel semconv exception event directly. error_message
+            # carries the failing locator for a structured_output_invalid
+            # failure (proposal 0082).
             span.set_status(Status(StatusCode.ERROR, description=event.error_category))
             span.set_attribute("openarmature.error.category", event.error_category)
-            self._run_enrichers(span, event)
-            span.end(end_time=end_time_ns)
-            return
+            span.add_event(
+                "exception",
+                attributes={
+                    "exception.type": event.error_type or "",
+                    "exception.message": event.error_message or "",
+                },
+            )
+            # Proposal 0082: a structured_output_invalid failure has an intact
+            # wire response, so the error span ALSO carries the response-side
+            # surface (payload-gated output) rendered below, in addition to
+            # ERROR status + category. Every other category received no
+            # response -- end the span here.
+            if event.error_category != "structured_output_invalid":
+                self._run_enrichers(span, event)
+                span.end(end_time=end_time_ns)
+                return
         usage = event.usage
         if event.finish_reason is not None:
             span.set_attribute("openarmature.llm.finish_reason", event.finish_reason)
@@ -1619,7 +1642,10 @@ class OTelObserver:
                     "openarmature.llm.output.tool_calls",
                     _truncate_for_attribute(serialized_calls, self.payload_max_bytes),
                 )
-        span.set_status(Status(StatusCode.OK))
+        # A structured_output_invalid failure fell through here with ERROR
+        # already set (proposal 0082); only a real success sets OK.
+        if event.error_category is None:
+            span.set_status(Status(StatusCode.OK))
         self._run_enrichers(span, event)
         span.end(end_time=end_time_ns)
 

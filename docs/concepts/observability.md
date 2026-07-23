@@ -715,9 +715,11 @@ inside a single call. Each attempt emits its own
 first try emits one span at `attempt_index` 0; a call that fails twice
 transiently before succeeding emits three spans (indices 0, 1, 2). Each
 failed attempt's span carries `ERROR` status plus
-`openarmature.error.category`; the final attempt's span carries the
-terminal outcome (`OK` on success, `ERROR` on an exhausted or
-non-transient failure).
+`openarmature.error.category`; a `structured_output_invalid` failure
+additionally carries the response-side surface (`finish_reason`,
+`usage`, and payload-gated `output.content`), since its wire response
+was intact. The final attempt's span carries the terminal outcome
+(`OK` on success, `ERROR` on an exhausted or non-transient failure).
 
 `openarmature.llm.attempt_index` is the **call-level** attempt counter,
 [independent of the node-level `attempt_index`](llms.md#call-level-vs-node-level-retry):
