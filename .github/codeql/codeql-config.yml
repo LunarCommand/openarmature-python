@@ -68,3 +68,23 @@ query-filters:
   # the CodeQL rule doesn't lose signal.
   - exclude:
       id: py/unsafe-cyclic-import
+  # ``py/cyclic-import`` is the broader sibling of
+  # ``py/unsafe-cyclic-import`` (above) and fires on the same
+  # false-positive class: TYPE_CHECKING-gated typed-module cycles
+  # that do not exist at runtime. The current instances are the
+  # ``graph`` <-> ``observability`` typing boundary:
+  #
+  # - ``observability/correlation.py``, ``observability/tool_call.py``,
+  #   and ``observability/metadata.py`` import graph event/observer
+  #   types only inside ``if TYPE_CHECKING:`` blocks (with
+  #   ``from __future__ import annotations``), while ``graph/events.py``
+  #   imports the ``AttributeValue`` type alias from
+  #   ``observability.metadata`` at runtime. The back-edges never
+  #   execute, so ``import openarmature.graph.events`` resolves with
+  #   no runtime cycle (verified).
+  #
+  # As with ``py/unsafe-cyclic-import``, pyright's
+  # ``reportImportCycles`` covers the genuine runtime-cycle cases at
+  # type-check time, so dropping the CodeQL rule doesn't lose signal.
+  - exclude:
+      id: py/cyclic-import
