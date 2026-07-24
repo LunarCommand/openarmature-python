@@ -1432,6 +1432,7 @@ def test_structured_output_builder_projects_empty_content_to_none() -> None:
         request_extras={},
         active_prompt=None,
         active_prompt_group=None,
+        token_budget=None,
     )
     assert event.error_category == "structured_output_invalid"
     assert event.output_content is None
@@ -1682,6 +1683,7 @@ def test_build_llm_failed_event_maps_category_and_type_per_exception(
         request_extras={},
         active_prompt=None,
         active_prompt_group=None,
+        token_budget=None,
     )
     assert event.error_category == expected_category
     assert event.error_type == expected_cls_name

@@ -629,6 +629,163 @@ async def test_filesystem_backend_unified_sampling(tmp_path: Path) -> None:
     assert extract.sampling.max_tokens == 1024
 
 
+# Proposal 0083: the token_budget sub-object rides the SAME sidecar as
+# sampling; ``token_budget_source`` gates it with the same three values.
+
+
+async def test_filesystem_backend_token_budget_per_prompt_sidecar(tmp_path: Path) -> None:
+    (tmp_path / "production").mkdir()
+    (tmp_path / "production" / "classify.j2").write_text("Classify: {{ topic }}", encoding="utf-8")
+    # One sidecar carries both surfaces: flat sampling keys + a token_budget
+    # sub-object sibling. sampling reads the flat keys and MUST NOT swallow
+    # token_budget; token_budget reads only the sub-object.
+    (tmp_path / "production" / "classify.config.json").write_text(
+        '{"temperature": 0.2, "token_budget": {"input_max_tokens": 10}}',
+        encoding="utf-8",
+    )
+
+    backend = FilesystemPromptBackend(
+        tmp_path,
+        sampling_source="per-prompt-sidecar",
+        token_budget_source="per-prompt-sidecar",
+    )
+    prompt = await backend.fetch("classify", "production")
+
+    assert prompt.token_budget is not None
+    assert prompt.token_budget.input_max_tokens == 10
+    assert prompt.token_budget.total_max_tokens is None
+    # sampling excludes the token_budget sub-object (not a sampling field).
+    assert prompt.sampling is not None
+    assert prompt.sampling.temperature == 0.2
+    assert "token_budget" not in (prompt.sampling.model_extra or {})
+
+
+async def test_filesystem_backend_token_budget_absent_sidecar(tmp_path: Path) -> None:
+    (tmp_path / "production").mkdir()
+    (tmp_path / "production" / "classify.j2").write_text("Classify: {{ topic }}", encoding="utf-8")
+    (tmp_path / "production" / "classify.config.json").write_text(
+        '{"temperature": 0.2}',
+        encoding="utf-8",
+    )
+
+    backend = FilesystemPromptBackend(
+        tmp_path,
+        sampling_source="per-prompt-sidecar",
+        token_budget_source="per-prompt-sidecar",
+    )
+    prompt = await backend.fetch("classify", "production")
+
+    # Sidecar present but declares no token_budget -> None.
+    assert prompt.token_budget is None
+    assert prompt.sampling is not None
+
+
+async def test_filesystem_backend_token_budget_source_none_leaves_budget_none(tmp_path: Path) -> None:
+    (tmp_path / "production").mkdir()
+    (tmp_path / "production" / "classify.j2").write_text("Classify: {{ topic }}", encoding="utf-8")
+    (tmp_path / "production" / "classify.config.json").write_text(
+        '{"token_budget": {"total_max_tokens": 25}}',
+        encoding="utf-8",
+    )
+
+    # Default token_budget_source="none": the sidecar budget is not sourced.
+    backend = FilesystemPromptBackend(tmp_path, sampling_source="per-prompt-sidecar")
+    prompt = await backend.fetch("classify", "production")
+
+    assert prompt.token_budget is None
+
+
+async def test_filesystem_backend_token_budget_unified(tmp_path: Path) -> None:
+    (tmp_path / "production").mkdir()
+    (tmp_path / "production" / "classify.j2").write_text("Classify: {{ topic }}", encoding="utf-8")
+    # The unified prompt_configs.json entry carries the token_budget sub-object
+    # alongside the flat sampling keys, exactly like the per-prompt sidecar.
+    (tmp_path / "prompt_configs.json").write_text(
+        '{"classify": {"temperature": 0.0, '
+        '"token_budget": {"input_max_tokens": 10, "total_max_tokens": 40}}}',
+        encoding="utf-8",
+    )
+
+    backend = FilesystemPromptBackend(
+        tmp_path,
+        sampling_source="unified",
+        token_budget_source="unified",
+    )
+    prompt = await backend.fetch("classify", "production")
+
+    assert prompt.token_budget is not None
+    assert prompt.token_budget.input_max_tokens == 10
+    assert prompt.token_budget.total_max_tokens == 40
+    assert prompt.sampling is not None
+    assert prompt.sampling.temperature == 0.0
+
+
+async def test_filesystem_backend_malformed_token_budget_is_fallback_eligible(tmp_path: Path) -> None:
+    # A malformed advisory token_budget (a string, not an object) surfaces as the
+    # fallback-eligible PromptStoreUnavailable -- NOT a bare exception that would
+    # bypass PromptManager's multi-backend fallback and crash the LLM call.
+    (tmp_path / "production").mkdir()
+    (tmp_path / "production" / "classify.j2").write_text("Classify: {{ topic }}", encoding="utf-8")
+    (tmp_path / "production" / "classify.config.json").write_text(
+        '{"token_budget": "1000"}',
+        encoding="utf-8",
+    )
+
+    backend = FilesystemPromptBackend(tmp_path, token_budget_source="per-prompt-sidecar")
+    with pytest.raises(PromptStoreUnavailable):
+        await backend.fetch("classify", "production")
+
+
+async def test_filesystem_backend_negative_bound_is_fallback_eligible(tmp_path: Path) -> None:
+    # A bound failing validation (negative; TokenBudget requires ge=0) is also
+    # converted to the fallback-eligible PromptStoreUnavailable, not a raw
+    # pydantic ValidationError.
+    (tmp_path / "production").mkdir()
+    (tmp_path / "production" / "classify.j2").write_text("Classify: {{ topic }}", encoding="utf-8")
+    (tmp_path / "production" / "classify.config.json").write_text(
+        '{"token_budget": {"input_max_tokens": -5}}',
+        encoding="utf-8",
+    )
+
+    backend = FilesystemPromptBackend(tmp_path, token_budget_source="per-prompt-sidecar")
+    with pytest.raises(PromptStoreUnavailable):
+        await backend.fetch("classify", "production")
+
+
+async def test_filesystem_backend_empty_token_budget_collapses_to_none(tmp_path: Path) -> None:
+    # An empty / all-null token_budget object is "no bound declared" -> None,
+    # not a non-null all-null record (parity with the langfuse backend).
+    (tmp_path / "production").mkdir()
+    (tmp_path / "production" / "classify.j2").write_text("Classify: {{ topic }}", encoding="utf-8")
+    (tmp_path / "production" / "classify.config.json").write_text(
+        '{"token_budget": {}}',
+        encoding="utf-8",
+    )
+
+    backend = FilesystemPromptBackend(tmp_path, token_budget_source="per-prompt-sidecar")
+    prompt = await backend.fetch("classify", "production")
+    assert prompt.token_budget is None
+
+
+def test_langfuse_token_budget_from_config() -> None:
+    # Direct coverage of the langfuse backend's config sourcing (proposal 0083):
+    # present -> TokenBudget; absent / non-object / no recognized bound / all-null
+    # -> None; a malformed bound is tolerated (dropped to None) -- the intentional
+    # divergence from the filesystem backend's fail-loud sidecar posture.
+    from openarmature.prompts import TokenBudget
+    from openarmature.prompts.backends.langfuse import _token_budget_from_config
+
+    assert _token_budget_from_config({"token_budget": {"input_max_tokens": 10}}) == TokenBudget(
+        input_max_tokens=10
+    )
+    assert _token_budget_from_config(None) is None
+    assert _token_budget_from_config({}) is None
+    assert _token_budget_from_config({"token_budget": "1000"}) is None
+    assert _token_budget_from_config({"token_budget": {"unknown": 5}}) is None
+    assert _token_budget_from_config({"token_budget": {"input_max_tokens": None}}) is None
+    assert _token_budget_from_config({"token_budget": {"input_max_tokens": -5}}) is None
+
+
 # LabelResolver fallback chain — covered by fixture 015 end-to-end,
 # but the resolver class is python-only and a focused unit test
 # documents the precedence rules in code.

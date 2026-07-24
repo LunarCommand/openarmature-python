@@ -83,7 +83,7 @@ from typing import Any, cast
 from opentelemetry import context as otel_context
 from opentelemetry import metrics as otel_metrics
 from opentelemetry import trace as otel_trace
-from opentelemetry.metrics import Histogram, Meter, MeterProvider
+from opentelemetry.metrics import Counter, Histogram, Meter, MeterProvider
 from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace import SpanProcessor, TracerProvider
 from opentelemetry.sdk.trace.id_generator import RandomIdGenerator
@@ -195,6 +195,52 @@ _DURATION_BUCKETS: list[float] = [
     40.96,
     81.92,
 ]
+# §11.2 (proposal 0083) token-budget utilization histogram bucket advisory.
+# Unitless ratio (actual / declared bound) so the boundaries cluster around
+# 1.0 -- the crossover between under- and over-budget -- to resolve how close
+# prompts run to (and how far past) their declared budget.
+_TOKEN_BUDGET_UTILIZATION_BUCKETS: list[float] = [
+    0.1,
+    0.25,
+    0.5,
+    0.75,
+    0.9,
+    1.0,
+    1.1,
+    1.25,
+    1.5,
+    2.0,
+    4.0,
+]
+
+
+def _token_budget_evaluations(token_budget: Any, usage: Any) -> list[dict[str, Any]]:
+    # §5.5.15 / §11.2 (proposal 0083): the per-bound token-budget evaluation
+    # shared by the span attrs and the metric recorder. Returns one entry per
+    # DECLARED bound that also has a usable actual to compare against, so a bound
+    # whose count the provider did not report (None) is omitted -- mirroring the
+    # token.usage gate rather than coercing a missing count to 0. A declared
+    # bound of 0 is degenerate (ratio undefined) and is skipped for both
+    # instruments; its declared value still surfaces as a prompt span attribute.
+    # Empty when there is no budget, no usage, or no evaluable bound; the caller
+    # then leaves the exceeded signal absent (not false).
+    if token_budget is None or usage is None:
+        return []
+    evaluations: list[dict[str, Any]] = []
+    input_max = getattr(token_budget, "input_max_tokens", None)
+    if input_max and usage.prompt_tokens is not None:
+        evaluations.append({"kind": "input", "actual": usage.prompt_tokens, "max": input_max})
+    total_max = getattr(token_budget, "total_max_tokens", None)
+    if total_max:
+        if usage.total_tokens is not None:
+            total_actual = usage.total_tokens
+        elif usage.prompt_tokens is not None and usage.completion_tokens is not None:
+            total_actual = usage.prompt_tokens + usage.completion_tokens
+        else:
+            total_actual = None
+        if total_actual is not None:
+            evaluations.append({"kind": "total", "actual": total_actual, "max": total_max})
+    return evaluations
 
 
 def _read_spec_version() -> str:
@@ -634,6 +680,10 @@ class OTelObserver:
     _meter: Meter | None = field(init=False, repr=False, default=None)
     _token_histogram: Histogram | None = field(init=False, repr=False, default=None)
     _duration_histogram: Histogram | None = field(init=False, repr=False, default=None)
+    # §11.2 (proposal 0083) per-prompt token-budget instruments — created
+    # alongside the token/duration histograms when enable_metrics is True.
+    _token_budget_exceeded_counter: Counter | None = field(init=False, repr=False, default=None)
+    _token_budget_utilization_histogram: Histogram | None = field(init=False, repr=False, default=None)
     # Per-invocation_id span state — concurrent invocations on a
     # shared observer each get their own ``_InvState`` so internal
     # maps never collide.
@@ -694,6 +744,19 @@ class OTelObserver:
                 "openarmature.gen_ai.client.operation.duration",
                 unit="s",
                 explicit_bucket_boundaries_advisory=_DURATION_BUCKETS,
+            )
+            # §11.2 (proposal 0083) per-prompt token-budget instruments: an
+            # exceeded counter ({call}) that increments per breached bound and
+            # a utilization histogram (unitless ratio) that records on every
+            # budgeted call, exceeded or not.
+            self._token_budget_exceeded_counter = self._meter.create_counter(
+                "openarmature.gen_ai.client.token_budget.exceeded",
+                unit="{call}",
+            )
+            self._token_budget_utilization_histogram = self._meter.create_histogram(
+                "openarmature.gen_ai.client.token_budget.utilization",
+                unit="1",
+                explicit_bucket_boundaries_advisory=_TOKEN_BUDGET_UTILIZATION_BUCKETS,
             )
 
     # ------------------------------------------------------------------
@@ -1444,6 +1507,20 @@ class OTelObserver:
                     usage.completion_tokens,
                     {**base_dims, "openarmature.gen_ai.token.type": "output"},
                 )
+        # §11.2 (proposal 0083) per-prompt token-budget instruments, from the
+        # shared per-bound evaluation (same per-attempt path as token.usage, so a
+        # structured_output_invalid failure -- which carries usage -- records
+        # too). Utilization on every declared+evaluable bound; the exceeded
+        # counter only when that bound is breached.
+        if (
+            self._token_budget_utilization_histogram is not None
+            and self._token_budget_exceeded_counter is not None
+        ):
+            for ev in _token_budget_evaluations(event.token_budget, usage):
+                dims = {**base_dims, "openarmature.gen_ai.token_budget.kind": ev["kind"]}
+                self._token_budget_utilization_histogram.record(ev["actual"] / ev["max"], dims)
+                if ev["actual"] > ev["max"]:
+                    self._token_budget_exceeded_counter.add(1, dims)
 
     def _handle_typed_llm_retry_attempt(self, event: LlmRetryAttemptEvent) -> None:
         """Open + close one ``openarmature.llm.complete`` span from a
@@ -1508,6 +1585,31 @@ class OTelObserver:
             attrs["openarmature.prompt.label"] = active_prompt.label
             attrs["openarmature.prompt.template_hash"] = active_prompt.template_hash
             attrs["openarmature.prompt.rendered_hash"] = active_prompt.rendered_hash
+        # §5.5.15 (proposal 0083) token-budget span surface. Each declared
+        # bound renders its own attribute (omitted when that bound is null);
+        # the exceeded signal is emitted ONLY when a budget is declared
+        # (>= 1 bound) AND the attempt carries usage, value = OR of per-bound
+        # exceedances. No budget or no usage -> the attribute is absent (not
+        # false), matching the §5.5 omit-when-undeclared convention.
+        token_budget = event.token_budget
+        if token_budget is not None:
+            # Declared bounds surface regardless of usage (each only when the
+            # prompt declared it); a 0 bound is still a declared value.
+            input_max = getattr(token_budget, "input_max_tokens", None)
+            total_max = getattr(token_budget, "total_max_tokens", None)
+            if input_max is not None:
+                attrs["openarmature.prompt.token_budget.input_max_tokens"] = input_max
+            if total_max is not None:
+                attrs["openarmature.prompt.token_budget.total_max_tokens"] = total_max
+            # The exceeded signal is emitted ONLY when at least one bound was
+            # actually evaluated (declared, non-degenerate, with a reported
+            # count); value = OR of per-bound breaches. No evaluable bound ->
+            # the attribute is absent (not false), per §5.5.15.
+            evaluations = _token_budget_evaluations(token_budget, event.usage)
+            if evaluations:
+                attrs["openarmature.llm.token_budget.exceeded"] = any(
+                    ev["actual"] > ev["max"] for ev in evaluations
+                )
         active_group = event.active_prompt_group
         if active_group is not None:
             attrs["openarmature.prompt.group_name"] = active_group.group_name

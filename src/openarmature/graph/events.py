@@ -583,6 +583,14 @@ class LlmCompletionEvent:
     active_prompt_group: Any
     call_id: str
     caller_invocation_metadata: Mapping[str, AttributeValue] | None = None
+    # Proposal 0083 (graph-engine §6 / observability §5.5.15): the active
+    # prompt's advisory per-prompt token budget at LLM-call time (the
+    # Prompt.token_budget snapshot). None when the call ran outside a
+    # budgeted prompt-context binding. Typed as Any -- same rationale as
+    # active_prompt (the prompts package isn't imported here); the observer
+    # reads input_max_tokens / total_max_tokens off it directly and compares
+    # them reactively against the reported usage to drive the budget signals.
+    token_budget: Any = None
     # Proposal 0076 (spec v0.67.0): the assistant message's output tool
     # calls in typed-event-native form (the ToolCall records, not a
     # pre-serialized shape — they carry no inline-image bytes, so the
@@ -694,6 +702,13 @@ class LlmFailedEvent:
     usage: "Usage | None" = None
     response_id: str | None = None
     response_model: str | None = None
+    # Proposal 0083 (graph-engine §6 / observability §5.5.15): the active
+    # prompt's advisory per-prompt token budget at LLM-call time. None when
+    # the call ran outside a budgeted prompt-context binding. Typed as Any --
+    # same rationale as active_prompt. On a structured_output_invalid failure
+    # (which carries the response-side usage) the budget eval fires as it does
+    # on a completion; None-carrying every other category leaves it inert.
+    token_budget: Any = None
 
 
 # Python-internal per-attempt LLM event. NOT a spec-normative event type
@@ -770,6 +785,13 @@ class LlmRetryAttemptEvent:
     error_message: str | None = None
     error_type: str | None = None
     caller_invocation_metadata: Mapping[str, AttributeValue] | None = None
+    # Proposal 0083 (graph-engine §6 / observability §5.5.15): the active
+    # prompt's advisory per-prompt token budget at LLM-call time. None outside
+    # a budgeted prompt-context binding. Typed as Any -- same rationale as
+    # active_prompt. This per-attempt event is the OTel budget-signal source:
+    # the observer compares its bounds against event.usage on every attempt
+    # carrying usage (success OR a structured_output_invalid failure).
+    token_budget: Any = None
     # Proposal 0076: the attempt's output tool calls (ToolCall records),
     # mirroring LlmCompletionEvent.output_tool_calls. Populated on a
     # successful attempt; empty list on a failed one (no response). The

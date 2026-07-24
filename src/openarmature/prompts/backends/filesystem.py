@@ -8,9 +8,11 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal, cast
 
+from pydantic import ValidationError
+
 from ..errors import PromptNotFound, PromptStoreUnavailable
 from ..hashing import compute_template_hash
-from ..prompt import Prompt, SamplingConfig, TextPrompt
+from ..prompt import Prompt, SamplingConfig, TextPrompt, TokenBudget
 
 
 class FilesystemPromptBackend:
@@ -52,6 +54,14 @@ class FilesystemPromptBackend:
       :class:`PromptStoreUnavailable` if the file exists but cannot
       be parsed.
 
+    Optional ``token_budget_source`` populates ``Prompt.token_budget``
+    from the SAME sidecar file as ``sampling``. It takes
+    the same three values with the same semantics; the budget lives as a
+    ``token_budget`` sub-object sibling to the sampling keys inside the
+    sidecar (``<name>.config.json`` / unified ``prompt_configs.json``), so
+    one file carries both. ``sampling`` reads every sidecar key EXCEPT the
+    ``token_budget`` sub-object; ``token_budget`` reads only that sub-object.
+
     This backend reads templates from disk on every fetch; no caching.
     """
 
@@ -61,10 +71,12 @@ class FilesystemPromptBackend:
         *,
         layout: Literal["per-label", "flat"] = "per-label",
         sampling_source: Literal["none", "per-prompt-sidecar", "unified"] = "none",
+        token_budget_source: Literal["none", "per-prompt-sidecar", "unified"] = "none",
     ) -> None:
         self._root = root
         self._layout = layout
         self._sampling_source = sampling_source
+        self._token_budget_source = token_budget_source
         # Unified mode: load and parse at construction so the cost is
         # paid once. Backend instances are typically long-lived
         # process-wide singletons, so a single read on startup is
@@ -72,8 +84,10 @@ class FilesystemPromptBackend:
         # ``Any`` rather than ``dict[str, Any]`` so the runtime
         # isinstance guard in ``_resolve_sampling`` remains meaningful
         # — JSON files can have non-dict values under top-level keys.
+        # sampling + token_budget share the one unified file, so a single
+        # load serves both when either source is unified.
         self._unified_sampling: dict[str, Any] | None = None
-        if sampling_source == "unified":
+        if sampling_source == "unified" or token_budget_source == "unified":
             self._unified_sampling = self._load_unified_configs()
 
     def _load_unified_configs(self) -> dict[str, Any]:
@@ -106,24 +120,10 @@ class FilesystemPromptBackend:
             return self._root / f"{name}.config.json"
         return self._root / label / f"{name}.config.json"
 
-    def _resolve_sampling(self, name: str, label: str) -> SamplingConfig | None:
-        if self._sampling_source == "none":
-            return None
-        if self._sampling_source == "unified":
-            assert self._unified_sampling is not None
-            raw = self._unified_sampling.get(name)
-            if raw is None:
-                return None
-            if not isinstance(raw, dict):
-                raise PromptStoreUnavailable(
-                    f"unified prompt_configs.json entry for {name!r} is not a JSON object "
-                    f"(got {type(raw).__name__})",
-                    name=name,
-                    label="",
-                )
-            entry = cast(dict[str, Any], raw)
-            return _sampling_from_dict(entry)
-        # per-prompt-sidecar
+    def _read_sidecar(self, name: str, label: str) -> dict[str, Any] | None:
+        # Read + parse the per-prompt sidecar ONCE per fetch so sampling and
+        # token_budget derive from a single consistent snapshot (proposal 0083);
+        # reading each independently risked a torn read + a redundant parse.
         path = self._sidecar_path(name, label)
         if not path.exists():
             return None
@@ -141,7 +141,69 @@ class FilesystemPromptBackend:
                 name=name,
                 label=label,
             )
-        return _sampling_from_dict(cast(dict[str, Any], raw))
+        return cast(dict[str, Any], raw)
+
+    def _resolve_sampling(self, name: str, sidecar: dict[str, Any] | None) -> SamplingConfig | None:
+        if self._sampling_source == "none":
+            return None
+        if self._sampling_source == "unified":
+            assert self._unified_sampling is not None
+            raw = self._unified_sampling.get(name)
+            if raw is None:
+                return None
+            if not isinstance(raw, dict):
+                raise PromptStoreUnavailable(
+                    f"unified prompt_configs.json entry for {name!r} is not a JSON object "
+                    f"(got {type(raw).__name__})",
+                    name=name,
+                    label="",
+                )
+            return _sampling_from_dict(cast(dict[str, Any], raw))
+        # per-prompt-sidecar: use the single pre-read snapshot.
+        if sidecar is None:
+            return None
+        return _sampling_from_dict(sidecar)
+
+    def _resolve_token_budget(
+        self, name: str, label: str, sidecar: dict[str, Any] | None
+    ) -> TokenBudget | None:
+        # Mirrors ``_resolve_sampling`` gate-for-gate, reading from the SAME
+        # sidecar snapshot (proposal 0083). The budget is the ``token_budget``
+        # sub-object; ``_token_budget_from_dict`` pulls it out and returns None
+        # when the sidecar carries no budget.
+        if self._token_budget_source == "none":
+            return None
+        if self._token_budget_source == "unified":
+            assert self._unified_sampling is not None
+            raw = self._unified_sampling.get(name)
+            if raw is None:
+                return None
+            if not isinstance(raw, dict):
+                raise PromptStoreUnavailable(
+                    f"unified prompt_configs.json entry for {name!r} is not a JSON object "
+                    f"(got {type(raw).__name__})",
+                    name=name,
+                    label="",
+                )
+            source: dict[str, Any] = cast(dict[str, Any], raw)
+            source_label = ""
+        else:  # per-prompt-sidecar: use the single pre-read snapshot.
+            if sidecar is None:
+                return None
+            source = sidecar
+            source_label = label
+        # A malformed advisory budget (non-object sub-value, or a bound failing
+        # validation) surfaces as PromptStoreUnavailable -- a fallback-eligible
+        # domain error -- NOT a bare exception that would bypass PromptManager's
+        # multi-backend fallback and hard-crash the LLM call over an advisory field.
+        try:
+            return _token_budget_from_dict(source)
+        except (ValueError, ValidationError) as exc:
+            raise PromptStoreUnavailable(
+                f"malformed token_budget for prompt {name!r}: {exc}",
+                name=name,
+                label=source_label,
+            ) from exc
 
     async def fetch(
         self, name: str, label: str = "production", *, cache_ttl_seconds: int | None = None
@@ -173,7 +235,13 @@ class FilesystemPromptBackend:
                 label=label,
             ) from exc
 
-        sampling = await asyncio.to_thread(self._resolve_sampling, name, label)
+        # Read the per-prompt sidecar at most once; both sampling and
+        # token_budget derive from this one snapshot (proposal 0083).
+        sidecar: dict[str, Any] | None = None
+        if self._sampling_source == "per-prompt-sidecar" or self._token_budget_source == "per-prompt-sidecar":
+            sidecar = await asyncio.to_thread(self._read_sidecar, name, label)
+        sampling = self._resolve_sampling(name, sidecar)
+        token_budget = self._resolve_token_budget(name, label, sidecar)
         template_hash = compute_template_hash(template_source)
         version = template_hash.removeprefix("sha256:")[:16]
         return TextPrompt(
@@ -184,6 +252,7 @@ class FilesystemPromptBackend:
             template_hash=template_hash,
             fetched_at=datetime.now(UTC),
             sampling=sampling,
+            token_budget=token_budget,
         )
 
 
@@ -192,9 +261,30 @@ def _sampling_from_dict(data: dict[str, Any]) -> SamplingConfig:
     # end up in SamplingConfig's extras-allow bag rather than as a
     # single literal `extras` key. Matches the YAML conformance-fixture
     # convention from llm-provider/032 + the spec §5 sidecar example.
-    flat: dict[str, Any] = {k: v for k, v in data.items() if k != "extras"}
+    # `token_budget` (proposal 0083) is a sibling sub-object read by
+    # `_token_budget_from_dict`, not a sampling field, so it is excluded
+    # here alongside `extras`.
+    flat: dict[str, Any] = {k: v for k, v in data.items() if k not in ("extras", "token_budget")}
     extras = data.get("extras")
     if isinstance(extras, dict):
         for k, v in cast(dict[str, Any], extras).items():
             flat.setdefault(k, v)
     return SamplingConfig(**flat)
+
+
+def _token_budget_from_dict(data: dict[str, Any]) -> TokenBudget | None:
+    # The sidecar carries the budget as a `token_budget` sub-object sibling to
+    # the sampling keys. Absent -> no budget (None). A non-object sub-value, or
+    # a bound failing validation, raises (the caller converts it to the
+    # fallback-eligible PromptStoreUnavailable). An all-null / empty budget
+    # collapses to None: "no bound declared" is None (parity with the langfuse
+    # backend + the None-when-no-budget contract), not a non-null all-null record.
+    raw = data.get("token_budget")
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise ValueError(f"sidecar token_budget must be a JSON object, got {type(raw).__name__}")
+    budget = TokenBudget(**cast(dict[str, Any], raw))
+    if budget.input_max_tokens is None and budget.total_max_tokens is None:
+        return None
+    return budget
