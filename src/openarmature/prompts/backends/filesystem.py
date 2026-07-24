@@ -200,7 +200,7 @@ class FilesystemPromptBackend:
             return _token_budget_from_dict(source)
         except (ValueError, ValidationError) as exc:
             raise PromptStoreUnavailable(
-                f"malformed token_budget for prompt {name!r}: {exc}",
+                f"malformed token_budget for prompt ({name!r}, {source_label!r}): {exc}",
                 name=name,
                 label=source_label,
             ) from exc

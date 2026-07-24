@@ -5181,6 +5181,13 @@ def _render_prompt_result(case: Mapping[str, Any], prompt_name: str) -> Any:
     # provider stamps it onto the typed event. Absent -> None.
     token_budget_spec = cast("dict[str, Any] | None", entry.get("token_budget"))
     token_budget = TokenBudget(**token_budget_spec) if token_budget_spec is not None else None
+    # Mirror the real backends: an empty / all-null budget collapses to None.
+    if (
+        token_budget is not None
+        and token_budget.input_max_tokens is None
+        and token_budget.total_max_tokens is None
+    ):
+        token_budget = None
     return PromptResult(
         name=cast("str", entry["name"]),
         version=cast("str", entry["version"]),
