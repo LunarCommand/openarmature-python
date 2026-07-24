@@ -540,8 +540,11 @@ class PromptManager:
             variables=variables,
             fetched_at=prompt.fetched_at,
             rendered_at=datetime.now(UTC),
-            # Defensive copy of the two mutable propagated fields.
+            # Defensive copy of the mutable propagated fields.
             sampling=prompt.sampling.model_copy() if prompt.sampling is not None else None,
+            # Proposal 0083: advisory token budget propagated verbatim (defensive
+            # copy), mirroring sampling -- rendering does not modify it.
+            token_budget=prompt.token_budget.model_copy() if prompt.token_budget is not None else None,
             observability_entities=(
                 dict(prompt.observability_entities) if prompt.observability_entities is not None else None
             ),

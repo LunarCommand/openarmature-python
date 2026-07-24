@@ -24,6 +24,7 @@ from typing import Any, Protocol, cast
 import httpx
 from langfuse.api import NotFoundError, ServiceUnavailableError
 from langfuse.model import ChatPromptClient, TextPromptClient
+from pydantic import ValidationError
 
 from ..errors import PromptNotFound, PromptStoreUnavailable
 from ..hashing import compute_template_hash
@@ -35,6 +36,7 @@ from ..prompt import (
     Prompt,
     SamplingConfig,
     TextPrompt,
+    TokenBudget,
 )
 
 
@@ -62,6 +64,15 @@ _SAMPLING_FIELDS = (
     "frequency_penalty",
     "presence_penalty",
     "stop_sequences",
+)
+
+# Langfuse prompt `config.token_budget` sub-object keys that line up with
+# TokenBudget's declared fields (proposal 0083). Mirrors `_SAMPLING_FIELDS`:
+# the budget lives under a `token_budget` sub-object in the Langfuse config
+# (sibling to the flat sampling keys), matching the filesystem sidecar shape.
+_TOKEN_BUDGET_FIELDS = (
+    "input_max_tokens",
+    "total_max_tokens",
 )
 
 
@@ -122,6 +133,7 @@ class LangfusePromptBackend:
                 template_hash=template_hash,
                 fetched_at=datetime.now(UTC),
                 sampling=_sampling_from_config(result.config),
+                token_budget=_token_budget_from_config(result.config),
                 observability_entities={"langfuse_prompt": result},
                 metadata=_metadata_from(result),
             )
@@ -136,6 +148,7 @@ class LangfusePromptBackend:
             template_hash=template_hash,
             fetched_at=datetime.now(UTC),
             sampling=_sampling_from_config(result.config),
+            token_budget=_token_budget_from_config(result.config),
             observability_entities={"langfuse_prompt": result},
             metadata=_metadata_from(result),
         )
@@ -172,6 +185,36 @@ def _sampling_from_config(config: dict[str, Any] | None) -> SamplingConfig | Non
     if not declared:
         return None
     return SamplingConfig(**declared)
+
+
+def _token_budget_from_config(config: dict[str, Any] | None) -> TokenBudget | None:
+    # The budget is a `token_budget` sub-object in the Langfuse config;
+    # only the declared TokenBudget fields are lifted (TokenBudget forbids
+    # extras, so an unknown config key would otherwise reject the fetch).
+    # Absent / non-object / no recognized bound -> no budget.
+    if not config:
+        return None
+    raw = config.get("token_budget")
+    if not isinstance(raw, dict):
+        return None
+    budget = cast("dict[str, Any]", raw)
+    declared = {k: budget[k] for k in _TOKEN_BUDGET_FIELDS if k in budget}
+    if not declared:
+        return None
+    # The Langfuse config is a remote-service payload: tolerate a malformed
+    # advisory bound (e.g. a negative value) by dropping the budget rather than
+    # failing the fetch. The filesystem backend, whose sidecar is operator-
+    # authored, fails loud (fallback-eligible) instead -- an intentional
+    # divergence by data-source trust model, flagged to spec for confirmation.
+    try:
+        parsed = TokenBudget(**declared)
+    except ValidationError:
+        return None
+    # An all-null budget (bounds present but explicitly null) is "no bound
+    # declared" -> None, not a non-null all-null record.
+    if parsed.input_max_tokens is None and parsed.total_max_tokens is None:
+        return None
+    return parsed
 
 
 def _normalized_langfuse_entries(raw: Iterable[Any], *, name: str, label: str) -> list[dict[str, Any]]:

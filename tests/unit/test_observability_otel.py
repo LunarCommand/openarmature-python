@@ -1004,10 +1004,14 @@ async def test_llm_span_output_tool_calls_payload_gating() -> None:
 
 def _collect_metric_points(reader: Any) -> list[tuple[str, float, int, dict[str, Any]]]:
     """Flatten an InMemoryMetricReader's collected data into
-    ``(instrument_name, point_sum, point_count, point_attributes)``
+    ``(instrument_name, recorded_value, point_count, point_attributes)``
     tuples. Histogram observations with identical attribute sets
     aggregate into one data point (sum + count), so per-attempt tests
-    assert on ``count``, not point cardinality."""
+    assert on ``count``, not point cardinality. A Counter's data points are
+    ``NumberDataPoint`` (``.value``, no ``.sum`` / ``.count``) -- the
+    token_budget.exceeded counter -- so branch on the point shape:
+    ``.value`` (count 1) for a Sum/Counter point, ``.sum`` / ``.count``
+    for a Histogram point."""
     data = reader.get_metrics_data()
     points: list[tuple[str, float, int, dict[str, Any]]] = []
     if data is None:
@@ -1016,7 +1020,10 @@ def _collect_metric_points(reader: Any) -> list[tuple[str, float, int, dict[str,
         for scope_metric in resource_metric.scope_metrics:
             for metric in scope_metric.metrics:
                 for pt in metric.data.data_points:
-                    points.append((metric.name, pt.sum, pt.count, dict(pt.attributes)))
+                    if hasattr(pt, "value"):
+                        points.append((metric.name, float(pt.value), 1, dict(pt.attributes)))
+                    else:
+                        points.append((metric.name, pt.sum, pt.count, dict(pt.attributes)))
     return points
 
 
@@ -1181,6 +1188,235 @@ async def test_metrics_record_once_per_attempt_under_retry() -> None:
     by_type = {p[3]["openarmature.gen_ai.token.type"]: p for p in token_points}
     assert by_type["input"][1] == 5 and by_type["input"][2] == 1
     assert by_type["output"][1] == 1 and by_type["output"][2] == 1
+
+
+# ---------------------------------------------------------------------------
+# Proposal 0083 — per-prompt token-budget span attributes + §11.2 metrics
+# ---------------------------------------------------------------------------
+
+_TB_EXCEEDED = "openarmature.gen_ai.client.token_budget.exceeded"
+_TB_UTILIZATION = "openarmature.gen_ai.client.token_budget.utilization"
+
+
+async def test_token_budget_input_exceeded_span_and_metrics() -> None:
+    # §5.5.15 / §11.2 (mirrors fixture 126): input_max_tokens 10 vs prompt 20 ->
+    # exceeded. The span carries the declared input bound + exceeded=true (no
+    # total-bound attr); metrics record the exceeded counter (kind input,
+    # value 1) + the utilization histogram (2.0, kind input).
+    from openarmature.llm.response import Usage
+    from openarmature.prompts import TokenBudget
+    from tests._helpers.typed_event import make_retry_attempt_event
+
+    event = make_retry_attempt_event(
+        model="test-model",
+        provider="openai",
+        usage=Usage(prompt_tokens=20, completion_tokens=1, total_tokens=21),
+        token_budget=TokenBudget(input_max_tokens=10),
+    )
+    points, llm_spans = await _drive_metrics_events([event])
+
+    attrs: dict[str, Any] = dict(llm_spans[0].attributes or {})
+    assert attrs.get("openarmature.prompt.token_budget.input_max_tokens") == 10
+    assert "openarmature.prompt.token_budget.total_max_tokens" not in attrs
+    assert attrs.get("openarmature.llm.token_budget.exceeded") is True
+
+    exceeded = [p for p in points if p[0] == _TB_EXCEEDED]
+    util = [p for p in points if p[0] == _TB_UTILIZATION]
+    assert len(exceeded) == 1
+    assert exceeded[0][1] == 1
+    assert exceeded[0][3]["openarmature.gen_ai.token_budget.kind"] == "input"
+    assert len(util) == 1
+    assert util[0][1] == 2.0
+    assert util[0][3]["openarmature.gen_ai.token_budget.kind"] == "input"
+    assert util[0][3]["gen_ai.request.model"] == "test-model"
+    assert util[0][3]["gen_ai.system"] == "openai"
+
+
+async def test_token_budget_total_exceeded_kind_total() -> None:
+    # §5.5.15 / §11.2 (mirrors fixture 127): total_max_tokens 25 vs total 50 ->
+    # exceeded on the total bound; kind "total", input bound absent.
+    from openarmature.llm.response import Usage
+    from openarmature.prompts import TokenBudget
+    from tests._helpers.typed_event import make_retry_attempt_event
+
+    event = make_retry_attempt_event(
+        model="test-model",
+        provider="openai",
+        usage=Usage(prompt_tokens=40, completion_tokens=10, total_tokens=50),
+        token_budget=TokenBudget(total_max_tokens=25),
+    )
+    points, llm_spans = await _drive_metrics_events([event])
+
+    attrs: dict[str, Any] = dict(llm_spans[0].attributes or {})
+    assert attrs.get("openarmature.prompt.token_budget.total_max_tokens") == 25
+    assert "openarmature.prompt.token_budget.input_max_tokens" not in attrs
+    assert attrs.get("openarmature.llm.token_budget.exceeded") is True
+
+    exceeded = [p for p in points if p[0] == _TB_EXCEEDED]
+    util = [p for p in points if p[0] == _TB_UTILIZATION]
+    assert len(exceeded) == 1 and exceeded[0][1] == 1
+    assert exceeded[0][3]["openarmature.gen_ai.token_budget.kind"] == "total"
+    assert len(util) == 1 and util[0][1] == 2.0
+    assert util[0][3]["openarmature.gen_ai.token_budget.kind"] == "total"
+
+
+async def test_token_budget_under_budget_records_utilization_only() -> None:
+    # §5.5.15 / §11.2 (mirrors fixture 128): input_max_tokens 40 vs prompt 20 ->
+    # under budget. exceeded=false span attr, NO exceeded counter, but the
+    # utilization histogram STILL records (0.5).
+    from openarmature.llm.response import Usage
+    from openarmature.prompts import TokenBudget
+    from tests._helpers.typed_event import make_retry_attempt_event
+
+    event = make_retry_attempt_event(
+        model="test-model",
+        provider="openai",
+        usage=Usage(prompt_tokens=20, completion_tokens=1, total_tokens=21),
+        token_budget=TokenBudget(input_max_tokens=40),
+    )
+    points, llm_spans = await _drive_metrics_events([event])
+
+    attrs: dict[str, Any] = dict(llm_spans[0].attributes or {})
+    assert attrs.get("openarmature.prompt.token_budget.input_max_tokens") == 40
+    assert attrs.get("openarmature.llm.token_budget.exceeded") is False
+
+    exceeded = [p for p in points if p[0] == _TB_EXCEEDED]
+    util = [p for p in points if p[0] == _TB_UTILIZATION]
+    assert exceeded == []
+    assert len(util) == 1 and util[0][1] == 0.5
+    assert util[0][3]["openarmature.gen_ai.token_budget.kind"] == "input"
+
+
+async def test_token_budget_absent_no_budget_surface() -> None:
+    # §5.5.15 / §11.2 (mirrors fixture 129): no token_budget -> no budget span
+    # attrs and no budget metric observations, while the baseline token.usage
+    # instruments still record.
+    from openarmature.llm.response import Usage
+    from tests._helpers.typed_event import make_retry_attempt_event
+
+    event = make_retry_attempt_event(
+        model="test-model",
+        provider="openai",
+        usage=Usage(prompt_tokens=5, completion_tokens=1, total_tokens=6),
+        token_budget=None,
+    )
+    points, llm_spans = await _drive_metrics_events([event])
+
+    attrs: dict[str, Any] = dict(llm_spans[0].attributes or {})
+    assert "openarmature.prompt.token_budget.input_max_tokens" not in attrs
+    assert "openarmature.prompt.token_budget.total_max_tokens" not in attrs
+    assert "openarmature.llm.token_budget.exceeded" not in attrs
+
+    budget_points = [p for p in points if "token_budget" in p[0]]
+    assert budget_points == []
+    token_points = [p for p in points if p[0] == "openarmature.gen_ai.client.token.usage"]
+    assert len(token_points) == 2
+
+
+async def test_token_budget_no_usage_omits_exceeded_signal() -> None:
+    # §5.5.15: a declared budget with NO usage on the attempt (e.g. a
+    # provider_unavailable failed attempt) still surfaces the declared bound
+    # attribute but omits the exceeded signal (it needs usage to evaluate),
+    # and records no budget metric observation (gated on usage present).
+    from openarmature.prompts import TokenBudget
+    from tests._helpers.typed_event import make_retry_attempt_event
+
+    event = make_retry_attempt_event(
+        model="test-model",
+        provider="openai",
+        finish_reason=None,
+        usage=None,
+        token_budget=TokenBudget(input_max_tokens=10),
+        error_category="provider_unavailable",
+        error_type="ProviderUnavailable",
+        error_message="down",
+    )
+    points, llm_spans = await _drive_metrics_events([event])
+
+    attrs: dict[str, Any] = dict(llm_spans[0].attributes or {})
+    assert attrs.get("openarmature.prompt.token_budget.input_max_tokens") == 10
+    assert "openarmature.llm.token_budget.exceeded" not in attrs
+    assert [p for p in points if "token_budget" in p[0]] == []
+
+
+async def test_token_budget_both_bounds_exceeded_double_increment() -> None:
+    # §11.2 (proposal 0083): a prompt declaring BOTH bounds, both exceeded,
+    # increments the exceeded counter once per breached bound (kinds input +
+    # total) and records two utilization observations; the span exceeded signal
+    # is the OR (true). Guards the per-kind double-increment.
+    from openarmature.llm.response import Usage
+    from openarmature.prompts import TokenBudget
+    from tests._helpers.typed_event import make_retry_attempt_event
+
+    event = make_retry_attempt_event(
+        model="test-model",
+        provider="openai",
+        usage=Usage(prompt_tokens=20, completion_tokens=10, total_tokens=30),
+        token_budget=TokenBudget(input_max_tokens=10, total_max_tokens=15),
+    )
+    points, llm_spans = await _drive_metrics_events([event])
+
+    attrs: dict[str, Any] = dict(llm_spans[0].attributes or {})
+    assert attrs.get("openarmature.prompt.token_budget.input_max_tokens") == 10
+    assert attrs.get("openarmature.prompt.token_budget.total_max_tokens") == 15
+    assert attrs.get("openarmature.llm.token_budget.exceeded") is True
+
+    exceeded = [p for p in points if p[0] == _TB_EXCEEDED]
+    util = [p for p in points if p[0] == _TB_UTILIZATION]
+    assert {p[3]["openarmature.gen_ai.token_budget.kind"] for p in exceeded} == {"input", "total"}
+    assert all(p[1] == 1 for p in exceeded)
+    util_by_kind = {p[3]["openarmature.gen_ai.token_budget.kind"]: p[1] for p in util}
+    assert util_by_kind["input"] == 2.0  # 20 / 10
+    assert util_by_kind["total"] == 2.0  # 30 / 15
+
+
+async def test_token_budget_total_falls_back_to_prompt_plus_completion() -> None:
+    # §11.2 (proposal 0083): when usage.total_tokens is None the total bound's
+    # actual falls back to prompt_tokens + completion_tokens. 12 + 4 = 16 over a
+    # total_max of 10 -> exceeded, utilization 1.6.
+    from openarmature.llm.response import Usage
+    from openarmature.prompts import TokenBudget
+    from tests._helpers.typed_event import make_retry_attempt_event
+
+    event = make_retry_attempt_event(
+        model="test-model",
+        provider="openai",
+        usage=Usage(prompt_tokens=12, completion_tokens=4, total_tokens=None),
+        token_budget=TokenBudget(total_max_tokens=10),
+    )
+    points, llm_spans = await _drive_metrics_events([event])
+
+    attrs: dict[str, Any] = dict(llm_spans[0].attributes or {})
+    assert attrs.get("openarmature.llm.token_budget.exceeded") is True
+    util = [p for p in points if p[0] == _TB_UTILIZATION]
+    assert len(util) == 1
+    assert util[0][3]["openarmature.gen_ai.token_budget.kind"] == "total"
+    assert util[0][1] == 1.6  # (12 + 4) / 10
+
+
+async def test_token_budget_missing_input_count_omits_evaluation() -> None:
+    # §5.5.15 / §11.2 (proposal 0083): a usage record present but with the input
+    # count UNREPORTED (prompt_tokens None) is not coerced to 0 -- the input
+    # bound is not evaluated, so no utilization / exceeded-counter observation
+    # and, with no other evaluable bound, the span exceeded signal is absent
+    # (not a misleading false). Mirrors the token.usage is-not-None gate.
+    from openarmature.llm.response import Usage
+    from openarmature.prompts import TokenBudget
+    from tests._helpers.typed_event import make_retry_attempt_event
+
+    event = make_retry_attempt_event(
+        model="test-model",
+        provider="openai",
+        usage=Usage(prompt_tokens=None, completion_tokens=500, total_tokens=500),
+        token_budget=TokenBudget(input_max_tokens=100),
+    )
+    points, llm_spans = await _drive_metrics_events([event])
+
+    attrs: dict[str, Any] = dict(llm_spans[0].attributes or {})
+    # Declared bound still surfaces; the evaluation does not (input count missing).
+    assert attrs.get("openarmature.prompt.token_budget.input_max_tokens") == 100
+    assert "openarmature.llm.token_budget.exceeded" not in attrs
+    assert [p for p in points if "token_budget" in p[0]] == []
 
 
 async def test_llm_span_zero_duration_when_latency_missing() -> None:

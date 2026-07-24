@@ -206,6 +206,12 @@ class ObservabilityExpected(_ForbidExtras):
     # observations, each ``{instrument, dimensions, value?}``. An empty
     # list asserts that no measurements were recorded (fixture 091).
     metrics: list[dict[str, Any]] | None = None
+    # typed_event_collector expectations (proposal 0083, fixtures 126-129):
+    # ``{observer_name: {contains_event: ...}}``. The token-budget fixtures
+    # assert the completion-event field alongside span_tree + metrics, so the
+    # observability expected block carries the observer expectations too. Loose
+    # dict -- the runtime (_assert_observer_expectations) validates the shape.
+    observers: dict[str, Any] | None = None
 
 
 # ---------------------------------------------------------------------------

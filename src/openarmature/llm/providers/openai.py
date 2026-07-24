@@ -513,6 +513,7 @@ class OpenAIProvider:
                         request_extras=request_extras,
                         active_prompt=active_prompt,
                         active_prompt_group=active_prompt_group,
+                        token_budget=(active_prompt.token_budget if active_prompt is not None else None),
                         response=attempt_response,
                         exc=attempt_exc,
                     ),
@@ -541,6 +542,7 @@ class OpenAIProvider:
                         request_extras=request_extras,
                         active_prompt=active_prompt,
                         active_prompt_group=active_prompt_group,
+                        token_budget=(active_prompt.token_budget if active_prompt is not None else None),
                     ),
                 )
             raise
@@ -562,6 +564,7 @@ class OpenAIProvider:
                     request_extras=request_extras,
                     active_prompt=active_prompt,
                     active_prompt_group=active_prompt_group,
+                    token_budget=(active_prompt.token_budget if active_prompt is not None else None),
                 ),
             )
         return response
@@ -645,6 +648,7 @@ class OpenAIProvider:
         request_extras: dict[str, Any],
         active_prompt: Any,
         active_prompt_group: Any,
+        token_budget: Any,
     ) -> LlmCompletionEvent:
         """Construct the typed LlmCompletionEvent for the success path.
 
@@ -714,6 +718,9 @@ class OpenAIProvider:
             request_extras=request_extras,
             active_prompt=active_prompt,
             active_prompt_group=active_prompt_group,
+            # Proposal 0083: the active prompt's advisory token budget, sourced
+            # by the caller from active_prompt.token_budget at dispatch time.
+            token_budget=token_budget,
             call_id=call_id,
             caller_invocation_metadata=caller_metadata,
         )
@@ -729,6 +736,7 @@ class OpenAIProvider:
         request_extras: dict[str, Any],
         active_prompt: Any,
         active_prompt_group: Any,
+        token_budget: Any,
     ) -> LlmFailedEvent:
         """Construct the typed LlmFailedEvent for the failure path.
 
@@ -792,6 +800,11 @@ class OpenAIProvider:
             request_extras=request_extras,
             active_prompt=active_prompt,
             active_prompt_group=active_prompt_group,
+            # Proposal 0083: advisory budget carried on the failure event too;
+            # None-carrying keeps it inert for non-response failures, while a
+            # structured_output_invalid failure (which does carry usage) drives
+            # the same reactive budget eval as a completion.
+            token_budget=token_budget,
             call_id=call_id,
             error_category=exc.category,
             error_type=type(exc).__name__,
@@ -815,6 +828,7 @@ class OpenAIProvider:
         request_extras: dict[str, Any],
         active_prompt: Any,
         active_prompt_group: Any,
+        token_budget: Any,
         response: Response | None = None,
         exc: LlmProviderError | None = None,
     ) -> LlmRetryAttemptEvent:
@@ -853,6 +867,8 @@ class OpenAIProvider:
             "request_extras": request_extras,
             "active_prompt": active_prompt,
             "active_prompt_group": active_prompt_group,
+            # Proposal 0083: advisory per-prompt token budget snapshot.
+            "token_budget": token_budget,
             "caller_invocation_metadata": caller_metadata,
         }
         if response is not None:

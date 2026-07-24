@@ -223,6 +223,16 @@ _SUPPORTED_FIXTURES = frozenset(
         # (123) stays deferred to the final PR of the split.
         "124-otel-error-span-renders-output-usage-finish-reason",
         "125-metrics-token-usage-on-structured-output-failure",
+        # proposal 0083 (per-prompt token-budget observability, spec v0.78.0)
+        # completion path: the §5.5.15 budget span attributes + §11.2 budget
+        # metrics (utilization histogram + exceeded counter) for a budgeted
+        # LLM completion. 126 input-exceeded, 127 total-exceeded, 128
+        # under-budget (utilization records, no exceeded), 129 no-budget
+        # baseline. The Langfuse WARNING (130) + failure path (131) are later.
+        "126-token-budget-input-exceeded",
+        "127-token-budget-total-exceeded",
+        "128-token-budget-under-budget-no-warning",
+        "129-token-budget-absent-unchanged",
         # v0.69.0 — proposal 0063 (tool-execution observability). A
         # calls_tool node enters the with_tool_call scope; the typed
         # ToolCallEvent / ToolCallFailedEvent drive the OTel tool span +
@@ -362,15 +372,12 @@ _DEFERRED_FIXTURES: dict[str, str] = {
         "Langfuse failed-Generation rendering; driven in test_observability_langfuse"
     ),
     # Proposal 0083 (per-prompt token-budget observability, spec v0.78.0).
-    # The Prompt.token_budget advisory + budget-exceeded span attribute /
-    # WARNING / metrics are unimplemented until a later v0.16.0 PR.
+    # The completion-path span attributes + §11.2 metrics (126-129) run here
+    # (see _SUPPORTED_FIXTURES). The Langfuse WARNING-level rendering (130) and
+    # the structured-output-failure path (131) land in later v0.16.0 PRs.
     **{
         fixture_id: "per-prompt token-budget observability (proposal 0083) not-yet implemented"
         for fixture_id in (
-            "126-token-budget-input-exceeded",
-            "127-token-budget-total-exceeded",
-            "128-token-budget-under-budget-no-warning",
-            "129-token-budget-absent-unchanged",
             "130-langfuse-token-budget-warning-level",
             "131-token-budget-on-structured-output-failure",
         )
@@ -703,6 +710,13 @@ async def test_observability_fixture(fixture_path: Path) -> None:
         await _run_metrics_fixture(spec)
     elif fixture_id == "124-otel-error-span-renders-output-usage-finish-reason":
         await _run_structured_output_error_span_fixture(spec)
+    elif fixture_id in {
+        "126-token-budget-input-exceeded",
+        "127-token-budget-total-exceeded",
+        "128-token-budget-under-budget-no-warning",
+        "129-token-budget-absent-unchanged",
+    }:
+        await _run_token_budget_fixture(spec)
     elif fixture_id in {
         "092-tool-call-event-dispatch",
         "093-tool-call-failed-event-dispatch",
@@ -3893,6 +3907,128 @@ async def _run_metrics_case(case: Mapping[str, Any]) -> None:
     _assert_metric_points(points, expected_metrics)
 
 
+# ---------------------------------------------------------------------------
+# Proposal 0083 — per-prompt token-budget observability fixtures (126-129)
+# ---------------------------------------------------------------------------
+#
+# These fixtures assert THREE surfaces at once for one budgeted LLM call: the
+# typed LlmCompletionEvent.token_budget field (typed_event_collector), the
+# §5.5.15 token-budget span attributes (span_tree, including attributes_absent),
+# and the §11.2 token-budget metric instruments (metrics + absence invariants).
+# The runner threads all three off a single invocation with the metrics reader +
+# span exporter + typed collectors attached together.
+
+
+async def _run_token_budget_fixture(spec: Mapping[str, Any]) -> None:
+    for case in cast("list[dict[str, Any]]", spec["cases"]):
+        try:
+            await _run_token_budget_case(case)
+        except AssertionError as e:
+            raise AssertionError(f"case {case.get('name')!r}: {e}") from e
+
+
+async def _run_token_budget_case(case: Mapping[str, Any]) -> None:
+    from opentelemetry.sdk.metrics import MeterProvider as SdkMeterProvider
+    from opentelemetry.sdk.metrics.export import InMemoryMetricReader
+    from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import (
+        InMemorySpanExporter,
+    )
+
+    collectors, _ = _parse_typed_observers(case)
+    graph, state_cls, provider = _build_simple_llm_graph(case, populate_caller_metadata=False)
+
+    reader = InMemoryMetricReader()
+    meter_provider = SdkMeterProvider(metric_readers=[reader])
+    exporter = InMemorySpanExporter()
+    observer = OTelObserver(
+        span_processor=SimpleSpanProcessor(exporter),
+        enable_metrics=bool(case.get("enable_metrics", False)),
+        meter_provider=meter_provider,
+    )
+    handles = [graph.attach_observer(observer)]
+    handles += [graph.attach_observer(c) for c in collectors.values()]
+
+    state = _make_state_instance(case, state_cls)
+    try:
+        await graph.invoke(state)
+        await graph.drain()
+    finally:
+        for handle in handles:
+            handle.remove()
+        await provider.aclose()
+        observer.shutdown()
+
+    expected = cast("dict[str, Any]", case.get("expected") or {})
+
+    # ---- typed collector: LlmCompletionEvent.token_budget field ----
+    observer_expectations = cast("dict[str, Any]", expected.get("observers") or {})
+    for name, expectations in observer_expectations.items():
+        collector = collectors.get(name)
+        if collector is None:
+            raise AssertionError(f"fixture references unknown observer {name!r}")
+        _assert_observer_expectations(name, collector, cast("dict[str, Any]", expectations))
+
+    # ---- span_tree: §5.5.15 attributes + attributes_absent ----
+    spans = exporter.get_finished_spans()
+    expected_tree = cast("list[dict[str, Any]] | None", expected.get("span_tree"))
+    if expected_tree is not None:
+        inv_root = next(
+            (s for s in spans if s.name == "openarmature.invocation" and cast("Any", s.parent) is None),
+            None,
+        )
+        assert inv_root is not None, f"invocation root span missing; got {[s.name for s in spans]}"
+        _assert_span_tree_matches(spans, [inv_root], expected_tree)
+        # _assert_span_tree_matches ignores attributes_absent; assert the
+        # declared-only / no-budget absence claims explicitly.
+        _assert_error_span_extras(spans, expected_tree)
+
+    # ---- metrics + absence invariants ----
+    points = _collect_metric_points(reader)
+    expected_metrics = cast("list[dict[str, Any]]", expected.get("metrics") or [])
+    _assert_metric_points(points, expected_metrics)
+    _assert_token_budget_invariants(case, points, collectors)
+
+
+def _assert_token_budget_invariants(
+    case: Mapping[str, Any],
+    points: Sequence[tuple[str, float, int, dict[str, Any]]],
+    collectors: Mapping[str, Any],
+) -> None:
+    """Evaluate the token-budget named invariants (128/129) as absence
+    predicates over the captured measurement set + the completion event.
+    The ``metrics:`` list shape asserts presence only, so these cover the
+    "no observation recorded" claims the list cannot express."""
+    invariants = cast("dict[str, Any]", case["expected"].get("invariants") or {})
+    exceeded_points = [p for p in points if p[0] == "openarmature.gen_ai.client.token_budget.exceeded"]
+    utilization_points = [p for p in points if p[0] == "openarmature.gen_ai.client.token_budget.utilization"]
+
+    if invariants.get("no_token_budget_exceeded_observation_when_under_budget"):
+        assert not exceeded_points, (
+            f"under-budget call MUST record no token_budget.exceeded observation; got {exceeded_points}"
+        )
+    if invariants.get("utilization_records_under_budget"):
+        assert utilization_points, (
+            "under-budget call MUST still record a token_budget.utilization observation; got none"
+        )
+    if invariants.get("no_token_budget_instrument_observations_when_no_budget"):
+        assert not exceeded_points and not utilization_points, (
+            "no-budget call MUST record no token-budget instrument observations; got "
+            f"exceeded={exceeded_points} utilization={utilization_points}"
+        )
+    if invariants.get("token_budget_null_on_completion_event"):
+        completion_events = [
+            e
+            for collector in collectors.values()
+            for e in collector.events
+            if type(e).__name__ == "LlmCompletionEvent"
+        ]
+        assert completion_events, "expected at least one LlmCompletionEvent to assert token_budget null"
+        assert all(getattr(e, "token_budget", "missing") is None for e in completion_events), (
+            "no-budget call MUST carry token_budget=None on the completion event"
+        )
+
+
 def _assert_error_span_extras(spans: Sequence[Any], expected_tree: list[dict[str, Any]]) -> None:
     """Assert the span-tree keys ``_assert_span_tree_matches`` ignores:
     ``status_description``, ``attributes_absent``, and ``exception_recorded``
@@ -3985,9 +4121,13 @@ async def _run_structured_output_error_span_case(case: Mapping[str, Any]) -> Non
 
 def _collect_metric_points(reader: Any) -> list[tuple[str, float, int, dict[str, Any]]]:
     """Flatten an InMemoryMetricReader's data into
-    ``(instrument_name, point_sum, point_count, point_attributes)``
+    ``(instrument_name, recorded_value, point_count, point_attributes)``
     tuples. Observations with identical attribute sets aggregate into one
-    histogram data point (sum + count)."""
+    histogram data point (``sum`` + ``count``). A Counter's data points are
+    ``NumberDataPoint`` (``.value``, no ``.sum`` / ``.count``) -- the
+    token_budget.exceeded counter -- so branch on the point shape: use
+    ``.value`` as the recorded value (count 1) for a Sum/Counter point,
+    ``.sum`` / ``.count`` for a Histogram point."""
     data = reader.get_metrics_data()
     points: list[tuple[str, float, int, dict[str, Any]]] = []
     if data is None:
@@ -3996,7 +4136,12 @@ def _collect_metric_points(reader: Any) -> list[tuple[str, float, int, dict[str,
         for scope_metric in resource_metric.scope_metrics:
             for metric in scope_metric.metrics:
                 for pt in metric.data.data_points:
-                    points.append((metric.name, pt.sum, pt.count, dict(pt.attributes)))
+                    if hasattr(pt, "value"):
+                        # NumberDataPoint (Sum / Counter): the aggregated value.
+                        points.append((metric.name, float(pt.value), 1, dict(pt.attributes)))
+                    else:
+                        # HistogramDataPoint: sum + observation count.
+                        points.append((metric.name, pt.sum, pt.count, dict(pt.attributes)))
     return points
 
 
@@ -5017,7 +5162,7 @@ def _render_prompt_result(case: Mapping[str, Any], prompt_name: str) -> Any:
     from datetime import UTC, datetime
 
     from openarmature.llm import Message, UserMessage
-    from openarmature.prompts import PromptResult, compute_rendered_hash
+    from openarmature.prompts import PromptResult, TokenBudget, compute_rendered_hash
 
     # The renders_prompt: directive (064): the 5-field identity (name / version
     # / label / template_hash / rendered_hash) is what the event's active_prompt
@@ -5031,6 +5176,18 @@ def _render_prompt_result(case: Mapping[str, Any], prompt_name: str) -> Any:
         rendered = rendered.replace("{{" + key + "}}", str(value)).replace("{{ " + key + " }}", str(value))
     messages: list[Message] = [UserMessage(content=rendered)]
     now = datetime.now(UTC)
+    # Proposal 0083: the prompt's token_budget sub-object (the same config slot
+    # 013 puts sampling in) surfaces on PromptResult.token_budget so the
+    # provider stamps it onto the typed event. Absent -> None.
+    token_budget_spec = cast("dict[str, Any] | None", entry.get("token_budget"))
+    token_budget = TokenBudget(**token_budget_spec) if token_budget_spec is not None else None
+    # Mirror the real backends: an empty / all-null budget collapses to None.
+    if (
+        token_budget is not None
+        and token_budget.input_max_tokens is None
+        and token_budget.total_max_tokens is None
+    ):
+        token_budget = None
     return PromptResult(
         name=cast("str", entry["name"]),
         version=cast("str", entry["version"]),
@@ -5041,6 +5198,7 @@ def _render_prompt_result(case: Mapping[str, Any], prompt_name: str) -> Any:
         variables=variables,
         fetched_at=now,
         rendered_at=now,
+        token_budget=token_budget,
     )
 
 

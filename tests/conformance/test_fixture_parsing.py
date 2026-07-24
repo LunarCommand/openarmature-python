@@ -611,11 +611,9 @@ _DEFERRED_FIXTURES: dict[str, str] = {
         "Proposal 0082 structured-output failure event; harness typed_event_collector schema pending"
     ),
     # Proposal 0083 (per-prompt token-budget observability, v0.78.0) -- the
-    # token_budget directive shape + budget-exceeded expectations.
-    "observability/126-token-budget-input-exceeded": "Proposal 0083 token-budget; not implemented",
-    "observability/127-token-budget-total-exceeded": "Proposal 0083 token-budget; not implemented",
-    "observability/128-token-budget-under-budget-no-warning": "Proposal 0083 token-budget; not implemented",
-    "observability/129-token-budget-absent-unchanged": "Proposal 0083 token-budget; not implemented",
+    # completion-path fixtures (126-129) parse + run in test_observability; the
+    # Langfuse WARNING (130) + structured-output-failure (131) paths stay
+    # deferred until their PRs.
     "observability/130-langfuse-token-budget-warning-level": "Proposal 0083 token-budget; not implemented",
     "observability/131-token-budget-on-structured-output-failure": (
         "Proposal 0083 token-budget; not implemented"

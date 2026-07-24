@@ -369,9 +369,14 @@ class CallsLlmSpec(_AllowExtras):
     ``config`` (fixtures 016-018) carries the optional
     ``RuntimeConfig`` field set for the call — temperature, max_tokens,
     top_p, seed, and a provider-specific ``extras`` bag.
+
+    ``messages`` is optional: a ``renders_prompt`` node (proposal 0064 /
+    0083, fixtures 064 / 126-129) supplies the messages from the rendered
+    prompt, so the ``calls_llm`` block carries only ``model`` +
+    ``stores_response_in``.
     """
 
-    messages: list[dict[str, Any]]
+    messages: list[dict[str, Any]] | None = None
     stores_response_in: str
     config: RuntimeConfigSpec | None = None
 
@@ -498,6 +503,12 @@ class NodeSpec(_ForbidExtras):
     calls_tool: CallsToolSpec | None = None
 
     # Companions — additive.
+    # ``renders_prompt`` (proposal 0064 / 0083, fixtures 064 / 126-129):
+    # the node renders the named prompt before its ``calls_llm`` call so the
+    # rendered PromptResult is stamped active for the completion. The harness
+    # reads it at runtime (``node_spec.get("renders_prompt")``); modelled here
+    # so the fixtures parse under the strict NodeSpec.
+    renders_prompt: str | None = None
     inputs: dict[str, str] | None = None
     outputs: dict[str, str] | None = None
     middleware: list[MiddlewareSpec] | None = None

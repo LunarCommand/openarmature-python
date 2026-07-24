@@ -35,6 +35,24 @@ class SamplingConfig(RuntimeConfig):
     """Per-prompt sampling configuration. Shape-compatible with ``RuntimeConfig``."""
 
 
+# Spec prompt-management §3 (proposal 0083): an advisory, observability-only
+# per-prompt token budget.  Unlike SamplingConfig it is NOT splatted into a
+# provider call -- it never touches the request; it is compared reactively
+# against the provider's reported usage to drive the observability §5.5.15 /
+# §7 / §8.4.3 / §11 signals.  Closed shape (extra="forbid"): input_max_tokens
+# is the ceiling on the call's input (prompt) tokens, total_max_tokens the
+# ceiling on input + output.  The output budget is SamplingConfig.max_tokens
+# and is not duplicated here.  Each bound optional + non-negative; absent when
+# the backend supplies none.
+class TokenBudget(BaseModel):
+    """Per-prompt input / total token budget. Advisory observability only."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    input_max_tokens: int | None = Field(default=None, ge=0)
+    total_max_tokens: int | None = Field(default=None, ge=0)
+
+
 # Spec §3.1 *Chat-prompt variant* — content-blocks-template shapes
 # mirroring llm-provider §3.1 ContentBlock shapes with variable-
 # substitutable text fields.  The v1 set covers user-message
@@ -181,6 +199,9 @@ class _PromptBase(BaseModel):
             the cache hit time.
         sampling: Optional per-prompt sampling configuration.  Splats
             into ``provider.complete(config=...)`` without translation.
+        token_budget: Optional advisory input / total token budget.
+            Observability-only: never applied to the request, compared
+            reactively against reported usage to drive the budget signals.
         observability_entities: Optional backend-keyed references to
             first-class entities the prompt has been registered as in
             observability backends.  Recognized key:
@@ -196,6 +217,7 @@ class _PromptBase(BaseModel):
     template_hash: str
     fetched_at: datetime
     sampling: SamplingConfig | None = None
+    token_budget: TokenBudget | None = None
     observability_entities: dict[str, Any] | None = None
     metadata: dict[str, Any] | None = None
 
@@ -301,4 +323,5 @@ class PromptResult(BaseModel):
     # Per spec §4: propagated verbatim from the source Prompt.
     # Rendering does NOT modify or reinterpret either field.
     sampling: SamplingConfig | None = None
+    token_budget: TokenBudget | None = None
     observability_entities: dict[str, Any] | None = None

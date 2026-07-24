@@ -37,6 +37,7 @@ from .prompt import (
     SamplingConfig,
     TextBlockTemplate,
     TextPrompt,
+    TokenBudget,
 )
 
 __all__ = [
@@ -69,6 +70,7 @@ __all__ = [
     "SamplingConfig",
     "TextBlockTemplate",
     "TextPrompt",
+    "TokenBudget",
     "compute_rendered_hash",
     "compute_template_hash",
     "current_prompt_group",
