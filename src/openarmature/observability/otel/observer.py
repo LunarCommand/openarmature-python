@@ -220,18 +220,20 @@ def _token_budget_evaluations(token_budget: Any, usage: Any) -> list[dict[str, A
     # DECLARED bound that also has a usable actual to compare against, so a bound
     # whose count the provider did not report (None) is omitted -- mirroring the
     # token.usage gate rather than coercing a missing count to 0. A declared
-    # bound of 0 is degenerate (ratio undefined) and is skipped for both
-    # instruments; its declared value still surfaces as a prompt span attribute.
-    # Empty when there is no budget, no usage, or no evaluable bound; the caller
-    # then leaves the exceeded signal absent (not false).
+    # bound of 0 IS evaluated: the exceeded test is a strict ``actual > max``, so
+    # a 0 bound is exceeded by any positive usage per §5.5.15; only the
+    # utilization ratio is undefined for a 0 denominator, and the metric recorder
+    # skips that one sample. Empty when there is no budget, no usage, or no bound
+    # with a reported count; the caller then leaves the exceeded signal absent
+    # (not false).
     if token_budget is None or usage is None:
         return []
     evaluations: list[dict[str, Any]] = []
     input_max = getattr(token_budget, "input_max_tokens", None)
-    if input_max and usage.prompt_tokens is not None:
+    if input_max is not None and usage.prompt_tokens is not None:
         evaluations.append({"kind": "input", "actual": usage.prompt_tokens, "max": input_max})
     total_max = getattr(token_budget, "total_max_tokens", None)
-    if total_max:
+    if total_max is not None:
         if usage.total_tokens is not None:
             total_actual = usage.total_tokens
         elif usage.prompt_tokens is not None and usage.completion_tokens is not None:
@@ -1518,7 +1520,11 @@ class OTelObserver:
         ):
             for ev in _token_budget_evaluations(event.token_budget, usage):
                 dims = {**base_dims, "openarmature.gen_ai.token_budget.kind": ev["kind"]}
-                self._token_budget_utilization_histogram.record(ev["actual"] / ev["max"], dims)
+                # The utilization ratio is undefined for a 0 denominator; skip
+                # that one sample. A 0 bound is still counted as exceeded below
+                # (strict actual > max), per §5.5.15.
+                if ev["max"] > 0:
+                    self._token_budget_utilization_histogram.record(ev["actual"] / ev["max"], dims)
                 if ev["actual"] > ev["max"]:
                     self._token_budget_exceeded_counter.add(1, dims)
 

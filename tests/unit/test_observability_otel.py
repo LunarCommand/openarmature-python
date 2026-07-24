@@ -1419,6 +1419,64 @@ async def test_token_budget_missing_input_count_omits_evaluation() -> None:
     assert [p for p in points if "token_budget" in p[0]] == []
 
 
+async def test_token_budget_zero_bound_exceeds_but_skips_utilization() -> None:
+    # §5.5.15 (proposal 0083): a declared bound of 0 is exceeded by any positive
+    # usage (the exceeded test is a strict actual > max), so the exceeded span
+    # attr + counter fire. The utilization ratio is undefined for a 0 denominator,
+    # so that one histogram sample is skipped -- not a fabricated sentinel.
+    from openarmature.llm.response import Usage
+    from openarmature.prompts import TokenBudget
+    from tests._helpers.typed_event import make_retry_attempt_event
+
+    event = make_retry_attempt_event(
+        model="test-model",
+        provider="openai",
+        usage=Usage(prompt_tokens=5, completion_tokens=1, total_tokens=6),
+        token_budget=TokenBudget(input_max_tokens=0),
+    )
+    points, llm_spans = await _drive_metrics_events([event])
+
+    attrs: dict[str, Any] = dict(llm_spans[0].attributes or {})
+    assert attrs.get("openarmature.prompt.token_budget.input_max_tokens") == 0
+    assert attrs.get("openarmature.llm.token_budget.exceeded") is True
+
+    exceeded = [p for p in points if p[0] == _TB_EXCEEDED]
+    util = [p for p in points if p[0] == _TB_UTILIZATION]
+    assert len(exceeded) == 1
+    assert exceeded[0][1] == 1
+    assert exceeded[0][3]["openarmature.gen_ai.token_budget.kind"] == "input"
+    # No utilization sample -- the 0-denominator ratio is undefined and skipped.
+    assert util == []
+
+
+async def test_token_budget_zero_total_bound_exceeds_but_skips_utilization() -> None:
+    # §5.5.15 (proposal 0083): the total branch mirrors the input branch -- a
+    # total_max of 0 is exceeded by any positive total usage (exceeded attr +
+    # counter fire, kind total), and the undefined 0-denominator utilization
+    # sample is skipped.
+    from openarmature.llm.response import Usage
+    from openarmature.prompts import TokenBudget
+    from tests._helpers.typed_event import make_retry_attempt_event
+
+    event = make_retry_attempt_event(
+        model="test-model",
+        provider="openai",
+        usage=Usage(prompt_tokens=5, completion_tokens=1, total_tokens=6),
+        token_budget=TokenBudget(total_max_tokens=0),
+    )
+    points, llm_spans = await _drive_metrics_events([event])
+
+    attrs: dict[str, Any] = dict(llm_spans[0].attributes or {})
+    assert attrs.get("openarmature.prompt.token_budget.total_max_tokens") == 0
+    assert attrs.get("openarmature.llm.token_budget.exceeded") is True
+
+    exceeded = [p for p in points if p[0] == _TB_EXCEEDED]
+    util = [p for p in points if p[0] == _TB_UTILIZATION]
+    assert len(exceeded) == 1
+    assert exceeded[0][3]["openarmature.gen_ai.token_budget.kind"] == "total"
+    assert util == []
+
+
 async def test_llm_span_zero_duration_when_latency_missing() -> None:
     # When the typed event omits latency_ms (None), the handler falls
     # back to a zero-duration span at end_time rather than guessing
