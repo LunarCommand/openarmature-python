@@ -612,9 +612,8 @@ _DEFERRED_FIXTURES: dict[str, str] = {
     ),
     # Proposal 0083 (per-prompt token-budget observability, v0.78.0) -- the
     # completion-path fixtures (126-129) parse + run in test_observability; the
-    # Langfuse WARNING (130) + structured-output-failure (131) paths stay
-    # deferred until their PRs.
-    "observability/130-langfuse-token-budget-warning-level": "Proposal 0083 token-budget; not implemented",
+    # Langfuse WARNING (130) parses + runs via test_observability_langfuse; the
+    # structured-output-failure (131) path stays deferred until its PR.
     "observability/131-token-budget-on-structured-output-failure": (
         "Proposal 0083 token-budget; not implemented"
     ),

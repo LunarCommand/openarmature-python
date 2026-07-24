@@ -1384,6 +1384,135 @@ async def test_typed_llm_event_emits_generation_with_expected_fields() -> None:
     assert obs.ended is True
 
 
+async def test_typed_llm_completion_over_budget_sets_warning_level() -> None:
+    # §8.4.3 (proposal 0083): a SUCCESSFUL completion whose prompt_tokens exceed
+    # the declared input_max_tokens sets the Generation's advisory WARNING level +
+    # a statusMessage naming the breached bound, and maps the declared budget to
+    # metadata.token_budget. The call succeeded, so the level is WARNING (not
+    # ERROR).
+    from openarmature.llm.response import Usage
+    from openarmature.observability.correlation import (
+        _reset_invocation_id,
+        _set_invocation_id,
+    )
+    from openarmature.prompts import TokenBudget
+    from tests._helpers.typed_event import make_typed_event
+
+    client = InMemoryLangfuseClient()
+    observer = LangfuseObserver(client=client)
+    token = _set_invocation_id("inv-tb-warn")
+    try:
+        await observer(
+            make_typed_event(
+                invocation_id="inv-tb-warn",
+                usage=Usage(prompt_tokens=20, completion_tokens=1, total_tokens=21),
+                token_budget=TokenBudget(input_max_tokens=10),
+            )
+        )
+    finally:
+        _reset_invocation_id(token)
+
+    gen = next(o for o in client.traces["inv-tb-warn"].observations if o.type == "generation")
+    assert gen.level == "WARNING"
+    assert gen.status_message == "token budget exceeded: input 20 > 10"
+    assert gen.metadata.get("token_budget") == {"input_max_tokens": 10}
+
+
+async def test_typed_llm_completion_under_budget_no_warning_level() -> None:
+    # §8.4.3 (proposal 0083): a completion under budget keeps the default level
+    # (no advisory WARNING) while still mapping the declared budget to
+    # metadata.token_budget.
+    from openarmature.llm.response import Usage
+    from openarmature.observability.correlation import (
+        _reset_invocation_id,
+        _set_invocation_id,
+    )
+    from openarmature.prompts import TokenBudget
+    from tests._helpers.typed_event import make_typed_event
+
+    client = InMemoryLangfuseClient()
+    observer = LangfuseObserver(client=client)
+    token = _set_invocation_id("inv-tb-ok")
+    try:
+        await observer(
+            make_typed_event(
+                invocation_id="inv-tb-ok",
+                usage=Usage(prompt_tokens=5, completion_tokens=1, total_tokens=6),
+                token_budget=TokenBudget(input_max_tokens=40),
+            )
+        )
+    finally:
+        _reset_invocation_id(token)
+
+    gen = next(o for o in client.traces["inv-tb-ok"].observations if o.type == "generation")
+    assert gen.level == "DEFAULT"
+    assert gen.status_message is None
+    assert gen.metadata.get("token_budget") == {"input_max_tokens": 40}
+
+
+async def test_typed_llm_completion_both_bounds_breach_statusmessage() -> None:
+    # §8.4.3 (proposal 0083): a completion breaching BOTH bounds names both in the
+    # statusMessage, input then total.
+    from openarmature.llm.response import Usage
+    from openarmature.observability.correlation import (
+        _reset_invocation_id,
+        _set_invocation_id,
+    )
+    from openarmature.prompts import TokenBudget
+    from tests._helpers.typed_event import make_typed_event
+
+    client = InMemoryLangfuseClient()
+    observer = LangfuseObserver(client=client)
+    token = _set_invocation_id("inv-tb-both")
+    try:
+        await observer(
+            make_typed_event(
+                invocation_id="inv-tb-both",
+                usage=Usage(prompt_tokens=20, completion_tokens=10, total_tokens=30),
+                token_budget=TokenBudget(input_max_tokens=10, total_max_tokens=15),
+            )
+        )
+    finally:
+        _reset_invocation_id(token)
+
+    gen = next(o for o in client.traces["inv-tb-both"].observations if o.type == "generation")
+    assert gen.level == "WARNING"
+    assert gen.status_message == "token budget exceeded: input 20 > 10, total 30 > 15"
+    assert gen.metadata.get("token_budget") == {"input_max_tokens": 10, "total_max_tokens": 15}
+
+
+async def test_typed_llm_failed_generation_carries_token_budget_metadata() -> None:
+    # §5.5.15 (proposal 0083): the shared metadata renders token_budget on a
+    # FAILED Generation too (it carries the active prompt's budget). ERROR level
+    # stands -- the advisory WARNING never displaces a hard failure (§8.4.3).
+    from openarmature.observability.correlation import (
+        _reset_invocation_id,
+        _set_invocation_id,
+    )
+    from openarmature.prompts import TokenBudget
+    from tests._helpers.typed_event import make_failed_event
+
+    client = InMemoryLangfuseClient()
+    observer = LangfuseObserver(client=client)
+    token = _set_invocation_id("inv-tb-fail")
+    try:
+        await observer(
+            make_failed_event(
+                invocation_id="inv-tb-fail",
+                error_category="provider_unavailable",
+                error_type="ProviderUnavailable",
+                error_message="503",
+                token_budget=TokenBudget(input_max_tokens=10),
+            )
+        )
+    finally:
+        _reset_invocation_id(token)
+
+    gen = next(o for o in client.traces["inv-tb-fail"].observations if o.type == "generation")
+    assert gen.level == "ERROR"
+    assert gen.metadata.get("token_budget") == {"input_max_tokens": 10}
+
+
 async def test_structured_output_failure_generation_renders_response_surface() -> None:
     # Proposal 0082: a structured_output_invalid failure renders the response-side
     # surface (output payload-gated, usage, metadata.finish_reason) on the ERROR

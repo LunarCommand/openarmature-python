@@ -41,6 +41,7 @@ from openarmature.prompts import (
     PromptManager,
     SamplingConfig,
     TextPrompt,
+    TokenBudget,
 )
 from openarmature.prompts.context import with_active_prompt
 
@@ -122,6 +123,12 @@ _LANGFUSE_FIXTURES = frozenset(
         # on the ERROR failed Generation. Drives the real failure path via
         # calls_llm.response_schema + expected_error.
         "123-langfuse-failed-generation-renders-output-usage-finish-reason",
+        # 130 (proposal 0083): a SUCCESSFUL completion whose prompt_tokens exceed
+        # the declared input_max_tokens renders the advisory WARNING level +
+        # statusMessage naming the breached bound, and maps the declared budget
+        # to metadata.token_budget.*. Drives the input-exceeded path via
+        # renders_prompt + the prompt's token_budget block.
+        "130-langfuse-token-budget-warning-level",
     }
 )
 
@@ -425,6 +432,18 @@ class _MockPromptBackend:
             observability_entities: dict[str, Any] | None = None
             if with_langfuse_reference and "langfuse_prompt_reference" in spec:
                 observability_entities = {"langfuse_prompt": spec["langfuse_prompt_reference"]}
+            # Proposal 0083: the prompt's token_budget block propagates onto the
+            # TextPrompt so PromptManager.render carries it to the PromptResult
+            # (and thence the typed event). An empty / all-null budget collapses
+            # to None, mirroring the real backends.
+            token_budget_spec = cast("dict[str, Any] | None", spec.get("token_budget"))
+            token_budget = TokenBudget(**token_budget_spec) if token_budget_spec is not None else None
+            if (
+                token_budget is not None
+                and token_budget.input_max_tokens is None
+                and token_budget.total_max_tokens is None
+            ):
+                token_budget = None
             self._prompts[prompt_name] = TextPrompt(
                 name=spec["name"],
                 version=spec["version"],
@@ -433,6 +452,7 @@ class _MockPromptBackend:
                 template_hash=spec["template_hash"],
                 fetched_at=now,
                 observability_entities=observability_entities,
+                token_budget=token_budget,
             )
 
     async def fetch(
