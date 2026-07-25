@@ -839,6 +839,10 @@ class OTelObserver:
         # completion spans per §5.5.8); only the payload / GenAI-semconv
         # attribute subsets are gated, inside the handler.
         if isinstance(event, EmbeddingEvent | EmbeddingFailedEvent):
+            # §11 embedding metrics (proposal 0067) record per call, independent
+            # of span emission (§11.1), gated only on enable_metrics.
+            if self.enable_metrics:
+                self._record_embedding_metrics(event)
             self._handle_embedding(event)
             return
         # Proposal 0060 rerank observability (observability §5.5.13): emit the
@@ -1851,6 +1855,35 @@ class OTelObserver:
             span.set_status(Status(StatusCode.OK))
         self._run_enrichers(span, event)
         span.end(end_time=end_time_ns)
+
+    def _record_embedding_metrics(self, event: EmbeddingEvent | EmbeddingFailedEvent) -> None:
+        # §11 (proposal 0067): the embedding-call analog of _record_llm_metrics,
+        # recorded from the terminal embedding event onto the SAME two
+        # instruments (the operation dim separates chat from embeddings).
+        # operation is "embeddings"; an embedding call has input tokens only
+        # (EmbeddingUsage.input_tokens, no output). Duration records every call
+        # including a failure (error.type = the §7 category); token.usage only
+        # when a usage record is present (a failure carries none).
+        if self._duration_histogram is None or self._token_histogram is None:
+            return
+        base_dims: dict[str, str] = {
+            "openarmature.gen_ai.operation": "embeddings",
+            "gen_ai.request.model": event.model,
+            "gen_ai.system": event.provider,
+        }
+        if event.latency_ms is not None:
+            duration_dims = dict(base_dims)
+            error_category = getattr(event, "error_category", None)
+            if error_category is not None:
+                duration_dims["error.type"] = error_category
+            self._duration_histogram.record(event.latency_ms / 1000.0, duration_dims)
+        usage = getattr(event, "usage", None)
+        input_tokens = getattr(usage, "input_tokens", None) if usage is not None else None
+        if input_tokens is not None:
+            self._token_histogram.record(
+                input_tokens,
+                {**base_dims, "openarmature.gen_ai.token.type": "input"},
+            )
 
     # Spec: observability §5.5.8 (proposal 0059) embedding span. Payload
     # gating is §5.5.4 + the §5.5.5 truncation contract; gen_ai.operation.name
