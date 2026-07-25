@@ -2236,10 +2236,15 @@ class LangfuseObserver:
         token_budget = event.token_budget
         if token_budget is not None:
             budget: dict[str, Any] = {}
-            if token_budget.input_max_tokens is not None:
-                budget["input_max_tokens"] = token_budget.input_max_tokens
-            if token_budget.total_max_tokens is not None:
-                budget["total_max_tokens"] = token_budget.total_max_tokens
+            # token_budget is typed Any; read defensively (getattr) so a
+            # non-TokenBudget value degrades to no budget metadata rather than
+            # crashing the Generation, matching the OTel span + shared helper.
+            input_max = getattr(token_budget, "input_max_tokens", None)
+            total_max = getattr(token_budget, "total_max_tokens", None)
+            if input_max is not None:
+                budget["input_max_tokens"] = input_max
+            if total_max is not None:
+                budget["total_max_tokens"] = total_max
             if budget:
                 metadata["token_budget"] = budget
         if event.caller_invocation_metadata is not None:

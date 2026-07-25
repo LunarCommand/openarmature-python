@@ -4024,6 +4024,19 @@ def _assert_token_budget_invariants(
     The ``metrics:`` list shape asserts presence only, so these cover the
     "no observation recorded" claims the list cannot express."""
     invariants = cast("dict[str, Any]", case["expected"].get("invariants") or {})
+    # Fail loudly on a declared invariant this runner does not map, so a future
+    # fixture's new invariant name cannot pass vacuously (harness-fidelity).
+    _known_invariants = {
+        "no_token_budget_exceeded_observation_when_under_budget",
+        "utilization_records_under_budget",
+        "no_token_budget_instrument_observations_when_no_budget",
+        "token_budget_null_on_completion_event",
+        "no_token_budget_instrument_observations_without_usage",
+        "token_budget_populated_but_not_evaluated_without_usage",
+        "exception_propagates_alongside_typed_event",
+    }
+    unknown = set(invariants) - _known_invariants
+    assert not unknown, f"unhandled token-budget invariant(s): {sorted(unknown)}"
     exceeded_points = [p for p in points if p[0] == "openarmature.gen_ai.client.token_budget.exceeded"]
     utilization_points = [p for p in points if p[0] == "openarmature.gen_ai.client.token_budget.utilization"]
 
@@ -4070,6 +4083,16 @@ def _assert_token_budget_invariants(
         assert not exceeded_points and not utilization_points, (
             "a no-usage failure MUST NOT evaluate the budget (no token-budget metric observation)"
         )
+    if invariants.get("exception_propagates_alongside_typed_event"):
+        # The runner's pytest.raises already asserts the exception propagated;
+        # assert the typed failure event fired alongside it (both, not either).
+        failed_events = [
+            e
+            for collector in collectors.values()
+            for e in collector.events
+            if type(e).__name__ == "LlmFailedEvent"
+        ]
+        assert failed_events, "expected an LlmFailedEvent alongside the propagated exception"
 
 
 def _assert_error_span_extras(spans: Sequence[Any], expected_tree: list[dict[str, Any]]) -> None:

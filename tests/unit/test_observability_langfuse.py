@@ -1513,6 +1513,43 @@ async def test_typed_llm_failed_generation_carries_token_budget_metadata() -> No
     assert gen.metadata.get("token_budget") == {"input_max_tokens": 10}
 
 
+async def test_structured_over_budget_failure_generation_is_error_not_warning() -> None:
+    # §8.4.3 (proposal 0083): a structured_output_invalid failure that ALSO
+    # exceeds budget renders the ERROR Generation (a hard ERROR wins over the
+    # advisory WARNING) with metadata.token_budget still present -- the failed
+    # handler never applies the success-path WARNING.
+    from openarmature.llm.response import Usage
+    from openarmature.observability.correlation import (
+        _reset_invocation_id,
+        _set_invocation_id,
+    )
+    from openarmature.prompts import TokenBudget
+    from tests._helpers.typed_event import make_failed_event
+
+    client = InMemoryLangfuseClient()
+    observer = LangfuseObserver(client=client)
+    token = _set_invocation_id("inv-tb-soi")
+    try:
+        await observer(
+            make_failed_event(
+                invocation_id="inv-tb-soi",
+                error_category="structured_output_invalid",
+                error_type="StructuredOutputInvalid",
+                error_message="schema mismatch",
+                usage=Usage(prompt_tokens=20, completion_tokens=1, total_tokens=21),
+                token_budget=TokenBudget(input_max_tokens=10),
+            )
+        )
+    finally:
+        _reset_invocation_id(token)
+
+    gen = next(o for o in client.traces["inv-tb-soi"].observations if o.type == "generation")
+    assert gen.level == "ERROR"
+    assert gen.status_message == "structured_output_invalid"
+    assert "token budget exceeded" not in (gen.status_message or "")
+    assert gen.metadata.get("token_budget") == {"input_max_tokens": 10}
+
+
 async def test_structured_output_failure_generation_renders_response_surface() -> None:
     # Proposal 0082: a structured_output_invalid failure renders the response-side
     # surface (output payload-gated, usage, metadata.finish_reason) on the ERROR
