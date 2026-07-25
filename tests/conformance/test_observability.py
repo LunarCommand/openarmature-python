@@ -270,6 +270,11 @@ _SUPPORTED_FIXTURES = frozenset(
         "137-langfuse-embedding-failure-observation",
         "139-otel-embedding-no-usage-input-tokens-omitted",
         "140-langfuse-embedding-no-usage-usagedetails-omitted",
+        # proposal 0067 §11 embedding metrics: token.usage (input only) +
+        # operation.duration, operation="embeddings", recorded from the terminal
+        # embedding event. 089 (usage) + 143 (no-usage: duration only).
+        "089-embedding-metrics-token-and-duration",
+        "143-embedding-metrics-no-usage-no-token-observation",
         # v0.16.0 — proposal 0060 rerank observability (0060b). A calls_rerank
         # node awaits CohereRerankProvider.rerank() inside the node body; the
         # typed RerankEvent / RerankFailedEvent drive the typed-event collector
@@ -299,16 +304,11 @@ _SUPPORTED_FIXTURES = frozenset(
 )
 
 
-_EMBEDDING_METRICS_DEFER = (
-    "embedding observability (074-083 + 137) is wired (proposal 0059b); only the "
-    "§11 embedding-metrics path stays deferred -- the OTelObserver records metrics "
-    "from the LLM per-attempt event, not yet from EmbeddingEvent"
-)
-
 _RERANK_DEFER = (
-    "rerank observability (099-108 + 138 + 141/142) is wired (proposal 0060b); only the "
-    "§11 rerank-metrics path stays deferred -- the OTelObserver records metrics from the "
-    "LLM per-attempt event, not yet from RerankEvent (rides proposal 0067, cf. 089)"
+    "rerank observability (099-108 + 138 + 141/142) is wired (proposal 0060b); the "
+    "§11 rerank-metrics path stays deferred -- rerank metrics are OUT OF SCOPE for "
+    "proposal 0067 (embedding metrics shipped; rerank is explicitly excluded per the "
+    "proposal), with no later PR in this release"
 )
 
 
@@ -327,17 +327,11 @@ _DEFERRED_FIXTURES: dict[str, str] = {
     "039-nested-lineage-augmentation": (
         "nested-case Langfuse harness wiring not yet implemented (proposal 0045 nested fan-out)"
     ),
-    # Embedding observability (proposal 0067 §11). 074-083 + 137 are wired
-    # (proposal 0059b -- see _SUPPORTED_FIXTURES). Only the §11 embedding-
-    # metrics path (089) stays deferred: the OTelObserver records metrics from
-    # the LLM per-attempt event only; extending the metric instruments to the
-    # embedding path rides the §11 embedding-metrics work, not 0059b.
-    "089-embedding-metrics-token-and-duration": _EMBEDDING_METRICS_DEFER,
     # Rerank observability (proposal 0060). 099-108 + 138 + 141/142 are wired
-    # (proposal 0060b -- see _SUPPORTED_FIXTURES). Only the §11 rerank-metrics
-    # path (109) stays deferred with the embedding-metrics sibling (089): the
-    # OTelObserver records metrics from the LLM per-attempt event only;
-    # extending the instruments to the rerank path rides proposal 0067.
+    # (proposal 0060b -- see _SUPPORTED_FIXTURES). The §11 rerank-metrics path
+    # (109) stays deferred: rerank metrics are out of scope for proposal 0067
+    # (embedding metrics 089/143 now run; rerank is explicitly excluded per the
+    # proposal), with no later PR in this release.
     "109-rerank-metrics-token-and-duration": _RERANK_DEFER,
     # ---- v0.16.0 spec-pin bump (v0.70.1 -> v0.84.0): new fixtures for
     # proposals deferred to their own later PRs of this release. ----
@@ -410,18 +404,6 @@ _DEFERRED_FIXTURES: dict[str, str] = {
     # unimplemented until a later v0.16.0 PR.
     "136-langfuse-parallel-branches-dispatch-span": (
         "Langfuse parallel-branches dispatch-span parity (proposal 0088) not-yet implemented"
-    ),
-    # ---- Proposal 0093 (nullable provider usage records). 139/140 (embedding
-    # no-usage) and 141/142 (rerank no-usage) are wired -- see
-    # _SUPPORTED_FIXTURES. Only 143 stays deferred, and NOT for a 0093 reason:
-    # it asserts the §11 GenAI token METRIC is not observed when a call reports
-    # no usage, and the OTelObserver records metrics from the LLM per-attempt
-    # event only -- the embedding metric path does not exist yet. It defers
-    # behind the same gate as 089 (proposal 0067), whose implementation would
-    # realize it. 0093 itself changes nothing in §11. ----
-    "143-embedding-metrics-no-usage-no-token-observation": (
-        "embedding no-usage metric rides the deferred §11 embedding-metrics "
-        "path (proposal 0067; cf. 089), not a proposal 0093 gap"
     ),
 }
 
@@ -743,6 +725,8 @@ async def test_observability_fixture(fixture_path: Path) -> None:
         "137-langfuse-embedding-failure-observation",
         "139-otel-embedding-no-usage-input-tokens-omitted",
         "140-langfuse-embedding-no-usage-usagedetails-omitted",
+        "089-embedding-metrics-token-and-duration",
+        "143-embedding-metrics-no-usage-no-token-observation",
     }:
         await _run_embedding_fixture(spec)
     elif fixture_id in {
@@ -4687,6 +4671,8 @@ async def _run_embedding_case(case: Mapping[str, Any]) -> None:
     exporter: Any = None
     otel_observer: Any = None
     langfuse_client: Any = None
+    metrics_observer: Any = None
+    reader: Any = None
     if "observers" in expected:
         for collector in collectors.values():
             graph.attach_observer(collector)
@@ -4704,6 +4690,20 @@ async def _run_embedding_case(case: Mapping[str, Any]) -> None:
         if "disable_provider_payload" in lf_cfg:
             lf_kwargs["disable_provider_payload"] = bool(lf_cfg["disable_provider_payload"])
         graph.attach_observer(LangfuseObserver(**lf_kwargs))
+    if "metrics" in expected:
+        # §11 embedding metrics (proposal 0067, fixtures 089/143): a metrics
+        # observer with a private MeterProvider + InMemoryMetricReader (the §6.9
+        # capture primitive), mirroring _run_metrics_case for the LLM path.
+        from opentelemetry.sdk.metrics import MeterProvider as SdkMeterProvider
+        from opentelemetry.sdk.metrics.export import InMemoryMetricReader
+
+        reader = InMemoryMetricReader()
+        metrics_observer = OTelObserver(
+            span_processor=SimpleSpanProcessor(InMemorySpanExporter()),
+            enable_metrics=bool(case.get("enable_metrics", False)),
+            meter_provider=SdkMeterProvider(metric_readers=[reader]),
+        )
+        graph.attach_observer(metrics_observer)
 
     try:
         if expected_error is not None:
@@ -4717,6 +4717,8 @@ async def _run_embedding_case(case: Mapping[str, Any]) -> None:
             await provider.aclose()
         if otel_observer is not None:
             otel_observer.shutdown()
+        if metrics_observer is not None:
+            metrics_observer.shutdown()
 
     if "observers" in expected:
         for obs_name, obs_spec in cast("dict[str, Any]", expected["observers"]).items():
@@ -4739,6 +4741,49 @@ async def _run_embedding_case(case: Mapping[str, Any]) -> None:
         trace = next(iter(langfuse_client.traces.values()))
         _assert_langfuse_observation_tree(
             trace, cast("list[dict[str, Any]]", expected["langfuse_trace"].get("observations") or [])
+        )
+    if "metrics" in expected and reader is not None:
+        points = _collect_metric_points(reader)
+        _assert_metric_points(points, cast("list[dict[str, Any]]", expected.get("metrics") or []))
+        _assert_embedding_metrics_invariants(case, points)
+
+
+def _assert_embedding_metrics_invariants(
+    case: Mapping[str, Any],
+    points: Sequence[tuple[str, float, int, dict[str, Any]]],
+) -> None:
+    # Named invariants from the embedding-metrics fixtures (proposal 0067):
+    # 089 (usage) asserts the token observation is input-only (no output); 143
+    # (no usage) asserts the duration metric records but NO token.usage. The
+    # metrics: list asserts presence; these cover the "no observation" and
+    # "input-only" claims it cannot express. Fail loudly on an unmapped name.
+    invariants = cast("dict[str, Any]", case["expected"].get("invariants") or {})
+    _known = {
+        "no_token_usage_observation_when_usage_absent",
+        "duration_recorded_when_usage_absent",
+        "embedding_records_input_token_only",
+        "no_output_token_observation_for_embedding",
+    }
+    unknown = set(invariants) - _known
+    assert not unknown, f"unhandled embedding-metrics invariant(s): {sorted(unknown)}"
+    token_points = [p for p in points if p[0] == "openarmature.gen_ai.client.token.usage"]
+    duration_points = [p for p in points if p[0] == "openarmature.gen_ai.client.operation.duration"]
+    input_token_points = [p for p in token_points if p[3].get("openarmature.gen_ai.token.type") == "input"]
+    output_token_points = [p for p in token_points if p[3].get("openarmature.gen_ai.token.type") == "output"]
+    if invariants.get("no_token_usage_observation_when_usage_absent"):
+        assert not token_points, (
+            f"no-usage embedding MUST record no token.usage observation; got {token_points}"
+        )
+    if invariants.get("duration_recorded_when_usage_absent"):
+        assert duration_points, "no-usage embedding MUST still record operation.duration"
+    if invariants.get("embedding_records_input_token_only"):
+        assert input_token_points and not output_token_points, (
+            "embedding token.usage MUST record input only; "
+            f"input={input_token_points} output={output_token_points}"
+        )
+    if invariants.get("no_output_token_observation_for_embedding"):
+        assert not output_token_points, (
+            f"embedding MUST record no output token observation; got {output_token_points}"
         )
 
 

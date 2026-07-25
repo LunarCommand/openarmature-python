@@ -1617,6 +1617,118 @@ async def test_token_budget_warning_log_multibound_and_per_attempt(caplog: pytes
     assert len([r for r in caplog.records if r.name == "openarmature.observability"]) == 2
 
 
+def _embedding_event_for_metrics(*, usage: Any = None, latency_ms: float | None = 5.0) -> Any:
+    from openarmature.graph.events import EmbeddingEvent
+
+    return EmbeddingEvent(
+        invocation_id="inv-metrics",
+        correlation_id=None,
+        node_name="embed",
+        namespace=("embed",),
+        attempt_index=0,
+        fan_out_index=None,
+        branch_name=None,
+        provider="openai",
+        model="test-embed-model",
+        response_id=None,
+        response_model=None,
+        usage=usage,
+        latency_ms=latency_ms,
+        input_strings=["x"],
+        input_count=1,
+        dimensions=2,
+        output_vectors=[[0.1, 0.2]],
+        request_params={},
+        request_extras={},
+        active_prompt=None,
+        active_prompt_group=None,
+        call_id="c",
+    )
+
+
+async def test_embedding_metrics_records_input_token_and_duration() -> None:
+    # §11 (proposal 0067, mirrors fixture 089): an embedding call with usage
+    # records ONE token.usage observation (input only, operation "embeddings")
+    # and one duration observation. No output token observation.
+    from openarmature.retrieval.response import EmbeddingUsage
+
+    event = _embedding_event_for_metrics(usage=EmbeddingUsage(input_tokens=4))
+    points, _ = await _drive_metrics_events([event])
+    token_points = [p for p in points if p[0] == "openarmature.gen_ai.client.token.usage"]
+    duration_points = [p for p in points if p[0] == "openarmature.gen_ai.client.operation.duration"]
+    assert len(token_points) == 1
+    assert token_points[0][1] == 4
+    dims = token_points[0][3]
+    assert dims["openarmature.gen_ai.operation"] == "embeddings"
+    assert dims["openarmature.gen_ai.token.type"] == "input"
+    assert dims["gen_ai.request.model"] == "test-embed-model"
+    assert dims["gen_ai.system"] == "openai"
+    assert len(duration_points) == 1
+    assert duration_points[0][3]["openarmature.gen_ai.operation"] == "embeddings"
+    assert "error.type" not in duration_points[0][3]
+
+
+async def test_embedding_metrics_records_zero_input_token_observation() -> None:
+    # §11 (proposal 0067): a reported input_tokens=0 (EmbeddingUsage.input_tokens
+    # is ge=0) records a token.usage observation of value 0 -- the is-not-None
+    # gate distinguishes a reported 0 from absent usage (which records nothing).
+    from openarmature.retrieval.response import EmbeddingUsage
+
+    event = _embedding_event_for_metrics(usage=EmbeddingUsage(input_tokens=0))
+    points, _ = await _drive_metrics_events([event])
+    token_points = [p for p in points if p[0] == "openarmature.gen_ai.client.token.usage"]
+    assert len(token_points) == 1
+    assert token_points[0][1] == 0
+    assert token_points[0][3]["openarmature.gen_ai.token.type"] == "input"
+
+
+async def test_embedding_metrics_no_usage_records_duration_only() -> None:
+    # §11 (proposal 0067, mirrors fixture 143): an embedding call with no usage
+    # records the duration observation but NO token.usage.
+    event = _embedding_event_for_metrics(usage=None)
+    points, _ = await _drive_metrics_events([event])
+    assert [p for p in points if p[0] == "openarmature.gen_ai.client.token.usage"] == []
+    duration_points = [p for p in points if p[0] == "openarmature.gen_ai.client.operation.duration"]
+    assert len(duration_points) == 1
+    assert duration_points[0][3]["openarmature.gen_ai.operation"] == "embeddings"
+
+
+async def test_embedding_metrics_failure_records_duration_with_error_type() -> None:
+    # §11 (proposal 0067): an embedding FAILURE records the duration observation
+    # carrying error.type and NO token.usage (a failure carries no usage). Not
+    # fixture-covered (089/143 are both success events); parity with the LLM
+    # failure path (fixture 090).
+    from openarmature.graph.events import EmbeddingFailedEvent
+
+    event = EmbeddingFailedEvent(
+        invocation_id="inv-metrics",
+        correlation_id=None,
+        node_name="embed",
+        namespace=("embed",),
+        attempt_index=0,
+        fan_out_index=None,
+        branch_name=None,
+        provider="openai",
+        model="test-embed-model",
+        latency_ms=5.0,
+        input_strings=["x"],
+        request_params={},
+        request_extras={},
+        active_prompt=None,
+        active_prompt_group=None,
+        call_id="c",
+        error_category="provider_unavailable",
+        error_message="down",
+    )
+    points, _ = await _drive_metrics_events([event])
+    assert [p for p in points if p[0] == "openarmature.gen_ai.client.token.usage"] == []
+    duration_points = [p for p in points if p[0] == "openarmature.gen_ai.client.operation.duration"]
+    assert len(duration_points) == 1
+    ddims = duration_points[0][3]
+    assert ddims["openarmature.gen_ai.operation"] == "embeddings"
+    assert ddims["error.type"] == "provider_unavailable"
+
+
 async def test_llm_span_zero_duration_when_latency_missing() -> None:
     # When the typed event omits latency_ms (None), the handler falls
     # back to a zero-duration span at end_time rather than guessing
