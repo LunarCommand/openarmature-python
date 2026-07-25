@@ -228,11 +228,15 @@ _SUPPORTED_FIXTURES = frozenset(
         # metrics (utilization histogram + exceeded counter) for a budgeted
         # LLM completion. 126 input-exceeded, 127 total-exceeded, 128
         # under-budget (utilization records, no exceeded), 129 no-budget
-        # baseline. The Langfuse WARNING (130) + failure path (131) are later.
+        # baseline. 131 is the failure path: the budget evaluates on a
+        # structured_output_invalid failure (carries usage, proposal 0082) and
+        # NOT on a no-usage provider_unavailable failure. The Langfuse WARNING
+        # (130) runs in the dedicated test_observability_langfuse harness.
         "126-token-budget-input-exceeded",
         "127-token-budget-total-exceeded",
         "128-token-budget-under-budget-no-warning",
         "129-token-budget-absent-unchanged",
+        "131-token-budget-on-structured-output-failure",
         # v0.69.0 — proposal 0063 (tool-execution observability). A
         # calls_tool node enters the with_tool_call scope; the typed
         # ToolCallEvent / ToolCallFailedEvent drive the OTel tool span +
@@ -372,16 +376,13 @@ _DEFERRED_FIXTURES: dict[str, str] = {
         "Langfuse failed-Generation rendering; driven in test_observability_langfuse"
     ),
     # Proposal 0083 (per-prompt token-budget observability, spec v0.78.0).
-    # The completion-path span attributes + §11.2 metrics (126-129) run here
-    # (see _SUPPORTED_FIXTURES). The Langfuse WARNING-level rendering (130) and
-    # the structured-output-failure path (131) land in later v0.16.0 PRs.
-    **{
-        fixture_id: "per-prompt token-budget observability (proposal 0083) not-yet implemented"
-        for fixture_id in (
-            "130-langfuse-token-budget-warning-level",
-            "131-token-budget-on-structured-output-failure",
-        )
-    },
+    # The completion path (126-129) and the failure path (131) run here (see
+    # _SUPPORTED_FIXTURES); the Langfuse WARNING-level rendering (130) is driven
+    # in the dedicated test_observability_langfuse harness (its langfuse_trace
+    # shape lives there, like 123).
+    "130-langfuse-token-budget-warning-level": (
+        "Langfuse WARNING-level rendering; driven in test_observability_langfuse"
+    ),
     # Proposal 0084 (nested-fan-out span lineage, spec v0.81.0).
     # Fixture 132's nested-lineage dispatch KEYING shipped in #194 (the
     # OTel + Langfuse observers key dispatches by the full enclosing
@@ -715,6 +716,7 @@ async def test_observability_fixture(fixture_path: Path) -> None:
         "127-token-budget-total-exceeded",
         "128-token-budget-under-budget-no-warning",
         "129-token-budget-absent-unchanged",
+        "131-token-budget-on-structured-output-failure",
     }:
         await _run_token_budget_fixture(spec)
     elif fixture_id in {
@@ -3950,8 +3952,25 @@ async def _run_token_budget_case(case: Mapping[str, Any]) -> None:
     handles += [graph.attach_observer(c) for c in collectors.values()]
 
     state = _make_state_instance(case, state_cls)
+    # 131's failure path raises out of the node; the budget still evaluates on
+    # the (usage-bearing) structured_output_invalid attempt. The §7 error
+    # category rides the span status_description (checked below), NOT the outer
+    # NodeException (whose category is always "node_exception"), so only
+    # raised_from is asserted against the exception here.
+    expected_error = cast("dict[str, Any] | None", case.get("expected_error"))
     try:
-        await graph.invoke(state)
+        if expected_error is not None:
+            from openarmature.graph import NodeException  # noqa: PLC0415
+
+            with pytest.raises(NodeException) as exc_info:
+                await graph.invoke(state)
+            raised_from = expected_error.get("raised_from")
+            if raised_from is not None:
+                assert exc_info.value.node_name == raised_from, (
+                    f"expected error raised_from: expected {raised_from!r}, got {exc_info.value.node_name!r}"
+                )
+        else:
+            await graph.invoke(state)
         await graph.drain()
     finally:
         for handle in handles:
@@ -3985,8 +4004,13 @@ async def _run_token_budget_case(case: Mapping[str, Any]) -> None:
 
     # ---- metrics + absence invariants ----
     points = _collect_metric_points(reader)
-    expected_metrics = cast("list[dict[str, Any]]", expected.get("metrics") or [])
-    _assert_metric_points(points, expected_metrics)
+    # Only exact-assert when the fixture declares a metrics block. A no-usage
+    # failure (131 case 2) declares none: it still records the §11 baseline
+    # operation.duration (with error.type), and asserts the token-budget-metric
+    # absence via its invariants instead of an exact empty-set match.
+    expected_metrics = cast("list[dict[str, Any]] | None", expected.get("metrics"))
+    if expected_metrics is not None:
+        _assert_metric_points(points, expected_metrics)
     _assert_token_budget_invariants(case, points, collectors)
 
 
@@ -3995,11 +4019,24 @@ def _assert_token_budget_invariants(
     points: Sequence[tuple[str, float, int, dict[str, Any]]],
     collectors: Mapping[str, Any],
 ) -> None:
-    """Evaluate the token-budget named invariants (128/129) as absence
-    predicates over the captured measurement set + the completion event.
+    """Evaluate the token-budget named invariants (128/129/131) as absence
+    predicates over the captured measurement set + the typed events.
     The ``metrics:`` list shape asserts presence only, so these cover the
     "no observation recorded" claims the list cannot express."""
     invariants = cast("dict[str, Any]", case["expected"].get("invariants") or {})
+    # Fail loudly on a declared invariant this runner does not map, so a future
+    # fixture's new invariant name cannot pass vacuously (harness-fidelity).
+    _known_invariants = {
+        "no_token_budget_exceeded_observation_when_under_budget",
+        "utilization_records_under_budget",
+        "no_token_budget_instrument_observations_when_no_budget",
+        "token_budget_null_on_completion_event",
+        "no_token_budget_instrument_observations_without_usage",
+        "token_budget_populated_but_not_evaluated_without_usage",
+        "exception_propagates_alongside_typed_event",
+    }
+    unknown = set(invariants) - _known_invariants
+    assert not unknown, f"unhandled token-budget invariant(s): {sorted(unknown)}"
     exceeded_points = [p for p in points if p[0] == "openarmature.gen_ai.client.token_budget.exceeded"]
     utilization_points = [p for p in points if p[0] == "openarmature.gen_ai.client.token_budget.utilization"]
 
@@ -4027,6 +4064,35 @@ def _assert_token_budget_invariants(
         assert all(getattr(e, "token_budget", "missing") is None for e in completion_events), (
             "no-budget call MUST carry token_budget=None on the completion event"
         )
+    if invariants.get("no_token_budget_instrument_observations_without_usage"):
+        assert not exceeded_points and not utilization_points, (
+            "no-usage failure MUST record no token-budget instrument observations; got "
+            f"exceeded={exceeded_points} utilization={utilization_points}"
+        )
+    if invariants.get("token_budget_populated_but_not_evaluated_without_usage"):
+        failed_events = [
+            e
+            for collector in collectors.values()
+            for e in collector.events
+            if type(e).__name__ == "LlmFailedEvent"
+        ]
+        assert failed_events, "expected at least one LlmFailedEvent to assert token_budget populated"
+        assert all(getattr(e, "token_budget", None) is not None for e in failed_events), (
+            "a no-usage failure from a budgeted prompt MUST still carry token_budget on the event"
+        )
+        assert not exceeded_points and not utilization_points, (
+            "a no-usage failure MUST NOT evaluate the budget (no token-budget metric observation)"
+        )
+    if invariants.get("exception_propagates_alongside_typed_event"):
+        # The runner's pytest.raises already asserts the exception propagated;
+        # assert the typed failure event fired alongside it (both, not either).
+        failed_events = [
+            e
+            for collector in collectors.values()
+            for e in collector.events
+            if type(e).__name__ == "LlmFailedEvent"
+        ]
+        assert failed_events, "expected an LlmFailedEvent alongside the propagated exception"
 
 
 def _assert_error_span_extras(spans: Sequence[Any], expected_tree: list[dict[str, Any]]) -> None:

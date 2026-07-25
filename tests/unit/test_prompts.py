@@ -264,6 +264,27 @@ def test_render_propagates_identity_fields() -> None:
     assert len(result.messages) == 1
 
 
+def test_render_propagates_token_budget() -> None:
+    # Proposal 0083: PromptManager.render propagates Prompt.token_budget onto
+    # PromptResult verbatim, as a distinct copy -- the production path the
+    # conformance harness's _render_prompt_result shortcut bypasses.
+    from openarmature.prompts import TokenBudget
+
+    budget = TokenBudget(input_max_tokens=10, total_max_tokens=40)
+    prompt = _make_prompt().model_copy(update={"token_budget": budget})
+
+    class _Backend:
+        async def fetch(
+            self, name: str, label: str = "production", *, cache_ttl_seconds: int | None = None
+        ) -> Prompt:
+            return prompt
+
+    manager = PromptManager(_Backend())
+    result = manager.render(prompt, {"user": "Alice"})
+    assert result.token_budget == budget
+    assert result.token_budget is not budget
+
+
 async def test_fetch_rejects_negative_cache_ttl_seconds() -> None:
     prompt = _make_prompt()
 
@@ -720,6 +741,22 @@ async def test_filesystem_backend_token_budget_unified(tmp_path: Path) -> None:
     assert prompt.sampling.temperature == 0.0
 
 
+async def test_filesystem_backend_unified_malformed_token_budget_is_fallback_eligible(tmp_path: Path) -> None:
+    # The malformed-budget -> fallback-eligible PromptStoreUnavailable conversion
+    # applies on the unified path too, not just per-prompt-sidecar (invariant: a
+    # malformed advisory budget must never break the LLM call).
+    (tmp_path / "production").mkdir()
+    (tmp_path / "production" / "classify.j2").write_text("Classify: {{ topic }}", encoding="utf-8")
+    (tmp_path / "prompt_configs.json").write_text(
+        '{"classify": {"token_budget": "1000"}}',
+        encoding="utf-8",
+    )
+
+    backend = FilesystemPromptBackend(tmp_path, token_budget_source="unified")
+    with pytest.raises(PromptStoreUnavailable):
+        await backend.fetch("classify", "production")
+
+
 async def test_filesystem_backend_malformed_token_budget_is_fallback_eligible(tmp_path: Path) -> None:
     # A malformed advisory token_budget (a string, not an object) surfaces as the
     # fallback-eligible PromptStoreUnavailable -- NOT a bare exception that would
@@ -784,6 +821,13 @@ def test_langfuse_token_budget_from_config() -> None:
     assert _token_budget_from_config({"token_budget": {"unknown": 5}}) is None
     assert _token_budget_from_config({"token_budget": {"input_max_tokens": None}}) is None
     assert _token_budget_from_config({"token_budget": {"input_max_tokens": -5}}) is None
+    # Extra keys alongside a valid bound are dropped, the valid bound kept (the
+    # langfuse tolerate model -- a remote config may carry unrecognized keys).
+    # The filesystem sidecar rejects the whole budget on an extra key (extra=
+    # forbid); divergence flagged to spec.
+    assert _token_budget_from_config({"token_budget": {"input_max_tokens": 10, "unknown": 5}}) == TokenBudget(
+        input_max_tokens=10
+    )
 
 
 # LabelResolver fallback chain — covered by fixture 015 end-to-end,

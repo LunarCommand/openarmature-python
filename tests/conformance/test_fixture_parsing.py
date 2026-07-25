@@ -611,12 +611,9 @@ _DEFERRED_FIXTURES: dict[str, str] = {
         "Proposal 0082 structured-output failure event; harness typed_event_collector schema pending"
     ),
     # Proposal 0083 (per-prompt token-budget observability, v0.78.0) -- the
-    # completion-path fixtures (126-129) parse + run in test_observability; the
-    # Langfuse WARNING (130) parses + runs via test_observability_langfuse; the
-    # structured-output-failure (131) path stays deferred until its PR.
-    "observability/131-token-budget-on-structured-output-failure": (
-        "Proposal 0083 token-budget; not implemented"
-    ),
+    # completion-path fixtures (126-129) + the structured-output-failure path
+    # (131) parse + run in test_observability; the Langfuse WARNING (130) parses
+    # + runs via test_observability_langfuse. All of 0083's fixtures now run.
     # Proposal 0084 (nested-fan-out span lineage, v0.81.0) -- the
     # lineage-chain directive shapes. (132 parses cleanly; accounted in
     # test_observability.)
