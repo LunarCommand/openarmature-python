@@ -1477,6 +1477,146 @@ async def test_token_budget_zero_total_bound_exceeds_but_skips_utilization() -> 
     assert util == []
 
 
+async def test_token_budget_exceeded_emits_one_warning_log(caplog: pytest.LogCaptureFixture) -> None:
+    # §7 (proposal 0083): an over-budget attempt emits exactly ONE WARNING record
+    # on the openarmature.observability logger naming the breached bound; an
+    # under-budget attempt emits none. The record is one-per-attempt, not
+    # one-per-bound, and fires independent of the span-attr / metric surfaces.
+    from openarmature.llm.response import Usage
+    from openarmature.prompts import TokenBudget
+    from tests._helpers.typed_event import make_retry_attempt_event
+
+    caplog.set_level(logging.WARNING, logger="openarmature.observability")
+
+    over = make_retry_attempt_event(
+        usage=Usage(prompt_tokens=20, completion_tokens=1, total_tokens=21),
+        token_budget=TokenBudget(input_max_tokens=10),
+    )
+    await _drive_metrics_events([over])
+    warns = [r for r in caplog.records if r.name == "openarmature.observability"]
+    assert len(warns) == 1
+    assert warns[0].levelno == logging.WARNING
+    assert "input 20 > 10" in warns[0].getMessage()
+
+    caplog.clear()
+    under = make_retry_attempt_event(
+        usage=Usage(prompt_tokens=5, completion_tokens=1, total_tokens=6),
+        token_budget=TokenBudget(input_max_tokens=40),
+    )
+    await _drive_metrics_events([under])
+    assert [r for r in caplog.records if r.name == "openarmature.observability"] == []
+
+    # The §7 log is its own surface: it fires even with BOTH the span
+    # (disable_llm_spans) and metric (enable_metrics off) surfaces suppressed.
+    caplog.clear()
+    _, llm_spans = await _drive_metrics_events([over], enable_metrics=False, disable_llm_spans=True)
+    assert llm_spans == []
+    warns = [r for r in caplog.records if r.name == "openarmature.observability"]
+    assert len(warns) == 1
+    assert "input 20 > 10" in warns[0].getMessage()
+
+
+async def test_token_budget_warning_log_names_prompt_identity(caplog: pytest.LogCaptureFixture) -> None:
+    # §7 (proposal 0083): the WARNING log names the active prompt's identity
+    # (name + version) alongside the breached bound.
+    from datetime import UTC, datetime
+
+    from openarmature.llm.messages import UserMessage
+    from openarmature.llm.response import Usage
+    from openarmature.prompts import PromptResult, TokenBudget
+    from tests._helpers.typed_event import make_retry_attempt_event
+
+    caplog.set_level(logging.WARNING, logger="openarmature.observability")
+    now = datetime.now(UTC)
+    result = PromptResult(
+        name="classify",
+        version="v7",
+        label="production",
+        template_hash="sha256:tpl",
+        rendered_hash="sha256:r",
+        messages=[UserMessage(content="x")],
+        variables={},
+        fetched_at=now,
+        rendered_at=now,
+    )
+    event = make_retry_attempt_event(
+        active_prompt=result,
+        usage=Usage(prompt_tokens=20, completion_tokens=1, total_tokens=21),
+        token_budget=TokenBudget(input_max_tokens=10),
+    )
+    await _drive_metrics_events([event])
+    warns = [r for r in caplog.records if r.name == "openarmature.observability"]
+    assert len(warns) == 1
+    msg = warns[0].getMessage()
+    assert "classify v7" in msg
+    assert "input 20 > 10" in msg
+
+
+async def test_token_budget_warning_log_on_structured_output_failure(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # §7 (proposal 0083): the WARNING log fires on an over-budget
+    # structured_output_invalid failure attempt (it carries usage, proposal
+    # 0082), parity with the completion path; a no-usage failure emits none.
+    from openarmature.llm.response import Usage
+    from openarmature.prompts import TokenBudget
+    from tests._helpers.typed_event import make_retry_attempt_event
+
+    caplog.set_level(logging.WARNING, logger="openarmature.observability")
+    failed = make_retry_attempt_event(
+        error_category="structured_output_invalid",
+        finish_reason="length",
+        usage=Usage(prompt_tokens=20, completion_tokens=16, total_tokens=36),
+        token_budget=TokenBudget(input_max_tokens=10),
+    )
+    await _drive_metrics_events([failed])
+    warns = [r for r in caplog.records if r.name == "openarmature.observability"]
+    assert len(warns) == 1
+    assert "input 20 > 10" in warns[0].getMessage()
+
+    # A no-usage failure has nothing to evaluate -> no log.
+    caplog.clear()
+    no_usage = make_retry_attempt_event(
+        error_category="provider_unavailable",
+        finish_reason=None,
+        usage=None,
+        token_budget=TokenBudget(input_max_tokens=10),
+    )
+    await _drive_metrics_events([no_usage])
+    assert [r for r in caplog.records if r.name == "openarmature.observability"] == []
+
+
+async def test_token_budget_warning_log_multibound_and_per_attempt(caplog: pytest.LogCaptureFixture) -> None:
+    # §7 (proposal 0083): a both-bounds breach renders "input .. > .., total .. > .."
+    # in ONE record (input then total order); N over-budget attempts emit N records
+    # (one per exceedance, not per bound).
+    from openarmature.llm.response import Usage
+    from openarmature.prompts import TokenBudget
+    from tests._helpers.typed_event import make_retry_attempt_event
+
+    caplog.set_level(logging.WARNING, logger="openarmature.observability")
+    both = make_retry_attempt_event(
+        usage=Usage(prompt_tokens=20, completion_tokens=10, total_tokens=30),
+        token_budget=TokenBudget(input_max_tokens=10, total_max_tokens=15),
+    )
+    await _drive_metrics_events([both])
+    warns = [r for r in caplog.records if r.name == "openarmature.observability"]
+    assert len(warns) == 1
+    assert "input 20 > 10, total 30 > 15" in warns[0].getMessage()
+
+    caplog.clear()
+    attempts = [
+        make_retry_attempt_event(
+            llm_attempt_index=i,
+            usage=Usage(prompt_tokens=20, completion_tokens=1, total_tokens=21),
+            token_budget=TokenBudget(input_max_tokens=10),
+        )
+        for i in range(2)
+    ]
+    await _drive_metrics_events(attempts)
+    assert len([r for r in caplog.records if r.name == "openarmature.observability"]) == 2
+
+
 async def test_llm_span_zero_duration_when_latency_missing() -> None:
     # When the typed event omits latency_ms (None), the handler falls
     # back to a zero-duration span at end_time rather than guessing

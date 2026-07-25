@@ -75,6 +75,7 @@ carries an OTel :class:`Link` to the detached trace.
 from __future__ import annotations
 
 import json
+import logging
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -117,7 +118,17 @@ from openarmature.graph.events import (
 )
 from openarmature.graph.observer import ObserverEvent
 from openarmature.observability.lineage import is_strict_prefix
-from openarmature.observability.llm_event import serialize_tool_calls
+from openarmature.observability.llm_event import _token_budget_evaluations, serialize_tool_calls
+
+# §7 (proposal 0083): the vendor-neutral token-budget WARNING log surface.
+# The logger name is our choice (the spec doesn't pin one). The OTLP log
+# bridge attaches correlation_id (via its LogRecord factory) but NOT OTel
+# trace_id / span_id -- the observer never activates its spans and this record
+# is emitted outside any span context -- so §7 correlation is via
+# correlation_id. The record names the prompt + the breached bound(s), one per
+# over-budget attempt, independent of the §11 metrics opt-in.
+logger = logging.getLogger("openarmature.observability")
+
 
 # Span-stack key shape:
 # ``(namespace, attempt_index, fan_out_index, branch_name)`` — these
@@ -212,37 +223,6 @@ _TOKEN_BUDGET_UTILIZATION_BUCKETS: list[float] = [
     2.0,
     4.0,
 ]
-
-
-def _token_budget_evaluations(token_budget: Any, usage: Any) -> list[dict[str, Any]]:
-    # §5.5.15 / §11.2 (proposal 0083): the per-bound token-budget evaluation
-    # shared by the span attrs and the metric recorder. Returns one entry per
-    # DECLARED bound that also has a usable actual to compare against, so a bound
-    # whose count the provider did not report (None) is omitted -- mirroring the
-    # token.usage gate rather than coercing a missing count to 0. A declared
-    # bound of 0 IS evaluated: the exceeded test is a strict ``actual > max``, so
-    # a 0 bound is exceeded by any positive usage per §5.5.15; only the
-    # utilization ratio is undefined for a 0 denominator, and the metric recorder
-    # skips that one sample. Empty when there is no budget, no usage, or no bound
-    # with a reported count; the caller then leaves the exceeded signal absent
-    # (not false).
-    if token_budget is None or usage is None:
-        return []
-    evaluations: list[dict[str, Any]] = []
-    input_max = getattr(token_budget, "input_max_tokens", None)
-    if input_max is not None and usage.prompt_tokens is not None:
-        evaluations.append({"kind": "input", "actual": usage.prompt_tokens, "max": input_max})
-    total_max = getattr(token_budget, "total_max_tokens", None)
-    if total_max is not None:
-        if usage.total_tokens is not None:
-            total_actual = usage.total_tokens
-        elif usage.prompt_tokens is not None and usage.completion_tokens is not None:
-            total_actual = usage.prompt_tokens + usage.completion_tokens
-        else:
-            total_actual = None
-        if total_actual is not None:
-            evaluations.append({"kind": "total", "actual": total_actual, "max": total_max})
-    return evaluations
 
 
 def _read_spec_version() -> str:
@@ -836,6 +816,10 @@ class OTelObserver:
         # LlmRetryAttemptEvent — one span per attempt under call-level
         # retry (attempt_index 0..N-1), one for a no-retry call.
         if isinstance(event, LlmRetryAttemptEvent):
+            # §7 token-budget WARNING log is its own surface: it fires
+            # independently of both the span (disable_llm_spans) and metric
+            # (enable_metrics) gates.
+            self._maybe_log_token_budget_exceedance(event)
             # §11 metrics record per attempt, independent of span emission
             # (§11.1) — so this runs regardless of disable_llm_spans.
             if self.enable_metrics:
@@ -1527,6 +1511,31 @@ class OTelObserver:
                     self._token_budget_utilization_histogram.record(ev["actual"] / ev["max"], dims)
                 if ev["actual"] > ev["max"]:
                     self._token_budget_exceeded_counter.add(1, dims)
+
+    def _maybe_log_token_budget_exceedance(self, event: LlmRetryAttemptEvent) -> None:
+        # §7 (proposal 0083): one vendor-neutral WARNING log record per
+        # over-budget attempt (not per bound). Its own surface -- independent of
+        # disable_llm_spans and enable_metrics -- so it is dispatched here rather
+        # than from the span/metric handlers. Names the prompt + each breached
+        # bound (kind, actual, budget). The OTLP log bridge attaches
+        # correlation_id via its LogRecord factory; it does NOT populate OTel
+        # trace_id / span_id, because the observer never makes its spans current
+        # (start_span with explicit parents) and this record is emitted from the
+        # detached delivery worker, so no span is active at log time. The record
+        # correlates via correlation_id.
+        breached = [
+            ev
+            for ev in _token_budget_evaluations(event.token_budget, event.usage)
+            if ev["actual"] > ev["max"]
+        ]
+        if not breached:
+            return
+        active_prompt = event.active_prompt
+        prompt_ident: Any = active_prompt.name if active_prompt is not None else None
+        if active_prompt is not None and active_prompt.version is not None:
+            prompt_ident = f"{active_prompt.name} {active_prompt.version}"
+        breaches = ", ".join(f"{ev['kind']} {ev['actual']} > {ev['max']}" for ev in breached)
+        logger.warning("token budget exceeded for prompt %r: %s", prompt_ident, breaches)
 
     def _handle_typed_llm_retry_attempt(self, event: LlmRetryAttemptEvent) -> None:
         """Open + close one ``openarmature.llm.complete`` span from a

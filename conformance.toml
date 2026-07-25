@@ -826,9 +826,10 @@ note = "The graph-engine §6 event surface + llm-provider §7 error surface (PR 
 
 # Spec v0.78.0 (proposal 0083).  Per-prompt token-budget observability
 # (prompt-management §3 / graph-engine §6 / observability §5.5.15).
-# Not-yet overall: the completion-path OTel rendering + fixtures 126-129 run
-# (PR A), but the Langfuse WARNING (130) and structured-output-failure (131)
-# paths stay deferred until their PRs; flips to implemented when they land.
+# Not-yet overall: the completion-path OTel rendering + fixtures 126-129 (PR A)
+# and the Langfuse WARNING + §7 log + fixture 130 (PR B) run; only the
+# structured-output-failure path (131) stays deferred until PR C, which is when
+# this flips to implemented.
 [proposals."0083"]
 status = "not-yet"
 

@@ -47,6 +47,7 @@ from openarmature.graph.events import (
 )
 from openarmature.graph.observer import ObserverEvent
 from openarmature.observability.lineage import is_strict_prefix
+from openarmature.observability.llm_event import _token_budget_evaluations
 
 from .client import (
     LangfuseClient,
@@ -1753,6 +1754,20 @@ class LangfuseObserver:
         end_kwargs: dict[str, Any] = {}
         if usage is not None:
             end_kwargs["usage"] = usage
+        # §8.4.3 (proposal 0083): a token-budget exceedance sets the Generation's
+        # advisory WARNING level + a statusMessage naming each breached bound. The
+        # call succeeded (this is the success handler), so WARNING never displaces
+        # a hard ERROR — the failure path is untouched. No breach -> end as before.
+        breached = [
+            ev
+            for ev in _token_budget_evaluations(event.token_budget, event.usage)
+            if ev["actual"] > ev["max"]
+        ]
+        if breached:
+            end_kwargs["level"] = "WARNING"
+            end_kwargs["status_message"] = "token budget exceeded: " + ", ".join(
+                f"{ev['kind']} {ev['actual']} > {ev['max']}" for ev in breached
+            )
         handle.end(end_time=end_time, **end_kwargs)
 
     def _handle_typed_llm_failed(self, event: LlmFailedEvent) -> None:
@@ -2214,6 +2229,19 @@ class LangfuseObserver:
         active_group = event.active_prompt_group
         if active_group is not None:
             metadata["prompt_group_name"] = active_group.group_name
+        # §8.4.3 (proposal 0083): the declared token-budget bounds map to
+        # metadata.token_budget.*, each key present only when that bound is
+        # non-None. Omitted entirely when no budget was declared. Shared with the
+        # failure handler (harmless there; a failed Generation carries it too).
+        token_budget = event.token_budget
+        if token_budget is not None:
+            budget: dict[str, Any] = {}
+            if token_budget.input_max_tokens is not None:
+                budget["input_max_tokens"] = token_budget.input_max_tokens
+            if token_budget.total_max_tokens is not None:
+                budget["total_max_tokens"] = token_budget.total_max_tokens
+            if budget:
+                metadata["token_budget"] = budget
         if event.caller_invocation_metadata is not None:
             _apply_caller_metadata(metadata, event.caller_invocation_metadata)
         # Response-side metadata. A completion always carries it; a
