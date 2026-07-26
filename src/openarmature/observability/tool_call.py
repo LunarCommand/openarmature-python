@@ -92,9 +92,11 @@ def with_tool_call(
     from .correlation import (
         current_attempt_index,
         current_branch_name,
+        current_branch_name_chain,
         current_correlation_id,
         current_dispatch,
         current_fan_out_index,
+        current_fan_out_index_chain,
         current_invocation_id,
         current_namespace_prefix,
     )
@@ -108,6 +110,10 @@ def with_tool_call(
     attempt_index = current_attempt_index()
     fan_out_index = current_fan_out_index()
     branch_name = current_branch_name()
+    # Proposal 0084: enclosing fan-out / branch lineage chains, captured at
+    # scope entry alongside the scalars (same node-body lineage).
+    fan_out_index_chain = current_fan_out_index_chain()
+    branch_name_chain = current_branch_name_chain()
     caller_metadata = dict(current_invocation_metadata())
     call_id = uuid.uuid4().hex
     dispatch = current_dispatch()
@@ -128,6 +134,8 @@ def with_tool_call(
                     attempt_index=attempt_index,
                     fan_out_index=fan_out_index,
                     branch_name=branch_name,
+                    fan_out_index_chain=fan_out_index_chain,
+                    branch_name_chain=branch_name_chain,
                     call_id=call_id,
                     tool_name=tool_name,
                     tool_call_id=tool_call_id,
@@ -151,6 +159,8 @@ def with_tool_call(
                 attempt_index=attempt_index,
                 fan_out_index=fan_out_index,
                 branch_name=branch_name,
+                fan_out_index_chain=fan_out_index_chain,
+                branch_name_chain=branch_name_chain,
                 call_id=call_id,
                 tool_name=tool_name,
                 tool_call_id=tool_call_id,

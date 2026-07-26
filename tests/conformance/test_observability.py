@@ -91,6 +91,11 @@ _SUPPORTED_FIXTURES = frozenset(
         # §5.7 attribute surface end-to-end against a two-branch
         # parallel-branches graph with calls_llm in each branch.
         "038-otel-parallel-branches-dispatch-span",
+        # v0.81.0 — proposal 0084 (nested-fan-out span lineage). An inner
+        # fan-out nested in a concurrent outer fan-out instance: no dropped
+        # spans (chain-keyed node spans) + nested-LLM exact-match (each
+        # llm.complete parents under its own lineage-disambiguated `ask`).
+        "132-otel-nested-fan-out-span-keying-and-llm-exact-match",
         # v0.42.0 — proposal 0050 call-level-retry per-attempt LLM span
         # surface. Single-attempt default: one span, attempt_index 0.
         "057-llm-attempt-index-single-attempt-default",
@@ -377,21 +382,10 @@ _DEFERRED_FIXTURES: dict[str, str] = {
     "130-langfuse-token-budget-warning-level": (
         "Langfuse WARNING-level rendering; driven in test_observability_langfuse"
     ),
-    # Proposal 0084 (nested-fan-out span lineage, spec v0.81.0).
-    # Fixture 132's nested-lineage dispatch KEYING shipped in #194 (the
-    # OTel + Langfuse observers key dispatches by the full enclosing
-    # fan-out / branch lineage, so no spans drop). It stays deferred for
-    # 0084's remaining surface: the fan_out_index_chain / branch_name_chain
-    # arrive on the provider events with 0084 (see graph/events.py), and the
-    # nested-orphan LLM parent resolution is top-level-instance-only as of
-    # #195 -- the at-any-depth generalization rides 0084.
-    "132-otel-nested-fan-out-span-keying-and-llm-exact-match": (
-        "nested-lineage span keying shipped (#194); deferred for 0084's event-chain "
-        "surface (fan_out_index_chain / branch_name_chain on provider events) and the "
-        "nested-orphan LLM parent (top-level only as of #195)"
-    ),
-    # Proposal 0084: 133 (orphan LLM fallback) + 134 (Langfuse parent
-    # resolution) defer with 0084's lineage-resolved parent surface.
+    # Proposal 0084 (nested-fan-out span lineage, spec v0.81.0). Fixture 132
+    # (span keying + nested-LLM exact-match) now runs -- see _SUPPORTED_FIXTURES.
+    # 133 (orphan LLM fallback) + 134 (Langfuse parent resolution) defer with
+    # the orphan-call conformance-adapter primitive (a later PR).
     **{
         fixture_id: "nested-fan-out span lineage (proposal 0084) not-yet implemented"
         for fixture_id in (
@@ -620,6 +614,8 @@ async def test_observability_fixture(fixture_path: Path) -> None:
         await _run_fixture_038(spec)
     elif fixture_id == "110-otel-callable-branch-span":
         await _run_fixture_110(spec)
+    elif fixture_id == "132-otel-nested-fan-out-span-keying-and-llm-exact-match":
+        await _run_fixture_132(spec)
     elif fixture_id in {
         "040-llm-cache-attribute-emission",
         "041-llm-cache-attribute-absence",
@@ -2486,6 +2482,238 @@ def _assert_span_tree_matches(
                 s for s in all_spans if s.parent is not None and s.parent.span_id == matched_span_id
             ]
             _assert_span_tree_matches(all_spans, actual_children, expected_children)
+
+
+async def _run_fixture_132(spec: Mapping[str, Any]) -> None:
+    # Proposal 0084: nested-fan-out span keying (no dropped spans under
+    # concurrent nesting) + nested-LLM exact-match (each provider span parents
+    # under ITS OWN lineage-disambiguated calling-node span, never a sibling in
+    # the other concurrent outer instance sharing the innermost fan_out_index).
+    for case in cast("list[dict[str, Any]]", spec["cases"]):
+        case_name = cast("str", case["name"])
+        try:
+            await _run_fixture_132_case(case, spec)
+        except AssertionError as e:
+            raise AssertionError(f"case {case_name!r}: {e}") from e
+
+
+async def _run_fixture_132_case(case: Mapping[str, Any], spec: Mapping[str, Any]) -> None:
+    import asyncio
+    import json
+
+    import httpx
+    from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import (
+        InMemorySpanExporter,
+    )
+
+    from openarmature.graph import END, GraphBuilder
+    from openarmature.llm import OpenAIProvider, UserMessage
+
+    from .adapter import build_state_cls
+
+    # ---- FIFO mock provider. The four canned responses are identical; this
+    # fixture asserts span topology + the lineage-resolved parent, not
+    # response-content routing, so FIFO is correct.
+    mock_responses = list(cast("list[dict[str, Any]]", case.get("mock_llm") or []))
+
+    def _handler(_request: httpx.Request) -> httpx.Response:
+        if not mock_responses:
+            raise AssertionError("mock_llm queue exhausted")
+        body = cast("dict[str, Any]", mock_responses.pop(0)["body"])
+        return httpx.Response(
+            200, content=json.dumps(body).encode("utf-8"), headers={"Content-Type": "application/json"}
+        )
+
+    provider = OpenAIProvider(
+        base_url="http://mock-llm.test",
+        model="test-model",
+        api_key="test",
+        transport=httpx.MockTransport(_handler),
+    )
+
+    # ---- Innermost leaf subgraph: the `ask` node calls the mock provider.
+    subgraphs_spec = cast("dict[str, Any]", spec["subgraphs"])
+    leaf_spec = cast("dict[str, Any]", subgraphs_spec["leaf_sg"])
+    leaf_state_cls = build_state_cls(
+        "Leaf_132", cast("dict[str, dict[str, Any]]", leaf_spec["state"]["fields"])
+    )
+    ask_calls_llm = cast("dict[str, Any]", leaf_spec["nodes"]["ask"]["calls_llm"])
+    stores_in = cast("str", ask_calls_llm.get("stores_response_in", "score"))
+    messages_in: tuple[Any, ...] = tuple(
+        UserMessage(content=m["content"])
+        for m in cast("list[dict[str, str]]", ask_calls_llm.get("messages", []))
+        if m.get("role") == "user"
+    ) or (UserMessage(content="score it"),)
+
+    # Rendezvous: hold every inner `ask` until all are in flight (all their
+    # node spans open) before any calls the provider, so a scalar-only span
+    # key would have collided -- and the second outer instance's provider span
+    # would mis-parent -- before any parent is resolved. This is what makes the
+    # fixture DISCRIMINATE the fix (without it the instances can run serially
+    # enough that no collision occurs and even a scalar-keyed observer passes).
+    # Times out to a no-op if fewer run concurrently than expected, so it never
+    # deadlocks. Counter increments are atomic under asyncio's single thread.
+    outer_items0 = cast(
+        "list[list[Any]]",
+        case["state"]["fields"][case["nodes"]["outer_fan_out"]["fan_out"]["items_field"]].get("default")
+        or [],
+    )
+    total_asks = sum(len(x) for x in outer_items0)
+    # Fail loud rather than silently degenerate: total_asks is derived from the
+    # outer items' `default`. If a future case sources them via initial_state
+    # instead (leaving the default empty), total_asks would be 0, the gate would
+    # fire on the first ask, and the rendezvous would become a no-op -- so the
+    # fixture could pass vacuously on the very scalar-key bug it exists to catch.
+    assert total_asks > 0, (
+        "fixture 132 rendezvous gate degenerated (total_asks=0): the outer items "
+        "must be supplied via the field `default` so the concurrent interleaving is forced"
+    )
+    rendezvous = {"n": 0}
+    gate = asyncio.Event()
+
+    async def _ask_body(_s: Any) -> dict[str, str]:
+        rendezvous["n"] += 1
+        if rendezvous["n"] >= total_asks:
+            gate.set()
+        try:
+            async with asyncio.timeout(5):
+                await gate.wait()
+        except TimeoutError:
+            pass
+        response = await provider.complete(list(messages_in))
+        return {stores_in: response.message.content or ""}
+
+    leaf_sg = (
+        GraphBuilder(leaf_state_cls)
+        .add_node("ask", _ask_body)
+        .add_edge("ask", END)
+        .set_entry("ask")
+        .compile()
+    )
+
+    # ---- Middle subgraph: the inner fan-out over `leaf_sg`.
+    mid_spec = cast("dict[str, Any]", subgraphs_spec["mid"])
+    mid_state_cls = build_state_cls("Mid_132", cast("dict[str, dict[str, Any]]", mid_spec["state"]["fields"]))
+    inner_fo = cast("dict[str, Any]", mid_spec["nodes"]["inner_fan_out"]["fan_out"])
+    mid = (
+        GraphBuilder(mid_state_cls)
+        .add_fan_out_node(
+            "inner_fan_out",
+            subgraph=leaf_sg,
+            items_field=cast("str", inner_fo["items_field"]),
+            item_field=cast("str", inner_fo["item_field"]),
+            collect_field=cast("str", inner_fo["collect_field"]),
+            target_field=cast("str", inner_fo["target_field"]),
+            error_policy=cast("str", inner_fo.get("error_policy", "fail_fast")),
+        )
+        .add_edge("inner_fan_out", END)
+        .set_entry("inner_fan_out")
+        .compile()
+    )
+
+    # ---- Outer graph: the outer fan-out over `mid`, forced concurrent so the
+    # two outer instances' inner subtrees are in flight at once (the condition
+    # the chain keying discriminates -- a scalar key would collide/drop).
+    outer_fields = cast("dict[str, dict[str, Any]]", case["state"]["fields"])
+    outer_state_cls = build_state_cls("Outer_132", outer_fields)
+    outer_fo = cast("dict[str, Any]", case["nodes"]["outer_fan_out"]["fan_out"])
+    outer_default = cast("list[Any]", outer_fields[cast("str", outer_fo["items_field"])].get("default") or [])
+    graph = (
+        GraphBuilder(outer_state_cls)
+        .add_fan_out_node(
+            "outer_fan_out",
+            subgraph=mid,
+            items_field=cast("str", outer_fo["items_field"]),
+            item_field=cast("str", outer_fo["item_field"]),
+            collect_field=cast("str", outer_fo["collect_field"]),
+            target_field=cast("str", outer_fo["target_field"]),
+            error_policy=cast("str", outer_fo.get("error_policy", "fail_fast")),
+            concurrency=max(len(outer_default), 2),
+        )
+        .add_edge("outer_fan_out", END)
+        .set_entry("outer_fan_out")
+        .compile()
+    )
+
+    exporter = InMemorySpanExporter()
+    observer = OTelObserver(span_processor=SimpleSpanProcessor(exporter))
+    graph.attach_observer(observer)
+    try:
+        await graph.invoke(outer_state_cls())
+        await graph.drain()
+    finally:
+        observer.shutdown()
+        await provider.aclose()
+
+    spans = exporter.get_finished_spans()
+
+    # ---- span_tree: the recursive match enforces the nested-LLM exact-match --
+    # each llm.complete is matched only among the children of its own already-
+    # disambiguated `ask` parent, so a mis-parent to a sibling outer instance
+    # fails the tree match.
+    expected_tree = cast("list[dict[str, Any]]", case["expected"]["span_tree"])
+    inv_root = next(
+        (s for s in spans if s.name == "openarmature.invocation" and cast("Any", s.parent) is None), None
+    )
+    assert inv_root is not None, f"invocation root span missing; got {[s.name for s in spans]}"
+    _assert_span_tree_matches(spans, [inv_root], expected_tree)
+
+    # ---- Invariants (fail loud on any declared-but-unhandled name).
+    invariants = cast("dict[str, Any]", case["expected"].get("invariants") or {})
+    ask_spans = [s for s in spans if s.name == "ask"]
+    llm_spans = [s for s in spans if s.name == "openarmature.llm.complete"]
+    ask_ids = {cast("Any", s.context).span_id for s in ask_spans}
+
+    if invariants.get("no_inner_spans_dropped_under_concurrent_nesting"):
+        assert len(ask_spans) == total_asks and len(llm_spans) == total_asks, (
+            f"nested inner spans dropped: {len(ask_spans)} ask / {len(llm_spans)} llm.complete "
+            f"(want {total_asks}/{total_asks})"
+        )
+    if (want := invariants.get("inner_node_span_count")) is not None:
+        assert len(ask_spans) == want, f"expected {want} ask spans; got {len(ask_spans)}"
+    if (want := invariants.get("llm_provider_span_count")) is not None:
+        assert len(llm_spans) == want, f"expected {want} llm.complete spans; got {len(llm_spans)}"
+    if invariants.get("llm_span_parents_under_own_lineage_calling_node"):
+        llm_parents = [cast("Any", s.parent).span_id for s in llm_spans if s.parent is not None]
+        assert all(p in ask_ids for p in llm_parents), (
+            "each llm.complete MUST parent under its calling ask span"
+        )
+        assert len(set(llm_parents)) == len(llm_spans), (
+            "each llm.complete MUST parent under a DISTINCT ask span (nested exact-match)"
+        )
+    under = cast("str | None", invariants.get("unique_fan_out_indices_per_node_span_under"))
+    fo_range = cast("list[int] | None", invariants.get("fan_out_index_range"))
+    if under is not None and fo_range is not None:
+        node_spans = [
+            s
+            for s in spans
+            if s.name == under and (s.attributes or {}).get("openarmature.fan_out.item_count") is not None
+        ]
+        assert node_spans, f"no {under!r} fan-out NODE span found"
+        lo, hi = fo_range
+        for ns in node_spans:
+            ns_id = cast("Any", ns.context).span_id
+            child_indices = sorted(
+                cast("int", (s.attributes or {}).get("openarmature.node.fan_out_index"))
+                for s in spans
+                if s.parent is not None
+                and s.parent.span_id == ns_id
+                and (s.attributes or {}).get("openarmature.node.fan_out_index") is not None
+            )
+            assert child_indices == list(range(lo, hi + 1)), (
+                f"{under!r} instance indices {child_indices} != expected {list(range(lo, hi + 1))}"
+            )
+    _handled = {
+        "no_inner_spans_dropped_under_concurrent_nesting",
+        "inner_node_span_count",
+        "llm_provider_span_count",
+        "llm_span_parents_under_own_lineage_calling_node",
+        "unique_fan_out_indices_per_node_span_under",
+        "fan_out_index_range",
+    }
+    unhandled = set(invariants) - _handled
+    assert not unhandled, f"fixture 132 declares unhandled invariants: {sorted(unhandled)}"
 
 
 async def _run_fixture_110(spec: Mapping[str, Any]) -> None:

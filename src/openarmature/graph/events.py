@@ -602,6 +602,16 @@ class LlmCompletionEvent:
     # Defaulted (default_factory) so existing kwargs-constructors that
     # predate this field keep working; the provider always populates it.
     output_tool_calls: list["ToolCall"] = field(default_factory=list["ToolCall"])
+    # Proposal 0084 (graph-engine §6, spec v0.81.0): per-depth enclosing
+    # fan-out / branch lineage chains, parallel to ``namespace`` -- position
+    # ``i`` is the fan_out_index (or branch_name) at the dispatch boundary
+    # leading to namespace depth ``i+1``, or ``None`` at a non-fan-out /
+    # non-branch boundary. Mirror of NodeEvent's chains; observers resolve the
+    # lineage-disambiguated span parent from these rather than the innermost
+    # scalar (which coincides across concurrent enclosing instances). Empty for
+    # a top-level (non-nested) call; the scalars above carry the innermost value.
+    fan_out_index_chain: tuple[int | None, ...] = ()
+    branch_name_chain: tuple[str | None, ...] = ()
 
 
 # Spec: realizes proposal 0058's second spec-normatively-typed event
@@ -709,6 +719,10 @@ class LlmFailedEvent:
     # (which carries the response-side usage) the budget eval fires as it does
     # on a completion; None-carrying every other category leaves it inert.
     token_budget: Any = None
+    # Proposal 0084 (spec v0.81.0): enclosing fan-out / branch lineage
+    # chains parallel to ``namespace`` (see LlmCompletionEvent).
+    fan_out_index_chain: tuple[int | None, ...] = ()
+    branch_name_chain: tuple[str | None, ...] = ()
 
 
 # Python-internal per-attempt LLM event. NOT a spec-normative event type
@@ -799,6 +813,10 @@ class LlmRetryAttemptEvent:
     # tool-call span attributes from this field (the per-attempt event is
     # the LLM-span source).
     output_tool_calls: list["ToolCall"] = field(default_factory=list["ToolCall"])
+    # Proposal 0084 (spec v0.81.0): enclosing fan-out / branch lineage
+    # chains parallel to ``namespace`` (see LlmCompletionEvent).
+    fan_out_index_chain: tuple[int | None, ...] = ()
+    branch_name_chain: tuple[str | None, ...] = ()
 
 
 # Spec: realizes graph-engine §6 + observability §5.5.9 -- the typed
@@ -877,6 +895,10 @@ class EmbeddingEvent:
     active_prompt_group: Any
     call_id: str
     caller_invocation_metadata: Mapping[str, AttributeValue] | None = None
+    # Proposal 0084 (spec v0.81.0): enclosing fan-out / branch lineage
+    # chains parallel to ``namespace`` (see LlmCompletionEvent).
+    fan_out_index_chain: tuple[int | None, ...] = ()
+    branch_name_chain: tuple[str | None, ...] = ()
 
 
 # Spec: the failure sibling of EmbeddingEvent (proposal 0059). Dispatched
@@ -926,6 +948,10 @@ class EmbeddingFailedEvent:
     error_message: str
     error_type: str | None = None
     caller_invocation_metadata: Mapping[str, AttributeValue] | None = None
+    # Proposal 0084 (spec v0.81.0): enclosing fan-out / branch lineage
+    # chains parallel to ``namespace`` (see LlmCompletionEvent).
+    fan_out_index_chain: tuple[int | None, ...] = ()
+    branch_name_chain: tuple[str | None, ...] = ()
 
 
 # Spec: realizes graph-engine §6 -- the typed RerankEvent / RerankFailedEvent
@@ -1010,6 +1036,10 @@ class RerankEvent:
     active_prompt_group: Any
     call_id: str
     caller_invocation_metadata: Mapping[str, AttributeValue] | None = None
+    # Proposal 0084 (spec v0.81.0): enclosing fan-out / branch lineage
+    # chains parallel to ``namespace`` (see LlmCompletionEvent).
+    fan_out_index_chain: tuple[int | None, ...] = ()
+    branch_name_chain: tuple[str | None, ...] = ()
 
 
 # Spec: the failure sibling of RerankEvent (proposal 0060). Dispatched
@@ -1062,6 +1092,10 @@ class RerankFailedEvent:
     error_message: str
     error_type: str | None = None
     caller_invocation_metadata: Mapping[str, AttributeValue] | None = None
+    # Proposal 0084 (spec v0.81.0): enclosing fan-out / branch lineage
+    # chains parallel to ``namespace`` (see LlmCompletionEvent).
+    fan_out_index_chain: tuple[int | None, ...] = ()
+    branch_name_chain: tuple[str | None, ...] = ()
 
 
 # Spec: realizes pipeline-utilities §6.3 failure-isolation middleware
@@ -1107,6 +1141,15 @@ class FailureIsolatedEvent:
     pre_state: Any
     post_state: Mapping[str, Any]
     caught_exception: CaughtException
+    # Proposal 0084 (spec v0.81.0): enclosing fan-out / branch lineage chains
+    # parallel to ``namespace`` (see LlmCompletionEvent). Carried for surface
+    # consistency with the provider events. The marker's calling-node span is
+    # already closed by delivery time (its completed event precedes this one on
+    # the serial queue), so it parents under the invocation span, not via the
+    # lineage exact-match -- the chains only disambiguate in the rare case that
+    # calling-node span is still open.
+    fan_out_index_chain: tuple[int | None, ...] = ()
+    branch_name_chain: tuple[str | None, ...] = ()
 
 
 # Spec: realizes graph-engine §6 tool-execution observer events
@@ -1169,6 +1212,10 @@ class ToolCallEvent:
     result: Any
     latency_ms: float | None
     caller_invocation_metadata: Mapping[str, AttributeValue] | None = None
+    # Proposal 0084 (spec v0.81.0): enclosing fan-out / branch lineage
+    # chains parallel to ``namespace`` (see LlmCompletionEvent).
+    fan_out_index_chain: tuple[int | None, ...] = ()
+    branch_name_chain: tuple[str | None, ...] = ()
 
 
 # Spec: the failure variant (proposal 0063). Mirrors ToolCallEvent's
@@ -1217,6 +1264,10 @@ class ToolCallFailedEvent:
     error_type: str | None
     error_message: str
     caller_invocation_metadata: Mapping[str, AttributeValue] | None = None
+    # Proposal 0084 (spec v0.81.0): enclosing fan-out / branch lineage
+    # chains parallel to ``namespace`` (see LlmCompletionEvent).
+    fan_out_index_chain: tuple[int | None, ...] = ()
+    branch_name_chain: tuple[str | None, ...] = ()
 
 
 __all__ = [

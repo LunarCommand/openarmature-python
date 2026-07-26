@@ -137,7 +137,28 @@ logger = logging.getLogger("openarmature.observability")
 # across sibling parallel-branches branches (pipeline-utilities §11);
 # without it the two inner ``ask`` nodes of two branches with the
 # same namespace + fan_out_index would collide on the same key.
-_StackKey = tuple[tuple[str, ...], int, int | None, str | None]
+# Proposal 0084 (spec v0.81.0): a node span is keyed by the innermost scalars
+# AND the full enclosing fan-out / branch lineage chains. The chains are the
+# addition: an inner node under two concurrent outer fan-out instances shares
+# the same innermost scalar across the outer instances, so a scalar-only key
+# would collide (last-writer-wins drops / mis-closes the second) and the
+# LLM-parent exact-match would resolve to a sibling's span. The scalars are
+# RETAINED (not replaced by the chains) because ``_key_for`` is also used to
+# LOOK UP a callable-parallel-branch event in ``open_spans`` on the publish
+# path (``_publish_active_span``): a callable branch carries its branch_name on
+# the event but never extends branch_name_chain (no subgraph descent), so on
+# the chains alone its key would EQUAL its own parallel-branches NODE's key --
+# the lookup would return that NODE instead of missing, and the branch's
+# per-branch dispatch span would never be synthesized (verified: blanking the
+# scalars drops the dispatch span). The scalar branch_name (key[3]) keeps the
+# two distinct. Past that lookup the scalars are redundant with the chains for
+# storage uniqueness (each equals its chain's innermost non-None entry); the
+# merged spec keys the driving span chains-only, so the retained scalar is a
+# harmless superset kept for the callable-branch lookup. The common
+# single-level case keys as before plus the (empty / length-1) chains.
+_StackKey = tuple[
+    tuple[str, ...], int, int | None, str | None, tuple[int | None, ...], tuple[str | None, ...]
+]
 
 # Lineage-aware dispatch keys (proposal 0045): the fan-out / pb NODE namespace
 # prefix plus the fan-out instance index / branch name chain slices along the
@@ -1304,7 +1325,7 @@ class OTelObserver:
         #   identified structurally by their presence in the
         #   parent_node_name caches)
         for key, open_span in inv_state.open_spans.items():
-            ns, _ai, _fi, _bn = key
+            ns = key[0]
             if ns != aug_ns and not is_strict_prefix(ns, aug_ns):
                 continue
             # Shared-parent check: a fan-out NODE or parallel-branches NODE
@@ -1587,6 +1608,8 @@ class OTelObserver:
             calling_attempt_index=event.attempt_index,
             calling_fan_out_index=event.fan_out_index,
             calling_branch_name=event.branch_name,
+            calling_fan_out_index_chain=event.fan_out_index_chain,
+            calling_branch_name_chain=event.branch_name_chain,
         )
         attrs: dict[str, Any] = {
             "openarmature.llm.model": event.model,
@@ -1808,6 +1831,8 @@ class OTelObserver:
             calling_attempt_index=event.attempt_index,
             calling_fan_out_index=event.fan_out_index,
             calling_branch_name=event.branch_name,
+            calling_fan_out_index_chain=event.fan_out_index_chain,
+            calling_branch_name_chain=event.branch_name_chain,
         )
         attrs: dict[str, Any] = {"openarmature.tool.name": event.tool_name}
         if event.tool_call_id is not None:
@@ -1926,6 +1951,8 @@ class OTelObserver:
             calling_attempt_index=event.attempt_index,
             calling_fan_out_index=event.fan_out_index,
             calling_branch_name=event.branch_name,
+            calling_fan_out_index_chain=event.fan_out_index_chain,
+            calling_branch_name_chain=event.branch_name_chain,
         )
         attrs: dict[str, Any] = {}
         cid = current_correlation_id()
@@ -2036,6 +2063,8 @@ class OTelObserver:
             calling_attempt_index=event.attempt_index,
             calling_fan_out_index=event.fan_out_index,
             calling_branch_name=event.branch_name,
+            calling_fan_out_index_chain=event.fan_out_index_chain,
+            calling_branch_name_chain=event.branch_name_chain,
         )
         attrs: dict[str, Any] = {}
         cid = current_correlation_id()
@@ -2147,6 +2176,8 @@ class OTelObserver:
             calling_attempt_index=event.attempt_index,
             calling_fan_out_index=event.fan_out_index,
             calling_branch_name=event.branch_name,
+            calling_fan_out_index_chain=event.fan_out_index_chain,
+            calling_branch_name_chain=event.branch_name_chain,
         )
         attrs: dict[str, Any] = {
             "openarmature.failure_isolation.event_name": event.event_name,
@@ -2182,16 +2213,25 @@ class OTelObserver:
         calling_attempt_index: int,
         calling_fan_out_index: int | None,
         calling_branch_name: str | None,
+        calling_fan_out_index_chain: tuple[int | None, ...],
+        calling_branch_name_chain: tuple[str | None, ...],
     ) -> object:
         """Look up the calling node's span using the calling-node
         identity, falling back through the per-instance fan-out dispatch
         span, subgraph dispatch / detached root, and the invocation span."""
-        # 1. Direct match on the calling node's ``_StackKey``.
+        # 1. Direct match on the calling node's ``_StackKey`` -- the
+        #    lineage-disambiguated calling-node span (proposal 0084 §5.5
+        #    "Lineage-resolved parent"). Keyed by the full enclosing fan-out /
+        #    branch chain so a nested provider call parents under ITS OWN
+        #    calling node's span, not a sibling in another concurrent outer
+        #    instance that shares the innermost scalar fan_out_index.
         calling_key: _StackKey = (
             calling_namespace_prefix,
             calling_attempt_index,
             calling_fan_out_index,
             calling_branch_name,
+            calling_fan_out_index_chain,
+            calling_branch_name_chain,
         )
         calling = inv_state.open_spans.get(calling_key)
         if calling is not None:
@@ -2264,7 +2304,17 @@ class OTelObserver:
         self._invocation_span[invocation_id] = _OpenSpan(span=span)
 
     def _key_for(self, event: NodeEvent) -> _StackKey:
-        return (event.namespace, event.attempt_index, event.fan_out_index, event.branch_name)
+        # Proposal 0084: scalars (retained) + enclosing lineage chains (added),
+        # so concurrent nested fan-out node spans don't collide while a callable
+        # parallel-branch still stays distinct from its parallel-branches node.
+        return (
+            event.namespace,
+            event.attempt_index,
+            event.fan_out_index,
+            event.branch_name,
+            event.fan_out_index_chain,
+            event.branch_name_chain,
+        )
 
     def _resolve_parent_context(
         self,
@@ -2955,23 +3005,21 @@ class OTelObserver:
         self, inv_state: _InvState, prefix: tuple[str, ...], event: NodeEvent
     ) -> _OpenSpan | None:
         """Find the currently-open fan-out / pb NODE span at ``prefix`` on the
-        given event's ENCLOSING lineage. When the NODE is itself nested inside an
-        outer fan-out instance / branch, several instances of the same NODE
-        namespace are open at once under concurrency, so a namespace-only scan
-        would bind the wrong one. The NODE's own event carries the instance /
-        branch it sits in as its fan_out_index / branch_name (key[2] / key[3]);
-        that equals the synthesizing event's chain entry at the level above this
-        NODE."""
-        n = len(prefix)
-        enclosing_fi = (
-            event.fan_out_index_chain[n - 2] if n >= 2 and n - 2 < len(event.fan_out_index_chain) else None
-        )
-        enclosing_bn = (
-            event.branch_name_chain[n - 2] if n >= 2 and n - 2 < len(event.branch_name_chain) else None
-        )
+        given event's ENCLOSING lineage. When the NODE is itself nested inside
+        one or more outer fan-out instances / branches, several instances of the
+        same NODE namespace are open at once under concurrency, so a
+        namespace-only scan would bind the wrong one. Disambiguate by the full
+        enclosing chain (proposal 0084): the NODE span sits on the synthesizing
+        event's call-stack ancestor path iff its stored lineage chain is a
+        prefix of the event's -- the same lineage-boundary rule the augmentation
+        scoping uses (``_span_chain_on_path``). Matching the innermost scalar
+        alone is ambiguous at >=3 levels, where an intermediate instance index
+        repeats across concurrent outer instances (both would match the scalar
+        but only one is on the event's path)."""
         for key, open_span in inv_state.open_spans.items():
-            ns, _attempt, fan_idx, bn = key
-            if ns == prefix and fan_idx == enclosing_fi and bn == enclosing_bn:
+            if key[0] == prefix and _span_chain_on_path(
+                open_span, event.fan_out_index_chain, event.branch_name_chain
+            ):
                 return open_span
         return None
 

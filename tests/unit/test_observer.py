@@ -29,7 +29,12 @@ from openarmature.graph.observer import (
     _QueuedItem,
     deliver_loop,
 )
-from openarmature.observability.metadata import set_invocation_metadata
+from openarmature.observability.metadata import (
+    _reset_invocation_metadata,
+    _set_invocation_metadata,
+    get_invocation_metadata,
+    set_invocation_metadata,
+)
 
 
 class DummyState(State):
@@ -472,6 +477,16 @@ def test_set_invocation_metadata_outside_invocation_skips_dispatch() -> None:
     """Without a current_dispatch installed (no engine in scope),
     ``set_invocation_metadata`` still updates the ContextVar but
     does NOT raise and does NOT attempt to enqueue an event."""
-    # Sanity: by default outside any engine the dispatch ContextVar is
-    # None, so the call should be a no-op on the queue side.
-    set_invocation_metadata(local_key="local_value")
+    # Reset-guard: the call mutates the module-level invocation-metadata
+    # ContextVar; snapshot + restore it so the value does not leak into later
+    # tests (conformance 046 reads get_invocation_metadata() outside any
+    # invocation and expects {}).
+    token = _set_invocation_metadata(get_invocation_metadata())
+    try:
+        # Outside any engine the dispatch ContextVar is None, so the call is a
+        # no-op on the queue side -- it must not raise and must still update
+        # the ContextVar.
+        set_invocation_metadata(local_key="local_value")
+        assert get_invocation_metadata().get("local_key") == "local_value"
+    finally:
+        _reset_invocation_metadata(token)
