@@ -1778,17 +1778,19 @@ async def test_typed_failed_event_parents_under_branch_calling_node() -> None:
     try:
         # Bootstrap the Trace + two branch-distinguished node
         # observations directly. _InvState's open_observations map is
-        # keyed by (namespace, attempt_index, fan_out_index,
-        # branch_name); the calling node identity on the typed event
-        # is (("dispatcher", "ask"), 0, None, "fast").
+        # keyed by (namespace, attempt_index, fan_out_index, branch_name)
+        # plus the proposal-0084 lineage chains; the calling node identity
+        # on the (non-nested) typed event has empty chains, so the keys are
+        # (("dispatcher", "ask"), 0, None, "fast"/"slow", (), ()). key[3]
+        # (branch_name) is the discriminator this test exercises.
         client.trace(id=invocation_id, name="dispatcher")
         observer._inv_states[invocation_id] = _InvState(trace_id=invocation_id)  # noqa: SLF001
         inv_state = observer._inv_states[invocation_id]  # noqa: SLF001
         # Open two observations under the trace — one per branch.
         fast_handle = client.generation(trace_id=invocation_id, name="ask", model="m-test")
         slow_handle = client.generation(trace_id=invocation_id, name="ask", model="m-test")
-        fast_key = (("dispatcher", "ask"), 0, None, "fast")
-        slow_key = (("dispatcher", "ask"), 0, None, "slow")
+        fast_key = (("dispatcher", "ask"), 0, None, "fast", (), ())
+        slow_key = (("dispatcher", "ask"), 0, None, "slow", (), ())
         inv_state.open_observations[fast_key] = _OpenObservation(handle=fast_handle)
         inv_state.open_observations[slow_key] = _OpenObservation(handle=slow_handle)
         await observer(
@@ -1820,13 +1822,14 @@ async def test_typed_failed_event_parents_under_branch_calling_node() -> None:
 
 
 async def test_llm_event_parents_under_fan_out_instance_dispatch() -> None:
-    # Regression cover for _resolve_llm_parent_observation_id fallback #2: when an
-    # LLM event fires inside a top-level fan-out instance and the calling node has
-    # no open observation (fallback #1 misses), the Generation MUST parent under
-    # the per-instance fan-out dispatch observation. The dispatch map is keyed by
-    # the lineage-aware _dispatch_key; before the lineage keys this fallback used
-    # a flat namespace[:1] + (str(index),) key, which always-misses against the
-    # composite map and silently re-parents the Generation under the Trace.
+    # Regression cover for the _resolve_llm_parent_observation_id orphan fallback:
+    # when an LLM event fires inside a top-level fan-out instance and the calling
+    # node has no open observation (fallback #1 misses), the Generation MUST
+    # parent under the per-instance fan-out dispatch observation (the nearest
+    # enclosing wrapper). Proposal 0084: the fallback resolves the dispatch via
+    # the event's lineage chain, so the event carries fan_out_index_chain=
+    # (0, None) aligned to namespace ("fan", "ask") -- instance 0 at "fan", none
+    # at "ask".
     from openarmature.observability.correlation import (
         _reset_invocation_id,
         _set_invocation_id,
@@ -1860,6 +1863,8 @@ async def test_llm_event_parents_under_fan_out_instance_dispatch() -> None:
                 attempt_index=0,
                 fan_out_index=0,
                 branch_name=None,
+                fan_out_index_chain=(0, None),
+                branch_name_chain=(None, None),
                 model="m-test",
                 error_category="provider_unavailable",
                 error_type="ProviderUnavailable",

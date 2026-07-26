@@ -614,15 +614,9 @@ _DEFERRED_FIXTURES: dict[str, str] = {
     # completion-path fixtures (126-129) + the structured-output-failure path
     # (131) parse + run in test_observability; the Langfuse WARNING (130) parses
     # + runs via test_observability_langfuse. All of 0083's fixtures now run.
-    # Proposal 0084 (nested-fan-out span lineage, v0.81.0) -- the
-    # lineage-chain directive shapes. (132 parses cleanly; accounted in
-    # test_observability.)
-    "observability/133-otel-nested-fan-out-orphan-llm-fallback": (
-        "Proposal 0084 nested-fan-out span lineage; not implemented"
-    ),
-    "observability/134-langfuse-nested-fan-out-parent-resolution": (
-        "Proposal 0084 nested-fan-out span lineage; not implemented"
-    ),
+    # Proposal 0084 (nested-fan-out span lineage, v0.81.0): 132/133/134 all
+    # parse cleanly and run in test_observability / test_observability_langfuse.
+    # The orphan-call directive is modeled as NodeSpec.calls_llm_from_wrapper.
     # Proposal 0087 (within-node directive execution order, v0.82.0).
     # 135 reuses the augment_metadata / capture_invocation_metadata_into
     # directive shapes (as 043-046 above) the cross-cap parser does not

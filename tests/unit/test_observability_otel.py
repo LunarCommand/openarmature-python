@@ -560,11 +560,13 @@ async def test_active_prompt_propagates_to_llm_span_attributes() -> None:
 
 
 async def test_llm_span_parents_under_fan_out_instance_dispatch() -> None:
-    # Gap 2 (review-nested-fan-out-lineage): an LLM span whose calling node has
-    # no open span and fires inside a top-level fan-out instance MUST parent
-    # under the per-instance fan-out dispatch span (matching the Langfuse
-    # observer), not fall through to the subgraph / invocation span. Before this
-    # OTel had no fan-out-instance fallback in _resolve_llm_parent.
+    # An LLM span whose calling node has no open span and fires inside a
+    # top-level fan-out instance MUST parent under the per-instance fan-out
+    # dispatch span (the §5.5 orphan fallback / nearest enclosing wrapper),
+    # not fall through to the subgraph / invocation span. Proposal 0084: the
+    # fallback resolves the dispatch via the event's lineage chain, so the
+    # event carries fan_out_index_chain=(0, None) aligned to namespace
+    # ("fan", "ask") -- instance 0 at the "fan" boundary, none at "ask".
     from openarmature.observability.correlation import (
         _reset_invocation_id,
         _set_invocation_id,
@@ -599,6 +601,8 @@ async def test_llm_span_parents_under_fan_out_instance_dispatch() -> None:
                 attempt_index=0,
                 fan_out_index=0,
                 branch_name=None,
+                fan_out_index_chain=(0, None),
+                branch_name_chain=(None, None),
             )
         )
         # dispatch_span is ended by observer.shutdown() below (it drains

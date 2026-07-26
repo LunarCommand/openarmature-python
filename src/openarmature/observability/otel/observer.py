@@ -2236,41 +2236,26 @@ class OTelObserver:
         calling = inv_state.open_spans.get(calling_key)
         if calling is not None:
             return set_span_in_context(calling.span)
-        # 2. Per-instance fan-out dispatch (spec ruling,
-        #    review-nested-fan-out-lineage): an orphaned LLM span inside a
-        #    fan-out instance parents under the per-instance dispatch span, not
-        #    the subgraph / invocation span. Mirrors the LangfuseObserver
-        #    fallback. Top-level instance ONLY (namespace[:1] + the scalar
-        #    fan_out_index): for a NESTED fan-out instance the innermost index
-        #    can coincide with a sibling top-level instance's, so this may
-        #    mis-resolve to that sibling rather than miss. The nearest-open-
-        #    ancestor-at-any-depth generalization (which also reorders this ahead
-        #    of the subgraph walk below) fixes that and rides the spec §5.5
-        #    fixture.
-        if calling_fan_out_index is not None and calling_namespace_prefix:
-            instance_key = _dispatch_key(calling_namespace_prefix[:1], (calling_fan_out_index,), (None,))
-            dispatch = inv_state.fan_out_instance_spans.get(instance_key)
-            if dispatch is not None:
-                return set_span_in_context(dispatch.span)
-        # 3. Walk up the calling namespace prefix for a synthetic
-        #    subgraph dispatch span at any ancestor — covers LLM
-        #    calls from inside subgraph wrapper middleware.
-        for plen in range(len(calling_namespace_prefix), 0, -1):
-            ancestor = calling_namespace_prefix[:plen]
-            sg = inv_state.subgraph_spans.get(ancestor)
-            if sg is not None:
-                return set_span_in_context(sg.span)
-            dr = inv_state.detached_roots.get(ancestor)
-            if dr is not None:
-                return set_span_in_context(dr.span)
-        # 4. Invocation span — ``complete()`` called outside any
-        #    node body but inside an ``invoke()``.
-        inv = self._invocation_span.get(invocation_id)
-        if inv is not None:
-            return set_span_in_context(inv.span)
-        # 5. No invocation in scope — return a fresh empty Context.
-        #    The span will live in its own trace.
-        return otel_context.Context()
+        # 2. Orphan fallback (proposal 0084 §5.5 "Lineage-resolved parent"):
+        #    the calling-node span is not open -- a call issued from middleware
+        #    (pre/post phase) or a wrapper rather than the node body -- so the
+        #    provider span parents under the nearest enclosing wrapper per §4.3,
+        #    resolved via the lineage chain to the correct inner instance (not
+        #    the old top-level-scalar shortcut, which mis-resolves to a
+        #    coincidentally-indexed sibling under nested concurrency). This is
+        #    the same ancestor walk the node parent uses, so a wrapper-issued
+        #    call and an in-body call on the same lineage resolve to the same
+        #    enclosing parent; it subsumes the former per-instance / subgraph /
+        #    invocation / empty-context fallbacks.
+        return self._resolve_enclosing_wrapper_context(
+            inv_state,
+            invocation_id,
+            namespace=calling_namespace_prefix,
+            fan_out_index=calling_fan_out_index,
+            branch_name=calling_branch_name,
+            fan_out_index_chain=calling_fan_out_index_chain,
+            branch_name_chain=calling_branch_name_chain,
+        )
 
     # ------------------------------------------------------------------
     # Helpers
@@ -2322,10 +2307,38 @@ class OTelObserver:
         invocation_id: str,
         event: NodeEvent,
     ) -> object:
-        """Return the OTel context to use as the parent for this
-        event's span. Walks namespace ancestors finding the
-        innermost-open subgraph or detached root span; falls back to
-        the invocation span."""
+        """Return the OTel context to use as the parent for this event's span:
+        the nearest enclosing wrapper on the event's lineage, else the
+        invocation span. Delegates to the shared enclosing-wrapper resolver so
+        the §5.5 orphan LLM-span fallback resolves a wrapper-issued call to the
+        same parent (proposal 0084)."""
+        return self._resolve_enclosing_wrapper_context(
+            inv_state,
+            invocation_id,
+            namespace=event.namespace,
+            fan_out_index=event.fan_out_index,
+            branch_name=event.branch_name,
+            fan_out_index_chain=event.fan_out_index_chain,
+            branch_name_chain=event.branch_name_chain,
+        )
+
+    def _resolve_enclosing_wrapper_context(
+        self,
+        inv_state: _InvState,
+        invocation_id: str,
+        *,
+        namespace: tuple[str, ...],
+        fan_out_index: int | None,
+        branch_name: str | None,
+        fan_out_index_chain: tuple[int | None, ...],
+        branch_name_chain: tuple[str | None, ...],
+    ) -> object:
+        """Resolve the OTel context of the nearest enclosing wrapper span on the
+        given lineage (proposal 0084 §4.3), falling back to the invocation span.
+        Shared by the node parent (``_resolve_parent_context``, called with the
+        node event's lineage) and the §5.5 orphan LLM-span fallback (called with
+        the calling node's lineage when its span is not open), so both resolve
+        to the same parent."""
         # 1. Walk prefix lengths longest-to-shortest.  The INNERMOST
         #    matching synthetic dispatch span wins.  Three keying
         #    schemes live alongside each other at each prefix:
@@ -2342,47 +2355,43 @@ class OTelObserver:
         #    arbitrary composition (parallel-branches inside fan-out
         #    instance and vice versa) — the dispatch span at the
         #    deepest matching depth is the most-immediate parent.
-        for prefix_len in range(len(event.namespace), 0, -1):
-            prefix = event.namespace[:prefix_len]
+        for prefix_len in range(len(namespace), 0, -1):
+            prefix = namespace[:prefix_len]
             # Lineage-aware keys (proposal 0045): carry the enclosing fan-out
             # instance / branch chain so this resolves to the RIGHT outer
             # instance for arbitrary nesting.
             fi_axis = (
-                event.fan_out_index_chain[prefix_len - 1]
-                if prefix_len - 1 < len(event.fan_out_index_chain)
-                else None
+                fan_out_index_chain[prefix_len - 1] if prefix_len - 1 < len(fan_out_index_chain) else None
             )
-            if event.branch_name is not None:
+            if branch_name is not None:
                 branch_dispatch = inv_state.parallel_branches_branch_spans.get(
-                    _branch_dispatch_key(
-                        prefix, event.fan_out_index_chain, event.branch_name_chain, event.branch_name
-                    )
+                    _branch_dispatch_key(prefix, fan_out_index_chain, branch_name_chain, branch_name)
                 )
                 if branch_dispatch is not None:
                     return set_span_in_context(branch_dispatch.span)
-            if event.fan_out_index is not None:
+            if fan_out_index is not None:
                 # Detached roots keep the top-level routing key shape (detached
                 # generalization is out of scope).
-                root = inv_state.detached_roots.get(prefix + (str(event.fan_out_index),))
+                root = inv_state.detached_roots.get(prefix + (str(fan_out_index),))
                 if root is not None:
                     return set_span_in_context(root.span)
             if fi_axis is not None:
                 instance_dispatch = inv_state.fan_out_instance_spans.get(
-                    _dispatch_key(prefix, event.fan_out_index_chain, event.branch_name_chain)
+                    _dispatch_key(prefix, fan_out_index_chain, branch_name_chain)
                 )
                 if instance_dispatch is not None:
                     return set_span_in_context(instance_dispatch.span)
         # 1b. Detached subgraph root at any matching prefix wins
         #     (highest precedence — events inside a detached subtree
         #     always parent under the detached root, never bleed up).
-        for prefix_len in range(len(event.namespace) - 1, -1, -1):
-            prefix = event.namespace[:prefix_len]
+        for prefix_len in range(len(namespace) - 1, -1, -1):
+            prefix = namespace[:prefix_len]
             root = inv_state.detached_roots.get(prefix)
             if root is not None:
                 return set_span_in_context(root.span)
         # 2. Innermost synthetic subgraph span at any prefix.
-        for prefix_len in range(len(event.namespace) - 1, 0, -1):
-            prefix = event.namespace[:prefix_len]
+        for prefix_len in range(len(namespace) - 1, 0, -1):
+            prefix = namespace[:prefix_len]
             sg = inv_state.subgraph_spans.get(prefix)
             if sg is not None:
                 return set_span_in_context(sg.span)

@@ -381,6 +381,20 @@ class CallsLlmSpec(_AllowExtras):
     config: RuntimeConfigSpec | None = None
 
 
+class CallsLlmFromWrapperSpec(_AllowExtras):
+    """Wrapper-issued (orphan) LLM call, proposal 0084 / conformance-adapter
+    §5.1: the harness wraps the node in a middleware that issues exactly one
+    mock-provider ``complete()`` in the named ``phase`` (``pre`` before the
+    body, ``post`` after) and discards the response, so the call has no open
+    calling-node span and exercises the observability §5.5 orphan fallback.
+    Additive alongside the node's primary directive (the ``guard`` node in
+    fixtures 133 / 134 carries ``update`` as its primary), so this is NOT a
+    primary field."""
+
+    phase: Literal["pre", "post"] = "pre"
+    messages: list[dict[str, Any]] | None = None
+
+
 class MockToolSpec(_AllowExtras):
     """The mock tool a ``calls_tool`` node runs inside the
     instrumentation scope: ``returns`` (a result -> ToolCallEvent) XOR
@@ -501,6 +515,9 @@ class NodeSpec(_ForbidExtras):
     calls_embed: CallsEmbedSpec | None = None
     calls_rerank: CallsRerankSpec | None = None
     calls_tool: CallsToolSpec | None = None
+    # Proposal 0084 orphan-call primitive: a wrapper-issued side call, ADDITIVE
+    # to the node's primary directive (not in _PRIMARY_FIELDS below).
+    calls_llm_from_wrapper: CallsLlmFromWrapperSpec | None = None
 
     # Companions — additive.
     # ``renders_prompt`` (proposal 0064 / 0083, fixtures 064 / 126-129):
