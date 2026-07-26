@@ -2580,6 +2580,11 @@ async def _run_fixture_132_case(case: Mapping[str, Any], spec: Mapping[str, Any]
             async with asyncio.timeout(5):
                 await gate.wait()
         except TimeoutError:
+            # Best-effort rendezvous: if fewer asks run concurrently than
+            # total_asks the gate never fires, so the timeout releases this ask
+            # rather than deadlocking. Interleaving is then not forced, but the
+            # test still runs (and total_asks > 0 is asserted above, so the gate
+            # cannot degenerate silently).
             pass
         response = await provider.complete(list(messages_in))
         return {stores_in: response.message.content or ""}
