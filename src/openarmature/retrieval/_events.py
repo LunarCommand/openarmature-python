@@ -31,8 +31,10 @@ from openarmature.llm.errors import LlmProviderError
 from openarmature.observability.correlation import (
     current_attempt_index,
     current_branch_name,
+    current_branch_name_chain,
     current_correlation_id,
     current_fan_out_index,
+    current_fan_out_index_chain,
     current_invocation_id,
     current_namespace_prefix,
 )
@@ -74,6 +76,9 @@ def build_embedding_event(
         attempt_index=current_attempt_index(),
         fan_out_index=current_fan_out_index(),
         branch_name=current_branch_name(),
+        # Proposal 0084: enclosing fan-out / branch lineage chains.
+        fan_out_index_chain=current_fan_out_index_chain(),
+        branch_name_chain=current_branch_name_chain(),
         provider=provider,
         model=model,
         response_id=response.response_id,
@@ -130,6 +135,9 @@ def build_embedding_failed_event(
         attempt_index=current_attempt_index(),
         fan_out_index=current_fan_out_index(),
         branch_name=current_branch_name(),
+        # Proposal 0084: enclosing fan-out / branch lineage chains.
+        fan_out_index_chain=current_fan_out_index_chain(),
+        branch_name_chain=current_branch_name_chain(),
         provider=provider,
         model=model,
         latency_ms=latency_ms,
@@ -182,6 +190,9 @@ def build_rerank_event(
         attempt_index=current_attempt_index(),
         fan_out_index=current_fan_out_index(),
         branch_name=current_branch_name(),
+        # Proposal 0084: enclosing fan-out / branch lineage chains.
+        fan_out_index_chain=current_fan_out_index_chain(),
+        branch_name_chain=current_branch_name_chain(),
         provider=provider,
         model=model,
         response_id=response.response_id,
@@ -241,6 +252,9 @@ def build_rerank_failed_event(
         attempt_index=current_attempt_index(),
         fan_out_index=current_fan_out_index(),
         branch_name=current_branch_name(),
+        # Proposal 0084: enclosing fan-out / branch lineage chains.
+        fan_out_index_chain=current_fan_out_index_chain(),
+        branch_name_chain=current_branch_name_chain(),
         provider=provider,
         model=model,
         latency_ms=latency_ms,

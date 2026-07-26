@@ -2980,10 +2980,26 @@ async def test_metadata_augmentation_outside_invocation_is_silent() -> None:
     # invocation updates the ContextVar but emits no augmentation event
     # (no dispatch is in scope). The observer never sees an event so
     # no observer-side error surfaces.
-    from openarmature.observability.metadata import set_invocation_metadata
+    from openarmature.observability.metadata import (
+        _reset_invocation_metadata,
+        _set_invocation_metadata,
+        get_invocation_metadata,
+        set_invocation_metadata,
+    )
 
-    # No graph, no observer attached — should not raise.
-    set_invocation_metadata(local_only="value")
+    # Reset-guard: this is a sync-reachable module ContextVar mutation. Snapshot
+    # + restore so the value cannot reach a later-executed test's context (a
+    # unit-before-conformance run would otherwise leave it visible to fixture
+    # 046, which asserts an empty get_invocation_metadata() outside any
+    # invocation).
+    token = _set_invocation_metadata(get_invocation_metadata())
+    try:
+        # No graph, no observer attached -- should not raise, and still updates
+        # the ContextVar.
+        set_invocation_metadata(local_only="value")
+        assert get_invocation_metadata().get("local_only") == "value"
+    finally:
+        _reset_invocation_metadata(token)
 
 
 async def test_metadata_augmentation_no_op_when_no_entries() -> None:

@@ -45,8 +45,10 @@ from openarmature.observability.correlation import (
     _set_terminal_attempt_index,
     current_attempt_index,
     current_branch_name,
+    current_branch_name_chain,
     current_dispatch,
     current_fan_out_index,
+    current_fan_out_index_chain,
     current_namespace_prefix,
 )
 
@@ -233,6 +235,9 @@ class FailureIsolationMiddleware:
                 attempt_index=attempt_index,
                 fan_out_index=current_fan_out_index(),
                 branch_name=current_branch_name(),
+                # Proposal 0084: enclosing fan-out / branch lineage chains.
+                fan_out_index_chain=current_fan_out_index_chain(),
+                branch_name_chain=current_branch_name_chain(),
                 pre_state=state,
                 post_state=degraded,
                 caught_exception=classification,

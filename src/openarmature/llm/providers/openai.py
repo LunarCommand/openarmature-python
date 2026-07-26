@@ -72,9 +72,11 @@ from openarmature.graph.events import (
 from openarmature.observability.correlation import (
     current_attempt_index,
     current_branch_name,
+    current_branch_name_chain,
     current_correlation_id,
     current_dispatch,
     current_fan_out_index,
+    current_fan_out_index_chain,
     current_invocation_id,
     current_namespace_prefix,
 )
@@ -702,6 +704,9 @@ class OpenAIProvider:
             attempt_index=current_attempt_index(),
             fan_out_index=current_fan_out_index(),
             branch_name=current_branch_name(),
+            # Proposal 0084: enclosing fan-out / branch lineage chains.
+            fan_out_index_chain=current_fan_out_index_chain(),
+            branch_name_chain=current_branch_name_chain(),
             provider=self._genai_system,
             model=self.model,
             response_id=response.response_id,
@@ -792,6 +797,9 @@ class OpenAIProvider:
             attempt_index=current_attempt_index(),
             fan_out_index=current_fan_out_index(),
             branch_name=current_branch_name(),
+            # Proposal 0084: enclosing fan-out / branch lineage chains.
+            fan_out_index_chain=current_fan_out_index_chain(),
+            branch_name_chain=current_branch_name_chain(),
             provider=self._genai_system,
             model=self.model,
             latency_ms=latency_ms,
@@ -857,6 +865,9 @@ class OpenAIProvider:
             "attempt_index": current_attempt_index(),
             "fan_out_index": current_fan_out_index(),
             "branch_name": current_branch_name(),
+            # Proposal 0084: enclosing fan-out / branch lineage chains.
+            "fan_out_index_chain": current_fan_out_index_chain(),
+            "branch_name_chain": current_branch_name_chain(),
             "provider": self._genai_system,
             "model": self.model,
             "call_id": call_id,

@@ -586,9 +586,22 @@ async def test_metadata_augmentation_outside_invocation_is_silent() -> None:
     # observer event — set_invocation_metadata is a Context-only
     # mutation. The Langfuse handler is never called in this path so
     # no client / no Trace state is created.
-    from openarmature.observability.metadata import set_invocation_metadata
+    from openarmature.observability.metadata import (
+        _reset_invocation_metadata,
+        _set_invocation_metadata,
+        get_invocation_metadata,
+        set_invocation_metadata,
+    )
 
-    set_invocation_metadata(local_key="local_value")
+    # Reset-guard: snapshot + restore the module ContextVar so local_value does
+    # not leak into later tests (conformance 046 expects an empty
+    # get_invocation_metadata() outside any invocation).
+    token = _set_invocation_metadata(get_invocation_metadata())
+    try:
+        set_invocation_metadata(local_key="local_value")
+        assert get_invocation_metadata().get("local_key") == "local_value"
+    finally:
+        _reset_invocation_metadata(token)
 
 
 async def test_metadata_augmentation_no_op_when_no_entries() -> None:
