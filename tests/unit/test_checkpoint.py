@@ -287,7 +287,10 @@ def test_restore_fan_out_progress_keys_by_persisted_lineage() -> None:
         fan_out_node_name="inner_process",
         namespace=("outer_process",),
         instance_count=2,
-        instances=(FanOutInstanceProgress(state="completed", result=1),),
+        instances=(
+            FanOutInstanceProgress(state="completed", result=1),
+            FanOutInstanceProgress(state="not_started"),
+        ),
     )
     restored = _restore_fan_out_progress_state([lineaged, legacy])
     assert (("outer_process",), "inner_process", (1,)) in restored
