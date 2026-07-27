@@ -30,7 +30,7 @@ Fixture-by-fixture status:
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Any, cast
 
@@ -42,6 +42,8 @@ from openarmature.checkpoint import (
     CheckpointError,
     CheckpointNotFound,
     CheckpointRecord,
+    CheckpointRecordInvalid,
+    EnclosingFanOutInstance,
     FanOutInstanceProgress,
     FanOutInternalSaveBatching,
     FanOutProgress,
@@ -75,7 +77,7 @@ CONFORMANCE_DIR = (
 # 070 (crash-injection after_node resume, proposal 0070 coverage, spec
 # v0.63.1) is a crash/resume fixture this runner owns, alongside 067.
 _CHECKPOINT_FIXTURE_NUMBERS: frozenset[int] = frozenset(
-    (set(range(24, 32)) - {28}) | set(range(48, 57)) | {67, 69, 70}
+    (set(range(24, 32)) - {28}) | set(range(48, 57)) | {67, 69, 70, 76}
 )
 
 # Fixtures that need resume-aware test seams the conformance adapter
@@ -469,8 +471,202 @@ def _strip_abort_directive(spec: Mapping[str, Any]) -> Mapping[str, Any]:
     return {**spec, "nodes": new_nodes}
 
 
+def _build_seeded_fan_out_progress(fp: Mapping[str, Any]) -> FanOutProgress:
+    """Build one FanOutProgress entry (incl. proposal-0085
+    enclosing_fan_out_lineage) from a fixture ``seeded_record`` block."""
+    instances = tuple(
+        FanOutInstanceProgress(
+            state=inst["state"],
+            result=inst.get("result"),
+            result_is_error=inst.get("result_is_error", False),
+        )
+        for inst in cast("list[Mapping[str, Any]]", fp.get("instances", []))
+    )
+    lineage = tuple(
+        EnclosingFanOutInstance(
+            namespace=tuple(e.get("namespace", [])),
+            fan_out_node_name=e["fan_out_node_name"],
+            fan_out_index=e["fan_out_index"],
+        )
+        for e in cast("list[Mapping[str, Any]]", fp.get("enclosing_fan_out_lineage", []))
+    )
+    return FanOutProgress(
+        fan_out_node_name=fp["fan_out_node_name"],
+        namespace=tuple(fp.get("namespace", [])),
+        instance_count=fp["instance_count"],
+        instances=instances,
+        enclosing_fan_out_lineage=lineage,
+    )
+
+
+def _build_seeded_record(seeded: Mapping[str, Any], invocation_id: str) -> CheckpointRecord:
+    """Construct a CheckpointRecord from a fixture ``seeded_record`` block
+    (the mechanism the migration suite uses, extended for proposal 0085's
+    lineage-qualified fan_out_progress). ``namespace`` node-name paths are
+    used verbatim: the runtime namespace_prefix for a fan-out equals its
+    node-name path, so a seeded entry positively matches the re-entering
+    execution's key without a mapping step."""
+    positions = tuple(
+        NodePosition(
+            namespace=tuple(p.get("namespace", [])),
+            node_name=p["node_name"],
+            step=p["step"],
+            attempt_index=p.get("attempt_index", 0),
+            fan_out_index=p.get("fan_out_index"),
+        )
+        for p in cast("list[Mapping[str, Any]]", seeded.get("completed_positions", []))
+    )
+    fan_out_progress = tuple(
+        _build_seeded_fan_out_progress(fp)
+        for fp in cast("list[Mapping[str, Any]]", seeded.get("fan_out_progress", []))
+    )
+    return CheckpointRecord(
+        invocation_id=invocation_id,
+        correlation_id=seeded.get("correlation_id", "seeded-corr"),
+        state=dict(seeded.get("state", {})),
+        completed_positions=positions,
+        parent_states=tuple(seeded.get("parent_states", [])),
+        last_saved_at=0.0,
+        schema_version=seeded.get("schema_version", ""),
+        fan_out_progress=fan_out_progress,
+    )
+
+
+_KNOWN_NESTED_RESUME_INVARIANTS = frozenset(
+    {
+        "inner_fan_out_progress_matched_per_enclosing_lineage",
+        "each_outer_instance_skips_only_its_own_completed_inner_instances",
+        "no_inner_instance_skipped_across_enclosing_instances",
+        "legacy_unlineaged_entry_not_applied_to_nested_fan_out",
+        "all_inner_instances_re_run_in_every_outer_instance",
+    }
+)
+
+
+def _assert_nested_resume_invariants(
+    seeded: Mapping[str, Any],
+    recorded_values: Sequence[Any],
+    invariants: Mapping[str, Any],
+) -> None:
+    """Assert fixture 076's nested-fan-out resume invariants (proposal 0085,
+    conformance-adapter §5.9 fixture-specific predicates) against the set of
+    inner-leaf source values that actually RE-RAN on resume.
+
+    The leaf's source values are globally unique, so the recorded set tells a
+    correct per-lineage skip from a full re-run (final state alone cannot,
+    since both yield the same accumulator). Expectations are derived from the
+    seeded record: an inner entry with a matching lineage skips its
+    ``completed`` positions and re-runs the rest; a legacy (no-lineage) entry
+    matches nothing, so every inner instance re-runs. Fails loud on an
+    unmapped invariant name."""
+    unknown = set(invariants) - _KNOWN_NESTED_RESUME_INVARIANTS
+    assert not unknown, f"unhandled nested-resume invariant(s): {sorted(unknown)}"
+
+    recorded = {v for v in recorded_values}
+    outer_items = cast("list[list[int]]", seeded["state"]["outer_items"])
+    all_inner = {v for sub in outer_items for v in sub}
+    nested_entries = [
+        fp for fp in cast("list[Mapping[str, Any]]", seeded["fan_out_progress"]) if fp.get("namespace")
+    ]
+    lineaged = [fp for fp in nested_entries if fp.get("enclosing_fan_out_lineage")]
+
+    # Per-lineage expected re-run / skip: for each lineage-qualified inner
+    # entry, its enclosing instance index selects the inner items list; a
+    # ``completed`` position is skipped, everything else re-runs.
+    expected_rerun: set[Any] = set()
+    expected_skipped: set[Any] = set()
+    for fp in lineaged:
+        outer_idx = int(fp["enclosing_fan_out_lineage"][-1]["fan_out_index"])
+        items: list[int] = outer_items[outer_idx]
+        for i, inst in enumerate(cast("list[Mapping[str, Any]]", fp["instances"])):
+            target = expected_skipped if inst["state"] == "completed" else expected_rerun
+            target.add(items[i])
+
+    if invariants.get("inner_fan_out_progress_matched_per_enclosing_lineage"):
+        keys = {(tuple(fp["namespace"]), fp["fan_out_node_name"]) for fp in lineaged}
+        assert len(lineaged) >= 2 and len(keys) < len(lineaged), (
+            "expected >= 2 inner entries sharing (namespace, fan_out_node_name) with distinct lineage"
+        )
+        assert recorded == expected_rerun, (
+            f"inner entries not matched per lineage: re-ran {sorted(recorded)}, "
+            f"expected {sorted(expected_rerun)} (a collapsed/mismatched entry would differ)"
+        )
+    if invariants.get("each_outer_instance_skips_only_its_own_completed_inner_instances"):
+        assert recorded.isdisjoint(expected_skipped), (
+            f"an inner instance completed under its own lineage was re-run: "
+            f"re-ran {sorted(recorded)}, should have skipped {sorted(expected_skipped)}"
+        )
+    if invariants.get("no_inner_instance_skipped_across_enclosing_instances"):
+        assert expected_rerun <= recorded, (
+            f"an inner instance was mis-skipped across enclosing instances: "
+            f"expected re-run {sorted(expected_rerun)}, actually re-ran {sorted(recorded)}"
+        )
+    if invariants.get("legacy_unlineaged_entry_not_applied_to_nested_fan_out"):
+        legacy_completed = {
+            inst["result"]
+            for fp in nested_entries
+            if not fp.get("enclosing_fan_out_lineage")
+            for inst in cast("list[Mapping[str, Any]]", fp["instances"])
+            if inst["state"] == "completed"
+        }
+        assert legacy_completed <= recorded, (
+            f"a legacy (no-lineage) entry's completed instances were applied (skipped) to a nested "
+            f"fan-out: its completed results {sorted(legacy_completed)} were not all re-run "
+            f"(re-ran {sorted(recorded)})"
+        )
+    if invariants.get("all_inner_instances_re_run_in_every_outer_instance"):
+        assert recorded == all_inner, (
+            f"expected a full re-run of every inner instance {sorted(all_inner)}, "
+            f"but re-ran {sorted(recorded)}"
+        )
+
+
+async def _run_seeded_resume_case(spec: Mapping[str, Any], *, top_level: Mapping[str, Any]) -> None:
+    """Drive a seeded-record resume case (fixture 076, proposal 0085).
+
+    Seeds a precise mid-flight CheckpointRecord (carrying lineage-qualified
+    fan_out_progress entries) rather than crash-producing one, then resumes
+    and asserts the nested-fan-out consume-side contract: lineage-matched
+    skip, no mis-skip across enclosing instances, exactly-once accumulator."""
+    leaf_values: list[Any] = []
+    subgraphs = _build_subgraphs_for(spec, top_level, leaf_value_recorder=leaf_values)
+    built = build_graph(spec, subgraphs=subgraphs, trace=[], leaf_value_recorder=leaf_values)
+    checkpointer = InMemoryCheckpointer()
+    built.builder.with_checkpointer(cast("Checkpointer", checkpointer))
+    compiled = built.builder.compile()
+
+    seeded_block = cast("Mapping[str, Any]", spec["seeded_record"])
+    invocation_id = f"seeded-{spec.get('name', 'case')}"
+    await checkpointer.save(invocation_id, _build_seeded_record(seeded_block, invocation_id))
+
+    resume_block = cast("Mapping[str, Any]", spec.get("resume") or {})
+    if not resume_block.get("from_seeded_record"):
+        raise AssertionError("seeded_record present but resume.from_seeded_record not set")
+
+    initial_state = built.initial_state(spec.get("initial_state", {}))
+    # No first run: leaf_values accrues only the resume run's re-run values.
+    leaf_values.clear()
+    final = await compiled.invoke(initial_state, resume_invocation=invocation_id)
+
+    resume_expected = cast("Mapping[str, Any]", resume_block.get("expected") or {})
+    if "final_state" in resume_expected:
+        _assert_state_matches(final, cast("Mapping[str, Any]", resume_expected["final_state"]))
+
+    invariants_block: dict[str, Any] = {}
+    invariants_block.update(cast("dict[str, Any]", resume_block.get("invariants") or {}))
+    invariants_block.update(cast("dict[str, Any]", resume_expected.get("invariants") or {}))
+    if invariants_block:
+        _assert_nested_resume_invariants(seeded_block, leaf_values, invariants_block)
+
+
 async def _run_one_case(spec: Mapping[str, Any], *, top_level: Mapping[str, Any]) -> None:
     """Run one fixture or one case from a cases-shape fixture."""
+    # A seeded-record case (fixture 076, proposal 0085 nested-fan-out resume)
+    # does not crash-produce its record: it seeds a precise mid-flight record
+    # and drives the RESUME consume-side. Route it to the dedicated runner.
+    if "seeded_record" in spec:
+        await _run_seeded_resume_case(spec, top_level=top_level)
+        return
     capturing = _build_capturing(spec)
     # Shared recorders so flaky_per_index nodes inside subgraphs feed
     # the same per-instance attempt table the resume assertions consult.
@@ -853,6 +1049,7 @@ def _build_subgraphs_for(
     *,
     flaky_per_index_recorders: dict[str, dict[int, list[int]]] | None = None,
     instance_execution_recorders: dict[str, dict[int, list[int]]] | None = None,
+    leaf_value_recorder: list[Any] | None = None,
 ) -> dict[str, Any]:
     """Build subgraphs from either the case's own ``subgraph`` /
     ``subgraphs`` block or the cases-fixture's top-level shared
@@ -862,12 +1059,15 @@ def _build_subgraphs_for(
     ``flaky_per_index_recorders`` and ``instance_execution_recorders``
     (when supplied) thread through to inner-subgraph build so per-instance
     bodies inside subgraphs populate the recorder maps the resume
-    assertions read.
+    assertions read. ``leaf_value_recorder`` (fixture 076) records the
+    source values that inner-leaf ``update_from_field`` bodies read, so the
+    resume driver can tell which inner instances re-ran vs. skipped.
     """
     return _build_subgraphs(
         {**dict(top_level), **dict(spec)},
         flaky_per_index_recorders=flaky_per_index_recorders,
         instance_execution_recorders=instance_execution_recorders,
+        leaf_value_recorder=leaf_value_recorder,
     )
 
 
@@ -876,6 +1076,7 @@ def _build_subgraphs(
     *,
     flaky_per_index_recorders: dict[str, dict[int, list[int]]] | None = None,
     instance_execution_recorders: dict[str, dict[int, list[int]]] | None = None,
+    leaf_value_recorder: list[Any] | None = None,
 ) -> dict[str, Any]:
     """Build any subgraphs (`subgraph:` or `subgraphs:`) the fixture
     declares. Returns a registry the adapter consumes by name.
@@ -895,13 +1096,19 @@ def _build_subgraphs(
         for k, v in cast("dict[str, Any]", spec["subgraphs"]).items():
             subgraph_specs[k] = v
     compiled_subgraphs: dict[str, Any] = {}
+    # Build in declaration order, threading the registry built so far so a
+    # subgraph may reference an earlier one (fixture 076: inner_runner's
+    # fan-out targets the leaf_scorer subgraph). YAML preserves insertion
+    # order, so an inner subgraph declared before its user resolves.
     for name, sub_spec in subgraph_specs.items():
         sub_trace: list[str] = []
         sub_built = build_graph(
             sub_spec,
+            subgraphs=compiled_subgraphs,
             trace=sub_trace,
             flaky_per_index_attempt_recorders=flaky_per_index_recorders,
             instance_execution_recorders=instance_execution_recorders,
+            leaf_value_recorder=leaf_value_recorder,
         )
         compiled_subgraphs[name] = sub_built.builder.compile()
     return compiled_subgraphs
@@ -1297,3 +1504,225 @@ async def test_capturing_checkpointer_aborts_after_node() -> None:
     )
     await cp_other.save("inv", other_record)
     assert cp_other._aborted is False  # noqa: SLF001 — test driver intentional
+
+
+# ---------------------------------------------------------------------------
+# Proposal 0085 nested-resume coverage the fixture-076 shape leaves out:
+# per-lineage count-drift and collect-mode error-entry roll-forward. Surfaced
+# by the adversarial review of 0085 (both are correct on inspection + verified
+# here; the fixture's symmetric fail_fast shape never exercises these branches).
+# ---------------------------------------------------------------------------
+
+
+def _nested_subgraphs(*, inner_error_policy: str) -> dict[str, Any]:
+    """A 076-shaped two-level fan-out subgraph set, with the inner fan-out's
+    error_policy configurable so the collect-mode error path can be driven."""
+    inner_state: dict[str, Any] = {
+        "inner_items": {"type": "list<int>", "default": []},
+        "inner_results": {"type": "list<int>", "reducer": "append", "default": []},
+    }
+    inner_fan_out: dict[str, Any] = {
+        "subgraph": "leaf_scorer",
+        "items_field": "inner_items",
+        "item_field": "input",
+        "collect_field": "out",
+        "target_field": "inner_results",
+        "error_policy": inner_error_policy,
+        "concurrent_mode": "serial",
+    }
+    if inner_error_policy == "collect":
+        inner_state["inner_errors"] = {"type": "list<error_entry>", "default": []}
+        inner_fan_out["errors_field"] = "inner_errors"
+    return {
+        "leaf_scorer": {
+            "state": {
+                "fields": {"input": {"type": "int", "default": 0}, "out": {"type": "int", "default": 0}}
+            },
+            "entry": "score",
+            "nodes": {"score": {"update_from_field": {"out": "input"}}},
+            "edges": [{"from": "score", "to": "END"}],
+        },
+        "inner_runner": {
+            "state": {"fields": inner_state},
+            "entry": "inner_process",
+            "nodes": {"inner_process": {"fan_out": inner_fan_out}},
+            "edges": [{"from": "inner_process", "to": "END"}],
+        },
+    }
+
+
+def _nested_outer_case(outer_items: list[list[int]]) -> dict[str, Any]:
+    return {
+        "state": {
+            "fields": {
+                "outer_items": {"type": "list<list<int>>", "default": outer_items},
+                "all_results": {"type": "list<list<int>>", "reducer": "append", "default": []},
+            }
+        },
+        "entry": "outer_process",
+        "nodes": {
+            "outer_process": {
+                "fan_out": {
+                    "subgraph": "inner_runner",
+                    "items_field": "outer_items",
+                    "item_field": "inner_items",
+                    "collect_field": "inner_results",
+                    "target_field": "all_results",
+                    "error_policy": "fail_fast",
+                    "concurrent_mode": "concurrent",
+                }
+            }
+        },
+        "edges": [{"from": "outer_process", "to": "END"}],
+        "initial_state": {},
+    }
+
+
+def _outer_in_flight(n: int) -> dict[str, Any]:
+    return {
+        "namespace": [],
+        "fan_out_node_name": "outer_process",
+        "instance_count": n,
+        "enclosing_fan_out_lineage": [],
+        "instances": [{"state": "in_flight"} for _ in range(n)],
+    }
+
+
+def _inner_entry(outer_idx: int, count: int, instances: list[dict[str, Any]]) -> dict[str, Any]:
+    return {
+        "namespace": ["outer_process"],
+        "fan_out_node_name": "inner_process",
+        "instance_count": count,
+        "enclosing_fan_out_lineage": [
+            {"namespace": [], "fan_out_node_name": "outer_process", "fan_out_index": outer_idx}
+        ],
+        "instances": instances,
+    }
+
+
+def _cause_chain(exc: BaseException | None) -> list[BaseException]:
+    out: list[BaseException] = []
+    seen = exc
+    while seen is not None and seen not in out:
+        out.append(seen)
+        seen = seen.__cause__ or seen.__context__
+    return out
+
+
+async def _seed_and_resume(
+    outer_case: Mapping[str, Any],
+    subgraphs_block: Mapping[str, Any],
+    seeded: Mapping[str, Any],
+) -> tuple[Any, list[Any]]:
+    """Build the nested graph, seed the mid-flight record, resume, and return
+    (final_state, inner-leaf source values re-run on resume)."""
+    top_level = {"subgraphs": subgraphs_block}
+    leaf_values: list[Any] = []
+    subgraphs = _build_subgraphs_for(outer_case, top_level, leaf_value_recorder=leaf_values)
+    built = build_graph(outer_case, subgraphs=subgraphs, trace=[], leaf_value_recorder=leaf_values)
+    cp = InMemoryCheckpointer()
+    built.builder.with_checkpointer(cast("Checkpointer", cp))
+    compiled = built.builder.compile()
+    inv = "seeded-cov"
+    await cp.save(inv, _build_seeded_record(seeded, inv))
+    leaf_values.clear()
+    final = await compiled.invoke(built.initial_state({}), resume_invocation=inv)
+    return final, leaf_values
+
+
+async def test_nested_resume_asymmetric_inner_counts_skip_per_lineage() -> None:
+    # Fixture 076 uses symmetric inner counts (both length 3). Here outer-0 has
+    # 2 inner items and outer-1 has 3: each lineage-qualified entry resolves its
+    # OWN instance_count, and resume skips only that entry's completed instances.
+    outer_items = [[1, 2], [4, 5, 6]]
+    seeded = {
+        "state": {"outer_items": outer_items, "all_results": []},
+        "fan_out_progress": [
+            _outer_in_flight(2),
+            _inner_entry(0, 2, [{"state": "completed", "result": 1}, {"state": "not_started"}]),
+            _inner_entry(
+                1,
+                3,
+                [{"state": "completed", "result": 4}, {"state": "not_started"}, {"state": "not_started"}],
+            ),
+        ],
+    }
+    final, leaf_values = await _seed_and_resume(
+        _nested_outer_case(outer_items), _nested_subgraphs(inner_error_policy="fail_fast"), seeded
+    )
+    assert [sorted(sub) for sub in final.all_results] == [[1, 2], [4, 5, 6]]
+    # outer-0 skips inner-0 (=1), re-runs inner-1 (=2); outer-1 skips inner-0 (=4),
+    # re-runs inner-1 (=5) + inner-2 (=6). No cross-skip across the asymmetric counts.
+    assert sorted(leaf_values) == [2, 5, 6]
+
+
+async def test_nested_resume_count_drift_on_matched_entry_raises() -> None:
+    # A POSITIVELY matched inner entry whose saved instance_count no longer equals
+    # the per-enclosing-instance re-resolved count MUST raise
+    # checkpoint_record_invalid (count-drift re-resolved per lineage-qualified entry).
+    outer_items = [[1, 2], [4, 5, 6]]  # outer-0 now resolves to 2 inner items
+    seeded = {
+        "state": {"outer_items": outer_items, "all_results": []},
+        "fan_out_progress": [
+            _outer_in_flight(2),
+            # Stale: saved instance_count=3 but outer-0's items resolve to 2.
+            _inner_entry(
+                0,
+                3,
+                [
+                    {"state": "completed", "result": 1},
+                    {"state": "completed", "result": 2},
+                    {"state": "not_started"},
+                ],
+            ),
+            _inner_entry(
+                1,
+                3,
+                [{"state": "completed", "result": 4}, {"state": "not_started"}, {"state": "not_started"}],
+            ),
+        ],
+    }
+    with pytest.raises((CheckpointError, RuntimeGraphError)) as excinfo:
+        await _seed_and_resume(
+            _nested_outer_case(outer_items), _nested_subgraphs(inner_error_policy="fail_fast"), seeded
+        )
+    # The inner-fan-out drift surfaces wrapped through the outer node; the
+    # count-drift CheckpointRecordInvalid MUST be in the cause chain.
+    assert any(isinstance(e, CheckpointRecordInvalid) for e in _cause_chain(excinfo.value)), (
+        f"expected CheckpointRecordInvalid in the cause chain; got {excinfo.value!r}"
+    )
+
+
+async def test_nested_resume_error_entry_rolls_forward_per_lineage() -> None:
+    # Collect-mode resume (§10.11.2) under a nested lineage: a completed instance
+    # whose contribution is an ERROR (result_is_error=True) is skipped and rolled
+    # forward under ITS OWN enclosing instance only, never crossing to a sibling.
+    outer_items = [[10, 20], [30, 40]]
+    seeded = {
+        "state": {"outer_items": outer_items, "all_results": []},
+        "fan_out_progress": [
+            _outer_in_flight(2),
+            # outer-0: nothing done -> both inner instances re-run (10, 20).
+            _inner_entry(0, 2, [{"state": "not_started"}, {"state": "not_started"}]),
+            # outer-1: inner-0 completed as an ERROR (value 30 -> errors bucket),
+            # inner-1 re-runs (40).
+            _inner_entry(
+                1,
+                2,
+                [
+                    {"state": "completed", "result": {"category": "node_exception"}, "result_is_error": True},
+                    {"state": "not_started"},
+                ],
+            ),
+        ],
+    }
+    final, leaf_values = await _seed_and_resume(
+        _nested_outer_case(outer_items), _nested_subgraphs(inner_error_policy="collect"), seeded
+    )
+    # The errored inner-0 under outer-1 (value 30) is SKIPPED (rolled forward as an
+    # error), never re-run, and never crosses into outer-0. outer-0 re-runs 10, 20;
+    # outer-1 re-runs only its non-errored inner-1 (40).
+    assert sorted(leaf_values) == [10, 20, 40]
+    assert 30 not in leaf_values
+    # outer-0 collects [10, 20]; outer-1 collects only the success value [40].
+    assert [sorted(sub) for sub in final.all_results] == [[10, 20], [40]]

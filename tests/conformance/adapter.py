@@ -288,11 +288,19 @@ def _make_update_from_field_fn(
     node_name: str,
     update: Mapping[str, Any],
     trace: list[str],
+    value_recorder: list[Any] | None = None,
 ) -> Callable[[Any], Awaitable[Mapping[str, Any]]]:
     """`update_from_field` test seam — assigns ``state.<source> * multiplier``
     to ``target``. The fixture format is ``{<target>: <source>, multiplier: N}``;
     e.g. ``{result: x, multiplier: 2}`` means ``result = state.x * 2``.
-    Used by the doubler / scorer subgraphs in the fan-out fixtures."""
+    Used by the doubler / scorer subgraphs in the fan-out fixtures.
+
+    ``value_recorder`` (optional): when supplied, each execution appends the
+    source value it read to the list. The nested-fan-out resume fixture (076)
+    uses this to observe which inner-leaf instances actually re-ran vs. were
+    skipped on resume — the leaf's source values are globally unique, so the
+    recorded set distinguishes a correct per-lineage skip from a full re-run
+    (final state alone cannot, since both yield the same accumulator)."""
     cfg = dict(update)
     multiplier = int(cfg.pop("multiplier", 1))
     # The remaining single key→value pair is target_field → source_field.
@@ -306,6 +314,8 @@ def _make_update_from_field_fn(
     async def fn(state: Any) -> Mapping[str, Any]:
         trace.append(node_name)
         source_value = getattr(state, source_field)
+        if value_recorder is not None:
+            value_recorder.append(source_value)
         return {target_field: source_value * multiplier}
 
     return fn
@@ -722,6 +732,7 @@ def build_graph(
     parallel_branches_branch_middleware: Mapping[str, Mapping[str, Sequence[Any]]] | None = None,
     flaky_per_index_attempt_recorders: dict[str, dict[int, list[int]]] | None = None,
     instance_execution_recorders: dict[str, dict[int, list[int]]] | None = None,
+    leaf_value_recorder: list[Any] | None = None,
 ) -> BuiltGraph:
     """Translate a graph-shaped fixture block into a `BuiltGraph`.
 
@@ -818,7 +829,12 @@ def build_graph(
         elif "update_pure" in node_spec:
             body = _make_pure_update_fn(node_name, node_spec["update_pure"], trace)
         elif "update_from_field" in node_spec:
-            body = _make_update_from_field_fn(node_name, node_spec["update_from_field"], trace)
+            body = _make_update_from_field_fn(
+                node_name,
+                node_spec["update_from_field"],
+                trace,
+                value_recorder=leaf_value_recorder,
+            )
         else:
             raise ValueError(
                 f"node {node_name!r} has no recognized directive "

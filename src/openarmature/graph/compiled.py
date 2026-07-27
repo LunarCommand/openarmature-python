@@ -349,15 +349,18 @@ def _project_fan_out_progress(
     byte-identically, which matters for backends that hash records.
     """
     out: list[FanOutProgress] = []
-    # The key's third element is the enclosing fan-out instance lineage; it is
-    # NOT projected onto the record (top-level / subgraph-nested fan-outs have an
-    # empty lineage, and nested-fan-out resume is a tracked limitation). One
-    # consequence: a fan-out nested inside an outer fan-out instance emits one
-    # record PER outer instance, all sharing (namespace, fan_out_node_name);
-    # _restore_fan_out_progress_state is last-wins on that collision (the nested
-    # fan-out re-runs on resume regardless). Sorting includes the lineage so
-    # those same-namespace entries still order deterministically (preserving the
-    # byte-identical-record guarantee above).
+    # The key's third element is the enclosing fan-out instance lineage (the flat
+    # non-None fan_out_index chain). The RESTORE consume-side keys by the record's
+    # enclosing_fan_out_lineage (proposal 0085), but this WRITE side does not yet
+    # emit it: reconstructing the rich {namespace, fan_out_node_name, fan_out_index}
+    # per level needs more than the flat index tuple the key carries, so it is a
+    # tracked follow-up. Consequence: a fan-out nested inside an outer instance
+    # emits one entry PER outer instance, all sharing (namespace, fan_out_node_name)
+    # with an empty lineage; on resume those empty-lineage entries never match a
+    # non-empty re-entering lineage, so the nested fan-out re-runs from scratch --
+    # the safe floor (§10.11 no-mis-skip), not the correct-skip a lineage-bearing
+    # record achieves. Sorting includes the lineage so those same-namespace entries
+    # still order deterministically (preserving the byte-identical-record guarantee).
     for (namespace, name, _lineage), exec_state in sorted(state_dict.items()):
         instances = tuple(
             FanOutInstanceProgress(
@@ -415,23 +418,27 @@ def _restore_fan_out_progress_state(
                     completed_inner_positions=list(inst.completed_inner_positions),
                 )
             )
-        # The enclosing fan-out instance lineage defaults to empty: the saved
-        # record carries no lineage, which is correct for top-level and
-        # subgraph/branch-nested fan-outs (all empty). A fan-out nested inside an
-        # outer fan-out instance does not round-trip its per-outer-instance
-        # progress through the current record format (it would need the lineage
-        # on the record): its in-memory keys carry the lineage, so the restored
-        # empty-lineage entry never matches. The consequence only bites when
-        # resume actually RE-ENTERS the nested fan-out -- i.e. its outer instance
-        # was in-flight at the save. A completed outer instance rolls forward and
-        # never re-runs its inner fan-out, so the missing inner entry is moot
-        # there. When the inner fan-out does re-enter, it re-runs from scratch
-        # rather than skipping its completed inner instances. (Before the lineage
-        # fix it would instead skip, rolling forward the collapsed/wrong shared
-        # entry -- so re-running is the safer of two never-correct behaviors, and
-        # matches the spec's inner-subgraph re-entry model.) A full fix needs the
-        # lineage on the record; tracked separately.
-        key = (fp.namespace, fp.fan_out_node_name, ())
+        # Key by the persisted enclosing fan-out instance lineage (proposal
+        # 0085 consume-side). The in-memory tracking key's third element is the
+        # non-None fan_out_index chain of the enclosing fan-out instances (see
+        # FanOutNode.run_with_context and _find_innermost_fan_out_instance_state),
+        # so project the record's enclosing_fan_out_lineage down to that same
+        # flat index tuple. This realizes §10.11's no-mis-skip invariant + the
+        # exactly-once extension for free via the existing keyed re-entry:
+        #   - a record entry with a lineage matching the re-entering execution's
+        #     lineage element-for-element is a POSITIVE match, so its completed
+        #     instances are skipped and rolled forward correctly;
+        #   - an empty saved lineage (a flat / top-level / subgraph-nested
+        #     fan-out, OR a legacy pre-0085 record) keys to (), which a non-empty
+        #     re-entering lineage never matches -- the re-entry misses and re-runs
+        #     from scratch rather than applying a different enclosing instance's
+        #     skips (correctness-preserving per §10.7). Empty positively matches
+        #     empty, so flat records resume exactly as before this field existed.
+        # The crash-PRODUCED write side (projecting the rich lineage onto a real
+        # crash record) is a tracked follow-up; until then a real nested-fan-out
+        # crash resumes at the safe re-run floor -- see _project_fan_out_progress.
+        lineage = tuple(e.fan_out_index for e in fp.enclosing_fan_out_lineage)
+        key = (fp.namespace, fp.fan_out_node_name, lineage)
         out[key] = _FanOutExecutionState(
             fan_out_node_name=fp.fan_out_node_name,
             namespace=fp.namespace,

@@ -45,6 +45,7 @@ from ..protocol import (
     CheckpointFilter,
     CheckpointRecord,
     CheckpointSummary,
+    EnclosingFanOutInstance,
     FanOutInstanceProgress,
     FanOutProgress,
     NodePosition,
@@ -110,6 +111,17 @@ def _fan_out_progress_to_dict(fp: FanOutProgress) -> dict[str, Any]:
             }
             for inst in fp.instances
         ],
+        # Per proposal 0085: the enclosing fan-out instance lineage. Absent /
+        # empty for a non-nested fan-out; a load path treats a missing key as
+        # empty for backward compat with pre-0085 records.
+        "enclosing_fan_out_lineage": [
+            {
+                "namespace": list(e.namespace),
+                "fan_out_node_name": e.fan_out_node_name,
+                "fan_out_index": e.fan_out_index,
+            }
+            for e in fp.enclosing_fan_out_lineage
+        ],
     }
 
 
@@ -162,11 +174,23 @@ def _fan_out_progress_from_dict(d: dict[str, Any], invocation_id: str) -> FanOut
                 completed_inner_positions=inner_positions,
             )
         )
+    # Per proposal 0085: rebuild the enclosing fan-out instance lineage.
+    # Backward-compat: a pre-0085 record omits the key, which restores to an
+    # empty lineage (a flat / non-nested fan-out, resumed as before).
+    enclosing_fan_out_lineage = tuple(
+        EnclosingFanOutInstance(
+            namespace=tuple(e["namespace"]),
+            fan_out_node_name=e["fan_out_node_name"],
+            fan_out_index=e["fan_out_index"],
+        )
+        for e in cast("list[dict[str, Any]]", d.get("enclosing_fan_out_lineage", []))
+    )
     return FanOutProgress(
         fan_out_node_name=d["fan_out_node_name"],
         namespace=tuple(d["namespace"]),
         instance_count=d["instance_count"],
         instances=tuple(instances),
+        enclosing_fan_out_lineage=enclosing_fan_out_lineage,
     )
 
 
