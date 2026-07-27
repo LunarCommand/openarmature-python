@@ -1681,6 +1681,8 @@ async def _run_langfuse_134_case2(case: Mapping[str, Any]) -> None:
             async with asyncio.timeout(5):
                 await gate.wait()
         except TimeoutError:
+            # Best-effort rendezvous: release rather than deadlock if fewer run
+            # concurrently than total_asks (asserted > 0 above).
             pass
         # Wrapper-issued side call: fire exactly one completion and DISCARD it.
         await provider.complete(cast("Sequence[Any]", messages_in))
