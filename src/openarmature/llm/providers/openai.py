@@ -479,18 +479,26 @@ class OpenAIProvider:
             wire_messages: Sequence[Message] = messages
             if schema_dict is not None and self._force_prompt_augmentation_fallback:
                 wire_messages = _augment_messages_with_schema_directive(messages, schema_dict)
-            body = self._build_request_body(
-                wire_messages,
-                tools,
-                config,
-                schema_dict,
-                # The fallback only governs structured-output calls;
-                # free-form calls (schema_dict is None) must preserve
-                # any caller-supplied response_format from RuntimeConfig
-                # extras.
-                include_response_format=(schema_dict is None or not self._force_prompt_augmentation_fallback),
-                tool_choice=tool_choice,
-            )
+            # The fallback only governs structured-output calls; free-form
+            # calls (schema_dict is None) must preserve any caller-supplied
+            # response_format from RuntimeConfig extras.
+            include_response_format = schema_dict is None or not self._force_prompt_augmentation_fallback
+
+            def build_body(attempt_config: RuntimeConfig | None) -> dict[str, Any]:
+                # Proposal 0095: the wire body is assembled PER ATTEMPT so a
+                # per-attempt request override can vary sampling across retries.
+                # wire_messages / tools / schema are fixed across attempts here
+                # (0095a); only ``config`` varies. Absent an override every
+                # attempt passes the base config -> identical body (today's
+                # byte-identical replay).
+                return self._build_request_body(
+                    wire_messages,
+                    tools,
+                    attempt_config,
+                    schema_dict,
+                    include_response_format=include_response_format,
+                    tool_choice=tool_choice,
+                )
 
             # Per-attempt LLM span surface (observability §5.5 under
             # llm-provider §7.1 call-level retry): dispatch one
@@ -502,6 +510,7 @@ class OpenAIProvider:
                 attempt_latency_ms: float,
                 attempt_response: Response | None,
                 attempt_exc: LlmProviderError | None,
+                retry_reason: str | None = None,
             ) -> None:
                 if dispatch is None:
                     return
@@ -518,11 +527,12 @@ class OpenAIProvider:
                         token_budget=(active_prompt.token_budget if active_prompt is not None else None),
                         response=attempt_response,
                         exc=attempt_exc,
+                        retry_reason=retry_reason,
                     ),
                 )
 
             response = await self._do_complete_with_retry(
-                body, schema_dict, schema_class, retry, emit_attempt
+                build_body, config, schema_dict, schema_class, retry, emit_attempt
             )
         except LlmProviderError as exc:
             # Failure path: dispatch a typed LlmFailedEvent per
@@ -571,35 +581,64 @@ class OpenAIProvider:
             )
         return response
 
+    @staticmethod
+    def _config_for_attempt(
+        base: RuntimeConfig | None,
+        overrides: list[RuntimeConfig] | None,
+        attempt: int,
+    ) -> RuntimeConfig | None:
+        """Resolve the RuntimeConfig for one call-level retry attempt
+        (proposal 0095 per-attempt override).
+
+        Attempt 0 uses the caller's base config unmodified; retry ``i``
+        (attempt ``i > 0``) merges ``overrides[i-1]`` onto the base -- the
+        override's SET fields replace, unspecified fields inherited -- and the
+        last entry carries forward when the schedule is shorter than the retry
+        count. Returns a fresh copy (``model_copy``); the caller's config is
+        never mutated (§5 immutability).
+        """
+        if attempt == 0 or not overrides:
+            return base
+        override = overrides[min(attempt - 1, len(overrides) - 1)]
+        base_or_empty = base if base is not None else RuntimeConfig()
+        return base_or_empty.model_copy(update=override.model_dump(exclude_unset=True))
+
     async def _do_complete_with_retry(
         self,
-        body: dict[str, Any],
+        build_body: Callable[[RuntimeConfig | None], dict[str, Any]],
+        base_config: RuntimeConfig | None,
         schema_dict: dict[str, Any] | None,
         schema_class: type[BaseModel] | None,
         retry: RetryConfig | None,
-        emit_attempt: Callable[[int, float, Response | None, LlmProviderError | None], None] | None = None,
+        emit_attempt: Callable[[int, float, Response | None, LlmProviderError | None, str | None], None]
+        | None = None,
     ) -> Response:
         """Run the wire call with optional call-level retry.
 
         Loops the underlying wire call on transient provider errors per
-        the retry config. ``emit_attempt`` (when supplied) fires once
-        per attempt with that attempt's index, latency, and outcome
-        (response on success, exception on failure) so the caller can
-        dispatch the per-attempt LLM span event. The terminal outcome
-        (success, retry exhaustion, or a non-transient error) is what
-        reaches ``complete()`` for the single terminal typed event, so
-        exactly one terminal event still fires per ``complete()`` call.
+        the retry config. ``build_body`` assembles the outbound body for a
+        given per-attempt config (proposal 0095: retries MAY vary sampling via
+        ``per_attempt_override``); absent an override every attempt uses
+        ``base_config`` unchanged, preserving the byte-identical replay.
+        ``emit_attempt`` (when supplied) fires once per attempt with that
+        attempt's index, latency, outcome (response on success, exception on
+        failure), and ``retry_reason`` (None on the base attempt) so the caller
+        can dispatch the per-attempt LLM span event. The terminal outcome
+        (success, retry exhaustion, or a non-transient error) is what reaches
+        ``complete()`` for the single terminal typed event, so exactly one
+        terminal event still fires per ``complete()`` call.
         """
         if retry is None:
+            body = build_body(base_config)
             attempt_start = time.perf_counter()
             try:
                 response = await self._do_complete(body, schema_dict, schema_class)
             except LlmProviderError as exc:
                 if emit_attempt is not None:
-                    emit_attempt(0, (time.perf_counter() - attempt_start) * 1000.0, None, exc)
+                    emit_attempt(0, (time.perf_counter() - attempt_start) * 1000.0, None, exc, None)
                 raise
             if emit_attempt is not None:
-                emit_attempt(0, (time.perf_counter() - attempt_start) * 1000.0, response, None)
+                emit_attempt(0, (time.perf_counter() - attempt_start) * 1000.0, response, None, None)
             return response
         # Lazy import avoids a module-load cycle: graph.middleware.retry
         # imports llm.errors. Resolve None config fields to the canonical
@@ -611,8 +650,17 @@ class OpenAIProvider:
 
         classifier = retry.classifier or default_classifier
         backoff = retry.backoff or exponential_jitter_backoff
+        # Proposal 0095: the per-attempt override schedule lives only on the
+        # llm-provider-scoped LlmRetryConfig superset; a plain RetryConfig has
+        # no such field (getattr -> None) and every attempt replays base_config.
+        overrides = getattr(retry, "per_attempt_override", None)
         attempt = 0
         while True:
+            attempt_config = self._config_for_attempt(base_config, overrides, attempt)
+            body = build_body(attempt_config)
+            # retry_reason: None on the base attempt (not a retry); "transient"
+            # on retries here (0095a). A "reask" retry arrives with 0095b.
+            retry_reason = "transient" if attempt > 0 else None
             attempt_start = time.perf_counter()
             try:
                 response = await self._do_complete(body, schema_dict, schema_class)
@@ -621,7 +669,9 @@ class OpenAIProvider:
                 # this failed one (the terminal failed attempt's span
                 # carries the final category).
                 if emit_attempt is not None:
-                    emit_attempt(attempt, (time.perf_counter() - attempt_start) * 1000.0, None, exc)
+                    emit_attempt(
+                        attempt, (time.perf_counter() - attempt_start) * 1000.0, None, exc, retry_reason
+                    )
                 # No graph state at the call boundary; pass None (the
                 # default classifier ignores it). Re-raise on exhaustion
                 # or a non-transient category so complete() emits the
@@ -636,7 +686,9 @@ class OpenAIProvider:
                 attempt += 1
                 continue
             if emit_attempt is not None:
-                emit_attempt(attempt, (time.perf_counter() - attempt_start) * 1000.0, response, None)
+                emit_attempt(
+                    attempt, (time.perf_counter() - attempt_start) * 1000.0, response, None, retry_reason
+                )
             return response
 
     def _build_llm_completion_event(
@@ -839,6 +891,7 @@ class OpenAIProvider:
         token_budget: Any,
         response: Response | None = None,
         exc: LlmProviderError | None = None,
+        retry_reason: str | None = None,
     ) -> LlmRetryAttemptEvent:
         """Construct an LlmRetryAttemptEvent for one in-call attempt.
 
@@ -881,6 +934,9 @@ class OpenAIProvider:
             # Proposal 0083: advisory per-prompt token budget snapshot.
             "token_budget": token_budget,
             "caller_invocation_metadata": caller_metadata,
+            # Proposal 0095: "transient" | "reask" on a retry attempt, None on
+            # the base attempt.
+            "retry_reason": retry_reason,
         }
         if response is not None:
             return LlmRetryAttemptEvent(

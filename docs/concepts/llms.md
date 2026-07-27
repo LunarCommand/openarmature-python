@@ -102,13 +102,44 @@ response = await provider.complete(
 ```
 
 When `retry` is omitted the call is a single attempt (the default).
-With a config, the request is built and validated once, then the wire
-call is retried on transient errors per the config's classifier and
-backoff; a non-transient error (a bad request, an auth failure)
+With a config, the request is validated once, then the wire call is
+retried on transient errors per the config's classifier and backoff (an
+`LlmRetryConfig` with a `per_attempt_override` can vary the request per
+attempt, below); a non-transient error (a bad request, an auth failure)
 propagates immediately without retrying. From observability's point of
 view the call stays a single unit: exactly one completion-or-failure
 event fires for the terminal outcome, regardless of how many attempts
 it took.
+
+### Varying the request across attempts
+
+By default a retry replays the same request. For a structured-output
+call that tends to be self-defeating: a byte-identical replay at
+`temperature=0` often reproduces the same invalid output, so retry is
+least reliable exactly where a self-heal is most wanted. Pass an
+`LlmRetryConfig` (the LLM-scoped superset of `RetryConfig`) with a
+`per_attempt_override` schedule to vary the sampling on the retries:
+
+```python
+from openarmature.llm import LlmRetryConfig, RuntimeConfig
+
+response = await provider.complete(
+    messages,
+    config=RuntimeConfig(temperature=0.0),
+    retry=LlmRetryConfig(
+        max_attempts=3,
+        per_attempt_override=[
+            RuntimeConfig(temperature=0.3),
+            RuntimeConfig(temperature=0.6),
+        ],
+    ),
+)
+```
+
+Attempt 0 uses the base `config` unchanged; retry `i` merges
+`per_attempt_override[i]` onto it (the override's set fields replace, the
+rest inherited), and the last entry carries forward when the schedule is
+shorter than the retry count. The caller's `config` is never mutated.
 
 ### Call-level vs node-level retry
 

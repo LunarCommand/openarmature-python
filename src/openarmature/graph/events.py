@@ -817,6 +817,13 @@ class LlmRetryAttemptEvent:
     # chains parallel to ``namespace`` (see LlmCompletionEvent).
     fan_out_index_chain: tuple[int | None, ...] = ()
     branch_name_chain: tuple[str | None, ...] = ()
+    # Proposal 0095 (llm-provider §7.1): the reason a retry attempt fired,
+    # "transient" (a retry-eligible §7 failure) or "reask" (a
+    # structured_output_invalid re-ask, 0095b). None on attempt 0 (the base
+    # attempt is not a retry). The OTel per-attempt span renders it as
+    # openarmature.llm.retry_reason (present only on retries); the detailed
+    # §5.5 / Langfuse mapping is a tracked follow-on.
+    retry_reason: str | None = None
 
 
 # Spec: realizes graph-engine §6 + observability §5.5.9 -- the typed
