@@ -26,6 +26,9 @@ from openarmature.checkpoint import (
     CheckpointRecord,
     CheckpointRecordInvalid,
     CheckpointSaveFailed,
+    EnclosingFanOutInstance,
+    FanOutInstanceProgress,
+    FanOutProgress,
     InMemoryCheckpointer,
     NodePosition,
     SQLiteCheckpointer,
@@ -215,6 +218,80 @@ async def test_sqlite_json_round_trip_with_pydantic_state(tmp_path: Path) -> Non
     assert loaded.state == {"x": 1, "tag": "hi"}
     assert list(loaded.parent_states) == [{"outer_flag": True}]
     assert loaded.completed_positions == record.completed_positions
+
+
+async def test_sqlite_json_round_trips_enclosing_fan_out_lineage(tmp_path: Path) -> None:
+    # Proposal 0085: the enclosing_fan_out_lineage on a FanOutProgress entry
+    # must survive a json-mode round-trip (pickle mode round-trips the object
+    # verbatim; json mode serializes field-by-field, so a new field silently
+    # drops unless the serializers are updated).
+    cp = SQLiteCheckpointer(tmp_path / "ck.db", serialization="json")
+    entry = FanOutProgress(
+        fan_out_node_name="inner_process",
+        namespace=("outer_process",),
+        instance_count=3,
+        instances=(
+            FanOutInstanceProgress(state="completed", result=1),
+            FanOutInstanceProgress(state="not_started"),
+            FanOutInstanceProgress(state="not_started"),
+        ),
+        enclosing_fan_out_lineage=(
+            EnclosingFanOutInstance(namespace=(), fan_out_node_name="outer_process", fan_out_index=1),
+        ),
+    )
+    record = CheckpointRecord(
+        invocation_id="i",
+        correlation_id="c",
+        state={"x": 1},
+        completed_positions=(),
+        parent_states=(),
+        last_saved_at=0.0,
+        fan_out_progress=(entry,),
+    )
+    await cp.save("i", record)
+    loaded = await cp.load("i")
+    assert loaded is not None
+    assert loaded.fan_out_progress[0].enclosing_fan_out_lineage == entry.enclosing_fan_out_lineage
+    # A pre-0085 record (no lineage key in the persisted dict) restores to an
+    # empty lineage -- backward-compat, verified via the default.
+    assert (
+        FanOutProgress(
+            fan_out_node_name="x", namespace=(), instance_count=0, instances=()
+        ).enclosing_fan_out_lineage
+        == ()
+    )
+
+
+def test_restore_fan_out_progress_keys_by_persisted_lineage() -> None:
+    # Proposal 0085 consume-side: _restore_fan_out_progress_state keys the
+    # tracking dict by the record's enclosing_fan_out_lineage projected to the
+    # flat fan_out_index tuple the in-memory re-entry key uses. A lineage-
+    # bearing entry keys to that non-empty tuple (positive match on re-entry);
+    # a legacy empty-lineage entry keys to () -- which a non-empty re-entering
+    # lineage never matches, so it re-runs (no mis-skip).
+    from openarmature.graph.compiled import _restore_fan_out_progress_state
+
+    lineaged = FanOutProgress(
+        fan_out_node_name="inner_process",
+        namespace=("outer_process",),
+        instance_count=2,
+        instances=(
+            FanOutInstanceProgress(state="completed", result=4),
+            FanOutInstanceProgress(state="not_started"),
+        ),
+        enclosing_fan_out_lineage=(
+            EnclosingFanOutInstance(namespace=(), fan_out_node_name="outer_process", fan_out_index=1),
+        ),
+    )
+    legacy = FanOutProgress(
+        fan_out_node_name="inner_process",
+        namespace=("outer_process",),
+        instance_count=2,
+        instances=(FanOutInstanceProgress(state="completed", result=1),),
+    )
+    restored = _restore_fan_out_progress_state([lineaged, legacy])
+    assert (("outer_process",), "inner_process", (1,)) in restored
+    assert (("outer_process",), "inner_process", ()) in restored
 
 
 async def test_sqlite_durability_across_reopen(tmp_path: Path) -> None:

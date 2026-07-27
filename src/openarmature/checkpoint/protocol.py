@@ -136,6 +136,30 @@ class FanOutInstanceProgress:
     completed_inner_positions: tuple[NodePosition, ...] = ()
 
 
+# Spec: realizes one element of pipeline-utilities §10.11's
+# ``enclosing_fan_out_lineage`` (proposal 0085) -- an enclosing fan-out
+# instance identifier. The lineage is the outermost->innermost chain of
+# these, distinguishing the same inner fan-out node run once per enclosing
+# outer instance so nested resume skips correctly.
+@dataclass(frozen=True)
+class EnclosingFanOutInstance:
+    """One enclosing fan-out instance in a nested fan-out's lineage.
+
+    Fields:
+
+    - ``namespace``: the enclosing fan-out node's own namespace (the chain
+      of outer subgraph-node names enclosing it; empty for an outermost
+      fan-out).
+    - ``fan_out_node_name``: the enclosing fan-out node's name.
+    - ``fan_out_index``: which instance of that enclosing fan-out this
+      lineage element identifies.
+    """
+
+    namespace: tuple[str, ...]
+    fan_out_node_name: str
+    fan_out_index: int
+
+
 @dataclass(frozen=True)
 class FanOutProgress:
     """Per-fan-out-node progress entry inside a
@@ -153,12 +177,25 @@ class FanOutProgress:
     - ``instances``: a tuple of per-instance entries indexed by
       ``fan_out_index`` (``instances[i]`` is the entry for
       ``fan_out_index=i``). Length equals ``instance_count``.
+    - ``enclosing_fan_out_lineage``: the outermost->innermost chain of
+      enclosing fan-out instances within which this fan-out is running
+      (proposal 0085). Empty for a fan-out that is not nested inside
+      another fan-out instance (a top-level fan-out, or one reached
+      through static subgraph nesting only). When present it distinguishes
+      the same inner fan-out node executing once per enclosing outer
+      instance: an entry is keyed by ``(namespace, fan_out_node_name,
+      enclosing_fan_out_lineage)``, so ``fan_out_progress`` MAY contain
+      multiple entries sharing ``(namespace, fan_out_node_name)`` that
+      differ only in ``enclosing_fan_out_lineage``. Backward-compatible:
+      records written before this field carry an empty lineage and resume
+      exactly as before.
     """
 
     fan_out_node_name: str
     namespace: tuple[str, ...]
     instance_count: int
     instances: tuple[FanOutInstanceProgress, ...]
+    enclosing_fan_out_lineage: tuple[EnclosingFanOutInstance, ...] = ()
 
 
 # Spec: realizes pipeline-utilities §10.2 CheckpointRecord.
