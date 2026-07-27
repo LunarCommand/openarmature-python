@@ -560,11 +560,13 @@ async def test_active_prompt_propagates_to_llm_span_attributes() -> None:
 
 
 async def test_llm_span_parents_under_fan_out_instance_dispatch() -> None:
-    # Gap 2 (review-nested-fan-out-lineage): an LLM span whose calling node has
-    # no open span and fires inside a top-level fan-out instance MUST parent
-    # under the per-instance fan-out dispatch span (matching the Langfuse
-    # observer), not fall through to the subgraph / invocation span. Before this
-    # OTel had no fan-out-instance fallback in _resolve_llm_parent.
+    # An LLM span whose calling node has no open span and fires inside a
+    # top-level fan-out instance MUST parent under the per-instance fan-out
+    # dispatch span (the §5.5 orphan fallback / nearest enclosing wrapper),
+    # not fall through to the subgraph / invocation span. Proposal 0084: the
+    # fallback resolves the dispatch via the event's lineage chain, so the
+    # event carries fan_out_index_chain=(0, None) aligned to namespace
+    # ("fan", "ask") -- instance 0 at the "fan" boundary, none at "ask".
     from openarmature.observability.correlation import (
         _reset_invocation_id,
         _set_invocation_id,
@@ -599,6 +601,8 @@ async def test_llm_span_parents_under_fan_out_instance_dispatch() -> None:
                 attempt_index=0,
                 fan_out_index=0,
                 branch_name=None,
+                fan_out_index_chain=(0, None),
+                branch_name_chain=(None, None),
             )
         )
         # dispatch_span is ended by observer.shutdown() below (it drains
@@ -612,6 +616,68 @@ async def test_llm_span_parents_under_fan_out_instance_dispatch() -> None:
     assert llm_spans[0].parent is not None, "LLM span must have a parent, not be a trace root"
     assert cast("Any", llm_spans[0].parent).span_id == dispatch_span.get_span_context().span_id, (
         "LLM span must parent under the per-instance fan-out dispatch span"
+    )
+
+
+async def test_llm_span_parents_under_parallel_branch_dispatch() -> None:
+    # Proposal 0084 branch coverage: the §5.5 orphan fallback is defined for a
+    # per-branch dispatch span as well as a fan-out instance span, but the 0084
+    # fixtures (132/133/134) are fan-out only. An orphan LLM call (no open
+    # calling-node span) fired inside a parallel branch MUST parent under the
+    # per-branch dispatch span -- the nearest enclosing wrapper -- resolved via
+    # branch_name_chain, the branch-side analog of the fan-out case above. Guards
+    # the reference behavior pending a spec fixture (see release-v0.17.0 coord).
+    from openarmature.observability.correlation import (
+        _reset_invocation_id,
+        _set_invocation_id,
+    )
+    from openarmature.observability.otel.observer import (
+        _branch_dispatch_key,
+        _InvState,
+        _OpenSpan,
+    )
+    from tests._helpers.typed_event import make_retry_attempt_event
+
+    exporter = InMemorySpanExporter()
+    observer = OTelObserver(span_processor=SimpleSpanProcessor(exporter))
+    invocation_id = "inv-pb-llm"
+    token = _set_invocation_id(invocation_id)
+    try:
+        # Per-branch dispatch span for branch "fast" of pb node "dispatcher". No
+        # open_spans entry for the calling node ("dispatcher", "ask"), so the
+        # resolver must reach the per-branch dispatch fallback. The calling node
+        # sits in branch "fast": branch_name_chain=(None, "fast") aligned to
+        # namespace (None at the "dispatcher" pb boundary, "fast" at the "ask"
+        # branch descent).
+        fi_chain: tuple[int | None, ...] = (None, None)
+        bn_chain: tuple[str | None, ...] = (None, "fast")
+        observer._inv_states[invocation_id] = _InvState()  # noqa: SLF001
+        dispatch_span = observer._tracer.start_span("fast")  # noqa: SLF001
+        branch_key = _branch_dispatch_key(("dispatcher",), fi_chain, bn_chain, "fast")
+        observer._inv_states[invocation_id].parallel_branches_branch_spans[branch_key] = _OpenSpan(  # noqa: SLF001
+            span=dispatch_span
+        )
+        await observer(
+            make_retry_attempt_event(
+                invocation_id=invocation_id,
+                node_name="ask",
+                namespace=("dispatcher", "ask"),
+                attempt_index=0,
+                fan_out_index=None,
+                branch_name="fast",
+                fan_out_index_chain=fi_chain,
+                branch_name_chain=bn_chain,
+            )
+        )
+    finally:
+        _reset_invocation_id(token)
+
+    observer.shutdown()
+    llm_spans = [s for s in exporter.get_finished_spans() if s.name == "openarmature.llm.complete"]
+    assert len(llm_spans) == 1
+    assert llm_spans[0].parent is not None, "LLM span must have a parent, not be a trace root"
+    assert cast("Any", llm_spans[0].parent).span_id == dispatch_span.get_span_context().span_id, (
+        "orphan LLM span must parent under the per-branch dispatch span"
     )
 
 

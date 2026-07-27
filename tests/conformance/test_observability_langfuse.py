@@ -129,6 +129,14 @@ _LANGFUSE_FIXTURES = frozenset(
         # to metadata.token_budget.*. Drives the input-exceeded path via
         # renders_prompt + the prompt's token_budget block.
         "130-langfuse-token-budget-warning-level",
+        # 134 (proposal 0084): the Langfuse Generation parent resolves by the same
+        # chain-aware §5.5 rule as the OTel span parent -- both the nested
+        # exact-match (case 1, mirrors OTel 132) and the orphan fallback (case 2,
+        # mirrors OTel 133). Driven by a dedicated hand-built runner
+        # (``_run_langfuse_134``): the nested double fan-out + the
+        # `calls_llm_from_wrapper` orphan primitive are not modeled by the generic
+        # ``_run_case`` topology path (precedent: the 039 hand-built runner).
+        "134-langfuse-nested-fan-out-parent-resolution",
     }
 )
 
@@ -470,6 +478,17 @@ class _MockPromptBackend:
 async def test_langfuse_fixture(fixture_path: Path) -> None:
     spec = _load(fixture_path)
     fixture_stem = fixture_path.stem
+    if fixture_stem == _FIXTURE_134:
+        # 134's nested double fan-out + `calls_llm_from_wrapper` orphan primitive
+        # are not modeled by the generic `_run_case` topology path; each case is
+        # driven by a dedicated hand-built runner (cf. the 039 hand-built path).
+        for case in cast("list[dict[str, Any]]", spec["cases"]):
+            case_name = cast("str", case.get("name") or "<unnamed>")
+            try:
+                await _run_langfuse_134(case)
+            except AssertionError as e:
+                raise AssertionError(f"case {case_name!r}: {e}") from e
+        return
     if "cases" in spec:
         # Fold fixture-level ``subgraphs`` / ``inner_subgraphs`` into
         # each case so the per-case runner sees them locally. Fixture
@@ -1347,6 +1366,543 @@ async def _run_resume_case(
     # ``hooks_refire_on_resumed_trace`` is implicit — verified by the
     # ``_assert_trace`` call on the resumed trace above, which checks the
     # hook-derived input/output match the resumed invocation's state.
+
+
+# Fixture 134 (proposal 0084): the Langfuse Generation parent MUST resolve by the
+# same chain-aware §5.5 rule as the OTel span parent, for both the nested
+# exact-match (case 1, mirrors OTel 132) and the orphan fallback (case 2, mirrors
+# OTel 133). The nested double fan-out + the `calls_llm_from_wrapper` orphan
+# primitive are not modeled by the generic `_run_case` topology path, so each
+# case is hand-built here (cf. the 039 hand-built runner) against GraphBuilder +
+# an InMemoryLangfuseClient / LangfuseObserver.
+_FIXTURE_134 = "134-langfuse-nested-fan-out-parent-resolution"
+
+
+def _build_134_provider(case: Mapping[str, Any]) -> OpenAIProvider:
+    # FIFO mock provider. The canned responses are identical; the fixture asserts
+    # observation parenting, not response-content routing.
+    responses = list(cast("list[dict[str, Any]]", case.get("mock_llm") or []))
+
+    def _handler(_request: httpx.Request) -> httpx.Response:
+        if not responses:
+            raise AssertionError("mock_llm queue exhausted")
+        body = cast("dict[str, Any]", responses.pop(0)["body"])
+        return httpx.Response(
+            200, content=json.dumps(body).encode("utf-8"), headers={"Content-Type": "application/json"}
+        )
+
+    return OpenAIProvider(
+        base_url="http://mock-llm.test",
+        model="test-model",
+        api_key="test",
+        transport=httpx.MockTransport(_handler),
+    )
+
+
+def _build_134_rendezvous(case: Mapping[str, Any]) -> tuple[dict[str, int], Any, int]:
+    # Hold every provider call until all are in flight before any fires, so the
+    # Generations are emitted while both concurrent outer instances' inner
+    # subtrees are in flight -- the condition under which a scalar-only parent key
+    # would collide / mis-parent and the chain key discriminates. total_asks
+    # derives from the outer items' default (4 for case 1, 2 for case 2).
+    import asyncio  # noqa: PLC0415
+
+    outer_items = cast(
+        "list[list[Any]]",
+        case["state"]["fields"][case["nodes"]["outer_fan_out"]["fan_out"]["items_field"]].get("default")
+        or [],
+    )
+    total_asks = sum(len(x) for x in outer_items)
+    assert total_asks > 0, (
+        "fixture 134 rendezvous gate degenerated (total_asks=0): the outer items "
+        "must be supplied via the field `default` so the concurrent interleaving is forced"
+    )
+    return {"n": 0}, asyncio.Event(), total_asks
+
+
+def _build_134_outer_graph(case: Mapping[str, Any], leaf_sg: Any, *, suffix: str) -> tuple[Any, Any]:
+    # Assemble the standard nested fan-out (outer fan-out over `mid`, `mid`'s
+    # inner fan-out over the given leaf subgraph), outer forced concurrent so both
+    # outer instances' inner subtrees are in flight at once. Returns the compiled
+    # graph + the outer state class.
+    subgraphs_spec = cast("dict[str, Any]", case["subgraphs"])
+    mid_spec = cast("dict[str, Any]", subgraphs_spec["mid"])
+    mid_state_cls = build_state_cls(
+        f"Mid134{suffix}", cast("dict[str, dict[str, Any]]", mid_spec["state"]["fields"])
+    )
+    inner_fo = cast("dict[str, Any]", mid_spec["nodes"]["inner_fan_out"]["fan_out"])
+    # subgraph_identity drives the instance observation's metadata.subgraph_name
+    # (the instance Span IS the subgraph wrapper, §8.4.2); sourced from the fan_out
+    # config's `subgraph` field ("leaf_sg" / "mid").
+    mid = (
+        GraphBuilder(mid_state_cls)
+        .add_fan_out_node(
+            "inner_fan_out",
+            subgraph=leaf_sg,
+            items_field=cast("str", inner_fo["items_field"]),
+            item_field=cast("str", inner_fo["item_field"]),
+            collect_field=cast("str", inner_fo["collect_field"]),
+            target_field=cast("str", inner_fo["target_field"]),
+            error_policy=cast("str", inner_fo.get("error_policy", "fail_fast")),
+            subgraph_identity=cast("str", inner_fo["subgraph"]),
+        )
+        .add_edge("inner_fan_out", END)
+        .set_entry("inner_fan_out")
+        .compile()
+    )
+    outer_fields = cast("dict[str, dict[str, Any]]", case["state"]["fields"])
+    outer_state_cls = build_state_cls(f"Outer134{suffix}", outer_fields)
+    outer_fo = cast("dict[str, Any]", case["nodes"]["outer_fan_out"]["fan_out"])
+    outer_default = cast("list[Any]", outer_fields[cast("str", outer_fo["items_field"])].get("default") or [])
+    graph = (
+        GraphBuilder(outer_state_cls)
+        .add_fan_out_node(
+            "outer_fan_out",
+            subgraph=mid,
+            items_field=cast("str", outer_fo["items_field"]),
+            item_field=cast("str", outer_fo["item_field"]),
+            collect_field=cast("str", outer_fo["collect_field"]),
+            target_field=cast("str", outer_fo["target_field"]),
+            error_policy=cast("str", outer_fo.get("error_policy", "fail_fast")),
+            subgraph_identity=cast("str", outer_fo["subgraph"]),
+            concurrency=max(len(outer_default), 2),
+        )
+        .add_edge("outer_fan_out", END)
+        .set_entry("outer_fan_out")
+        .compile()
+    )
+    return graph, outer_state_cls
+
+
+async def _run_134_and_capture(graph: Any, outer_state_cls: Any) -> tuple[InMemoryLangfuseClient, list[Any]]:
+    # Attach BOTH observers to the SAME invocation so the
+    # langfuse_parent_matches_otel_parent invariant can compare the two backends'
+    # actually-resolved parents on one workload, not re-assert a Langfuse-only
+    # membership check. Returns (langfuse client, OTel finished spans).
+    from opentelemetry.sdk.trace.export import SimpleSpanProcessor  # noqa: PLC0415
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import (  # noqa: PLC0415
+        InMemorySpanExporter,
+    )
+
+    from openarmature.observability.otel.observer import OTelObserver  # noqa: PLC0415
+
+    client = InMemoryLangfuseClient()
+    exporter = InMemorySpanExporter()
+    graph.attach_observer(LangfuseObserver(client=client))
+    graph.attach_observer(OTelObserver(span_processor=SimpleSpanProcessor(exporter)))
+    await graph.invoke(outer_state_cls())
+    await graph.drain()
+    return client, list(exporter.get_finished_spans())
+
+
+def _parent_parity_descriptors_otel(spans: list[Any]) -> list[tuple[Any, Any, Any]]:
+    # Per openarmature.llm.complete span, its resolved parent as
+    # (name, fan_out_index, fan_out_parent_node_name) -- the cross-backend-
+    # comparable identity of the parent span.
+    by_id = {s.context.span_id: s for s in spans}
+    out: list[tuple[Any, Any, Any]] = []
+    for s in spans:
+        if s.name != "openarmature.llm.complete":
+            continue
+        parent = by_id.get(s.parent.span_id) if s.parent is not None else None
+        if parent is None:
+            out.append(("<root>", None, None))
+            continue
+        attrs = dict(parent.attributes or {})
+        out.append(
+            (
+                parent.name,
+                attrs.get("openarmature.node.fan_out_index"),
+                attrs.get("openarmature.fan_out.parent_node_name"),
+            )
+        )
+    return sorted(out, key=lambda d: tuple("" if x is None else str(x) for x in d))
+
+
+def _parent_parity_descriptors_langfuse(trace: LangfuseTrace) -> list[tuple[Any, Any, Any]]:
+    by_id = {o.id: o for o in trace.observations}
+    out: list[tuple[Any, Any, Any]] = []
+    for g in trace.observations:
+        if g.type != "generation":
+            continue
+        parent = by_id.get(g.parent_observation_id) if g.parent_observation_id else None
+        if parent is None:
+            out.append(("<root>", None, None))
+            continue
+        meta = parent.metadata or {}
+        out.append((parent.name, meta.get("fan_out_index"), meta.get("fan_out_parent_node_name")))
+    return sorted(out, key=lambda d: tuple("" if x is None else str(x) for x in d))
+
+
+async def _run_langfuse_134(case: Mapping[str, Any]) -> None:
+    name = cast("str", case.get("name"))
+    if name == "generation_parents_under_own_lineage_calling_node_observation":
+        await _run_langfuse_134_case1(case)
+    elif name == "orphan_generation_parents_under_inner_fan_out_instance_observation":
+        await _run_langfuse_134_case2(case)
+    else:
+        raise NotImplementedError(f"134 case not yet wired: {name!r}")
+
+
+async def _run_langfuse_134_case1(case: Mapping[str, Any]) -> None:
+    # Case 1 (mirrors OTel 132): each inner `ask` node issues an in-body LLM call;
+    # its Generation parents under its OWN lineage-disambiguated `ask` Span
+    # observation, never a sibling `ask` in the other outer instance sharing the
+    # innermost fan_out_index.
+    import asyncio  # noqa: PLC0415
+
+    provider = _build_134_provider(case)
+    subgraphs_spec = cast("dict[str, Any]", case["subgraphs"])
+    leaf_spec = cast("dict[str, Any]", subgraphs_spec["leaf_sg"])
+    leaf_state_cls = build_state_cls(
+        "Leaf134C1", cast("dict[str, dict[str, Any]]", leaf_spec["state"]["fields"])
+    )
+    ask_calls_llm = cast("dict[str, Any]", leaf_spec["nodes"]["ask"]["calls_llm"])
+    stores_in = cast("str", ask_calls_llm.get("stores_response_in", "score"))
+    messages_in = _materialize_messages(cast("list[dict[str, Any]]", ask_calls_llm.get("messages") or []))
+    rendezvous, gate, total_asks = _build_134_rendezvous(case)
+
+    async def _ask_body(_s: Any) -> dict[str, str]:
+        rendezvous["n"] += 1
+        if rendezvous["n"] >= total_asks:
+            gate.set()
+        try:
+            async with asyncio.timeout(5):
+                await gate.wait()
+        except TimeoutError:
+            # Best-effort rendezvous: release rather than deadlock if fewer run
+            # concurrently than total_asks (asserted > 0 above).
+            pass
+        response = await provider.complete(cast("Sequence[Any]", messages_in))
+        return {stores_in: response.message.content or ""}
+
+    leaf_sg = (
+        GraphBuilder(leaf_state_cls)
+        .add_node("ask", _ask_body)
+        .add_edge("ask", END)
+        .set_entry("ask")
+        .compile()
+    )
+    graph, outer_state_cls = _build_134_outer_graph(case, leaf_sg, suffix="C1")
+    try:
+        client, otel_spans = await _run_134_and_capture(graph, outer_state_cls)
+    finally:
+        await provider.aclose()
+
+    trace = _single_trace(client)
+    expected = cast("dict[str, Any]", case["expected"])
+    _assert_langfuse_134_trace(trace, cast("dict[str, Any]", expected["langfuse_trace"]))
+
+    invariants = cast("dict[str, Any]", expected.get("invariants") or {})
+    generations = [o for o in trace.observations if o.type == "generation"]
+    ask_obs = [o for o in trace.observations if o.type == "span" and o.name == "ask"]
+    ask_ids = {o.id for o in ask_obs}
+    gen_parents = [g.parent_observation_id for g in generations]
+
+    if invariants.get("no_inner_observations_dropped_under_concurrent_nesting"):
+        assert len(ask_obs) == total_asks and len(generations) == total_asks, (
+            f"inner observations dropped: {len(ask_obs)} ask / {len(generations)} generation "
+            f"(want {total_asks}/{total_asks})"
+        )
+    if (want := invariants.get("generation_count")) is not None:
+        assert len(generations) == want, f"expected {want} Generations; got {len(generations)}"
+    if invariants.get("generation_parents_under_own_lineage_calling_node_observation"):
+        assert gen_parents and all(p in ask_ids for p in gen_parents), (
+            "each Generation MUST parent under its calling `ask` Span observation"
+        )
+        assert len(set(gen_parents)) == len(generations), (
+            "each Generation MUST parent under a DISTINCT `ask` observation (nested exact-match)"
+        )
+    if invariants.get("langfuse_parent_matches_otel_parent"):
+        # Real cross-backend comparison (§8.9): both observers ran on the SAME
+        # invocation above; each Generation's resolved parent MUST match the OTel
+        # llm.complete span's resolved parent by (name, fan_out_index,
+        # parent_node_name). Under the harness's POST realization these agree;
+        # under the fixtures' declared PRE phase they would NOT -- Langfuse
+        # resolves a lazily-created inner instance to the outer one (task #100,
+        # flagged to spec) -- so parity is asserted for the post-phase run here.
+        lf_desc = _parent_parity_descriptors_langfuse(trace)
+        otel_desc = _parent_parity_descriptors_otel(otel_spans)
+        assert lf_desc == otel_desc, (
+            f"Langfuse and OTel resolved DIFFERENT parents: langfuse={lf_desc} otel={otel_desc}"
+        )
+
+    _handled = {
+        "no_inner_observations_dropped_under_concurrent_nesting",
+        "generation_count",
+        "generation_parents_under_own_lineage_calling_node_observation",
+        "langfuse_parent_matches_otel_parent",
+    }
+    unhandled = set(invariants) - _handled
+    assert not unhandled, f"fixture 134 case 1 declares unhandled invariants: {sorted(unhandled)}"
+
+
+async def _run_langfuse_134_case2(case: Mapping[str, Any]) -> None:
+    # Case 2 (mirrors OTel 133): the `guard` node's BODY returns marker=1; a
+    # WRAPPER issues one orphan provider.complete and DISCARDS the response. The
+    # harness realizes the fixture's "per-node `guard` middleware, phase: pre" as
+    # INSTANCE middleware on the inner fan-out, POST phase -- the same realization
+    # as the OTel 133 harness (see the note there). Two axes, both forced by the
+    # observers' real timing; the orphan SEMANTIC and the oracle observation tree
+    # are preserved:
+    #   1. Instance middleware, not per-node middleware on `guard`: a per-node
+    #      wrapper's call carries guard's lineage and binds to guard's own
+    #      observation, not orphaned. The fan-out instance wrapper keeps the
+    #      orphan call's lineage at the fan-out boundary, so its Generation falls
+    #      back to the nearest enclosing wrapper -- the inner fan-out INSTANCE Span
+    #      observation -- a sibling of the `guard` Span. `leaf_sg` is the single
+    #      `guard` node, so the instance wrapper IS guard's wrapper; the directive
+    #      is read from the `guard` node spec.
+    #   2. POST phase (fire AFTER next()): the LangfuseObserver creates the inner
+    #      instance observation lazily when guard's started event drains on the
+    #      serial worker, so a pre-phase orphan (enqueued first) resolves to the
+    #      OUTER instance. Post guarantees the inner instance observation exists at
+    #      resolution time. In post `guard` has closed, so the calling-node
+    #      observation is still not open at emit (the orphan semantic holds).
+    import asyncio  # noqa: PLC0415
+
+    provider = _build_134_provider(case)
+    subgraphs_spec = cast("dict[str, Any]", case["subgraphs"])
+    leaf_spec = cast("dict[str, Any]", subgraphs_spec["leaf_sg"])
+    leaf_state_cls = build_state_cls(
+        "Leaf134C2", cast("dict[str, dict[str, Any]]", leaf_spec["state"]["fields"])
+    )
+    guard_spec = cast("dict[str, Any]", leaf_spec["nodes"]["guard"])
+    update_map = dict(cast("dict[str, Any]", guard_spec["update"]))
+    wrapper_spec = cast("dict[str, Any]", guard_spec["calls_llm_from_wrapper"])
+    messages_in = _materialize_messages(cast("list[dict[str, Any]]", wrapper_spec.get("messages") or []))
+    rendezvous, gate, total_asks = _build_134_rendezvous(case)
+
+    async def _fire_orphan_call() -> None:
+        rendezvous["n"] += 1
+        if rendezvous["n"] >= total_asks:
+            gate.set()
+        try:
+            async with asyncio.timeout(5):
+                await gate.wait()
+        except TimeoutError:
+            # Best-effort rendezvous: release rather than deadlock if fewer run
+            # concurrently than total_asks (asserted > 0 above).
+            pass
+        # Wrapper-issued side call: fire exactly one completion and DISCARD it.
+        await provider.complete(cast("Sequence[Any]", messages_in))
+
+    async def _guard_body(_s: Any) -> Mapping[str, Any]:
+        return dict(update_map)
+
+    async def _wrapper_mw(state: Any, next_call: Any) -> Mapping[str, Any]:
+        # POST phase: fire AFTER next() (the inner subgraph `guard` has run and its
+        # observation has closed), so the orphan Generation falls back to the inner
+        # fan-out INSTANCE Span observation (see the realization note above).
+        result = await next_call(state)
+        await _fire_orphan_call()
+        return result
+
+    leaf_sg = (
+        GraphBuilder(leaf_state_cls)
+        .add_node("guard", _guard_body)
+        .add_edge("guard", END)
+        .set_entry("guard")
+        .compile()
+    )
+    # Attach the orphan-call wrapper as INSTANCE middleware on the inner fan-out
+    # (see the realization note above).
+    mid_spec = cast("dict[str, Any]", subgraphs_spec["mid"])
+    mid_state_cls = build_state_cls(
+        "Mid134C2", cast("dict[str, dict[str, Any]]", mid_spec["state"]["fields"])
+    )
+    inner_fo = cast("dict[str, Any]", mid_spec["nodes"]["inner_fan_out"]["fan_out"])
+    # subgraph_identity drives the instance observation's metadata.subgraph_name
+    # (sourced from the fan_out config's `subgraph` field, as in case 1).
+    mid = (
+        GraphBuilder(mid_state_cls)
+        .add_fan_out_node(
+            "inner_fan_out",
+            subgraph=leaf_sg,
+            items_field=cast("str", inner_fo["items_field"]),
+            item_field=cast("str", inner_fo["item_field"]),
+            collect_field=cast("str", inner_fo["collect_field"]),
+            target_field=cast("str", inner_fo["target_field"]),
+            error_policy=cast("str", inner_fo.get("error_policy", "fail_fast")),
+            subgraph_identity=cast("str", inner_fo["subgraph"]),
+            instance_middleware=[_wrapper_mw],
+        )
+        .add_edge("inner_fan_out", END)
+        .set_entry("inner_fan_out")
+        .compile()
+    )
+    outer_fields = cast("dict[str, dict[str, Any]]", case["state"]["fields"])
+    outer_state_cls = build_state_cls("Outer134C2", outer_fields)
+    outer_fo = cast("dict[str, Any]", case["nodes"]["outer_fan_out"]["fan_out"])
+    outer_default = cast("list[Any]", outer_fields[cast("str", outer_fo["items_field"])].get("default") or [])
+    graph = (
+        GraphBuilder(outer_state_cls)
+        .add_fan_out_node(
+            "outer_fan_out",
+            subgraph=mid,
+            items_field=cast("str", outer_fo["items_field"]),
+            item_field=cast("str", outer_fo["item_field"]),
+            collect_field=cast("str", outer_fo["collect_field"]),
+            target_field=cast("str", outer_fo["target_field"]),
+            error_policy=cast("str", outer_fo.get("error_policy", "fail_fast")),
+            subgraph_identity=cast("str", outer_fo["subgraph"]),
+            concurrency=max(len(outer_default), 2),
+        )
+        .add_edge("outer_fan_out", END)
+        .set_entry("outer_fan_out")
+        .compile()
+    )
+    try:
+        client, otel_spans = await _run_134_and_capture(graph, outer_state_cls)
+    finally:
+        await provider.aclose()
+
+    trace = _single_trace(client)
+    expected = cast("dict[str, Any]", case["expected"])
+    _assert_langfuse_134_trace(trace, cast("dict[str, Any]", expected["langfuse_trace"]))
+
+    invariants = cast("dict[str, Any]", expected.get("invariants") or {})
+    generations = [o for o in trace.observations if o.type == "generation"]
+    guard_obs = [o for o in trace.observations if o.type == "span" and o.name == "guard"]
+    guard_ids = {o.id for o in guard_obs}
+    guard_parent_ids = {o.parent_observation_id for o in guard_obs}
+    # Inner fan-out INSTANCE Span observation: carries fan_out_index AND names its
+    # parent fan-out node `inner_fan_out` (distinct from the inner fan-out NODE
+    # observation, which carries fan_out_item_count).
+    inner_instance_ids = {
+        o.id
+        for o in trace.observations
+        if o.type == "span"
+        and o.name == "inner_fan_out"
+        and o.metadata.get("fan_out_index") is not None
+        and o.metadata.get("fan_out_parent_node_name") == "inner_fan_out"
+    }
+    fan_out_node_ids = {o.id for o in trace.observations if o.metadata.get("fan_out_item_count") is not None}
+    gen_parents = [g.parent_observation_id for g in generations]
+
+    if invariants.get("orphan_generation_parents_under_inner_fan_out_instance_observation"):
+        assert gen_parents and all(p in inner_instance_ids for p in gen_parents), (
+            "each orphan Generation MUST parent under an inner fan-out INSTANCE Span observation"
+        )
+        assert all(p not in guard_ids for p in gen_parents), (
+            "orphan Generation MUST NOT parent under the `guard` Span observation"
+        )
+    if invariants.get("orphan_generation_not_under_coincidentally_indexed_sibling"):
+        assert len(set(gen_parents)) == len(generations), (
+            "each orphan Generation MUST parent under a DISTINCT inner instance observation "
+            "(chain-routed, not the coincidentally-indexed sibling)"
+        )
+    if invariants.get("orphan_generation_not_under_fan_out_node_or_trace"):
+        assert all(p not in fan_out_node_ids for p in gen_parents), (
+            "orphan Generation MUST NOT parent under a fan-out NODE observation"
+        )
+        assert all(p is not None for p in gen_parents), (
+            "orphan Generation MUST NOT parent under the Trace root"
+        )
+    if invariants.get("orphan_generation_sibling_of_calling_node_observation"):
+        assert all(p in guard_parent_ids for p in gen_parents), (
+            "each orphan Generation MUST be a SIBLING of its `guard` Span observation (share its parent)"
+        )
+        assert all(p not in guard_ids for p in gen_parents), (
+            "orphan Generation parent MUST NOT be the `guard` observation itself"
+        )
+    if (want := invariants.get("generation_count")) is not None:
+        assert len(generations) == want, f"expected {want} Generations; got {len(generations)}"
+    if invariants.get("langfuse_parent_matches_otel_parent"):
+        # Real cross-backend comparison (§8.9): both observers ran on the SAME
+        # invocation above; each orphan Generation's resolved parent MUST match
+        # the OTel orphan llm.complete span's resolved parent by (name,
+        # fan_out_index, parent_node_name). Under the harness's POST realization
+        # these agree (both the inner fan-out instance); under the fixture's
+        # declared PRE phase they would NOT -- Langfuse resolves the lazily-
+        # created inner instance to the outer one (task #100, flagged to spec).
+        lf_desc = _parent_parity_descriptors_langfuse(trace)
+        otel_desc = _parent_parity_descriptors_otel(otel_spans)
+        assert lf_desc == otel_desc, (
+            f"Langfuse and OTel resolved DIFFERENT parents: langfuse={lf_desc} otel={otel_desc}"
+        )
+
+    _handled = {
+        "orphan_generation_parents_under_inner_fan_out_instance_observation",
+        "orphan_generation_not_under_coincidentally_indexed_sibling",
+        "orphan_generation_not_under_fan_out_node_or_trace",
+        "orphan_generation_sibling_of_calling_node_observation",
+        "generation_count",
+        "langfuse_parent_matches_otel_parent",
+    }
+    unhandled = set(invariants) - _handled
+    assert not unhandled, f"fixture 134 case 2 declares unhandled invariants: {sorted(unhandled)}"
+
+
+def _single_trace(client: InMemoryLangfuseClient) -> LangfuseTrace:
+    assert len(client.traces) == 1, f"expected exactly one Trace, got {len(client.traces)}"
+    return next(iter(client.traces.values()))
+
+
+def _assert_langfuse_134_trace(trace: LangfuseTrace, expected: dict[str, Any]) -> None:
+    # 134 asserts trace headline fields + the observation tree, matching children
+    # ORDER-INDEPENDENTLY (mirroring the OTel ``_assert_span_tree_matches`` set
+    # match). The shared ``_assert_observation_tree`` zips children in emission
+    # order; here two siblings under the inner instance (the orphan Generation and
+    # the `guard` Span) are emitted `guard`-first (the orphan fires in the wrapper
+    # post-phase), the reverse of the YAML order, and concurrent outer instances
+    # can drain in either order -- neither is semantically load-bearing.
+    _assert_string_or_placeholder("trace.id", trace.id, expected.get("id"))
+    if "name" in expected:
+        _assert_string_or_placeholder("trace.name", trace.name, expected.get("name"))
+    root_observations = trace.children_of(None)
+    _assert_obs_tree_unordered(
+        trace, root_observations, cast("list[dict[str, Any]]", expected["observations"])
+    )
+
+
+def _obs_shallow_matches(actual: LangfuseObservation, expected: dict[str, Any]) -> bool:
+    # Match an observation by type + name (+ placeholder) + metadata SUBSET (extra
+    # actual keys tolerated), the disambiguators the 134 tree needs.
+    if "type" in expected and actual.type != expected["type"]:
+        return False
+    if "name" in expected:
+        name = expected["name"]
+        if _is_placeholder(name):
+            if not (isinstance(actual.name, str) and actual.name):
+                return False
+        elif actual.name != name:
+            return False
+    for key, value in cast("dict[str, Any]", expected.get("metadata") or {}).items():
+        if actual.metadata.get(key) != value:
+            return False
+    return True
+
+
+def _assert_obs_tree_unordered(
+    trace: LangfuseTrace,
+    actual_children: list[LangfuseObservation],
+    expected_children: list[dict[str, Any]],
+) -> None:
+    assert len(actual_children) == len(expected_children), (
+        f"observation children count mismatch: expected {len(expected_children)}, "
+        f"got {len(actual_children)} ({[o.name for o in actual_children]})"
+    )
+    remaining = list(actual_children)
+    for expected in expected_children:
+        matches = [a for a in remaining if _obs_shallow_matches(a, expected)]
+        assert len(matches) >= 1, (
+            f"no observation matched expected type={expected.get('type')!r} "
+            f"name={expected.get('name')!r} metadata={expected.get('metadata')!r}; "
+            f"candidates: {[(o.type, o.name) for o in remaining]}"
+        )
+        assert len(matches) == 1, (
+            f"ambiguous match for expected type={expected.get('type')!r} "
+            f"name={expected.get('name')!r} metadata={expected.get('metadata')!r}: "
+            f"{len(matches)} candidates. Add a disambiguating metadata key."
+        )
+        matched = matches[0]
+        remaining.remove(matched)
+        _assert_obs_tree_unordered(
+            trace,
+            trace.children_of(matched.id),
+            cast("list[dict[str, Any]]", expected.get("children") or []),
+        )
 
 
 def _resolve_llm_model(case: Mapping[str, Any]) -> str:

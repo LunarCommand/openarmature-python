@@ -1142,12 +1142,13 @@ class FailureIsolatedEvent:
     post_state: Mapping[str, Any]
     caught_exception: CaughtException
     # Proposal 0084 (spec v0.81.0): enclosing fan-out / branch lineage chains
-    # parallel to ``namespace`` (see LlmCompletionEvent). Carried for surface
-    # consistency with the provider events. The marker's calling-node span is
-    # already closed by delivery time (its completed event precedes this one on
-    # the serial queue), so it parents under the invocation span, not via the
-    # lineage exact-match -- the chains only disambiguate in the rare case that
-    # calling-node span is still open.
+    # parallel to ``namespace`` (see LlmCompletionEvent). The marker's
+    # calling-node span/observation is already closed by delivery time (its
+    # completed event precedes this one on the serial queue), so both observers
+    # take the §5.5 orphan fallback and parent the marker under the nearest
+    # enclosing wrapper on this lineage (the fan-out instance / branch / subgraph
+    # span, else the invocation span / Trace). The chains disambiguate that
+    # enclosing wrapper across concurrent sibling instances.
     fan_out_index_chain: tuple[int | None, ...] = ()
     branch_name_chain: tuple[str | None, ...] = ()
 

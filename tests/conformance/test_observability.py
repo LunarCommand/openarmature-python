@@ -96,6 +96,13 @@ _SUPPORTED_FIXTURES = frozenset(
         # spans (chain-keyed node spans) + nested-LLM exact-match (each
         # llm.complete parents under its own lineage-disambiguated `ask`).
         "132-otel-nested-fan-out-span-keying-and-llm-exact-match",
+        # v0.81.0 -- proposal 0084 orphan fallback (§5.5 Lineage-resolved
+        # parent). A provider call issued from a node WRAPPER (middleware
+        # pre-phase, the calling-node span not open) parents its orphan span
+        # under the nearest enclosing wrapper -- the inner fan-out instance
+        # span -- chain-routed to the correct inner instance, as a sibling of
+        # the later-opened `guard` node span.
+        "133-otel-nested-fan-out-orphan-llm-fallback",
         # v0.42.0 — proposal 0050 call-level-retry per-attempt LLM span
         # surface. Single-attempt default: one span, attempt_index 0.
         "057-llm-attempt-index-single-attempt-default",
@@ -383,16 +390,10 @@ _DEFERRED_FIXTURES: dict[str, str] = {
         "Langfuse WARNING-level rendering; driven in test_observability_langfuse"
     ),
     # Proposal 0084 (nested-fan-out span lineage, spec v0.81.0). Fixture 132
-    # (span keying + nested-LLM exact-match) now runs -- see _SUPPORTED_FIXTURES.
-    # 133 (orphan LLM fallback) + 134 (Langfuse parent resolution) defer with
-    # the orphan-call conformance-adapter primitive (a later PR).
-    **{
-        fixture_id: "nested-fan-out span lineage (proposal 0084) not-yet implemented"
-        for fixture_id in (
-            "133-otel-nested-fan-out-orphan-llm-fallback",
-            "134-langfuse-nested-fan-out-parent-resolution",
-        )
-    },
+    # (span keying + nested-LLM exact-match) and 133 (orphan LLM fallback, via
+    # the `calls_llm_from_wrapper` primitive) now run -- see _SUPPORTED_FIXTURES.
+    # 134 (Langfuse parent resolution) runs in the sibling Langfuse harness --
+    # see _LANGFUSE_HARNESS_FIXTURES.
     # Proposal 0088 (Langfuse parallel-branches mapping parity, spec
     # v0.83.0). The §8.4.8 per-branch dispatch-span Langfuse observation is
     # unimplemented until a later v0.16.0 PR.
@@ -424,6 +425,11 @@ _LANGFUSE_HARNESS_FIXTURES: frozenset[str] = frozenset(
         "036-caller-invocation-id-non-uuid",
         "037-langfuse-trace-input-output",
         "059-implementation-attribution-langfuse",
+        # 134 -- proposal 0084 Langfuse parent resolution (nested exact-match +
+        # orphan fallback). Driven by a dedicated hand-built runner in the
+        # sibling harness; the generic topology path cannot model the
+        # `calls_llm_from_wrapper` orphan-call primitive.
+        "134-langfuse-nested-fan-out-parent-resolution",
     }
 )
 
@@ -616,6 +622,8 @@ async def test_observability_fixture(fixture_path: Path) -> None:
         await _run_fixture_110(spec)
     elif fixture_id == "132-otel-nested-fan-out-span-keying-and-llm-exact-match":
         await _run_fixture_132(spec)
+    elif fixture_id == "133-otel-nested-fan-out-orphan-llm-fallback":
+        await _run_fixture_133(spec)
     elif fixture_id in {
         "040-llm-cache-attribute-emission",
         "041-llm-cache-attribute-absence",
@@ -2719,6 +2727,295 @@ async def _run_fixture_132_case(case: Mapping[str, Any], spec: Mapping[str, Any]
     }
     unhandled = set(invariants) - _handled
     assert not unhandled, f"fixture 132 declares unhandled invariants: {sorted(unhandled)}"
+
+
+async def _run_fixture_133(spec: Mapping[str, Any]) -> None:
+    # Proposal 0084 (§5.5 Lineage-resolved parent, orphan fallback): a provider
+    # call issued from a node WRAPPER (middleware pre-phase) has no open calling-
+    # node span, so its provider span falls back to the nearest enclosing wrapper
+    # -- the inner fan-out INSTANCE span -- chain-routed to the correct inner
+    # instance (never a coincidentally-indexed sibling inner instance, a fan-out
+    # NODE span, or the invocation span), as a SIBLING of the later-opened
+    # `guard` node span.
+    for case in cast("list[dict[str, Any]]", spec["cases"]):
+        case_name = cast("str", case["name"])
+        try:
+            await _run_fixture_133_case(case, spec)
+        except AssertionError as e:
+            raise AssertionError(f"case {case_name!r}: {e}") from e
+
+
+async def _run_fixture_133_case(case: Mapping[str, Any], spec: Mapping[str, Any]) -> None:
+    import asyncio
+    import json
+
+    import httpx
+    from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import (
+        InMemorySpanExporter,
+    )
+
+    from openarmature.graph import END, GraphBuilder
+    from openarmature.llm import OpenAIProvider, UserMessage
+
+    from .adapter import build_state_cls
+
+    # ---- FIFO mock provider. The two canned responses are identical; this
+    # fixture asserts orphan-span parenting, not response-content routing.
+    mock_responses = list(cast("list[dict[str, Any]]", case.get("mock_llm") or []))
+
+    def _handler(_request: httpx.Request) -> httpx.Response:
+        if not mock_responses:
+            raise AssertionError("mock_llm queue exhausted")
+        body = cast("dict[str, Any]", mock_responses.pop(0)["body"])
+        return httpx.Response(
+            200, content=json.dumps(body).encode("utf-8"), headers={"Content-Type": "application/json"}
+        )
+
+    provider = OpenAIProvider(
+        base_url="http://mock-llm.test",
+        model="test-model",
+        api_key="test",
+        transport=httpx.MockTransport(_handler),
+    )
+
+    # ---- Innermost leaf subgraph. The `guard` node's BODY returns the `update`
+    # dict (marker=1) so the inner fan-out collect_field has a value; a WRAPPER
+    # issues exactly one orphan provider.complete and DISCARDS the response,
+    # modelling a guardrail / classifier side call.
+    #
+    # Realization note (this harness deviates from the fixture's literal
+    # "per-node `guard` middleware, phase: pre" on two axes, both forced by the
+    # observers' real timing; the orphan SEMANTIC -- no open calling-node span --
+    # and the oracle span_tree are preserved):
+    #
+    #   1. INSTANCE middleware on the inner fan-out, not per-node middleware on
+    #      `guard`. A per-node wrapper's call carries guard's own lineage, so the
+    #      observer binds it to guard's span (the OTel observer opens node spans
+    #      synchronously via ``prepare_sync`` before the async worker resolves the
+    #      provider event), and it parents under guard, not orphaned. The fan-out
+    #      instance wrapper keeps the orphan call's lineage at the fan-out
+    #      boundary (off the leaf node), so its span falls back to the nearest
+    #      enclosing wrapper -- the inner fan-out INSTANCE span -- exactly as §5.5
+    #      intends, a sibling of the later `guard` node span. `leaf_sg` is the
+    #      single `guard` node, so the instance wrapper IS guard's wrapper; the
+    #      `calls_llm_from_wrapper` directive is read from the `guard` node spec.
+    #   2. POST phase (fire AFTER next()), matching the sibling Langfuse 134
+    #      harness for a single realization across both backends. The Langfuse
+    #      observer creates the inner instance OBSERVATION lazily when guard's
+    #      started event drains on the serial worker, so a pre-phase orphan
+    #      (enqueued first) resolves to the OUTER instance there; post guarantees
+    #      the inner instance exists at resolution time. OTel resolves to the
+    #      inner instance in either phase. The fixture declares phase: pre; its .md
+    #      notes either phase exercises the same fallback (in post, guard has
+    #      closed, so the calling-node span is still not open at emit).
+    subgraphs_spec = cast("dict[str, Any]", spec["subgraphs"])
+    leaf_spec = cast("dict[str, Any]", subgraphs_spec["leaf_sg"])
+    leaf_state_cls = build_state_cls(
+        "Leaf_133", cast("dict[str, dict[str, Any]]", leaf_spec["state"]["fields"])
+    )
+    guard_spec = cast("dict[str, Any]", leaf_spec["nodes"]["guard"])
+    update_map = dict(cast("dict[str, Any]", guard_spec["update"]))
+    wrapper_spec = cast("dict[str, Any]", guard_spec["calls_llm_from_wrapper"])
+    messages_in: tuple[Any, ...] = tuple(
+        UserMessage(content=m["content"])
+        for m in cast("list[dict[str, str]]", wrapper_spec.get("messages", []))
+        if m.get("role") == "user"
+    ) or (UserMessage(content="guardrail check"),)
+
+    # Rendezvous: hold every wrapper provider call until all are in flight before
+    # any fires, so the two orphan provider spans are emitted while both inner
+    # instance subtrees -- whose instance spans share the innermost scalar
+    # fan_out_index 0 -- are in flight at once. A scalar-only parent key would
+    # then collide and mis-parent outer-1's orphan under outer-0's inner instance;
+    # the chain key routes each to its own. This is what makes the fixture
+    # DISCRIMINATE the fix. Times out to a no-op if fewer run concurrently than
+    # expected, so it never deadlocks. total_asks derives from the outer items'
+    # default (2 here: outer_seeds [[0], [0]]).
+    outer_items0 = cast(
+        "list[list[Any]]",
+        case["state"]["fields"][case["nodes"]["outer_fan_out"]["fan_out"]["items_field"]].get("default")
+        or [],
+    )
+    total_asks = sum(len(x) for x in outer_items0)
+    assert total_asks > 0, (
+        "fixture 133 rendezvous gate degenerated (total_asks=0): the outer items "
+        "must be supplied via the field `default` so the concurrent interleaving is forced"
+    )
+    rendezvous = {"n": 0}
+    gate = asyncio.Event()
+
+    async def _fire_orphan_call() -> None:
+        rendezvous["n"] += 1
+        if rendezvous["n"] >= total_asks:
+            gate.set()
+        try:
+            async with asyncio.timeout(5):
+                await gate.wait()
+        except TimeoutError:
+            # Best-effort rendezvous: release rather than deadlock if fewer run
+            # concurrently than total_asks (asserted > 0 above, so the gate cannot
+            # degenerate silently on the very bug this fixture exists to catch).
+            pass
+        # Wrapper-issued side call: fire exactly one completion and DISCARD it
+        # (never written to state), modelling a guardrail / classifier check.
+        await provider.complete(list(messages_in))
+
+    async def _guard_body(_s: Any) -> Mapping[str, Any]:
+        return dict(update_map)
+
+    async def _wrapper_mw(state: Any, next_call: Any) -> Mapping[str, Any]:
+        # Instance middleware on the inner fan-out, POST phase: fire AFTER next()
+        # (the inner subgraph, i.e. `guard`, has run and its span has closed), so
+        # the calling-node span is not open and the orphan provider span falls
+        # back to the nearest enclosing wrapper: the inner fan-out INSTANCE span.
+        result = await next_call(state)
+        await _fire_orphan_call()
+        return result
+
+    leaf_sg = (
+        GraphBuilder(leaf_state_cls)
+        .add_node("guard", _guard_body)
+        .add_edge("guard", END)
+        .set_entry("guard")
+        .compile()
+    )
+
+    # ---- Middle subgraph: the inner fan-out over `leaf_sg`, with the orphan-call
+    # wrapper attached as INSTANCE middleware (see the realization note above).
+    mid_spec = cast("dict[str, Any]", subgraphs_spec["mid"])
+    mid_state_cls = build_state_cls("Mid_133", cast("dict[str, dict[str, Any]]", mid_spec["state"]["fields"]))
+    inner_fo = cast("dict[str, Any]", mid_spec["nodes"]["inner_fan_out"]["fan_out"])
+    mid = (
+        GraphBuilder(mid_state_cls)
+        .add_fan_out_node(
+            "inner_fan_out",
+            subgraph=leaf_sg,
+            items_field=cast("str", inner_fo["items_field"]),
+            item_field=cast("str", inner_fo["item_field"]),
+            collect_field=cast("str", inner_fo["collect_field"]),
+            target_field=cast("str", inner_fo["target_field"]),
+            error_policy=cast("str", inner_fo.get("error_policy", "fail_fast")),
+            instance_middleware=[_wrapper_mw],
+        )
+        .add_edge("inner_fan_out", END)
+        .set_entry("inner_fan_out")
+        .compile()
+    )
+
+    # ---- Outer graph: the outer fan-out over `mid`, forced concurrent so the
+    # two outer instances' inner subtrees are in flight at once (the condition
+    # the chain keying discriminates -- a scalar key would collide/mis-parent).
+    outer_fields = cast("dict[str, dict[str, Any]]", case["state"]["fields"])
+    outer_state_cls = build_state_cls("Outer_133", outer_fields)
+    outer_fo = cast("dict[str, Any]", case["nodes"]["outer_fan_out"]["fan_out"])
+    outer_default = cast("list[Any]", outer_fields[cast("str", outer_fo["items_field"])].get("default") or [])
+    graph = (
+        GraphBuilder(outer_state_cls)
+        .add_fan_out_node(
+            "outer_fan_out",
+            subgraph=mid,
+            items_field=cast("str", outer_fo["items_field"]),
+            item_field=cast("str", outer_fo["item_field"]),
+            collect_field=cast("str", outer_fo["collect_field"]),
+            target_field=cast("str", outer_fo["target_field"]),
+            error_policy=cast("str", outer_fo.get("error_policy", "fail_fast")),
+            concurrency=max(len(outer_default), 2),
+        )
+        .add_edge("outer_fan_out", END)
+        .set_entry("outer_fan_out")
+        .compile()
+    )
+
+    exporter = InMemorySpanExporter()
+    observer = OTelObserver(span_processor=SimpleSpanProcessor(exporter))
+    graph.attach_observer(observer)
+    try:
+        await graph.invoke(outer_state_cls())
+        await graph.drain()
+    finally:
+        observer.shutdown()
+        await provider.aclose()
+
+    spans = exporter.get_finished_spans()
+
+    # ---- span_tree: the recursive match enforces that each orphan llm.complete
+    # is a child of ITS OWN inner fan-out instance span (chain-disambiguated),
+    # a sibling of that instance's `guard` node span.
+    expected_tree = cast("list[dict[str, Any]]", case["expected"]["span_tree"])
+    inv_root = next(
+        (s for s in spans if s.name == "openarmature.invocation" and cast("Any", s.parent) is None), None
+    )
+    assert inv_root is not None, f"invocation root span missing; got {[s.name for s in spans]}"
+    _assert_span_tree_matches(spans, [inv_root], expected_tree)
+
+    # ---- Invariants (fail loud on any declared-but-unhandled name).
+    invariants = cast("dict[str, Any]", case["expected"].get("invariants") or {})
+
+    def _attr(s: Any, key: str) -> Any:
+        attrs = cast("dict[str, Any]", s.attributes or {})
+        return attrs.get(key)
+
+    llm_spans = [s for s in spans if s.name == "openarmature.llm.complete"]
+    guard_spans = [s for s in spans if s.name == "guard"]
+    guard_ids = {cast("Any", s.context).span_id for s in guard_spans}
+    guard_parent_ids = {cast("Any", s.parent).span_id for s in guard_spans if s.parent is not None}
+    # Inner fan-out INSTANCE span: carries the scalar fan_out_index AND names its
+    # parent fan-out node `inner_fan_out` (distinguishing it from the inner
+    # fan-out NODE span, which carries item_count, and from an outer instance).
+    inner_instance_ids = {
+        cast("Any", s.context).span_id
+        for s in spans
+        if s.name == "inner_fan_out"
+        and _attr(s, "openarmature.node.fan_out_index") is not None
+        and _attr(s, "openarmature.fan_out.parent_node_name") == "inner_fan_out"
+    }
+    fan_out_node_ids = {
+        cast("Any", s.context).span_id
+        for s in spans
+        if _attr(s, "openarmature.fan_out.item_count") is not None
+    }
+    invocation_ids = {cast("Any", s.context).span_id for s in spans if s.name == "openarmature.invocation"}
+    llm_parents = [cast("Any", s.parent).span_id for s in llm_spans if s.parent is not None]
+
+    if invariants.get("orphan_llm_span_parents_under_inner_fan_out_instance"):
+        assert llm_parents and all(p in inner_instance_ids for p in llm_parents), (
+            "each orphan llm.complete MUST parent under an inner fan-out INSTANCE span"
+        )
+        assert all(p not in guard_ids for p in llm_parents), (
+            "orphan llm.complete MUST NOT parent under the guard node span"
+        )
+    if invariants.get("orphan_llm_span_not_under_coincidentally_indexed_sibling"):
+        assert len(set(llm_parents)) == len(llm_spans), (
+            "each orphan llm.complete MUST parent under a DISTINCT inner instance span "
+            "(chain-routed, not the coincidentally-indexed sibling sharing fan_out_index)"
+        )
+    if invariants.get("orphan_llm_span_not_under_fan_out_node_or_invocation"):
+        assert all(p not in fan_out_node_ids for p in llm_parents), (
+            "orphan llm.complete MUST NOT parent under a fan-out NODE span"
+        )
+        assert all(p not in invocation_ids for p in llm_parents), (
+            "orphan llm.complete MUST NOT parent under the invocation span"
+        )
+    if invariants.get("orphan_llm_span_sibling_of_calling_node_span"):
+        assert all(p in guard_parent_ids for p in llm_parents), (
+            "each orphan llm.complete MUST be a SIBLING of its guard node span (share its parent)"
+        )
+        assert all(p not in guard_ids for p in llm_parents), (
+            "orphan llm.complete parent MUST NOT be the guard span itself"
+        )
+    if (want := invariants.get("llm_provider_span_count")) is not None:
+        assert len(llm_spans) == want, f"expected {want} llm.complete spans; got {len(llm_spans)}"
+
+    _handled = {
+        "orphan_llm_span_parents_under_inner_fan_out_instance",
+        "orphan_llm_span_not_under_coincidentally_indexed_sibling",
+        "orphan_llm_span_not_under_fan_out_node_or_invocation",
+        "orphan_llm_span_sibling_of_calling_node_span",
+        "llm_provider_span_count",
+    }
+    unhandled = set(invariants) - _handled
+    assert not unhandled, f"fixture 133 declares unhandled invariants: {sorted(unhandled)}"
 
 
 async def _run_fixture_110(spec: Mapping[str, Any]) -> None:
