@@ -403,6 +403,26 @@ def test_set_invocation_metadata_rejects_reserved_detached() -> None:
         set_invocation_metadata(detached=True)
 
 
+# ---------------------------------------------------------------------------
+# Reserved exact key names extension (proposal 0088)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "parallel_branches_branch_count",
+        "parallel_branches_error_policy",
+        "parallel_branches_parent_node_name",
+    ],
+)
+def test_validate_rejects_reserved_parallel_branches_keys(key: str) -> None:
+    # Proposal 0088 (§3.4): the parallel-branches attribute keys are reserved so
+    # a caller cannot shadow the OA-emitted observation.metadata fields.
+    with pytest.raises(ValueError, match="is reserved"):
+        validate_invocation_metadata({key: "x"})
+
+
 def test_set_invocation_metadata_rejects_reserved_detached_from_invocation_id() -> None:
     with pytest.raises(ValueError, match="is reserved"):
         set_invocation_metadata(detached_from_invocation_id="parent-1")

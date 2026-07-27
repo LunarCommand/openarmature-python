@@ -1728,6 +1728,16 @@ class LangfuseObserver:
             metadata["fan_out_item_count"] = cfg.item_count
             metadata["fan_out_concurrency"] = 0 if cfg.concurrency is None else cfg.concurrency
             metadata["fan_out_error_policy"] = cfg.error_policy
+        # §8.4.2 (proposal 0088): the parallel-branches node-span attributes,
+        # flattened with the parallel_branches_ prefix, mirroring the fan_out_*
+        # block above. parallel_branches_config is present only on the
+        # parallel-branches node's own started/completed event, so these land on
+        # the node Span, not the per-branch dispatch Span (whose
+        # parent_node_name / branch_name are set at synthesis).
+        if event.parallel_branches_config is not None:
+            pcfg = event.parallel_branches_config
+            metadata["parallel_branches_branch_count"] = pcfg.branch_count
+            metadata["parallel_branches_error_policy"] = pcfg.error_policy
         _apply_caller_metadata(metadata, event.caller_invocation_metadata)
         return metadata
 

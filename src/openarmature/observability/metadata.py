@@ -109,6 +109,14 @@ _RESERVED_KEY_NAMES: frozenset[str] = frozenset(
         # from 24 (post-0042) to 26.
         "implementation_name",
         "implementation_version",
+        # Proposal 0088 (spec v0.83.0): the parallel-branches node-span /
+        # dispatch-span attributes, flattened onto observation.metadata like the
+        # fan_out_* keys. Reserved so a caller passing one in
+        # invocation_metadata is rejected at the invoke() boundary rather than
+        # shadowing the OA-emitted field. The set grows from 26 to 29.
+        "parallel_branches_branch_count",
+        "parallel_branches_error_policy",
+        "parallel_branches_parent_node_name",
     }
 )
 
