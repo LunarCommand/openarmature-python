@@ -1883,6 +1883,71 @@ async def test_llm_event_parents_under_fan_out_instance_dispatch() -> None:
     )
 
 
+async def test_llm_event_parents_under_parallel_branch_dispatch() -> None:
+    # Proposal 0084 branch coverage: the orphan fallback resolves a per-branch
+    # dispatch observation as well as a fan-out instance observation, but the
+    # 0084 fixtures (132/133/134) are fan-out only. An orphan LLM event fired
+    # inside a parallel branch (calling node observation not open) MUST parent
+    # under the per-branch dispatch observation -- the nearest enclosing wrapper
+    # -- resolved via branch_name_chain. Guards the reference behavior pending a
+    # spec fixture (see release-v0.17.0 coord).
+    from openarmature.observability.correlation import (
+        _reset_invocation_id,
+        _set_invocation_id,
+    )
+    from openarmature.observability.langfuse.observer import (
+        _branch_dispatch_key,
+        _InvState,
+        _OpenObservation,
+    )
+    from tests._helpers.typed_event import make_failed_event
+
+    client = InMemoryLangfuseClient()
+    observer = LangfuseObserver(client=client)
+    invocation_id = "inv-pb-llm"
+    token = _set_invocation_id(invocation_id)
+    try:
+        client.trace(id=invocation_id, name="dispatcher")
+        observer._inv_states[invocation_id] = _InvState(trace_id=invocation_id)  # noqa: SLF001
+        inv_state = observer._inv_states[invocation_id]  # noqa: SLF001
+        # Per-branch dispatch for branch "fast" of pb node "dispatcher". No
+        # open_observation for the calling node ("dispatcher", "ask"), so the
+        # resolver reaches the per-branch dispatch fallback. The calling node
+        # sits in branch "fast": branch_name_chain=(None, "fast") aligned to
+        # namespace.
+        fi_chain: tuple[int | None, ...] = (None, None)
+        bn_chain: tuple[str | None, ...] = (None, "fast")
+        dispatch_handle = client.span(trace_id=invocation_id, name="fast")
+        branch_key = _branch_dispatch_key(("dispatcher",), fi_chain, bn_chain, "fast")
+        inv_state.parallel_branches_branch_spans[branch_key] = _OpenObservation(handle=dispatch_handle)
+        await observer(
+            make_failed_event(
+                invocation_id=invocation_id,
+                node_name="ask",
+                namespace=("dispatcher", "ask"),
+                attempt_index=0,
+                fan_out_index=None,
+                branch_name="fast",
+                fan_out_index_chain=fi_chain,
+                branch_name_chain=bn_chain,
+                model="m-test",
+                error_category="provider_unavailable",
+                error_type="ProviderUnavailable",
+                error_message="503 from upstream",
+                call_id="cc-pb",
+            )
+        )
+    finally:
+        _reset_invocation_id(token)
+
+    trace = client.traces[invocation_id]
+    error_gens = [o for o in trace.observations if o.type == "generation" and o.level == "ERROR"]
+    assert len(error_gens) == 1
+    assert error_gens[0].parent_observation_id == dispatch_handle.id, (
+        "LLM Generation must parent under the per-branch dispatch observation"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Proposal 0063 — tool-execution Tool observation (asType "tool")
 # ---------------------------------------------------------------------------
