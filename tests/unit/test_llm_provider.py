@@ -1633,6 +1633,143 @@ async def test_call_level_retry_invokes_on_retry_per_attempt() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Per-attempt request override (proposal 0095a)
+# ---------------------------------------------------------------------------
+
+
+def _capture_then_ok(bodies: list[dict[str, Any]], calls: list[int], fail_count: int):  # type: ignore[no-untyped-def]
+    def handler(req: httpx.Request) -> httpx.Response:
+        bodies.append(json.loads(req.content))
+        calls[0] += 1
+        if calls[0] <= fail_count:
+            return httpx.Response(503, json={"error": {"message": "down"}})
+        return httpx.Response(200, json=_ok_chat_completion())
+
+    return handler
+
+
+async def test_call_level_retry_per_attempt_override_varies_sampling() -> None:
+    # Proposal 0095a: the per-attempt override varies the outbound request's
+    # sampling on RETRIES only. Attempt 0 uses the base config; retry i applies
+    # override[i]. Non-overridden base fields (top_p) carry through every
+    # attempt. The caller's config is never mutated, and each retry attempt
+    # event carries retry_reason="transient" (None on the base attempt).
+    from openarmature.llm import LlmRetryConfig, RuntimeConfig
+
+    bodies: list[dict[str, Any]] = []
+    calls = [0]
+    events, token = _collecting_dispatch()
+    provider = OpenAIProvider(
+        base_url="http://test",
+        model="m",
+        api_key="k",
+        transport=httpx.MockTransport(_capture_then_ok(bodies, calls, fail_count=2)),
+    )
+    base_config = RuntimeConfig(temperature=0.0, top_p=0.9)
+    try:
+        await provider.complete(
+            [UserMessage(content="go")],
+            config=base_config,
+            retry=LlmRetryConfig(
+                max_attempts=3,
+                backoff=deterministic_backoff(0),
+                per_attempt_override=[RuntimeConfig(temperature=0.3), RuntimeConfig(temperature=0.6)],
+            ),
+        )
+    finally:
+        await provider.aclose()
+        _release_dispatch(token)
+
+    assert [b.get("temperature") for b in bodies] == [0.0, 0.3, 0.6]
+    # Non-overridden base field survives the merge on every attempt.
+    assert [b.get("top_p") for b in bodies] == [0.9, 0.9, 0.9]
+    # §5 immutability: the caller's config object is untouched.
+    assert base_config.temperature == 0.0
+    attempts = [e for e in events if isinstance(e, LlmRetryAttemptEvent)]
+    assert [e.retry_reason for e in attempts] == [None, "transient", "transient"]
+
+
+async def test_call_level_retry_per_attempt_override_last_entry_carries_forward() -> None:
+    # Proposal 0095a: when the override schedule is shorter than the retry
+    # count, the last entry carries forward.
+    from openarmature.llm import LlmRetryConfig, RuntimeConfig
+
+    bodies: list[dict[str, Any]] = []
+    calls = [0]
+    provider = OpenAIProvider(
+        base_url="http://test",
+        model="m",
+        api_key="k",
+        transport=httpx.MockTransport(_capture_then_ok(bodies, calls, fail_count=2)),
+    )
+    try:
+        await provider.complete(
+            [UserMessage(content="go")],
+            config=RuntimeConfig(temperature=0.0),
+            retry=LlmRetryConfig(
+                max_attempts=3,
+                backoff=deterministic_backoff(0),
+                per_attempt_override=[RuntimeConfig(temperature=0.5)],  # one entry, two retries
+            ),
+        )
+    finally:
+        await provider.aclose()
+
+    # retry 1 applies override[0] (0.5); retry 2 (schedule exhausted) carries it forward.
+    assert [b.get("temperature") for b in bodies] == [0.0, 0.5, 0.5]
+
+
+async def test_call_level_retry_empty_override_uses_base_config() -> None:
+    # An empty per_attempt_override schedule applies no override: every attempt
+    # replays the base config, same as a plain RetryConfig.
+    from openarmature.llm import LlmRetryConfig, RuntimeConfig
+
+    bodies: list[dict[str, Any]] = []
+    calls = [0]
+    provider = OpenAIProvider(
+        base_url="http://test",
+        model="m",
+        api_key="k",
+        transport=httpx.MockTransport(_capture_then_ok(bodies, calls, fail_count=1)),
+    )
+    try:
+        await provider.complete(
+            [UserMessage(content="go")],
+            config=RuntimeConfig(temperature=0.4),
+            retry=LlmRetryConfig(max_attempts=2, backoff=deterministic_backoff(0), per_attempt_override=[]),
+        )
+    finally:
+        await provider.aclose()
+
+    assert [b.get("temperature") for b in bodies] == [0.4, 0.4]
+
+
+async def test_call_level_retry_plain_config_replays_identically() -> None:
+    # A plain RetryConfig (no per_attempt_override) preserves the byte-identical
+    # replay: every attempt sends the base config unchanged.
+    from openarmature.llm import RuntimeConfig
+
+    bodies: list[dict[str, Any]] = []
+    calls = [0]
+    provider = OpenAIProvider(
+        base_url="http://test",
+        model="m",
+        api_key="k",
+        transport=httpx.MockTransport(_capture_then_ok(bodies, calls, fail_count=1)),
+    )
+    try:
+        await provider.complete(
+            [UserMessage(content="go")],
+            config=RuntimeConfig(temperature=0.2),
+            retry=RetryConfig(max_attempts=2, backoff=deterministic_backoff(0)),
+        )
+    finally:
+        await provider.aclose()
+
+    assert [b.get("temperature") for b in bodies] == [0.2, 0.2]
+
+
+# ---------------------------------------------------------------------------
 # Proposal 0058: per-category field-mapping + pre-send + mutual exclusion
 # ---------------------------------------------------------------------------
 

@@ -22,6 +22,8 @@ frozenset are also re-exported here so callers writing custom retry
 classifiers don't have to reach into ``openarmature.llm.errors``.
 """
 
+from typing import TYPE_CHECKING
+
 from .errors import (
     PROVIDER_AUTHENTICATION,
     PROVIDER_INVALID_MODEL,
@@ -72,6 +74,13 @@ from .provider import (
 from .providers import OpenAIProvider, classify_http_error, parse_retry_after
 from .response import FinishReason, ParsedValue, Response, RuntimeConfig, Usage
 
+if TYPE_CHECKING:
+    # Eager-importing LlmRetryConfig would pull its base class from
+    # graph.middleware.retry during this package's init, and that module
+    # imports back into openarmature.llm (via llm.errors) -- a module-load
+    # cycle. Type-checkers see it here; runtime access is lazy (__getattr__).
+    from .retry import LlmRetryConfig
+
 __all__ = [
     "PROVIDER_AUTHENTICATION",
     "PROVIDER_INVALID_MODEL",
@@ -92,6 +101,7 @@ __all__ = [
     "ImageSourceInline",
     "ImageSourceURL",
     "LlmProviderError",
+    "LlmRetryConfig",
     "Message",
     "OpenAIProvider",
     "ParsedValue",
@@ -123,3 +133,16 @@ __all__ = [
     "validate_tool_choice",
     "validate_tools",
 ]
+
+
+def __getattr__(name: str) -> object:
+    # PEP 562 lazy export for LlmRetryConfig (proposal 0095). Its base class
+    # lives in graph.middleware.retry, which imports back into this package
+    # (via llm.errors) -- an eager import here would cycle during init. Deferring
+    # the import to first attribute access lets this package finish initializing
+    # before graph.middleware.retry is loaded.
+    if name == "LlmRetryConfig":
+        from .retry import LlmRetryConfig
+
+        return LlmRetryConfig
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

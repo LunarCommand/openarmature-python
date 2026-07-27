@@ -1618,6 +1618,10 @@ class OTelObserver:
             "openarmature.llm.model": event.model,
             "openarmature.llm.attempt_index": event.llm_attempt_index,
         }
+        # Proposal 0095 (llm-provider §7.1): the retry discriminator, present
+        # only on retry attempts (None on the base attempt 0).
+        if event.retry_reason is not None:
+            attrs["openarmature.llm.retry_reason"] = event.retry_reason
         cid = current_correlation_id()
         if cid is not None:
             attrs["openarmature.correlation_id"] = cid

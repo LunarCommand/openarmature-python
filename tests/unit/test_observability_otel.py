@@ -1683,6 +1683,22 @@ async def test_token_budget_warning_log_multibound_and_per_attempt(caplog: pytes
     assert len([r for r in caplog.records if r.name == "openarmature.observability"]) == 2
 
 
+async def test_retry_reason_span_attribute() -> None:
+    # Proposal 0095: the per-attempt span carries openarmature.llm.retry_reason
+    # on a retry attempt (present only when set); the base attempt 0
+    # (retry_reason None) omits it.
+    from tests._helpers.typed_event import make_retry_attempt_event
+
+    base = make_retry_attempt_event(llm_attempt_index=0)
+    retried = make_retry_attempt_event(llm_attempt_index=1, retry_reason="transient")
+    _, spans = await _drive_metrics_events([base, retried])
+    by_idx = {
+        dict(s.attributes or {})["openarmature.llm.attempt_index"]: dict(s.attributes or {}) for s in spans
+    }
+    assert "openarmature.llm.retry_reason" not in by_idx[0]
+    assert by_idx[1]["openarmature.llm.retry_reason"] == "transient"
+
+
 def _embedding_event_for_metrics(*, usage: Any = None, latency_ms: float | None = 5.0) -> Any:
     from openarmature.graph.events import EmbeddingEvent
 
