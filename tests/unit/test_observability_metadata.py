@@ -423,6 +423,20 @@ def test_validate_rejects_reserved_parallel_branches_keys(key: str) -> None:
         validate_invocation_metadata({key: "x"})
 
 
+@pytest.mark.parametrize(
+    "key",
+    [
+        "parallel_branches_branch_count",
+        "parallel_branches_error_policy",
+        "parallel_branches_parent_node_name",
+    ],
+)
+def test_set_invocation_metadata_rejects_reserved_parallel_branches_keys(key: str) -> None:
+    # The same reservation fires at the mid-invocation boundary (0088 §3.4).
+    with pytest.raises(ValueError, match="is reserved"):
+        set_invocation_metadata(**{key: "x"})
+
+
 def test_set_invocation_metadata_rejects_reserved_detached_from_invocation_id() -> None:
     with pytest.raises(ValueError, match="is reserved"):
         set_invocation_metadata(detached_from_invocation_id="parent-1")

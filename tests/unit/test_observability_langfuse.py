@@ -1304,7 +1304,11 @@ async def test_parallel_branches_node_span_carries_config_attributes() -> None:
     assert {o.metadata["branch_name"] for o in dispatch_obs} == {"alpha", "beta"}
     # The config attributes are node-span-only: they MUST NOT leak onto the
     # per-branch dispatch observations.
-    assert all("parallel_branches_branch_count" not in o.metadata for o in dispatch_obs)
+    assert all(
+        "parallel_branches_branch_count" not in o.metadata
+        and "parallel_branches_error_policy" not in o.metadata
+        for o in dispatch_obs
+    )
 
 
 # Spec §8.4.1 / proposal 0052: implementation attribution rows on
