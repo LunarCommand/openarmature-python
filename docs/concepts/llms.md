@@ -102,14 +102,14 @@ response = await provider.complete(
 ```
 
 When `retry` is omitted the call is a single attempt (the default).
-With a config, the request is validated once, then the wire call is
-retried on transient errors per the config's classifier and backoff (an
-`LlmRetryConfig` with a `per_attempt_override` can vary the request per
-attempt, below); a non-transient error (a bad request, an auth failure)
-propagates immediately without retrying. From observability's point of
-view the call stays a single unit: exactly one completion-or-failure
-event fires for the terminal outcome, regardless of how many attempts
-it took.
+With a config, the request is validated once; the wire body is then
+assembled per attempt (identically by default, or varied by an
+`LlmRetryConfig` `per_attempt_override`, below) and the wire call
+retried on transient errors per the config's classifier and backoff; a
+non-transient error (a bad request, an auth failure) propagates
+immediately without retrying. From observability's point of view the
+call stays a single unit: exactly one completion-or-failure event fires
+for the terminal outcome, regardless of how many attempts it took.
 
 ### Varying the request across attempts
 

@@ -594,8 +594,11 @@ class OpenAIProvider:
         (attempt ``i > 0``) merges ``overrides[i-1]`` onto the base -- the
         override's SET fields replace, unspecified fields inherited -- and the
         last entry carries forward when the schedule is shorter than the retry
-        count. Returns a fresh copy (``model_copy``); the caller's config is
-        never mutated (§5 immutability).
+        count. Attempt 0 and the no-override case return the caller's base
+        config as-is; only the override path returns a fresh ``model_copy``.
+        The caller's config is never mutated either way -- the base path
+        relies on the downstream body build reading it read-only -- honoring
+        §5 immutability.
         """
         if attempt == 0 or not overrides:
             return base
