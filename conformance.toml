@@ -867,7 +867,9 @@ note = "Within-node directive execution order (conformance-adapter §8.3): a nod
 # parity (observability §8.4.8).  Not-yet; observability fixture 136
 # defers with it.
 [proposals."0088"]
-status = "not-yet"
+status = "implemented"
+since = "0.17.0"
+note = "Langfuse parallel-branches mapping parity (observability §8.4.8 / §8.3 / §8.4.2 / §3.4). The LangfuseObserver already synthesized the three-level tree -- the parallel-branches NODE Span -> a per-branch dispatch Span (one per branch_name, observation.name = the branch_name) -> the branch's inner observations -- and already emitted the dispatch-span parallel_branches_parent_node_name + branch_name (0042). Completed here: the two NODE-span attributes parallel_branches_branch_count + parallel_branches_error_policy, flattened onto observation.metadata from parallel_branches_config, mirroring the fan_out_* block (they were the one §8.4.2 row the observer never mapped -- node-span-only, they do not leak onto the dispatch Span); and the §3.4 reservation of the three parallel_branches_* keys (the reserved caller-metadata set grows 26 -> 29), so a caller cannot shadow them at the invoke() boundary. The OTel side was already complete (§4.3 / §5.7 / §6). Observability fixture 136 (the dedicated three-level-tree pin, the Langfuse analog of fan-out's 032 and the OTel 038) runs; fixture 030's incidental coverage stands. No pin bump (0088 is spec v0.83.0, within the current v0.88.0 pin)."
 
 # Spec v0.84.0 (proposal 0089).  Embedding / rerank typed-event output
 # (graph-engine §6 EmbeddingEvent.output_vectors / RerankEvent.

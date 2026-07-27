@@ -110,6 +110,10 @@ _LANGFUSE_FIXTURES = frozenset(
         # proposal 0044) that inner branch nodes parent under, ported from the
         # OTel observer's parallel_branches_branch_spans machinery.
         "030-caller-metadata-parallel-branches-per-branch",
+        # 136 (Langfuse parallel-branches dispatch span, proposal 0088): the
+        # dedicated three-level-tree pin, with the node-span
+        # parallel_branches_branch_count / _error_policy attributes (§8.4.2).
+        "136-langfuse-parallel-branches-dispatch-span",
         # 039 (nested-lineage augmentation, proposal 0045): the LangfuseObserver
         # gained prefix-general fan-out-instance dispatch (so a fan-out under a
         # serial wrapper parents correctly) and skips shared-parent NODEs in the

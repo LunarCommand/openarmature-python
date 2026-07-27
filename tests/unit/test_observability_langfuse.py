@@ -1259,6 +1259,58 @@ async def test_parallel_branches_subgraph_branch_one_dispatch_observation() -> N
     assert all(o.parent_observation_id == branch_obs[0].id for o in inner)
 
 
+async def test_parallel_branches_node_span_carries_config_attributes() -> None:
+    # Proposal 0088 (§8.4.2): the parallel-branches NODE observation carries
+    # parallel_branches_branch_count + _error_policy; each per-branch dispatch
+    # observation carries parallel_branches_parent_node_name (+ branch_name).
+    from openarmature.graph import BranchSpec
+
+    class _BState(State):
+        v: str = ""
+
+    class _PState(State):
+        x: str = ""
+        y: str = ""
+
+    async def _leaf(_s: _BState) -> dict[str, Any]:
+        return {"v": "v"}
+
+    branch = GraphBuilder(_BState).add_node("leaf", _leaf).add_edge("leaf", END).set_entry("leaf").compile()
+    graph = (
+        GraphBuilder(_PState)
+        .add_parallel_branches_node(
+            "dispatch",
+            branches={
+                "alpha": BranchSpec(subgraph=branch, outputs={"x": "v"}),
+                "beta": BranchSpec(subgraph=branch, outputs={"y": "v"}),
+            },
+            error_policy="fail_fast",
+        )
+        .add_edge("dispatch", END)
+        .set_entry("dispatch")
+        .compile()
+    )
+    graph, client, _ = _attach(graph)
+    await graph.invoke(_PState())
+    await graph.drain()
+
+    trace = next(iter(client.traces.values()))
+    node_obs = next(o for o in trace.observations if o.name == "dispatch")
+    assert node_obs.metadata["parallel_branches_branch_count"] == 2
+    assert node_obs.metadata["parallel_branches_error_policy"] == "fail_fast"
+    dispatch_obs = [o for o in trace.observations if o.name in ("alpha", "beta")]
+    assert len(dispatch_obs) == 2
+    assert all(o.metadata["parallel_branches_parent_node_name"] == "dispatch" for o in dispatch_obs)
+    assert {o.metadata["branch_name"] for o in dispatch_obs} == {"alpha", "beta"}
+    # The config attributes are node-span-only: they MUST NOT leak onto the
+    # per-branch dispatch observations.
+    assert all(
+        "parallel_branches_branch_count" not in o.metadata
+        and "parallel_branches_error_policy" not in o.metadata
+        for o in dispatch_obs
+    )
+
+
 # Spec §8.4.1 / proposal 0052: implementation attribution rows on
 # every Langfuse Trace. The two rows source from the §5.1
 # attributes; the always-emit invariant inherits from §5.1 so the
