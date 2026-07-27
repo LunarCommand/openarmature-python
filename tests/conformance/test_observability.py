@@ -294,7 +294,8 @@ _SUPPORTED_FIXTURES = frozenset(
         # openarmature.rerank.complete), and the Langfuse Retriever observation
         # (108 success, 138 failure, 142 no-usage -- the proposal 0089
         # output_results-sourced rendering + the proposal 0093 nullable-usage
-        # path). 109 (rerank metrics) stays deferred with the §11 path.
+        # path). 109 (rerank §11 metrics) now runs -- the rerank analog of the
+        # embedding-metrics path (proposals 0067 + 0060).
         "099-rerank-event-dispatch",
         "100-rerank-failure-event-dispatch-on-provider-unavailable",
         "101-rerank-event-mutual-exclusion",
@@ -308,19 +309,12 @@ _SUPPORTED_FIXTURES = frozenset(
         "138-langfuse-rerank-failure-observation",
         "141-otel-rerank-no-usage-attributes-omitted",
         "142-langfuse-rerank-no-usage-usagedetails-omitted",
+        "109-rerank-metrics-token-and-duration",
         # v0.70.1 — proposal 0075 callable-branch span shape (observability
         # §5.7). The ORIGINAL fixture 110 (span shape + skip-emits-no-span);
         # the branch_count assertion arrives with the v0.73.1 pin (v0.16.0).
         "110-otel-callable-branch-span",
     }
-)
-
-
-_RERANK_DEFER = (
-    "rerank observability (099-108 + 138 + 141/142) is wired (proposal 0060b); the "
-    "§11 rerank-metrics path stays deferred -- rerank metrics are OUT OF SCOPE for "
-    "proposal 0067 (embedding metrics shipped; rerank is explicitly excluded per the "
-    "proposal), with no later PR in this release"
 )
 
 
@@ -339,12 +333,6 @@ _DEFERRED_FIXTURES: dict[str, str] = {
     "039-nested-lineage-augmentation": (
         "nested-case Langfuse harness wiring not yet implemented (proposal 0045 nested fan-out)"
     ),
-    # Rerank observability (proposal 0060). 099-108 + 138 + 141/142 are wired
-    # (proposal 0060b -- see _SUPPORTED_FIXTURES). The §11 rerank-metrics path
-    # (109) stays deferred: rerank metrics are out of scope for proposal 0067
-    # (embedding metrics 089/143 now run; rerank is explicitly excluded per the
-    # proposal), with no later PR in this release.
-    "109-rerank-metrics-token-and-duration": _RERANK_DEFER,
     # ---- v0.16.0 spec-pin bump (v0.70.1 -> v0.84.0): new fixtures for
     # proposals deferred to their own later PRs of this release. ----
     # Proposal 0062 (LLM completion streaming, spec v0.71.0). The stream
@@ -747,6 +735,7 @@ async def test_observability_fixture(fixture_path: Path) -> None:
         "138-langfuse-rerank-failure-observation",
         "141-otel-rerank-no-usage-attributes-omitted",
         "142-langfuse-rerank-no-usage-usagedetails-omitted",
+        "109-rerank-metrics-token-and-duration",
     }:
         await _run_rerank_fixture(spec)
     elif fixture_id in {
@@ -5476,6 +5465,8 @@ async def _run_rerank_case(case: Mapping[str, Any]) -> None:
     exporter: Any = None
     otel_observer: Any = None
     langfuse_client: Any = None
+    metrics_observer: Any = None
+    reader: Any = None
     if "observers" in expected:
         for collector in collectors.values():
             graph.attach_observer(collector)
@@ -5493,6 +5484,20 @@ async def _run_rerank_case(case: Mapping[str, Any]) -> None:
         if "disable_provider_payload" in lf_cfg:
             lf_kwargs["disable_provider_payload"] = bool(lf_cfg["disable_provider_payload"])
         graph.attach_observer(LangfuseObserver(**lf_kwargs))
+    if "metrics" in expected:
+        # §11 rerank metrics (proposals 0067 + 0060, fixture 109): a metrics
+        # observer with a private MeterProvider + InMemoryMetricReader, mirroring
+        # the embedding-metrics path in _run_embedding_case.
+        from opentelemetry.sdk.metrics import MeterProvider as SdkMeterProvider
+        from opentelemetry.sdk.metrics.export import InMemoryMetricReader
+
+        reader = InMemoryMetricReader()
+        metrics_observer = OTelObserver(
+            span_processor=SimpleSpanProcessor(InMemorySpanExporter()),
+            enable_metrics=bool(case.get("enable_metrics", False)),
+            meter_provider=SdkMeterProvider(metric_readers=[reader]),
+        )
+        graph.attach_observer(metrics_observer)
 
     try:
         if expected_error is not None:
@@ -5506,6 +5511,8 @@ async def _run_rerank_case(case: Mapping[str, Any]) -> None:
             await provider.aclose()
         if otel_observer is not None:
             otel_observer.shutdown()
+        if metrics_observer is not None:
+            metrics_observer.shutdown()
 
     if "observers" in expected:
         for obs_name, obs_spec in cast("dict[str, Any]", expected["observers"]).items():
@@ -5529,6 +5536,54 @@ async def _run_rerank_case(case: Mapping[str, Any]) -> None:
         _assert_langfuse_observation_tree(
             trace, cast("list[dict[str, Any]]", expected["langfuse_trace"].get("observations") or [])
         )
+    if "metrics" in expected and reader is not None:
+        points = _collect_metric_points(reader)
+        _assert_metric_points(points, cast("list[dict[str, Any]]", expected.get("metrics") or []))
+        _assert_rerank_metrics_invariants(case, points)
+
+
+def _assert_rerank_metrics_invariants(
+    case: Mapping[str, Any],
+    points: Sequence[tuple[str, float, int, dict[str, Any]]],
+) -> None:
+    # Named invariants from the rerank-metrics fixture 109 (proposals 0067 +
+    # 0060): input token recorded only when input_tokens is reported (never for
+    # search_units), operation dim "rerank", duration on every call incl. a
+    # failure carrying error.type, no token.usage on failure. Fail loudly on an
+    # unmapped name.
+    invariants = cast("dict[str, Any]", case["expected"].get("invariants") or {})
+    _known = {
+        "rerank_records_input_token_when_reported",
+        "rerank_operation_dimension_is_rerank",
+        "no_token_usage_observation_when_search_units_only",
+        "duration_recorded_for_rerank",
+        "errored_rerank_records_duration_with_error_type",
+        "no_token_usage_observation_on_failure",
+    }
+    unknown = set(invariants) - _known
+    assert not unknown, f"unhandled rerank-metrics invariant(s): {sorted(unknown)}"
+    token_points = [p for p in points if p[0] == "openarmature.gen_ai.client.token.usage"]
+    duration_points = [p for p in points if p[0] == "openarmature.gen_ai.client.operation.duration"]
+    input_token_points = [p for p in token_points if p[3].get("openarmature.gen_ai.token.type") == "input"]
+    if invariants.get("rerank_records_input_token_when_reported"):
+        assert input_token_points, (
+            "rerank MUST record an input token.usage observation when input_tokens is reported"
+        )
+    if invariants.get("rerank_operation_dimension_is_rerank"):
+        assert points and all(p[3].get("openarmature.gen_ai.operation") == "rerank" for p in points), (
+            "all rerank metric points MUST carry operation=rerank; "
+            f"got {[p[3].get('openarmature.gen_ai.operation') for p in points]}"
+        )
+    if invariants.get("no_token_usage_observation_when_search_units_only"):
+        assert not token_points, f"search_units-only rerank MUST record no token.usage; got {token_points}"
+    if invariants.get("duration_recorded_for_rerank"):
+        assert duration_points, "rerank MUST record an operation.duration observation"
+    if invariants.get("errored_rerank_records_duration_with_error_type"):
+        assert any(p[3].get("error.type") for p in duration_points), (
+            "errored rerank MUST record a duration observation carrying error.type"
+        )
+    if invariants.get("no_token_usage_observation_on_failure"):
+        assert not token_points, f"failed rerank MUST record no token.usage; got {token_points}"
 
 
 # ---------------------------------------------------------------------------

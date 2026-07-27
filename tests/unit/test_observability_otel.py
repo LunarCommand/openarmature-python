@@ -1099,7 +1099,7 @@ async def _drive_metrics_events(
     enable_metrics: bool = True,
     disable_llm_spans: bool = False,
 ) -> tuple[list[tuple[str, float, int, dict[str, Any]]], list[Any]]:
-    """Feed LlmRetryAttemptEvents through an OTelObserver wired to a
+    """Feed typed provider events through an OTelObserver wired to a
     private MeterProvider + InMemoryMetricReader; return the captured
     ``(metric_points, llm_complete_spans)``."""
     from opentelemetry.sdk.metrics import MeterProvider as SdkMeterProvider
@@ -1793,6 +1793,48 @@ async def test_embedding_metrics_failure_records_duration_with_error_type() -> N
     ddims = duration_points[0][3]
     assert ddims["openarmature.gen_ai.operation"] == "embeddings"
     assert ddims["error.type"] == "provider_unavailable"
+
+
+async def test_rerank_metrics_search_units_only_records_no_token() -> None:
+    # §11 (proposals 0067 + 0060): a rerank call reporting search_units but no
+    # input_tokens records the duration observation (operation "rerank") but NO
+    # token.usage -- search_units is a billing unit, not a token. Fast guard on
+    # _record_rerank_metrics's rerank-specific input_tokens read (fixture 109
+    # covers it end-to-end).
+    from openarmature.graph.events import RerankEvent
+    from openarmature.retrieval.response import RerankUsage
+
+    event = RerankEvent(
+        invocation_id="inv-metrics",
+        correlation_id=None,
+        node_name="rerank",
+        namespace=("rerank",),
+        attempt_index=0,
+        fan_out_index=None,
+        branch_name=None,
+        provider="cohere",
+        model="rerank-test",
+        response_id=None,
+        response_model=None,
+        usage=RerankUsage(search_units=1, input_tokens=None),
+        latency_ms=5.0,
+        query="q",
+        documents=["a", "b"],
+        document_count=2,
+        top_k=None,
+        result_count=2,
+        output_results=[],
+        request_params={},
+        request_extras={},
+        active_prompt=None,
+        active_prompt_group=None,
+        call_id="c",
+    )
+    points, _ = await _drive_metrics_events([event])
+    assert [p for p in points if p[0] == "openarmature.gen_ai.client.token.usage"] == []
+    duration_points = [p for p in points if p[0] == "openarmature.gen_ai.client.operation.duration"]
+    assert len(duration_points) == 1
+    assert duration_points[0][3]["openarmature.gen_ai.operation"] == "rerank"
 
 
 async def test_llm_span_zero_duration_when_latency_missing() -> None:

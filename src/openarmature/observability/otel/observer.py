@@ -870,9 +870,12 @@ class OTelObserver:
         # openarmature.rerank.complete span from the typed rerank events. NOT
         # gated by disable_llm_spans (that flag is scoped to LLM completion
         # spans per §5.5.13); only the payload / GenAI-semconv attribute subsets
-        # are gated, inside the handler. Rerank metrics ride proposal 0067
-        # (§11), not wired here.
+        # are gated, inside the handler.
         if isinstance(event, RerankEvent | RerankFailedEvent):
+            # §11 rerank metrics (proposals 0067 + 0060) record per call,
+            # independent of span emission (§11.1), gated only on enable_metrics.
+            if self.enable_metrics:
+                self._record_rerank_metrics(event)
             self._handle_rerank(event)
             return
         # Proposal 0063 tool-execution observability: emit the
@@ -1893,6 +1896,35 @@ class OTelObserver:
             return
         base_dims: dict[str, str] = {
             "openarmature.gen_ai.operation": "embeddings",
+            "gen_ai.request.model": event.model,
+            "gen_ai.system": event.provider,
+        }
+        if event.latency_ms is not None:
+            duration_dims = dict(base_dims)
+            error_category = getattr(event, "error_category", None)
+            if error_category is not None:
+                duration_dims["error.type"] = error_category
+            self._duration_histogram.record(event.latency_ms / 1000.0, duration_dims)
+        usage = getattr(event, "usage", None)
+        input_tokens = getattr(usage, "input_tokens", None) if usage is not None else None
+        if input_tokens is not None:
+            self._token_histogram.record(
+                input_tokens,
+                {**base_dims, "openarmature.gen_ai.token.type": "input"},
+            )
+
+    def _record_rerank_metrics(self, event: RerankEvent | RerankFailedEvent) -> None:
+        # §11 (proposals 0067 + 0060): the rerank-call analog of
+        # _record_embedding_metrics, onto the SAME two instruments (the operation
+        # dim "rerank" separates it from chat / embeddings). A rerank call has an
+        # input token count only (RerankUsage.input_tokens); search_units is a
+        # billing unit, NOT a token, so it is never recorded as token.usage.
+        # Duration records every call including a failure (error.type = the §7
+        # category); token.usage only when input_tokens is reported.
+        if self._duration_histogram is None or self._token_histogram is None:
+            return
+        base_dims: dict[str, str] = {
+            "openarmature.gen_ai.operation": "rerank",
             "gen_ai.request.model": event.model,
             "gen_ai.system": event.provider,
         }
