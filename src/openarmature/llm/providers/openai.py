@@ -690,9 +690,11 @@ class OpenAIProvider:
         # base_config + base_messages.
         overrides = getattr(retry, "per_attempt_override", None)
         reask = getattr(retry, "reask", None)
-        # The working transcript accumulates reask pairs across retries; it
-        # starts as the base messages and is never the same object the caller
-        # passed (each reask produces a fresh list).
+        # The working transcript accumulates reask pairs across retries: it
+        # starts as base_messages and each reask REPLACES it with a fresh list
+        # (from _append_reask_pair), never mutating in place. On a
+        # structured-output call base_messages is itself already an augmented
+        # copy, so the caller's messages are never mutated either way.
         transcript: Sequence[Message] = base_messages
         # retry_reason for the CURRENT attempt = why the PREVIOUS attempt was
         # retried (None for the base attempt). Set at each ``continue``.
