@@ -1744,6 +1744,342 @@ async def test_call_level_retry_empty_override_uses_base_config() -> None:
     assert [b.get("temperature") for b in bodies] == [0.4, 0.4]
 
 
+# ---------------------------------------------------------------------------
+# Structured-output reask (proposal 0095b)
+# ---------------------------------------------------------------------------
+
+_PERSON_SCHEMA = {
+    "type": "object",
+    "properties": {"name": {"type": "string"}, "age": {"type": "integer"}},
+    "required": ["name", "age"],
+    "additionalProperties": False,
+}
+
+
+def _person_completion(content: str) -> dict[str, object]:
+    return {
+        "id": "cc-reask",
+        "object": "chat.completion",
+        "model": "gpt-test",
+        "choices": [
+            {"index": 0, "message": {"role": "assistant", "content": content}, "finish_reason": "stop"}
+        ],
+        "usage": {"prompt_tokens": 5, "completion_tokens": 1, "total_tokens": 6},
+    }
+
+
+def _seq_handler(bodies: list[dict[str, Any]], calls: list[int], responses: list[tuple[int, str]]):  # type: ignore[no-untyped-def]
+    # responses: (status, content). 200 -> a chat completion with `content`;
+    # any other status -> a transient-shaped error body.
+    def handler(req: httpx.Request) -> httpx.Response:
+        bodies.append(json.loads(req.content))
+        status, content = responses[calls[0]]
+        calls[0] += 1
+        if status != 200:
+            return httpx.Response(status, json={"error": {"message": "down"}})
+        return httpx.Response(200, json=_person_completion(content))
+
+    return handler
+
+
+async def test_reask_corrects_on_retry() -> None:
+    # Proposal 0095b (062): a structured_output_invalid on attempt 0 with a reask
+    # builder appends the model's raw output (assistant) + the builder's exact
+    # correction (user) and retries; attempt 1 validates.
+    from openarmature.llm import LlmRetryConfig
+
+    def reask(exc: Any) -> str:
+        return f"Your previous output {exc.raw_content} was invalid. Return corrected JSON."
+
+    bodies: list[dict[str, Any]] = []
+    calls = [0]
+    events, token = _collecting_dispatch()
+    provider = OpenAIProvider(
+        base_url="http://test",
+        model="m",
+        api_key="k",
+        transport=httpx.MockTransport(
+            _seq_handler(bodies, calls, [(200, '{"name":"Alice"}'), (200, '{"name":"Alice","age":30}')])
+        ),
+    )
+    caller_messages = [UserMessage(content="Generate a person record.")]
+    try:
+        resp = await provider.complete(
+            caller_messages,
+            response_schema=_PERSON_SCHEMA,
+            retry=LlmRetryConfig(max_attempts=2, backoff=deterministic_backoff(0), reask=reask),
+        )
+    finally:
+        await provider.aclose()
+        _release_dispatch(token)
+
+    assert resp.message.content == '{"name":"Alice","age":30}'
+    # Attempt 0 sends only the caller's message; the reask retry appends the
+    # model's raw output (assistant, exact) then the builder's correction (user).
+    assert bodies[0]["messages"][-1] == {"role": "user", "content": "Generate a person record."}
+    assert bodies[1]["messages"][-2] == {"role": "assistant", "content": '{"name":"Alice"}'}
+    assert bodies[1]["messages"][-1] == {
+        "role": "user",
+        "content": 'Your previous output {"name":"Alice"} was invalid. Return corrected JSON.',
+    }
+    attempts = [e for e in events if isinstance(e, LlmRetryAttemptEvent)]
+    assert [e.retry_reason for e in attempts] == [None, "reask"]
+    # The caller's messages are never mutated.
+    assert caller_messages == [UserMessage(content="Generate a person record.")]
+
+
+async def test_reask_off_by_default_raises_without_retry() -> None:
+    # Proposal 0095b (064): absent a reask builder, structured_output_invalid is
+    # non-transient and raises on attempt 0 -- the loop does not iterate even
+    # with max_attempts=2, so the second response is never consumed.
+    from openarmature.llm import LlmRetryConfig, StructuredOutputInvalid
+
+    bodies: list[dict[str, Any]] = []
+    calls = [0]
+    provider = OpenAIProvider(
+        base_url="http://test",
+        model="m",
+        api_key="k",
+        transport=httpx.MockTransport(
+            _seq_handler(bodies, calls, [(200, '{"name":"Cara"}'), (200, '{"name":"Cara","age":9}')])
+        ),
+    )
+    try:
+        with pytest.raises(StructuredOutputInvalid):
+            await provider.complete(
+                [UserMessage(content="go")],
+                response_schema=_PERSON_SCHEMA,
+                retry=LlmRetryConfig(max_attempts=2, backoff=deterministic_backoff(0)),
+            )
+    finally:
+        await provider.aclose()
+    assert calls[0] == 1  # only one attempt issued; second response never consumed
+
+
+async def test_reask_budget_exhausted_raises_final() -> None:
+    # Proposal 0095b (063): reask consumes the max_attempts budget; when
+    # exhausted with every attempt invalid, the final structured_output_invalid
+    # propagates.
+    from openarmature.llm import LlmRetryConfig, StructuredOutputInvalid
+
+    bodies: list[dict[str, Any]] = []
+    calls = [0]
+    events, token = _collecting_dispatch()
+    provider = OpenAIProvider(
+        base_url="http://test",
+        model="m",
+        api_key="k",
+        transport=httpx.MockTransport(
+            _seq_handler(bodies, calls, [(200, '{"name":"Bob"}'), (200, '{"name":"Bob"}')])
+        ),
+    )
+    try:
+        with pytest.raises(StructuredOutputInvalid):
+            await provider.complete(
+                [UserMessage(content="go")],
+                response_schema=_PERSON_SCHEMA,
+                retry=LlmRetryConfig(
+                    max_attempts=2, backoff=deterministic_backoff(0), reask=lambda e: "fix it"
+                ),
+            )
+    finally:
+        await provider.aclose()
+        _release_dispatch(token)
+    assert calls[0] == 2
+    attempts = [e for e in events if isinstance(e, LlmRetryAttemptEvent)]
+    assert [e.retry_reason for e in attempts] == [None, "reask"]
+
+
+async def test_reask_composes_with_override_and_accumulates() -> None:
+    # Proposal 0095b (065): reask composes with a per-attempt override, and the
+    # transcript accumulates across reask retries. Two DIFFERENT invalid outputs
+    # then a valid one -> attempt 2 carries both prior (assistant + user) pairs.
+    from openarmature.llm import LlmRetryConfig, RuntimeConfig
+
+    bodies: list[dict[str, Any]] = []
+    calls = [0]
+    provider = OpenAIProvider(
+        base_url="http://test",
+        model="m",
+        api_key="k",
+        transport=httpx.MockTransport(
+            _seq_handler(
+                bodies,
+                calls,
+                [
+                    (200, '{"name":"Dan"}'),
+                    (200, '{"name":"Dan","age":"forty"}'),
+                    (200, '{"name":"Dan","age":40}'),
+                ],
+            )
+        ),
+    )
+    try:
+        resp = await provider.complete(
+            [UserMessage(content="go")],
+            config=RuntimeConfig(temperature=0.0),
+            response_schema=_PERSON_SCHEMA,
+            retry=LlmRetryConfig(
+                max_attempts=3,
+                backoff=deterministic_backoff(0),
+                reask=lambda e: f"fix {e.raw_content}",
+                per_attempt_override=[RuntimeConfig(temperature=0.3), RuntimeConfig(temperature=0.6)],
+            ),
+        )
+    finally:
+        await provider.aclose()
+
+    assert resp.message.content == '{"name":"Dan","age":40}'
+    # Sampling escalates per attempt (override composes with reask).
+    assert [b.get("temperature") for b in bodies] == [0.0, 0.3, 0.6]
+    # Attempt 2's transcript accumulates BOTH corrective pairs (4 appended msgs).
+    roles = [m["role"] for m in bodies[2]["messages"]]
+    assert roles == ["user", "assistant", "user", "assistant", "user"]
+    assert bodies[2]["messages"][1]["content"] == '{"name":"Dan"}'
+    assert bodies[2]["messages"][3]["content"] == '{"name":"Dan","age":"forty"}'
+
+
+async def test_reask_transient_interleave_carries_transcript() -> None:
+    # Proposal 0095b (066): a reask retry (attempt 1) then a transient retry
+    # (attempt 2). The transient retry re-sends the accumulated transcript
+    # unchanged (appends nothing); retry_reason distinguishes the two.
+    from openarmature.llm import LlmRetryConfig
+
+    bodies: list[dict[str, Any]] = []
+    calls = [0]
+    events, token = _collecting_dispatch()
+    provider = OpenAIProvider(
+        base_url="http://test",
+        model="m",
+        api_key="k",
+        transport=httpx.MockTransport(
+            _seq_handler(
+                bodies, calls, [(200, '{"name":"Eve"}'), (503, ""), (200, '{"name":"Eve","age":50}')]
+            )
+        ),
+    )
+    try:
+        resp = await provider.complete(
+            [UserMessage(content="go")],
+            response_schema=_PERSON_SCHEMA,
+            retry=LlmRetryConfig(
+                max_attempts=3, backoff=deterministic_backoff(0), reask=lambda e: f"fix {e.raw_content}"
+            ),
+        )
+    finally:
+        await provider.aclose()
+        _release_dispatch(token)
+
+    assert resp.message.content == '{"name":"Eve","age":50}'
+    # The transient retry (attempt 2) sends the EXACT SAME messages as the reask
+    # retry (attempt 1) -- it appends no new pair.
+    assert bodies[1]["messages"] == bodies[2]["messages"]
+    assert bodies[1]["messages"][-2] == {"role": "assistant", "content": '{"name":"Eve"}'}
+    attempts = [e for e in events if isinstance(e, LlmRetryAttemptEvent)]
+    assert [e.retry_reason for e in attempts] == [None, "reask", "transient"]
+
+
+def test_reask_append_pair_appends_fresh_assistant() -> None:
+    # Proposal 0095b: a reask appends the model's raw output as a fresh
+    # assistant message, then the correction as a user message. Proposal 0110
+    # removed the prefill-continuation branch (unreachable: §3 rejects the
+    # assistant-last input it needed), so the helper is always append-only.
+    appended = OpenAIProvider._append_reask_pair([UserMessage(content="go")], '{"name":"Al"}', "fix it")
+    assert appended == [
+        UserMessage(content="go"),
+        AssistantMessage(content='{"name":"Al"}'),
+        UserMessage(content="fix it"),
+    ]
+
+    # The input list + message objects are never mutated.
+    original = [UserMessage(content="go")]
+    OpenAIProvider._append_reask_pair(original, "X", "Y")
+    assert original == [UserMessage(content="go")]
+
+
+def _reask_returns_none(_exc: Any) -> Any:
+    return None
+
+
+def _reask_raises(_exc: Any) -> Any:
+    raise KeyError("template placeholder missing")
+
+
+@pytest.mark.parametrize(
+    "bad_reask",
+    [
+        pytest.param(_reask_returns_none, id="returns_none"),
+        pytest.param(_reask_raises, id="raises"),
+    ],
+)
+async def test_reask_builder_failure_surfaces_original_error(bad_reask: Any) -> None:
+    # Adversarial-review finding: the reask builder is caller code and is not
+    # exception-isolated. A builder that returns a non-str or raises MUST NOT
+    # leak a non-§7 error; the original structured_output_invalid re-raises
+    # through the terminal path, so exactly one terminal LlmFailedEvent fires.
+    from openarmature.graph.events import LlmCompletionEvent, LlmFailedEvent
+    from openarmature.llm import LlmRetryConfig, StructuredOutputInvalid
+
+    bodies: list[dict[str, Any]] = []
+    calls = [0]
+    events, token = _collecting_dispatch()
+    provider = OpenAIProvider(
+        base_url="http://test",
+        model="m",
+        api_key="k",
+        transport=httpx.MockTransport(
+            _seq_handler(bodies, calls, [(200, '{"name":"Al"}'), (200, '{"name":"Al"}')])
+        ),
+    )
+    try:
+        with pytest.raises(StructuredOutputInvalid):
+            await provider.complete(
+                [UserMessage(content="go")],
+                response_schema=_PERSON_SCHEMA,
+                retry=LlmRetryConfig(max_attempts=2, backoff=deterministic_backoff(0), reask=bad_reask),
+            )
+    finally:
+        await provider.aclose()
+        _release_dispatch(token)
+
+    terminal = [type(e).__name__ for e in events if isinstance(e, LlmCompletionEvent | LlmFailedEvent)]
+    assert terminal == ["LlmFailedEvent"]
+    failed = next(e for e in events if isinstance(e, LlmFailedEvent))
+    assert failed.error_category == "structured_output_invalid"
+
+
+async def test_per_attempt_override_none_field_inherits_base() -> None:
+    # Adversarial-review finding: an override field explicitly set to None
+    # inherits the base (per §6 null-skip), rather than clearing it to null.
+    from openarmature.llm import LlmRetryConfig, RuntimeConfig
+
+    bodies: list[dict[str, Any]] = []
+    calls = [0]
+    provider = OpenAIProvider(
+        base_url="http://test",
+        model="m",
+        api_key="k",
+        transport=httpx.MockTransport(_capture_then_ok(bodies, calls, fail_count=1)),
+    )
+    try:
+        await provider.complete(
+            [UserMessage(content="go")],
+            config=RuntimeConfig(temperature=0.0, top_p=0.9),
+            retry=LlmRetryConfig(
+                max_attempts=2,
+                backoff=deterministic_backoff(0),
+                # temperature=None must INHERIT base 0.0, not clear it; max_tokens added.
+                per_attempt_override=[RuntimeConfig(temperature=None, max_tokens=100)],
+            ),
+        )
+    finally:
+        await provider.aclose()
+
+    assert bodies[1].get("temperature") == 0.0
+    assert bodies[1].get("max_tokens") == 100
+    assert bodies[1].get("top_p") == 0.9
+
+
 async def test_call_level_retry_plain_config_replays_identically() -> None:
     # A plain RetryConfig (no per_attempt_override) preserves the byte-identical
     # replay: every attempt sends the base config unchanged.
