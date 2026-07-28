@@ -484,15 +484,18 @@ class OpenAIProvider:
             # response_format from RuntimeConfig extras.
             include_response_format = schema_dict is None or not self._force_prompt_augmentation_fallback
 
-            def build_body(attempt_config: RuntimeConfig | None) -> dict[str, Any]:
+            def build_body(
+                attempt_config: RuntimeConfig | None,
+                attempt_messages: Sequence[Message],
+            ) -> dict[str, Any]:
                 # Proposal 0095: the wire body is assembled PER ATTEMPT so a
-                # per-attempt request override can vary sampling across retries.
-                # wire_messages / tools / schema are fixed across attempts here
-                # (0095a); only ``config`` varies. Absent an override every
-                # attempt passes the base config -> identical body (today's
-                # byte-identical replay).
+                # retry can vary sampling (0095a per-attempt override) and/or the
+                # messages (0095b reask transcript). tools / schema are fixed
+                # across attempts. Absent an override and a reask, every attempt
+                # passes the base config + base messages -> identical body
+                # (today's byte-identical replay).
                 return self._build_request_body(
-                    wire_messages,
+                    attempt_messages,
                     tools,
                     attempt_config,
                     schema_dict,
@@ -532,7 +535,7 @@ class OpenAIProvider:
                 )
 
             response = await self._do_complete_with_retry(
-                build_body, config, schema_dict, schema_class, retry, emit_attempt
+                build_body, config, wire_messages, schema_dict, schema_class, retry, emit_attempt
             )
         except LlmProviderError as exc:
             # Failure path: dispatch a typed LlmFailedEvent per
@@ -587,29 +590,56 @@ class OpenAIProvider:
         overrides: list[RuntimeConfig] | None,
         attempt: int,
     ) -> RuntimeConfig | None:
-        """Resolve the RuntimeConfig for one call-level retry attempt
-        (proposal 0095 per-attempt override).
+        """Resolve the RuntimeConfig for one call-level retry attempt.
 
         Attempt 0 uses the caller's base config unmodified; retry ``i``
         (attempt ``i > 0``) merges ``overrides[i-1]`` onto the base -- the
-        override's SET fields replace, unspecified fields inherited -- and the
-        last entry carries forward when the schedule is shorter than the retry
-        count. Attempt 0 and the no-override case return the caller's base
-        config as-is; only the override path returns a fresh ``model_copy``.
-        The caller's config is never mutated either way -- the base path
-        relies on the downstream body build reading it read-only -- honoring
-        §5 immutability.
+        override's non-None fields replace, a None field (like an absent one)
+        inherits the base -- and the last entry carries forward when the
+        schedule is shorter than the retry count. Attempt 0 and the no-override
+        case return the caller's base config as-is; only the override path
+        returns a fresh ``model_copy``. The caller's config is never mutated
+        either way -- the base path relies on the downstream body build reading
+        it read-only.
         """
+        # Proposal 0095 per-attempt override. A None override field inheriting
+        # the base is the §6 null-skip rule (None means unset, not "clear to
+        # null"); the never-mutate guarantee honors §5 immutability.
         if attempt == 0 or not overrides:
             return base
         override = overrides[min(attempt - 1, len(overrides) - 1)]
         base_or_empty = base if base is not None else RuntimeConfig()
-        return base_or_empty.model_copy(update=override.model_dump(exclude_unset=True))
+        # exclude_none (not exclude_unset): a None override field inherits the
+        # base per §6 null-skip, rather than an explicit None clobbering it.
+        return base_or_empty.model_copy(update=override.model_dump(exclude_none=True))
+
+    @staticmethod
+    def _append_reask_pair(
+        transcript: Sequence[Message],
+        model_output: str,
+        correction: str,
+    ) -> list[Message]:
+        """Append a structured-output reask pair to a COPY of the transcript:
+        the model's verbatim raw output as a fresh ``assistant`` message, then
+        the caller's correction as a ``user`` message. The caller's messages are
+        never mutated -- a new list plus new message objects.
+        """
+        # Proposal 0095b. Always appends a fresh assistant message (never
+        # continues a trailing one): §3 requires the last message before a call
+        # to be user/tool, so the transcript never ends in assistant. Proposal
+        # 0110 removed the continuation clause 0095 had added for that
+        # (unreachable) case.
+        return [
+            *transcript,
+            AssistantMessage(content=model_output),
+            UserMessage(content=correction),
+        ]
 
     async def _do_complete_with_retry(
         self,
-        build_body: Callable[[RuntimeConfig | None], dict[str, Any]],
+        build_body: Callable[[RuntimeConfig | None, Sequence[Message]], dict[str, Any]],
         base_config: RuntimeConfig | None,
+        base_messages: Sequence[Message],
         schema_dict: dict[str, Any] | None,
         schema_class: type[BaseModel] | None,
         retry: RetryConfig | None,
@@ -618,21 +648,22 @@ class OpenAIProvider:
     ) -> Response:
         """Run the wire call with optional call-level retry.
 
-        Loops the underlying wire call on transient provider errors per
-        the retry config. ``build_body`` assembles the outbound body for a
-        given per-attempt config (proposal 0095: retries MAY vary sampling via
-        ``per_attempt_override``); absent an override every attempt uses
-        ``base_config`` unchanged, preserving the byte-identical replay.
-        ``emit_attempt`` (when supplied) fires once per attempt with that
-        attempt's index, latency, outcome (response on success, exception on
-        failure), and ``retry_reason`` (None on the base attempt) so the caller
-        can dispatch the per-attempt LLM span event. The terminal outcome
-        (success, retry exhaustion, or a non-transient error) is what reaches
+        Loops the underlying wire call on transient provider errors per the
+        retry config. ``build_body`` assembles the outbound body for a given
+        per-attempt config + messages (proposal 0095: retries MAY vary sampling
+        via ``per_attempt_override`` and/or the messages via ``reask``); absent
+        both, every attempt uses ``base_config`` + ``base_messages`` unchanged,
+        preserving the byte-identical replay. ``emit_attempt`` (when supplied)
+        fires once per attempt with that attempt's index, latency, outcome
+        (response on success, exception on failure), and ``retry_reason`` (None
+        on the base attempt, else "transient" | "reask") so the caller can
+        dispatch the per-attempt LLM span event. The terminal outcome (success,
+        retry exhaustion, or a non-retryable error) is what reaches
         ``complete()`` for the single terminal typed event, so exactly one
         terminal event still fires per ``complete()`` call.
         """
         if retry is None:
-            body = build_body(base_config)
+            body = build_body(base_config, base_messages)
             attempt_start = time.perf_counter()
             try:
                 response = await self._do_complete(body, schema_dict, schema_class)
@@ -653,40 +684,73 @@ class OpenAIProvider:
 
         classifier = retry.classifier or default_classifier
         backoff = retry.backoff or exponential_jitter_backoff
-        # Proposal 0095: the per-attempt override schedule lives only on the
-        # llm-provider-scoped LlmRetryConfig superset; a plain RetryConfig has
-        # no such field (getattr -> None) and every attempt replays base_config.
+        # Proposal 0095: the per-attempt override schedule + reask builder live
+        # only on the llm-provider-scoped LlmRetryConfig superset; a plain
+        # RetryConfig has neither (getattr -> None), so every attempt replays
+        # base_config + base_messages.
         overrides = getattr(retry, "per_attempt_override", None)
+        reask = getattr(retry, "reask", None)
+        # The working transcript accumulates reask pairs across retries: it
+        # starts as base_messages and each reask REPLACES it with a fresh list
+        # (from _append_reask_pair), never mutating in place. On a
+        # structured-output call base_messages is itself already an augmented
+        # copy, so the caller's messages are never mutated either way.
+        transcript: Sequence[Message] = base_messages
+        # retry_reason for the CURRENT attempt = why the PREVIOUS attempt was
+        # retried (None for the base attempt). Set at each ``continue``.
+        retry_reason: str | None = None
         attempt = 0
         while True:
             attempt_config = self._config_for_attempt(base_config, overrides, attempt)
-            body = build_body(attempt_config)
-            # retry_reason: None on the base attempt (not a retry); "transient"
-            # on retries here (0095a). A "reask" retry arrives with 0095b.
-            retry_reason = "transient" if attempt > 0 else None
+            body = build_body(attempt_config, transcript)
             attempt_start = time.perf_counter()
             try:
                 response = await self._do_complete(body, schema_dict, schema_class)
             except LlmProviderError as exc:
-                # Per-attempt event fires for every attempt, including
-                # this failed one (the terminal failed attempt's span
-                # carries the final category).
+                # Per-attempt event fires for every attempt, including this
+                # failed one (the terminal failed attempt's span carries the
+                # final category).
                 if emit_attempt is not None:
                     emit_attempt(
                         attempt, (time.perf_counter() - attempt_start) * 1000.0, None, exc, retry_reason
                     )
-                # No graph state at the call boundary; pass None (the
-                # default classifier ignores it). Re-raise on exhaustion
-                # or a non-transient category so complete() emits the
-                # single terminal LlmFailedEvent.
-                if attempt + 1 >= retry.max_attempts or not classifier(exc, None):
+                # Reask (0095b) makes a structured_output_invalid retryable FOR
+                # THIS CALL when a builder is present -- a call-level convenience,
+                # NOT via the classifier (structured_output_invalid stays
+                # non-transient). No graph state at the call boundary; the
+                # default classifier ignores the None state.
+                reasked = reask is not None and isinstance(exc, StructuredOutputInvalid)
+                retryable = reasked or classifier(exc, None)
+                # Re-raise on exhaustion or a non-retryable error so complete()
+                # emits the single terminal LlmFailedEvent.
+                if attempt + 1 >= retry.max_attempts or not retryable:
                     raise
-                # on_retry is not exception-isolated (matches
-                # RetryMiddleware); a raise propagates out of the call.
+                # Re-test inline (equivalent to ``reasked``) so the type checker
+                # narrows exc -> StructuredOutputInvalid and reask -> non-None.
+                if reask is not None and isinstance(exc, StructuredOutputInvalid):
+                    # Feed the model its own output + the caller's correction so
+                    # the next attempt is informed, not a byte-identical replay.
+                    # The reask builder is caller code and is NOT exception-
+                    # isolated: if it raises, or returns a non-str that fails
+                    # message construction, re-raise the original
+                    # structured_output_invalid (with the builder error chained)
+                    # so it propagates through the terminal-event path -- exactly
+                    # one terminal LlmFailedEvent still fires -- rather than
+                    # leaking a non-§7 error and masking the real failure.
+                    try:
+                        transcript = self._append_reask_pair(transcript, exc.raw_content, reask(exc))
+                    except Exception as reask_error:
+                        raise exc from reask_error
+                    next_retry_reason = "reask"
+                else:
+                    next_retry_reason = "transient"
+                # on_retry is not exception-isolated (matches RetryMiddleware);
+                # a raise propagates out of the call.
                 if retry.on_retry is not None:
                     await retry.on_retry(exc, attempt)
                 await asyncio.sleep(backoff(attempt))
                 attempt += 1
+                retry_reason = next_retry_reason
                 continue
             if emit_attempt is not None:
                 emit_attempt(

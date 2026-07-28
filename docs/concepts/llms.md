@@ -137,9 +137,42 @@ response = await provider.complete(
 ```
 
 Attempt 0 uses the base `config` unchanged; retry `i` merges
-`per_attempt_override[i]` onto it (the override's set fields replace, the
-rest inherited), and the last entry carries forward when the schedule is
-shorter than the retry count. The caller's `config` is never mutated.
+`per_attempt_override[i]` onto it (the override's non-`None` fields
+replace, the rest inherited from the base), and the last entry carries
+forward when the schedule is shorter than the retry count. The caller's
+`config` is never mutated.
+
+### Reasking on invalid structured output
+
+A `response_schema` call that returns schema-invalid output raises
+`StructuredOutputInvalid` immediately by default (it is not a transient
+failure). Supply a `reask` builder on `LlmRetryConfig` to make it
+self-healing: the failure becomes retryable for that call, and before the
+next attempt the loop feeds the model its own invalid output back plus a
+correction you write:
+
+```python
+from openarmature.llm import LlmRetryConfig
+
+response = await provider.complete(
+    messages,
+    response_schema=schema,
+    retry=LlmRetryConfig(
+        max_attempts=3,
+        reask=lambda err: f"That output was invalid: {err.failure_description}. Return corrected JSON.",
+    ),
+)
+```
+
+The builder receives the raised `StructuredOutputInvalid` (its
+`raw_content` is the model's invalid output, `failure_description` the
+reason) and returns the correction text. On each invalid attempt the loop
+appends the model's raw output as an `assistant` message and your
+correction as a `user` message to a working transcript that accumulates
+across retries and consumes the `max_attempts` budget. The framework adds
+no prompt text of its own; you own every word beyond the model's output,
+and the caller's `messages` are never mutated. Reask composes with a
+`per_attempt_override` (escalate temperature *and* reask).
 
 ### Call-level vs node-level retry
 
