@@ -94,10 +94,39 @@ class MappingReferencesUndeclaredField(CompileError):
     category = "mapping_references_undeclared_field"
 
     def __init__(self, *, direction: str, side: str, field_name: str) -> None:
-        super().__init__(f"subgraph {direction!r} mapping references undeclared {side} field {field_name!r}")
+        # "projection", not "mapping": the same category covers the declared
+        # same-name field SETS (proposal 0094), which are not maps, as well
+        # as the fan-out / branch config surfaces.
+        super().__init__(
+            f"subgraph {direction!r} projection references undeclared {side} field {field_name!r}"
+        )
         self.direction = direction
         self.side = side
         self.field_name = field_name
+
+
+class ConflictingProjectionForms(CompileError):
+    """Raised when one subgraph-as-node declares its projection in more
+    than one form: the declared same-name field sets AND the explicit
+    ``inputs``/``outputs`` rename maps. A node uses at most one of the
+    default (nothing declared), the declared sets, or the maps."""
+
+    # Proposal 0094 (graph-engine §2). The category presumes a projection
+    # surface where both forms can be declared at once, which is a
+    # config-schema shape. Our projection is a strategy object, so the two
+    # bundled declarative strategies each expose exactly one form and can
+    # never conflict; the check is duck-typed over whatever a strategy
+    # declares, so a custom (or future combined) strategy exposing both
+    # still fails here rather than the rule being absent.
+    category = "conflicting_projection_forms"
+
+    def __init__(self, *, node_name: str | None = None) -> None:
+        where = f" on node {node_name!r}" if node_name is not None else ""
+        super().__init__(
+            f"projection{where} declares both the same-name field sets and an "
+            f"explicit inputs/outputs mapping; use one form"
+        )
+        self.node_name = node_name
 
 
 class FanOutCountModeAmbiguous(CompileError):

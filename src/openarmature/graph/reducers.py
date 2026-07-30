@@ -25,9 +25,21 @@ class Reducer:
     Each reducer carries a canonical `name` used in error messages and
     introspection. Subclasses override `__call__` to merge a node's partial
     update for a single field into the prior value.
+
+    `round_trip_idempotent` declares whether re-applying an already-merged
+    value leaves the field unchanged. It drives the subgraph-projection
+    round-trip warning: a field projected in and back out re-merges through
+    this reducer, so a reducer that grows on re-application doubles it.
+    `None` means "not classified" and is the default, so a custom reducer
+    is silent unless its author opts in by declaring the attribute.
     """
 
     name: str
+    # Proposal 0094 (graph-engine §2). The warning is MUST for a canonical
+    # reducer classified here and SHOULD for a custom one, so leaving this
+    # None (unclassified) is a conforming choice for a user-registered
+    # reducer whose idempotency the implementation cannot determine.
+    round_trip_idempotent: bool | None = None
 
     def __call__(self, prior: Any, update: Any) -> Any:
         raise NotImplementedError
@@ -35,6 +47,8 @@ class Reducer:
 
 class _LastWriteWins(Reducer):
     name = "last_write_wins"
+    # A replace: re-applying the same value is a no-op.
+    round_trip_idempotent = True
 
     def __call__(self, prior: Any, update: Any) -> Any:
         return update
@@ -42,6 +56,8 @@ class _LastWriteWins(Reducer):
 
 class _Append(Reducer):
     name = "append"
+    # Grows on re-application -- a round-tripped value is added twice.
+    round_trip_idempotent = False
 
     def __call__(self, prior: Any, update: Any) -> list[Any]:
         if not isinstance(prior, list):
@@ -53,6 +69,8 @@ class _Append(Reducer):
 
 class _Merge(Reducer):
     name = "merge"
+    # Shallow key-value merge: re-applying the same mapping is a no-op.
+    round_trip_idempotent = True
 
     def __call__(self, prior: Any, update: Any) -> dict[Any, Any]:
         if not isinstance(prior, Mapping):
@@ -71,6 +89,8 @@ class _ConcatFlatten(Reducer):
     # list. The TypeError surfaces as a ``ReducerError`` (graph-engine
     # §4) once the engine wraps it.
     name = "concat_flatten"
+    # Grows on re-application, like ``append``.
+    round_trip_idempotent = False
 
     def __call__(self, prior: Any, update: Any) -> list[Any]:
         if not isinstance(prior, list):
@@ -97,6 +117,9 @@ class _MergeAll(Reducer):
     # times sequentially). Strict like ``merge`` — every element of
     # ``update`` MUST be a mapping.
     name = "merge_all"
+    # Requires a list-of-mappings update, so re-merging a single mapping
+    # value is ill-typed (a reducer_error) rather than a no-op.
+    round_trip_idempotent = False
 
     def __call__(self, prior: Any, update: Any) -> dict[Any, Any]:
         if not isinstance(prior, Mapping):
