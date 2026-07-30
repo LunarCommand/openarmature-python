@@ -178,6 +178,20 @@ async def test_conflicting_projection_forms_fails_compilation() -> None:
     assert excinfo.value.node_name == "sg"
 
 
+async def test_conflicting_projection_forms_with_empty_sets_still_fails() -> None:
+    # An empty in/out set is still a declaration of the set form ("nothing
+    # crosses"), exactly as ``outputs={}`` declares the map form. So the check
+    # tests attribute PRESENCE, not truthiness: a truthiness test would read
+    # the empty sets as absent and let this both-forms strategy compile, whose
+    # declared map would then be silently ignored by project_in/project_out.
+    class BothFormsEmptySets(DeclaredSameName[Parent, Child]):
+        inputs = {"query": "query"}
+        outputs = None
+
+    with pytest.raises(ConflictingProjectionForms):
+        _parent_with(BothFormsEmptySets()).compile()
+
+
 async def test_round_trip_into_non_idempotent_reducer_warns() -> None:
     # ``notes`` is projected in and back out through the parent's ``append``
     # reducer, so the unchanged value merges a second time and the list

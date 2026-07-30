@@ -770,11 +770,17 @@ def _check_projection_forms(projection: object, *, node_name: str) -> None:
     # bundled declarative strategies each expose exactly one form and so
     # can never conflict; the rule is still enforced for a custom (or
     # future combined) strategy exposing both, rather than being absent.
-    # A map form counts as declared when non-empty, or when ``outputs`` is
-    # present-but-empty (that spelling is meaningful for the maps: it
-    # means "project nothing out", distinct from absent).
-    has_maps = bool(getattr(projection, "inputs", None)) or getattr(projection, "outputs", None) is not None
-    has_sets = bool(getattr(projection, "in_fields", None)) or bool(getattr(projection, "out_fields", None))
+    #
+    # PRESENCE, not truthiness, on both halves. Every empty spelling is
+    # still a declaration of its form: ``outputs={}`` means "project
+    # nothing out", and an empty in/out set means "nothing crosses" -- so
+    # a truthiness test would read a deliberately-empty declaration as
+    # absent and let a both-forms strategy through. Only the map-form
+    # strategy defines ``inputs`` / ``outputs`` and only the set-form
+    # strategy defines ``in_fields`` / ``out_fields``, so exposing an
+    # attribute from each family IS the conflict.
+    has_maps = hasattr(projection, "inputs") or hasattr(projection, "outputs")
+    has_sets = hasattr(projection, "in_fields") or hasattr(projection, "out_fields")
     if has_maps and has_sets:
         raise ConflictingProjectionForms(node_name=node_name)
 
