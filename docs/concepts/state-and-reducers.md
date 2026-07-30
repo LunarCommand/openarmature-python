@@ -176,3 +176,45 @@ But `GraphBuilder.compile()` fails with `ConflictingReducers("log")`;
 the graph never compiles, so you can't reach runtime with an ambiguous
 merge policy. The same compile pass picks the one declared reducer per
 field; with no declaration, the default is `last_write_wins`.
+
+## Writing a custom reducer
+
+Subclass `Reducer`, give it a `name`, and implement `__call__(prior, update)`:
+
+```python
+from typing import Annotated
+from openarmature.graph import Reducer, State
+
+class TakeMax(Reducer):
+    name = "take_max"
+    round_trip_idempotent = True  # re-applying the same value is a no-op
+
+    def __call__(self, prior: int, update: int) -> int:
+        return max(prior, update)
+
+take_max = TakeMax()          # attach an INSTANCE, not the class
+
+class Scores(State):
+    high: Annotated[int, take_max] = 0
+```
+
+Attach an instance. `Annotated[int, TakeMax]` (the bare class) is not
+recognized as a reducer, so it is ignored and the field silently falls
+back to `last_write_wins`, taking any `round_trip_idempotent` you
+declared with it.
+
+`round_trip_idempotent` is optional and drives the subgraph-projection
+round-trip warning (see
+[Composition](composition.md#watch-out-round-tripping-a-field-through-a-growing-reducer)).
+It has three states:
+
+- `True`: re-applying an already-merged value leaves the field
+  unchanged. A projection that round-trips this field is harmless, so no
+  warning. `last_write_wins` and `merge` declare this.
+- `False`: re-applying changes the field, so a round-trip is a bug
+  waiting to happen and the library warns at compile time. `append`,
+  `concat_flatten`, and `merge_all` declare this.
+- unset (the default `None`): not classified. The library stays silent
+  rather than guessing, so declare `False` explicitly if your reducer
+  grows or otherwise misbehaves on re-application. This is the only way
+  authors of a custom reducer get the warning.

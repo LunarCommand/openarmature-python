@@ -10,6 +10,7 @@ all carry `StateT` forward so consumers get typed `invoke()` return values and
 a type-checked `state` parameter on every callback, without `cast(...)` calls.
 """
 
+import warnings
 from collections.abc import Awaitable, Callable, Iterable, Mapping
 from types import GenericAlias, UnionType
 from typing import Any, Literal, Self, cast, get_args, get_origin
@@ -19,8 +20,10 @@ from openarmature.checkpoint.migration import MigrationRegistry, StateMigration
 from openarmature.checkpoint.protocol import Checkpointer
 
 from .compiled import CompiledGraph
+from .diagnostics import ProjectionReducerRoundTrip
 from .edges import ConditionalEdge, EndSentinel, StaticEdge
 from .errors import (
+    ConflictingProjectionForms,
     ConflictingReducers,
     DanglingEdge,
     FanOutCountModeAmbiguous,
@@ -37,7 +40,7 @@ from .fan_out import ConcurrencyResolver, CountResolver, FanOutConfig, FanOutNod
 from .middleware import FailureIsolationMiddleware, Middleware
 from .nodes import FunctionNode, Node
 from .parallel_branches import BranchSpec, ParallelBranchesNode
-from .projection import FieldNameMatching, ProjectionStrategy
+from .projection import FieldNameMatching, ProjectionStrategy, map_round_tripped_parent_fields
 from .reducers import Reducer
 from .state import State, field_reducers, resolve_reducer
 from .subgraph import SubgraphNode
@@ -109,7 +112,9 @@ class GraphBuilder[StateT: State]:
         exit the child's final state is folded back via
         ``projection.project_out``. The default projection is
         :class:`FieldNameMatching`; pass an :class:`ExplicitMapping`
-        for declarative ``inputs``/``outputs`` instead.
+        for declarative ``inputs``/``outputs`` renames, or a
+        :class:`DeclaredSameName` to declare the crossing fields as
+        same-name sets.
 
         ``middleware`` wraps the whole subgraph dispatch as one atomic
         call from the parent's perspective. Per-graph middleware on
@@ -549,8 +554,10 @@ class GraphBuilder[StateT: State]:
         Runs structural checks in order:
 
         - ``conflicting_reducers`` (state-field reducer conflicts)
+        - ``conflicting_projection_forms`` (one node declaring both the
+          declared same-name sets and the explicit rename maps)
         - declarative projection ``validate`` hooks (e.g.
-          :class:`ExplicitMapping`)
+          :class:`ExplicitMapping`, :class:`DeclaredSameName`)
         - ``no_declared_entry`` / ``dangling_edge`` (entry pointer)
         - ``dangling_edge`` (edge endpoints reference declared nodes)
         - ``multiple_outgoing_edges`` (one edge per source)
@@ -561,6 +568,12 @@ class GraphBuilder[StateT: State]:
         graph is ready for :meth:`CompiledGraph.invoke`. A previously
         attached :class:`Checkpointer` is forwarded onto the compiled
         graph.
+
+        Once every check above has passed, advisory
+        :class:`CompileWarning` diagnostics are emitted (currently
+        ``projection_reducer_round_trip``). They run last so they cannot
+        preempt a real compile error for a caller whose warning filters
+        escalate warnings to exceptions.
         """
         # 1. ConflictingReducers — state schema check.
         per_field = field_reducers(self.state_cls)
@@ -581,9 +594,10 @@ class GraphBuilder[StateT: State]:
         #    ChildT is erased once SubgraphNode is stored as Node[StateT];
         #    the cast restores enough type info to access `compiled.state_cls`
         #    without pyright flagging an unknown member type.
-        for node in self._nodes.values():
+        for node_name, node in self._nodes.items():
             if isinstance(node, SubgraphNode):
                 sub = cast(SubgraphNode[StateT, State], node)
+                _check_projection_forms(sub.projection, node_name=node_name)
                 validate = getattr(sub.projection, "validate", None)
                 if validate is not None:
                     validate(self.state_cls, sub.compiled.state_cls)
@@ -618,6 +632,13 @@ class GraphBuilder[StateT: State]:
         for node_name in self._nodes:
             if node_name not in reachable:
                 raise UnreachableNode(node_name)
+
+        # Advisory diagnostics run LAST, once every MUST-fail structural
+        # check has passed. A caller whose warning filters escalate to
+        # errors would otherwise see this preempt (and mask) the real
+        # compile error, and a graph that never compiles should not be
+        # advised about nodes that can never run.
+        self._warn_projection_round_trips(resolved)
 
         compiled = CompiledGraph[StateT](
             state_cls=self.state_cls,
@@ -654,6 +675,114 @@ class GraphBuilder[StateT: State]:
                     reachable.add(name)
                     frontier.append(name)
         return reachable
+
+    def _warn_projection_round_trips(self, resolved: Mapping[str, Reducer]) -> None:
+        """Emit a ``projection_reducer_round_trip`` warning for every
+        parent field a projection carries in and then merges back out
+        through a reducer that grows on re-application.
+
+        Covers the DECLARATIVE surfaces: a subgraph-as-node whose
+        projection strategy exposes a ``round_tripped_parent_fields`` hook
+        (both bundled declarative strategies do), both of a fan-out's
+        output channels (the primary ``collect_field`` / ``target_field``
+        pair and the secondary ``extra_outputs`` map), and a
+        parallel-branches subgraph branch's ``inputs`` / ``outputs``.
+
+        An imperative custom projection has nothing declarative to
+        inspect, so it is skipped rather than guessed at, and its
+        round-trips go unwarned. Never fails compilation and never changes
+        runtime behavior.
+        """
+        for node_name, node in self._nodes.items():
+            round_tripped: set[str] = set()
+            if isinstance(node, SubgraphNode):
+                sub = cast(SubgraphNode[StateT, State], node)
+                # Duck-typed: a strategy declares its round-trip surface
+                # (both bundled declarative strategies do); an imperative
+                # custom projection has nothing declarative to inspect and
+                # is skipped rather than guessed at.
+                declared = getattr(sub.projection, "round_tripped_parent_fields", None)
+                if declared is not None:
+                    round_tripped = declared()
+            elif isinstance(node, FanOutNode):
+                cfg = cast(FanOutNode[StateT, State], node).config
+                # Secondary output channel: the extra_outputs rename map.
+                round_tripped = map_round_tripped_parent_fields(cfg.inputs, cfg.extra_outputs)
+                # Primary output channel (proposal 0111). collect_field /
+                # target_field are two scalars rather than a map, so a
+                # map-pair resolver is blind to them unless they are
+                # expressed as a one-entry out-map. Round-trips only when
+                # collect_field is SEEDED from target_field; a collect_field
+                # fed from anywhere else carries a distinct value back and
+                # does not warn.
+                #
+                # Two spellings seed it. 0111 names the `inputs` one:
+                round_tripped |= map_round_tripped_parent_fields(
+                    cfg.inputs, {cfg.target_field: cfg.collect_field}
+                )
+                # ...and items_field / item_field seeds it too, by handing
+                # each instance one ELEMENT of the parent list. 0111's §9.3
+                # condition is written against `inputs` only, but the same
+                # value returns to the same parent field through the same
+                # reducer, and 0111 declined to carve out the primary
+                # channel precisely because a silent primary alongside a
+                # warning secondary is backwards. Flagged to spec.
+                if (
+                    cfg.items_field is not None
+                    and cfg.item_field is not None
+                    and cfg.item_field == cfg.collect_field
+                ):
+                    round_tripped |= map_round_tripped_parent_fields(
+                        {cfg.item_field: cfg.items_field}, {cfg.target_field: cfg.collect_field}
+                    )
+            elif isinstance(node, ParallelBranchesNode):
+                for spec in node.branches.values():
+                    # A callable branch returns a partial update directly
+                    # (no subgraph, no projection), so its empty maps
+                    # contribute nothing here.
+                    round_tripped |= map_round_tripped_parent_fields(spec.inputs, spec.outputs)
+
+            for field_name in sorted(round_tripped):
+                reducer = resolved.get(field_name)
+                # round_trip_idempotent is None for an unclassified custom
+                # reducer: the warning is only SHOULD there, so stay silent
+                # rather than guess. False is the MUST case.
+                if reducer is None or reducer.round_trip_idempotent is not False:
+                    continue
+                warnings.warn(
+                    ProjectionReducerRoundTrip(
+                        field_name=field_name,
+                        reducer_name=reducer.name,
+                        node_name=node_name,
+                    ),
+                    stacklevel=3,
+                )
+
+
+def _check_projection_forms(projection: object, *, node_name: str) -> None:
+    """Fail compilation when one node's projection declares more than one
+    form: the declared same-name sets AND the explicit rename maps.
+
+    Checks whatever the strategy exposes rather than keying on a class,
+    so a custom strategy declaring both forms is caught too.
+    """
+    # Proposal 0094. Duck-typed rather than class-keyed because the two
+    # bundled declarative strategies each expose exactly one form and so
+    # can never conflict; the rule is still enforced for a custom (or
+    # future combined) strategy exposing both, rather than being absent.
+    #
+    # PRESENCE, not truthiness, on both halves. Every empty spelling is
+    # still a declaration of its form: ``outputs={}`` means "project
+    # nothing out", and an empty in/out set means "nothing crosses" -- so
+    # a truthiness test would read a deliberately-empty declaration as
+    # absent and let a both-forms strategy through. Only the map-form
+    # strategy defines ``inputs`` / ``outputs`` and only the set-form
+    # strategy defines ``in_fields`` / ``out_fields``, so exposing an
+    # attribute from each family IS the conflict.
+    has_maps = hasattr(projection, "inputs") or hasattr(projection, "outputs")
+    has_sets = hasattr(projection, "in_fields") or hasattr(projection, "out_fields")
+    if has_maps and has_sets:
+        raise ConflictingProjectionForms(node_name=node_name)
 
 
 def _is_list_typed(annotation: Any) -> bool:

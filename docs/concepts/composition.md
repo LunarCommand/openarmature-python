@@ -238,6 +238,147 @@ Without explicit mapping, both calls would have to read from and write
 to the same parent fields under name matching, making "run the same
 subgraph twice on different inputs" structurally impossible.
 
+### `DeclaredSameName` (declared, same-name only)
+
+Most boundaries do not rename anything: the parent and the subgraph
+already agree on the field names, and the rename maps are pure
+boilerplate. `DeclaredSameName` names the crossing fields as two sets
+of bare field names:
+
+```python
+from openarmature.graph import DeclaredSameName
+
+projection = DeclaredSameName[ParentState, SubgraphState](
+    in_fields={"topic", "corpus"},   # copied parent -> subgraph, same name
+    out_fields={"summary"},          # merged subgraph -> parent, same name
+)
+builder.add_subgraph_node("summarize", subgraph, projection=projection)
+```
+
+Per-field behavior is exactly `ExplicitMapping` restricted to same-name
+pairs, and both sets are validated against both schemas at compile time.
+That is the point: it is the checked middle between the default (terse
+but unchecked, so a rename silently stops carrying a field) and the maps
+(checked but verbose). Rename a field on either side and you get a
+`MappingReferencesUndeclaredField` at compile, not a value quietly
+arriving as its schema default.
+
+**It is a complete declaration, with no fallback.** `ExplicitMapping`
+distinguishes an *absent* `outputs` (falls back to field-name matching)
+from an *empty* one (projects nothing). The declared form drops that
+distinction: empty means "nothing" in both directions, so an
+accidentally-empty set cannot silently re-enable the implicit behavior.
+If you want field-name matching, use the default strategy instead.
+
+**`out_fields` defaults to empty, so omitting it projects nothing back.**
+This is the sharpest edge of the new form, and it is the opposite of what
+omitting `outputs` does:
+
+```python
+DeclaredSameName(in_fields={"topic"})              # projects NOTHING out
+ExplicitMapping(inputs={"topic": "topic"})         # name-matches everything out
+```
+
+Both compile clean. If you want fields to come back, name them.
+
+Use `ExplicitMapping` when any pair actually renames. A node declares
+its projection with one form: a strategy exposing both the sets and the
+maps fails compilation with `ConflictingProjectionForms`.
+
+### Watch out: round-tripping a field through a growing reducer
+
+Projection-out merges into the parent through the parent's reducers,
+exactly as any node's return does. That consistency has a sharp edge: if
+you project a field *in* and then the same field back *out*, the value
+merges a second time. With `last_write_wins` that is harmless. With
+`append` the list doubles.
+
+The library warns about this at compile time:
+
+```python
+import warnings
+from openarmature.graph import CompileWarning
+
+with warnings.catch_warnings(record=True) as caught:
+    warnings.simplefilter("always")
+    graph = builder.compile()
+# caught[0].message is a ProjectionReducerRoundTrip, whose `category` is
+# "projection_reducer_round_trip"
+```
+
+The warning changes no runtime behavior, and on its own it does not fail
+compilation. It runs last, after every structural check has passed, so it
+can never mask a real compile error. Treat it as a prompt to either route
+the field through an idempotent reducer, or stop round-tripping it (keep
+the subgraph read-only for that field and have the parent read it
+directly). If you would rather it be fatal,
+`warnings.simplefilter("error", CompileWarning)` promotes it, and then
+`compile()` does raise. Note that a `CompileWarning` is a `UserWarning`
+subclass, not a `CompileError`, so catch it accordingly. The same applies
+if your project already runs under `-W error` or pytest
+`filterwarnings = ["error"]`.
+
+What the doubling costs depends on the reducer: `append` and
+`concat_flatten` grow the field, while re-applying `merge_all` is
+ill-typed and raises at runtime instead.
+
+It fires on the declarative projection surfaces: a subgraph node using
+`ExplicitMapping` or `DeclaredSameName`, both of a fan-out's output
+channels, and a parallel-branches subgraph branch's `inputs` / `outputs`.
+Touching the same parent field through two *different* subgraph fields is
+not a round-trip (the value coming back is a distinct, subgraph-computed
+one), so that case stays silent.
+
+An **imperative custom strategy** is not covered. The engine can only
+read a declared boundary, so if you write your own `project_in` /
+`project_out` you are responsible for this hazard yourself.
+
+Fan-out has two ways back to the parent, and both count. The obvious one
+is the `extra_outputs` map. The easier one to miss is the **primary
+collect channel**, where the round-trip is spelled with scalars instead
+of a map:
+
+```python
+class Parent(State):
+    # concat_flatten, not append: the fan-in hands the parent a LIST of
+    # per-instance values, and only concat_flatten can consume that.
+    results: Annotated[list[str], concat_flatten] = Field(default_factory=list)
+
+class Instance(State):
+    acc: list[str] = Field(default_factory=list)
+
+async def add_one(state: Instance) -> dict[str, Any]:
+    return {"acc": [*state.acc, "new"]}
+
+builder.add_fan_out_node(
+    "spread",
+    subgraph=inner,              # a graph over Instance running add_one
+    count=2,
+    inputs={"acc": "results"},   # parent results -> each instance's acc
+    collect_field="acc",         # ...and each instance's acc
+    target_field="results",      # ...collected straight back into results
+)
+```
+
+The seed value re-merges **once per instance**: start from `["seed"]` over
+two instances and `results` ends up
+`['seed', 'seed', 'new', 'seed', 'new']`.
+
+Two things to note. `append` on the collect channel does not merely
+double: the update is a list of lists, so it fails state validation
+outright. And the seeding can also be spelled with `items_field` /
+`item_field`, which hands each instance one *element* of the parent list;
+that round-trips too, and warns.
+
+Feed `collect_field` from anywhere other than `target_field` and there is
+no round-trip, so collecting into a growing reducer is not by itself a
+problem. Branches need no equivalent care: a branch has only its
+`outputs` map, with no per-branch collect slot.
+
+The check is structural: it cannot prove the subgraph left the value
+untouched, so a round-trip that legitimately replaces the value will
+still warn.
+
 ### Custom projection strategies
 
 If you need behavior beyond name-mapping (synthesize values, project

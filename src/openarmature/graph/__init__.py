@@ -12,9 +12,11 @@ seams, and the canonical compile-time and runtime error categories.
 from .builder import GraphBuilder
 from .cause_chain import CaughtException, CauseLink, classify_cause_chain
 from .compiled import CompiledGraph
+from .diagnostics import CompileWarning, ProjectionReducerRoundTrip
 from .edges import END, ConditionalEdge, EndSentinel, StaticEdge
 from .errors import (
     CompileError,
+    ConflictingProjectionForms,
     ConflictingReducers,
     DanglingEdge,
     EdgeException,
@@ -69,7 +71,12 @@ from .middleware import (
 from .nodes import FunctionNode, Node
 from .observer import DrainSummary, Observer, ObserverEvent, RemoveHandle, SubscribedObserver
 from .parallel_branches import BranchSpec, ParallelBranchesNode
-from .projection import ExplicitMapping, FieldNameMatching, ProjectionStrategy
+from .projection import (
+    DeclaredSameName,
+    ExplicitMapping,
+    FieldNameMatching,
+    ProjectionStrategy,
+)
 from .reducers import Reducer, append, concat_flatten, last_write_wins, merge, merge_all
 from .state import State
 from .subgraph import SubgraphNode
@@ -81,6 +88,8 @@ __all__ = [
     "CompileError",
     "CompiledGraph",
     "ConditionalEdge",
+    "CompileWarning",
+    "ConflictingProjectionForms",
     "ConflictingReducers",
     "DanglingEdge",
     "DegradedUpdate",
@@ -89,6 +98,7 @@ __all__ = [
     "EmbeddingEvent",
     "EmbeddingFailedEvent",
     "EndSentinel",
+    "DeclaredSameName",
     "ExplicitMapping",
     "FailureIsolatedEvent",
     "FailureIsolationMiddleware",
@@ -110,6 +120,7 @@ __all__ = [
     "LlmFailedEvent",
     "LlmRetryAttemptEvent",
     "MappingReferencesUndeclaredField",
+    "ProjectionReducerRoundTrip",
     "MetadataAugmentationEvent",
     "Middleware",
     "MultipleOutgoingEdges",
