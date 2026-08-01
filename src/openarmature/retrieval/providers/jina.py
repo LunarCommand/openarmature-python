@@ -45,6 +45,7 @@ from typing import Any, cast
 
 import httpx
 
+from openarmature._managed_extras import ManagedArm, apply_managed_extras
 from openarmature.llm.errors import (
     LlmProviderError,
     ProviderAuthentication,
@@ -103,13 +104,11 @@ from ..response import (
 #
 # Note the boundary: `task` rides through only while input_type is ABSENT. When
 # input_type is SET, `task` is the managed wire realization of the declared
-# field, and 0108 (§6 clause (b)) governs a conflicting extras `task`: it MUST
-# be rejected pre-send (provider_invalid_request), a matching one is a no-op.
-# This mapping predates 0108 adoption and currently lets the managed value
-# silently overwrite the extra (the body assignment below), while the
-# EmbeddingEvent still reports the caller's extras verbatim. Reconciling to the
-# 0108 reject is tracked separately (it rides the pin bump that brings in 0108,
-# not this 0099 change).
+# field, and 0108 (§6 clause (b)) governs a conflicting extras `task`: it is
+# rejected pre-send (provider_invalid_request), a matching one is a no-op. The
+# embed body-builder enforces this via apply_managed_extras -- `task` is in the
+# managed set only while input_type is set, so the absent-input_type escape
+# hatch is preserved.
 _INPUT_TYPE_TO_TASK: dict[str, str] = {
     "query": "retrieval.query",
     "document": "retrieval.passage",
@@ -347,14 +346,8 @@ class JinaEmbeddingProvider:
         absent ``input_type`` omits ``task`` (the symmetric default).
         ``truncate: false`` is always sent (fail-loud).
         """
-        # Extras merge FIRST so the managed keys (model, input, task, dimensions,
-        # truncate) always win: a caller's undeclared extra named "input" must
-        # not clobber the wire identity, and one named "truncate" cannot defeat
-        # the fail-loud guarantee. truncate: false is sent explicitly so an
-        # over-length input errors rather than being silently truncated (§8.2).
         task = _task_for_input_type(input_type)
         body: dict[str, Any] = {
-            **request_extras,
             "model": self.model,
             "input": list(input_strings),
             "truncate": False,
@@ -363,6 +356,16 @@ class JinaEmbeddingProvider:
             body["task"] = task
         if dimensions is not None:
             body["dimensions"] = dimensions
+        # Managed-field collision (0105 + 0108, §6). model / input / truncate are
+        # managed-internal; dimensions and task realize declared fields (task
+        # only while input_type is set -- so when it is absent, task is omitted
+        # from `managed` and an extras `task` rides untouched, the §8.2 escape
+        # hatch for a model-specific task value). A conflicting extra on any of
+        # these is rejected pre-send rather than silently overriding.
+        managed: dict[str, ManagedArm] = {
+            key: "reject" for key in ("model", "input", "truncate", "dimensions", "task") if key in body
+        }
+        apply_managed_extras(body, request_extras, managed)
         return body
 
     def _parse_response(
@@ -598,27 +601,34 @@ class JinaRerankProvider:
         request_extras: dict[str, Any],
     ) -> dict[str, Any]:
         """Build the /v1/rerank request body."""
-        # Extras merge FIRST so the managed keys (model, query, documents,
-        # top_n, return_documents, truncation) always win. documents maps
-        # directly onto the string array (§8.2; no per-document wrapping).
-        # return_documents is sent EXPLICITLY: Jina's wire default is true but
-        # OA's is False (§2), so the mapping sends the resolved OA value rather
-        # than relying on Jina's default. truncation: false is sent explicitly
-        # (fail-loud -- an over-length pair errors rather than silently
-        # truncating). top_n maps from top_k, omitted when None.
+        # documents maps directly onto the string array (§8.2; no per-document
+        # wrapping). return_documents is sent EXPLICITLY: Jina's wire default is
+        # true but OA's is False (§2), so the mapping sends the resolved OA value.
+        # truncation: false is sent explicitly (fail-loud). top_n maps from
+        # top_k, omitted when None.
         body: dict[str, Any] = {
-            **request_extras,
             "model": self.model,
             "query": query,
             "documents": documents_list,
             "return_documents": return_documents,
             "truncation": False,
         }
-        # top_n is the wire mapping of top_k, so it is a managed key: drop any
-        # extras top_n (top_k is the sole source), then set it only when supplied.
-        body.pop("top_n", None)
         if top_k is not None:
             body["top_n"] = top_k
+        # Managed-field collision (0105 + 0108). model / query / documents /
+        # truncation are managed-internal; return_documents (always sent) and
+        # top_n (from top_k) are declared-field realizations. A conflicting extra
+        # on a produced key is rejected pre-send. top_n is managed only WHILE
+        # top_k is set; when top_k is None the mapping emits no top_n, so an
+        # extras top_n is unmanaged and rides untouched to the wire (0108's
+        # declared-field-absent escape hatch), capping the results with no top_k
+        # contract for validate_rerank_response to check.
+        managed: dict[str, ManagedArm] = {
+            key: "reject"
+            for key in ("model", "query", "documents", "return_documents", "truncation", "top_n")
+            if key in body
+        }
+        apply_managed_extras(body, request_extras, managed)
         return body
 
     def _parse_response(

@@ -2385,3 +2385,190 @@ def test_jina_base_url_default_and_v1_guard() -> None:
     for cls in (JinaEmbeddingProvider, JinaRerankProvider):
         with pytest.raises(ValueError, match="v1/v1"):
             cls(model="m", api_key="k", base_url="https://api.jina.ai/v1")
+
+
+# --- Managed-field vs extras collision (proposals 0105 + 0108) -------------
+# The shared resolver's arms are unit-tested in test_managed_extras.py; these
+# verify each retrieval mapping declares the right managed set and preserves the
+# escape hatches. Behavior ships ahead of the v0.88.0 pin; fixtures 046/047/048
+# ride the pin bump.
+
+
+def _never_called(_req: httpx.Request) -> httpx.Response:  # pragma: no cover - reject fires pre-send
+    raise AssertionError("provider must not be contacted on a pre-send collision reject")
+
+
+async def test_cohere_embed_conflicting_managed_extra_rejects_pre_send() -> None:
+    # A caller extra shadowing a managed wire field (model / truncate /
+    # output_dimension) is rejected pre-send rather than silently overriding the
+    # mapping's value. output_dimension is the wire realization of the declared
+    # `dimensions`, so an extras output_dimension against a declared dimensions
+    # is a genuine collision -- the wire name differs from the declared name.
+    # input_type is deliberately NOT tested here: its wire name equals its
+    # declared name, so a like-named key binds the declared field rather than
+    # model_extra and can never reach the reject arm as an extra.
+    provider = _cohere_embed_provider(_never_called)
+    configs = (
+        {"input_type": "document", "model": "other"},
+        {"input_type": "document", "truncate": "END"},
+        {"input_type": "document", "dimensions": 512, "output_dimension": 256},
+    )
+    for raw in configs:
+        with pytest.raises(ProviderInvalidRequest):
+            await provider.embed(["x"], config=EmbeddingRuntimeConfig.model_validate(raw))
+    await provider.aclose()
+
+
+async def test_cohere_embed_matching_managed_extra_is_a_noop() -> None:
+    captured: list[dict[str, Any]] = []
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        captured.append(json.loads(req.content))
+        return httpx.Response(200, json=_cohere_embed_body(vectors=[[0.1, 0.2]], input_tokens=3))
+
+    provider = _cohere_embed_provider(handler)
+    # A matching truncate is a no-op; an unmanaged extra rides untouched.
+    cfg = EmbeddingRuntimeConfig.model_validate({"truncate": "NONE", "user_tag": "keep"})
+    await provider.embed(["x"], config=cfg)
+    await provider.aclose()
+    assert captured[0]["truncate"] == "NONE"
+    assert captured[0]["user_tag"] == "keep"
+
+
+async def test_openai_embed_conflicting_model_extra_rejects() -> None:
+    provider = _openai_embed_provider(_never_called)
+    with pytest.raises(ProviderInvalidRequest):
+        await provider.embed(["x"], config=EmbeddingRuntimeConfig.model_validate({"model": "other"}))
+    await provider.aclose()
+
+
+def _jina_embed_response(req: httpx.Request) -> httpx.Response:
+    return httpx.Response(
+        200,
+        json={"model": "m", "usage": {"total_tokens": 4}, "data": [{"index": 0, "embedding": [0.1]}]},
+    )
+
+
+async def test_jina_embed_task_escape_hatch_when_input_type_absent() -> None:
+    # 0108 escape hatch: with input_type absent the mapping emits no task, so an
+    # extras task rides untouched to the wire (a model-specific task value).
+    captured: list[dict[str, Any]] = []
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        captured.append(json.loads(req.content))
+        return _jina_embed_response(req)
+
+    provider = _jina_embed_provider(handler)
+    await provider.embed(["x"], config=EmbeddingRuntimeConfig.model_validate({"task": "text-matching"}))
+    await provider.aclose()
+    assert captured[0]["task"] == "text-matching"
+
+
+async def test_jina_embed_task_conflict_rejects_when_input_type_set() -> None:
+    # input_type set -> task managed -> a conflicting extras task is rejected.
+    provider = _jina_embed_provider(_never_called)
+    cfg = EmbeddingRuntimeConfig.model_validate({"input_type": "query", "task": "retrieval.passage"})
+    with pytest.raises(ProviderInvalidRequest):
+        await provider.embed(["x"], config=cfg)
+    await provider.aclose()
+
+
+async def test_jina_embed_task_matching_is_a_noop() -> None:
+    captured: list[dict[str, Any]] = []
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        captured.append(json.loads(req.content))
+        return _jina_embed_response(req)
+
+    provider = _jina_embed_provider(handler)
+    cfg = EmbeddingRuntimeConfig.model_validate({"input_type": "query", "task": "retrieval.query"})
+    await provider.embed(["x"], config=cfg)
+    await provider.aclose()
+    assert captured[0]["task"] == "retrieval.query"
+
+
+async def test_tei_embed_relied_on_truncate_default_conflict_rejects() -> None:
+    # TEI /embed relies on the vendor default (truncate=false) rather than
+    # sending it; a conflicting extras truncate is still rejected (0105 fx 047).
+    provider = _tei_embed_provider(_never_called)
+    with pytest.raises(ProviderInvalidRequest):
+        await provider.embed(["x"], config=EmbeddingRuntimeConfig.model_validate({"truncate": True}))
+    await provider.aclose()
+
+
+async def test_tei_embed_matching_truncate_default_leaves_body_minimal() -> None:
+    # A matching truncate=false is a no-op that keeps the body minimal -- the
+    # mapping still does not add the key.
+    captured: list[dict[str, Any]] = []
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        captured.append(json.loads(req.content))
+        return httpx.Response(200, json=[[0.1, 0.2]])
+
+    provider = _tei_embed_provider(handler)
+    await provider.embed(["x"], config=EmbeddingRuntimeConfig.model_validate({"truncate": False}))
+    await provider.aclose()
+    assert "truncate" not in captured[0]
+
+
+async def test_jina_rerank_conflicting_truncation_rejects() -> None:
+    # 0105 fixture 048: the distinct `truncation` name on Jina /v1/rerank.
+    provider = _jina_rerank_provider(_never_called)
+    with pytest.raises(ProviderInvalidRequest):
+        await provider.rerank("q", ["d"], config=RerankRuntimeConfig.model_validate({"truncation": True}))
+    await provider.aclose()
+
+
+# top_n realizes the declared top_k, so it is managed only WHILE top_k is set: a
+# conflicting extras top_n rejects, but with no top_k the mapping emits no top_n
+# and an extras top_n rides untouched to the wire (0108 declared-field-absent
+# escape hatch). Both arms are pinned for Cohere and Jina rerank.
+async def test_cohere_rerank_conflicting_top_n_extra_rejects() -> None:
+    provider = _rerank_provider(_never_called)
+    with pytest.raises(ProviderInvalidRequest):
+        await provider.rerank(
+            "q", ["a", "b"], top_k=2, config=RerankRuntimeConfig.model_validate({"top_n": 1})
+        )
+    await provider.aclose()
+
+
+async def test_cohere_rerank_extras_top_n_without_top_k_rides_untouched() -> None:
+    captured: list[dict[str, Any]] = []
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        captured.append(json.loads(req.content))
+        return httpx.Response(200, json=_rerank_body(results=[{"index": 0, "relevance_score": 0.9}]))
+
+    provider = _rerank_provider(handler)
+    await provider.rerank("q", ["a", "b"], config=RerankRuntimeConfig.model_validate({"top_n": 1}))
+    await provider.aclose()
+    assert captured[0]["top_n"] == 1
+
+
+async def test_jina_rerank_conflicting_top_n_extra_rejects() -> None:
+    provider = _jina_rerank_provider(_never_called)
+    with pytest.raises(ProviderInvalidRequest):
+        await provider.rerank(
+            "q", ["a", "b"], top_k=2, config=RerankRuntimeConfig.model_validate({"top_n": 1})
+        )
+    await provider.aclose()
+
+
+async def test_jina_rerank_extras_top_n_without_top_k_rides_untouched() -> None:
+    captured: list[dict[str, Any]] = []
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        captured.append(json.loads(req.content))
+        return httpx.Response(
+            200,
+            json={
+                "model": "m",
+                "usage": {"total_tokens": 3},
+                "results": [{"index": 0, "relevance_score": 0.9}],
+            },
+        )
+
+    provider = _jina_rerank_provider(handler)
+    await provider.rerank("q", ["a", "b"], config=RerankRuntimeConfig.model_validate({"top_n": 1}))
+    await provider.aclose()
+    assert captured[0]["top_n"] == 1

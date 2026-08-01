@@ -38,6 +38,7 @@ from typing import Any, cast
 
 import httpx
 
+from openarmature._managed_extras import ManagedArm, apply_managed_extras
 from openarmature.llm.errors import (
     LlmProviderError,
     ProviderAuthentication,
@@ -296,9 +297,7 @@ class TeiEmbeddingProvider:
         """
         # input_type realization per §8.1. ``truncate`` is NOT added -- the
         # /embed mapping relies on TEI's false default, keeping the body minimal
-        # (§8.1). Extras merge FIRST so the managed keys (inputs, prompt_name,
-        # dimensions) always win: a caller's undeclared extra named "inputs"
-        # must not clobber the wire identity.
+        # (§8.1).
         inputs = list(input_strings)
         prompt_name: str | None = None
         if input_type is not None:
@@ -316,11 +315,23 @@ class TeiEmbeddingProvider:
                     query_prefix=self._query_prefix,
                     document_prefix=self._document_prefix,
                 )
-        body: dict[str, Any] = {**request_extras, "inputs": inputs}
+        body: dict[str, Any] = {"inputs": inputs}
         if prompt_name is not None:
             body["prompt_name"] = prompt_name
         if dimensions is not None:
             body["dimensions"] = dimensions
+        # Managed-field collision (0105 + 0108). inputs is managed-internal;
+        # prompt_name and dimensions realize declared fields (prompt_name only
+        # while input_type maps to one). truncate is the relied-upon-default
+        # reject arm: the mapping keeps the body minimal by relying on TEI's
+        # false fail-loud default, so a matching extras truncate=False is a
+        # body-minimal no-op and a conflicting one is rejected pre-send.
+        managed: dict[str, ManagedArm] = {
+            key: "reject" for key in ("inputs", "prompt_name", "dimensions") if key in body
+        }
+        # truncate is managed even though the body omits it (relied-upon default).
+        managed["truncate"] = "reject"
+        apply_managed_extras(body, request_extras, managed, managed_values={"truncate": False})
         return body
 
     async def _embed_chunked(
@@ -612,17 +623,21 @@ class TeiRerankProvider:
         # texts maps directly onto the chunk documents (§8.1; no per-document
         # object wrapping). truncate is sent false EXPLICITLY (fail-loud -- an
         # over-length pair errors rather than silently truncating); return_text
-        # tracks return_documents. Extras merge FIRST so the managed keys always
-        # win: a caller extra named "truncate" cannot defeat the fail-loud
-        # guarantee, and one named "query" / "texts" cannot clobber the wire
-        # identity.
-        return {
-            **request_extras,
+        # tracks return_documents.
+        body: dict[str, Any] = {
             "query": query,
             "texts": list(chunk),
             "truncate": False,
             "return_text": return_documents,
         }
+        # Managed-field collision (0105 + 0108). query / texts / truncate are
+        # managed-internal; return_text realizes the declared return_documents. A
+        # conflicting extra on any is rejected pre-send.
+        managed: dict[str, ManagedArm] = {
+            key: "reject" for key in ("query", "texts", "truncate", "return_text") if key in body
+        }
+        apply_managed_extras(body, request_extras, managed)
+        return body
 
     def _parse_chunk(
         self,

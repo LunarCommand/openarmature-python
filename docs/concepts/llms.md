@@ -632,6 +632,39 @@ or `"research" if "?" in state.query else "summarize"`. The branch
 nodes don't change. Swapping a rule-based router for an LLM-based one
 is a one-node change.
 
+## Provider-specific extras
+
+`RuntimeConfig` (and the retrieval `EmbeddingRuntimeConfig` /
+`RerankRuntimeConfig`) accept fields beyond the declared set, and any
+undeclared field is forwarded to the wire request untouched. This is how
+you reach a backend-specific knob the portable config does not model, for
+example a vLLM `guided_decoding`:
+
+```python
+config = RuntimeConfig.model_validate({
+    "temperature": 0.2,
+    "guided_decoding": {"grammar": "..."},   # forwarded as-is
+})
+```
+
+The value itself is never translated or renamed. One caveat for
+byte-level consumers: the OpenAI Chat Completions mapping canonicalizes
+the request body for reproducibility, so a dict-valued extra keeps its
+value but its keys are emitted in sorted order rather than your insertion
+order.
+
+The one exception is a key that collides with a field the mapping
+**manages** for its own correctness (the model, the messages, a fail-loud
+`truncate` flag) or that realizes a declared field on the wire (`stop`
+from `stop_sequences`, Jina's `task` from `input_type`). There, forwarding
+untouched would defeat the mapping, so the collision is resolved by shape:
+a list field like `stop` **merges** your value with the managed one, and a
+non-additive field **rejects** a conflicting value with
+`ProviderInvalidRequest` before the request is sent (a value equal to the
+managed one is a harmless no-op). Reach for a differently-configured
+provider instance rather than trying to override a managed field through
+extras. Every other extras key still rides through untouched.
+
 ## Errors at the LLM boundary
 
 Every provider call can fail. The
