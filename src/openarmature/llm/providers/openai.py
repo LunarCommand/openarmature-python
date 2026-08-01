@@ -64,6 +64,7 @@ import httpx
 import jsonschema
 from pydantic import BaseModel, ValidationError
 
+from openarmature._managed_extras import ManagedArm, apply_managed_extras
 from openarmature.graph.events import (
     LlmCompletionEvent,
     LlmFailedEvent,
@@ -133,6 +134,42 @@ if TYPE_CHECKING:
 # branches in ``ready()`` and return None — a false-green readiness
 # signal. Validate in ``__init__`` against this set instead.
 _VALID_READINESS_PROBES = frozenset({"models", "chat_completions", "both"})
+
+# §8.1 managed wire fields and their collision arms (proposals 0105 + 0108). The
+# structural keys (model / messages / tools / tool_choice) are managed-internal
+# (0105 §3.5): 0105 §3.5 gives them no "while producing it" qualifier (that is
+# reserved for the conditionally-managed response_format / stream_options), so
+# they are ALWAYS managed -- an extras key of a structural name is rejected even
+# on a call that produced no such field. This closes the hole where an extras
+# `tools` / `tool_choice` on a no-tools call would otherwise ride untouched and
+# smuggle a raw, unvalidated tool array past validate_tools. The sampling scalars
+# are declared-field realizations (0108); stop realizes the list-shaped
+# stop_sequences so it MERGES; response_format is managed only on the
+# structured-output path (0105 conditionally-managed). Those non-structural keys
+# are managed only WHEN the mapping actually produced them, which the call site
+# enforces by filtering to keys present in the built body -- so a sampling field
+# the caller left None, or response_format on the free-form / §8.1.5.1 fallback
+# path, is unmanaged and an extra of that name rides untouched.
+_OPENAI_MANAGED_ARMS: dict[str, ManagedArm] = {
+    "model": "reject",
+    "messages": "reject",
+    "tools": "reject",
+    "tool_choice": "reject",
+    "temperature": "reject",
+    "top_p": "reject",
+    "max_tokens": "reject",
+    "seed": "reject",
+    "frequency_penalty": "reject",
+    "presence_penalty": "reject",
+    "response_format": "reject",
+    "stop": "merge",
+}
+
+# The structural managed-internal keys (0105 §3.5), managed regardless of whether
+# the mapping produced them on this call. tools / tool_choice are absent from the
+# body on a no-tools call, but an extras key of either name must still reject
+# rather than inject; model / messages are always in the body.
+_OPENAI_STRUCTURAL_KEYS = frozenset({"model", "messages", "tools", "tool_choice"})
 
 
 class OpenAIProvider:
@@ -1109,17 +1146,10 @@ class OpenAIProvider:
                 body["presence_penalty"] = config.presence_penalty
             if config.stop_sequences is not None:
                 body["stop"] = config.stop_sequences
-            # Pass-through any provider-specific extras (extra="allow"
-            # on RuntimeConfig); spec §6 mandates implementations MUST
-            # accept and forward undeclared fields untouched. Spec 0047
-            # §8: canonicalize each extra value at the user-input
-            # boundary so dict-typed extras (vLLM ``guided_decoding``,
-            # etc.) render with stable key ordering.
-            extras = config.model_extra or {}
-            for k, v in extras.items():
-                body.setdefault(k, _canonicalize_dict_keys(v))
         # response_format is omitted entirely on the fallback path —
-        # the schema travels in the augmented system message instead.
+        # the schema travels in the augmented system message instead. It is
+        # set BEFORE the extras reconciliation so it is a managed value the
+        # collision rule can guard on the structured path.
         if schema_dict is not None and include_response_format:
             # Spec 0047 §8.1.5 / Q5 ack: response_format.json_schema.schema
             # is a user-supplied JSON Schema and flows through the same
@@ -1132,13 +1162,10 @@ class OpenAIProvider:
                     "strict": strict_mode_supported(schema_dict),
                 },
             }
-        elif not include_response_format:
-            # On the fallback path the §8.1.5.1 contract is "response_format
-            # MUST NOT be on the wire." RuntimeConfig is extra="allow" so
-            # a caller could pass response_format through via the extras
-            # loop above; strip it here so the fallback contract holds
-            # regardless of caller-supplied extras.
-            body.pop("response_format", None)
+        # On the free-form call and the §8.1.5.1 prompt-augmentation fallback
+        # path the mapping produces no response_format, so it is UNMANAGED there
+        # (0105 §3.5): a caller's extras response_format rides untouched via the
+        # reconciliation below rather than being stripped.
         # Per §8.1.1 (proposal 0025): map the spec-level `tool_choice`
         # shape onto the OpenAI wire shape. ``None`` omits the field
         # entirely so the OpenAI provider's own default applies —
@@ -1155,6 +1182,26 @@ class OpenAIProvider:
                 }
             else:
                 body["tool_choice"] = tool_choice
+        # Managed-field collision (proposals 0105 + 0108, §6). Reconcile the
+        # caller's extras against the managed wire fields the mapping just
+        # produced: a colliding managed scalar/object is a matching no-op or a
+        # conflicting reject (provider_invalid_request), stop merges, and every
+        # unmanaged extra keeps §6's untouched pass-through. Canonicalize each
+        # extra value first (0047 §8) so a dict-typed extra compares against the
+        # already-canonical managed value on the reject arm and renders with
+        # stable key ordering on pass-through. The structural keys (0105 §3.5)
+        # are managed unconditionally; every other key is managed only when the
+        # mapping actually produced it (present in the body), which realizes the
+        # "while producing it" semantics for the declared-field realizations and
+        # the conditionally-managed response_format.
+        if config is not None and config.model_extra:
+            extras = {k: _canonicalize_dict_keys(v) for k, v in config.model_extra.items()}
+            managed: dict[str, ManagedArm] = {
+                key: arm
+                for key, arm in _OPENAI_MANAGED_ARMS.items()
+                if key in body or key in _OPENAI_STRUCTURAL_KEYS
+            }
+            apply_managed_extras(body, extras, managed)
         # Spec 0047 §8 belt-and-suspenders: walk the assembled body
         # once more sorting any dict at every nesting level, in case
         # a future code path introduces a user-input boundary the

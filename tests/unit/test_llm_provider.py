@@ -43,6 +43,7 @@ from openarmature.llm import (
     ProviderRateLimit,
     ProviderUnavailable,
     ProviderUnsupportedContentBlock,
+    RuntimeConfig,
     StructuredOutputInvalid,
     SystemMessage,
     Tool,
@@ -3183,3 +3184,101 @@ async def test_wire_byte_equality_across_image_content_blocks() -> None:
 
     assert len(captured) == 2
     assert captured[0] == captured[1]
+
+
+# --- Managed-field vs extras collision (proposals 0105 + 0108) -------------
+# The resolver arms are unit-tested in test_managed_extras.py; these verify the
+# OpenAI §8.1 mapping declares the right managed set. Behavior ships ahead of
+# the v0.88.0 pin; fixtures 072 / 074 ride the pin bump.
+
+
+def _ok_handler(bodies: list[dict[str, Any]]):  # type: ignore[no-untyped-def]
+    def handler(req: httpx.Request) -> httpx.Response:
+        bodies.append(json.loads(req.content))
+        return httpx.Response(200, json=_person_completion('{"name":"Al"}'))
+
+    return handler
+
+
+def _collision_provider(handler: Any) -> OpenAIProvider:
+    return OpenAIProvider(base_url="http://x", model="m", api_key="k", transport=httpx.MockTransport(handler))
+
+
+# A same-named declared sampling field (temperature, top_p, ...) cannot be
+# shadowed by an extras key via the config API: pydantic binds the key to the
+# declared field, so `model_validate({"temperature": ...})` never lands in
+# model_extra. That collision is therefore unconstructible here (the resolver
+# still handles it defensively; its reject arm is covered generically in
+# test_managed_extras.py). The reachable collisions are the STRUCTURAL fields
+# (model / messages / tools / tool_choice, not RuntimeConfig fields) and the
+# RENAMED realizations (stop from stop_sequences), plus response_format.
+async def test_llm_conflicting_structural_extra_rejects() -> None:
+    # A structural managed field (model) shadowed by an extra is rejected
+    # pre-send rather than silently re-routing the model.
+    def never(_req: httpx.Request) -> httpx.Response:  # pragma: no cover
+        raise AssertionError("must not send on a collision reject")
+
+    provider = _collision_provider(never)
+    with pytest.raises(ProviderInvalidRequest):
+        await provider.complete(
+            [UserMessage(content="hi")], config=RuntimeConfig.model_validate({"model": "other"})
+        )
+    await provider.aclose()
+
+
+async def test_llm_extras_tools_on_no_tools_call_rejects() -> None:
+    # tools / tool_choice are structural managed fields (0105 §3.5), managed even
+    # on a call that produced none: an extras `tools` / `tool_choice` on a call
+    # that passed neither is rejected pre-send rather than smuggling a raw,
+    # unvalidated tool array past validate_tools.
+    def never(_req: httpx.Request) -> httpx.Response:  # pragma: no cover
+        raise AssertionError("must not send on a collision reject")
+
+    provider = _collision_provider(never)
+    tool = {"type": "function", "function": {"name": "x"}}
+    for extra in ({"tools": [tool]}, {"tool_choice": "auto"}):
+        with pytest.raises(ProviderInvalidRequest):
+            await provider.complete([UserMessage(content="hi")], config=RuntimeConfig.model_validate(extra))
+    await provider.aclose()
+
+
+async def test_llm_matching_structural_extra_is_a_noop() -> None:
+    # An extras model equal to the bound model is a redundant no-op.
+    bodies: list[dict[str, Any]] = []
+    provider = _collision_provider(_ok_handler(bodies))
+    await provider.complete([UserMessage(content="hi")], config=RuntimeConfig.model_validate({"model": "m"}))
+    await provider.aclose()
+    assert bodies[0]["model"] == "m"
+
+
+async def test_llm_stop_merges_declared_and_extras() -> None:
+    # stop realizes the list-shaped stop_sequences: the declared value and a
+    # wire-name extras `stop` MERGE, managed-first, de-duplicated.
+    bodies: list[dict[str, Any]] = []
+    provider = _collision_provider(_ok_handler(bodies))
+    cfg = RuntimeConfig.model_validate({"stop_sequences": ["A"], "stop": ["B", "A"]})
+    await provider.complete([UserMessage(content="hi")], config=cfg)
+    await provider.aclose()
+    assert bodies[0]["stop"] == ["A", "B"]
+
+
+async def test_llm_unmanaged_extra_rides_untouched() -> None:
+    bodies: list[dict[str, Any]] = []
+    provider = _collision_provider(_ok_handler(bodies))
+    cfg = RuntimeConfig.model_validate({"guided_decoding": {"grammar": "g"}})
+    await provider.complete([UserMessage(content="hi")], config=cfg)
+    await provider.aclose()
+    assert bodies[0]["guided_decoding"] == {"grammar": "g"}
+
+
+async def test_llm_response_format_rides_untouched_on_free_form_call() -> None:
+    # 0105 §3.5: response_format is UNMANAGED on a free-form call (no schema), so
+    # a caller's extras response_format rides untouched. (On the structured path
+    # it is managed and a conflict rejects; that path is covered by the schema
+    # tests.)
+    bodies: list[dict[str, Any]] = []
+    provider = _collision_provider(_ok_handler(bodies))
+    cfg = RuntimeConfig.model_validate({"response_format": {"type": "text"}})
+    await provider.complete([UserMessage(content="hi")], config=cfg)
+    await provider.aclose()
+    assert bodies[0]["response_format"] == {"type": "text"}

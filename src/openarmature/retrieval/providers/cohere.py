@@ -49,6 +49,7 @@ from typing import Any, cast
 
 import httpx
 
+from openarmature._managed_extras import ManagedArm, apply_managed_extras
 from openarmature.llm.errors import (
     LlmProviderError,
     ProviderAuthentication,
@@ -367,28 +368,34 @@ class CohereRerankProvider:
         request_extras: dict[str, Any],
     ) -> dict[str, Any]:
         """Build the /v2/rerank request body."""
-        # Extras are merged FIRST so the bound model, the query, the documents,
-        # and top_n always win: a caller's undeclared extra named "model" /
-        # "query" / "documents" must not clobber the wire identity.
-        # ``documents`` is the plain string-array form (Cohere v2 takes strings
-        # only). ``top_n`` maps from top_k and is omitted when the caller passed
-        # None. return_documents is NOT sent -- the Cohere wire has no such
-        # field, so it is a silent no-op (§8.4); it stays a declared config
-        # field (not an extra), so it never reaches request_extras.
+        # The bound model, the query, and the documents are managed-internal and
+        # cannot be clobbered by a like-named extra (reconciled below via
+        # apply_managed_extras). ``documents`` is the plain string-array form
+        # (Cohere v2 takes strings only). ``top_n`` maps from top_k and is
+        # omitted when the caller passed None. return_documents is NOT sent --
+        # the Cohere wire has no such field, so it is a silent no-op (§8.4); it
+        # stays a declared config field (not an extra), so it never reaches
+        # request_extras.
         body: dict[str, Any] = {
-            **request_extras,
             "model": self.model,
             "query": query,
             "documents": documents_list,
         }
-        # top_n is the wire mapping of the top_k parameter, so it is a managed
-        # key like model / query / documents: a caller extra named "top_n" must
-        # not set it. Leaving it would send an effective top_n the response-count
-        # validation (which keys off top_k) never checks. Drop any extras top_n;
-        # top_k is the sole source.
-        body.pop("top_n", None)
         if top_k is not None:
             body["top_n"] = top_k
+        # Managed-field collision (0105 + 0108). model / query / documents are
+        # managed-internal; top_n realizes the declared top_k, so it is managed
+        # only WHILE top_k is set. A conflicting extras model / query / documents
+        # / top_n is then rejected pre-send. When top_k is None the mapping emits
+        # no top_n, so an extras top_n is unmanaged and rides untouched to the
+        # wire (0108's declared-field-absent escape hatch, the same shape as Jina
+        # task); it caps the results, and validate_rerank_response -- which keys
+        # off top_k -- does not apply, because the caller opted out of the top_k
+        # contract by not declaring it.
+        managed: dict[str, ManagedArm] = {
+            key: "reject" for key in ("model", "query", "documents", "top_n") if key in body
+        }
+        apply_managed_extras(body, request_extras, managed)
         return body
 
     def _parse_response(
@@ -716,21 +723,27 @@ class CohereEmbeddingProvider:
                 if precision not in embedding_types:
                     embedding_types.append(precision)
         body: dict[str, Any] = {
-            **request_extras,
             "model": self.model,
             "input_type": input_type,
             "texts": list(chunk),
             "embedding_types": embedding_types,
             "truncate": "NONE",
         }
-        # output_dimension is the wire mapping of the dimensions parameter, so it
-        # is a managed key like model / texts: a caller extra named
-        # "output_dimension" must not set it. dimensions is the sole source; drop
-        # any extras copy, then set it only when supplied (omitted otherwise so
-        # Cohere's model default applies).
-        body.pop("output_dimension", None)
         if dimensions is not None:
             body["output_dimension"] = dimensions
+        # Managed-field collision (0105 + 0108). embedding_types is the merge arm
+        # and is already resolved above (0099 order/dedupe + 0113 malformed
+        # guard), so it is excluded from the extras handed to the resolver. The
+        # rest are reject-arm: model / texts are managed-internal, input_type and
+        # output_dimension (from dimensions) are declared-field realizations. A
+        # conflicting extra on any is rejected pre-send.
+        rest = {k: v for k, v in request_extras.items() if k != "embedding_types"}
+        managed: dict[str, ManagedArm] = {
+            key: "reject"
+            for key in ("model", "input_type", "texts", "truncate", "output_dimension")
+            if key in body
+        }
+        apply_managed_extras(body, rest, managed)
         return body
 
     def _parse_chunk(

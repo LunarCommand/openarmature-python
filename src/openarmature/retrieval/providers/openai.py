@@ -30,6 +30,7 @@ from typing import Any, Literal, cast
 
 import httpx
 
+from openarmature._managed_extras import ManagedArm, apply_managed_extras
 from openarmature.llm.errors import (
     LlmProviderError,
     ProviderAuthentication,
@@ -364,22 +365,29 @@ class OpenAIEmbeddingProvider:
         # input_type is realized as a client-side prefix (§8.1, reused by §8.3):
         # the OpenAI wire has NO query/document/input_type/task field, so an
         # input_type with no bound prefix leaves the input VERBATIM (the
-        # symmetric no-op). input_type MUST NEVER land on the wire. Extras merge
-        # FIRST so the managed keys (model, input, dimensions) always win: a
-        # caller's undeclared extra named "model" or "input" must not clobber
-        # the wire identity. encoding_format ("base64") rides the extras bag as
-        # a request pass-through only -- _parse_response decodes float embeddings
-        # (not base64 strings), so a base64 response raises
-        # provider_invalid_response; base64 is not an end-to-end response format.
+        # symmetric no-op). input_type MUST NEVER land on the wire, so there is
+        # no wire input_type key to manage here. encoding_format ("base64") rides
+        # the extras bag as a request pass-through only -- _parse_response decodes
+        # float embeddings (not base64 strings), so a base64 response raises
+        # provider_invalid_response; base64 is not an end-to-end response format
+        # yet (0106 territory), and 0105 defers encoding_format, so it stays an
+        # unmanaged pass-through.
         inputs = apply_client_side_prefix(
             input_strings,
             input_type,
             query_prefix=self._query_prefix,
             document_prefix=self._document_prefix,
         )
-        body: dict[str, Any] = {**request_extras, "model": self.model, "input": inputs}
+        body: dict[str, Any] = {"model": self.model, "input": inputs}
         if dimensions is not None:
             body["dimensions"] = dimensions
+        # Managed-field collision (0105 + 0108). model / input are
+        # managed-internal; dimensions realizes the declared field. A conflicting
+        # extra on any is rejected pre-send.
+        managed: dict[str, ManagedArm] = {
+            key: "reject" for key in ("model", "input", "dimensions") if key in body
+        }
+        apply_managed_extras(body, request_extras, managed)
         return body
 
     def _parse_chunk(
