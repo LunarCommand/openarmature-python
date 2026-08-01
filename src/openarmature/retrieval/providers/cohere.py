@@ -7,10 +7,12 @@
 # EmbeddingEvent dispatch (with their failure variants) mirrors the sibling
 # providers via current_dispatch(). The §8.4 embed half sends the mandatory
 # input_type wire field (query -> search_query, document -> search_document,
-# absent -> search_document, unrecognized -> pre-send provider_invalid_request),
-# embedding_types ["float"] + truncate "NONE" explicitly (fail-loud), maps
-# dimensions -> output_dimension, and chunk-and-stitches over Cohere's 96-input
-# per-call cap. FOLLOW-UP: classify_http_error / base_url normalization are
+# classification / clustering identity-mapped per 0099, absent ->
+# search_document, unrecognized -> pre-send provider_invalid_request), a
+# mapping-managed embedding_types that merges any caller-supplied precisions
+# onto the mandatory "float" (0099), truncate "NONE" explicitly (fail-loud),
+# maps dimensions -> output_dimension, and chunk-and-stitches over Cohere's
+# 96-input per-call cap. FOLLOW-UP: classify_http_error / base_url normalization are
 # duplicated in spirit from the jina / openai retrieval providers; lifting a
 # shared HTTP helper is a multi-provider follow-on.
 
@@ -141,27 +143,38 @@ def _request_params_from_config(config: RerankRuntimeConfig | None) -> dict[str,
 # fixed vendor cap, not a construction-configured chunk_size like TEI).
 _COHERE_EMBED_MAX_INPUTS = 96
 
-# §8.4 *input_type (mandatory wire field)*: the closed set the mapping
-# recognizes, translated into Cohere's mandatory input_type wire value. OA's
-# input_type is {query, document}; Cohere's other input_type values
-# (classification / clustering / image) are OUTSIDE that value space and are NOT
-# reachable through this mapping -- input_type is a declared config field (so it
-# cannot ride the extras bag) and an unrecognized value is rejected pre-send.
-# Widening input_type's normative value space is a deferred §2 / 0077 change.
+# §8.4 *input_type (mandatory wire field)*: the set this mapping recognizes,
+# translated into Cohere's mandatory input_type wire value. §2 types input_type
+# as an EXTENSIBLE string and names classification / clustering as well-known
+# values a mapping MAY recognize when its backend supports them; Cohere's
+# /v2/embed does, so 0099 has this mapping recognize them (identity-mapped)
+# rather than reject them.
+#
+# The set is deliberately NOT shared with §8.2 Jina, which stays closed at
+# {query, document} because Jina's `task` support is model-dependent (see
+# jina.py). A value recognized here is therefore rejected there, which is what
+# §2's per-mapping recognition model prescribes.
+#
+# `image` stays out: it names an input MODALITY, not a purpose for embedded
+# text, and embed() consumes strings (§3).
 _INPUT_TYPE_TO_COHERE: dict[str, str] = {
     "query": "search_query",
     "document": "search_document",
+    "classification": "classification",
+    "clustering": "clustering",
 }
 
 
 def _cohere_input_type(input_type: str | None) -> str:
     """Resolve the mandatory Cohere ``/v2/embed`` ``input_type`` wire value.
 
-    ``"query"`` maps to ``"search_query"``, ``"document"`` to
-    ``"search_document"``, and an absent ``input_type`` to ``"search_document"``
+    ``"query"`` maps to ``"search_query"`` and ``"document"`` to
+    ``"search_document"``; ``"classification"`` and ``"clustering"`` are
+    identity-mapped. An absent ``input_type`` resolves to ``"search_document"``
     (the bulk-indexing default -- the wire requires a value). Raises
-    :class:`ProviderInvalidRequest` pre-send for an ``input_type`` outside the
-    recognized set.
+    :class:`ProviderInvalidRequest` pre-send for any ``input_type`` outside the
+    recognized set; ``"image"`` is deliberately excluded (a modality, not a
+    purpose for embedded text).
     """
     # Cohere v2 /v2/embed REQUIRES input_type on every request (unlike §8.1 /
     # §8.2, which omit the field when input_type is absent, and §8.3, which has
@@ -470,9 +483,14 @@ class CohereEmbeddingProvider:
     ``truncate: "NONE"`` is sent explicitly (an over-length input errors rather
     than being silently truncated); ``dimensions`` maps to Cohere's
     ``output_dimension`` when set. Other precisions (``int8`` / ``base64`` /
-    ...) ride the extras pass-through bag; Cohere's other ``input_type`` values
-    (``classification`` / ...) are outside OA's ``input_type`` value space and
-    are not reachable through this mapping.
+    ...) ride the extras pass-through bag and are merged onto the mandatory
+    ``"float"`` rather than replacing it.
+
+    The recognized ``input_type`` values are ``query`` (to ``search_query``),
+    ``document`` (to ``search_document``), and ``classification`` /
+    ``clustering`` (identity-mapped, since Cohere's backend accepts them).
+    ``image`` is not recognized: it names an input modality rather than a
+    purpose for embedded text, and ``embed()`` consumes strings.
 
     ``ready()`` verifies the bound model with a minimal one-input ``/v2/embed``
     probe. The Cohere ``/v2/embed`` wire exposes no model-catalog probe, so
@@ -662,20 +680,41 @@ class CohereEmbeddingProvider:
         # embedding_types is the ONE managed key that MERGES rather than
         # clobbers: the mapping reads embeddings.float, so "float" MUST be
         # present, but a caller's other precisions (int8 / uint8 / binary /
-        # base64) ride the extras bag and are preserved -- "float" is merged in
-        # only when a caller's embedding_types omits it (§8.4). A malformed /
-        # empty embedding_types extra falls back to ["float"].
+        # base64) ride the extras bag and are preserved. The caller reads the
+        # extra precisions off the verbatim response on `raw` (0096). An
+        # override that dropped "float" would strip the key this mapping's own
+        # consumer reads and fail the call provider_invalid_response, so the
+        # merge is the only coherent reading (§8.4, 0099).
+        #
+        # 0099 pins the ORDER and the DEDUPE, purely for determinism so the
+        # outbound body is exact-match assertable: "float" first, then the
+        # caller's precisions in the order supplied, de-duplicated with FIRST
+        # occurrence winning. So an explicitly-named "float" appears once in
+        # first position, and a repeated precision keeps its first position.
+        # The wire is order-insensitive here, so none of this carries meaning
+        # beyond reproducibility.
+        #
+        # A MALFORMED merge-extra -- not a list, or a list with any non-string /
+        # empty element -- is treated as ABSENT and the mapping sends only the
+        # mandatory ["float"]. All-or-nothing (no partial salvage), and no raise
+        # or diagnostic: 0113 (general §6 merge arm, inherited by §8.4) requires
+        # exactly this, as the request-side counterpart of §7's
+        # malformed-ancillary-is-not-reported rule. Salvaging the valid entries
+        # would send a precision set the caller never wrote; failing loud would
+        # make a malformed optional extra call-fatal on a valid request.
+        # Malformation is STRUCTURAL only: a well-typed but
+        # provider-unrecognized precision string is NOT malformed -- it merges,
+        # and the provider rejects it if unsupported.
         caller_types = request_extras.get("embedding_types")
+        embedding_types = ["float"]
         if (
             isinstance(caller_types, list)
             and caller_types
             and all(isinstance(t, str) and t for t in cast("list[object]", caller_types))
         ):
-            embedding_types = list(cast("list[str]", caller_types))
-            if "float" not in embedding_types:
-                embedding_types.append("float")
-        else:
-            embedding_types = ["float"]
+            for precision in cast("list[str]", caller_types):
+                if precision not in embedding_types:
+                    embedding_types.append(precision)
         body: dict[str, Any] = {
             **request_extras,
             "model": self.model,
