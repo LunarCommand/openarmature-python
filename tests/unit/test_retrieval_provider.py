@@ -1261,13 +1261,38 @@ async def test_cohere_embed_input_type_query_and_document_map_to_wire() -> None:
         await provider.aclose()
         _reset_active_dispatch(token)
 
-    # The closed set maps query -> search_query, document -> search_document.
+    # query -> search_query, document -> search_document.
     assert captured[0]["input_type"] == "search_query"
     assert captured[1]["input_type"] == "search_document"
     embed_events = [e for e in events if isinstance(e, EmbeddingEvent)]
     # request_params carries the caller's ORIGINAL value, not the wire mapping.
     assert embed_events[0].request_params == {"input_type": "query"}
     assert embed_events[1].request_params == {"input_type": "document"}
+
+
+@pytest.mark.parametrize("purpose", ["classification", "clustering"])
+async def test_cohere_embed_recognizes_widened_input_type(purpose: str) -> None:
+    # Proposal 0099: Cohere's /v2/embed backend accepts these purposes, and §2
+    # types input_type as extensible with them as well-known values a mapping
+    # MAY recognize, so this mapping identity-maps them instead of rejecting
+    # them pre-send. This reverses a prior MUST-reject, hence breaking.
+    captured: list[dict[str, Any]] = []
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        captured.append(json.loads(req.content))
+        return httpx.Response(200, json=_cohere_embed_body(vectors=[[0.1, 0.2, 0.3, 0.4]], input_tokens=8))
+
+    provider = _cohere_embed_provider(handler)
+    events, token = _collecting_dispatch()
+    try:
+        await provider.embed(["alpha"], config=EmbeddingRuntimeConfig(input_type=purpose))
+    finally:
+        await provider.aclose()
+        _reset_active_dispatch(token)
+
+    assert captured[0]["input_type"] == purpose
+    embed_events = [e for e in events if isinstance(e, EmbeddingEvent)]
+    assert embed_events[0].request_params == {"input_type": purpose}
 
 
 async def test_cohere_embed_input_type_absent_sends_search_document_default() -> None:
@@ -1297,15 +1322,21 @@ async def test_cohere_embed_input_type_absent_sends_search_document_default() ->
 
 
 async def test_cohere_embed_unrecognized_input_type_rejected_pre_send() -> None:
-    # An OA input_type outside the closed query / document set is a pre-send
+    # An OA input_type outside the recognized set is a pre-send
     # provider_invalid_request; no /v2/embed request is issued (no silent
     # coercion to the search_document default -- that default is absent-only).
+    #
+    # "image" is in Cohere's own wire enum but deliberately NOT recognized here:
+    # it names an input modality rather than a purpose for embedded text, and
+    # embed() consumes strings (proposal 0099). Asserting it stops a later edit
+    # from adding it just because the vendor accepts it.
     def handler(_req: httpx.Request) -> httpx.Response:  # pragma: no cover - never called
         raise AssertionError("provider must not be contacted on pre-send validation failure")
 
     provider = _cohere_embed_provider(handler)
-    with pytest.raises(ProviderInvalidRequest):
-        await provider.embed(["alpha"], config=EmbeddingRuntimeConfig(input_type="summarization"))
+    for rejected in ("summarization", "image"):
+        with pytest.raises(ProviderInvalidRequest):
+            await provider.embed(["alpha"], config=EmbeddingRuntimeConfig(input_type=rejected))
     await provider.aclose()
 
 
@@ -1432,8 +1463,13 @@ async def test_cohere_embed_chunk_and_stitch_over_96_cap() -> None:
 async def test_cohere_embed_embedding_types_extra_merges_float_not_clobbers() -> None:
     # §8.4: embedding_types MERGES rather than clobbers -- the mapping guarantees
     # "float" (it reads embeddings.float), but a caller's other precisions ride
-    # the extras bag and are preserved. A caller list missing "float" gets it
-    # appended; a malformed / absent extra falls back to ["float"].
+    # the extras bag and are preserved. An override that dropped "float" would
+    # strip the key the mapping's own consumer reads, so merge is the only
+    # coherent reading. A malformed / absent extra falls back to ["float"].
+    #
+    # Proposal 0099 pins the ORDER and the DEDUPE for determinism, so these are
+    # exact-match assertions on the outbound body: "float" first, then the
+    # caller's precisions in supplied order, de-duplicated first-occurrence-wins.
     captured: list[dict[str, Any]] = []
 
     def handler(req: httpx.Request) -> httpx.Response:
@@ -1442,12 +1478,30 @@ async def test_cohere_embed_embedding_types_extra_merges_float_not_clobbers() ->
 
     cfg_both = EmbeddingRuntimeConfig.model_validate({"embedding_types": ["float", "int8"]})
     cfg_int8 = EmbeddingRuntimeConfig.model_validate({"embedding_types": ["int8"]})
+    cfg_float_last = EmbeddingRuntimeConfig.model_validate({"embedding_types": ["int8", "float"]})
+    cfg_dupes = EmbeddingRuntimeConfig.model_validate({"embedding_types": ["int8", "uint8", "int8"]})
+    # Supplied order is NOT alphabetical here, and "binary" sorts BEFORE
+    # "float". These two cases are what distinguish "in the order supplied" from
+    # a sorted implementation: without them, every list under test is already
+    # ascending and a sorted(set(...)) merge passes the whole suite while
+    # violating both the supplied-order and float-first rules.
+    cfg_unsorted = EmbeddingRuntimeConfig.model_validate({"embedding_types": ["uint8", "int8"]})
+    cfg_pre_float = EmbeddingRuntimeConfig.model_validate({"embedding_types": ["binary", "int8", "binary"]})
     cfg_bad = EmbeddingRuntimeConfig.model_validate({"embedding_types": [{"x": 1}]})
     provider = _cohere_embed_provider(handler)
-    # Caller adds int8 alongside float -> both reach the wire (float NOT clobbered).
+    # Caller names float first -> unchanged, and float appears exactly once.
     await provider.embed(["x"], config=cfg_both)
-    # Caller omits float -> "float" is appended (the mapping must read embeddings.float).
+    # Caller omits float -> float is prepended, not appended.
     await provider.embed(["x"], config=cfg_int8)
+    # Caller names float LAST -> hoisted to first (dedupe keeps one occurrence).
+    await provider.embed(["x"], config=cfg_float_last)
+    # A repeated precision keeps its FIRST position (first-occurrence-wins).
+    await provider.embed(["x"], config=cfg_dupes)
+    # Descending supplied order is PRESERVED, not sorted.
+    await provider.embed(["x"], config=cfg_unsorted)
+    # A precision that sorts before "float" still comes after it, and its
+    # duplicate keeps the first position.
+    await provider.embed(["x"], config=cfg_pre_float)
     # No embedding_types extra -> the ["float"] default.
     await provider.embed(["x"])
     # Malformed (non-string elements) -> falls back to ["float"], not sent verbatim.
@@ -1455,9 +1509,13 @@ async def test_cohere_embed_embedding_types_extra_merges_float_not_clobbers() ->
     await provider.aclose()
 
     assert captured[0]["embedding_types"] == ["float", "int8"]
-    assert captured[1]["embedding_types"] == ["int8", "float"]
-    assert captured[2]["embedding_types"] == ["float"]
-    assert captured[3]["embedding_types"] == ["float"]
+    assert captured[1]["embedding_types"] == ["float", "int8"]
+    assert captured[2]["embedding_types"] == ["float", "int8"]
+    assert captured[3]["embedding_types"] == ["float", "int8", "uint8"]
+    assert captured[4]["embedding_types"] == ["float", "uint8", "int8"]
+    assert captured[5]["embedding_types"] == ["float", "binary", "int8"]
+    assert captured[6]["embedding_types"] == ["float"]
+    assert captured[7]["embedding_types"] == ["float"]
 
 
 async def test_cohere_embed_per_chunk_count_mismatch_raises_despite_matching_total() -> None:
@@ -2036,6 +2094,13 @@ async def test_jina_embed_input_type_maps_to_task(input_type: str | None, expect
 async def test_jina_embed_unrecognized_input_type_raises_before_send() -> None:
     # An input_type outside the closed set (query / document) is a pre-send
     # provider_invalid_request; NO request is issued.
+    #
+    # Both values here are ones the Cohere mapping DOES recognize (0099). The
+    # divergence is deliberate: Jina's `task` support is model-dependent (v3 has
+    # classification but not clustering, v4 neither, v5 both) and OA has no
+    # model-capability registry, so this mapping cannot promise them across Jina
+    # models. Asserting the rejection here stops a later edit from harmonizing
+    # the two sets on the assumption that recognition is protocol-wide.
     captured: list[dict[str, Any]] = []
 
     def handler(req: httpx.Request) -> httpx.Response:
@@ -2043,8 +2108,9 @@ async def test_jina_embed_unrecognized_input_type_raises_before_send() -> None:
         return httpx.Response(200, json={"model": "m", "data": []})
 
     provider = _jina_embed_provider(handler)
-    with pytest.raises(ProviderInvalidRequest):
-        await provider.embed(["x"], config=EmbeddingRuntimeConfig(input_type="clustering"))
+    for purpose in ("clustering", "classification"):
+        with pytest.raises(ProviderInvalidRequest):
+            await provider.embed(["x"], config=EmbeddingRuntimeConfig(input_type=purpose))
     await provider.aclose()
     # No POST reached the transport (pre-send validation).
     assert captured == []

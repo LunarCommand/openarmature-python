@@ -83,9 +83,33 @@ from ..response import (
 # into Jina's native `task` field so Jina applies the model-appropriate
 # query/passage representation server-side. An input_type outside this set is a
 # pre-send provider_invalid_request (§7); Jina's other task values
-# (text-matching / classification / clustering) ride the extras pass-through bag,
-# not input_type (widening input_type's normative value space is a protocol-level
-# change, deferred until a consumer needs it).
+# (text-matching / classification / clustering) ride the extras pass-through bag
+# as `task`, not input_type.
+#
+# The set stays CLOSED here even though 0099 widened §8.4 Cohere's, and the
+# reason is model-dependence, not a protocol constraint: Jina's `task` support
+# varies by model (v3 accepts classification but not clustering, v4 neither, v5
+# both). A provider is bound to a model identifier and OA has no
+# model-capability registry, so this mapping cannot promise those values across
+# Jina models -- recognizing them would produce exactly the wire rejection that
+# pre-send recognition exists to prevent.
+#
+# The extras `task` path works here for a reason that does NOT hold for Cohere:
+# `task` is an UNDECLARED key, so it rides through untouched, and it is omitted
+# entirely when input_type is ABSENT -- which is the case the path is for.
+# Cohere's wire field is named input_type (a declared OA field) and is always
+# sent, so both preconditions fail there, which is why 0099 removed the copied
+# claim from §8.4 rather than from here.
+#
+# Note the boundary: `task` rides through only while input_type is ABSENT. When
+# input_type is SET, `task` is the managed wire realization of the declared
+# field, and 0108 (§6 clause (b)) governs a conflicting extras `task`: it MUST
+# be rejected pre-send (provider_invalid_request), a matching one is a no-op.
+# This mapping predates 0108 adoption and currently lets the managed value
+# silently overwrite the extra (the body assignment below), while the
+# EmbeddingEvent still reports the caller's extras verbatim. Reconciling to the
+# 0108 reject is tracked separately (it rides the pin bump that brings in 0108,
+# not this 0099 change).
 _INPUT_TYPE_TO_TASK: dict[str, str] = {
     "query": "retrieval.query",
     "document": "retrieval.passage",

@@ -102,6 +102,41 @@ model (OpenAI's) it is a no-op and the text is embedded verbatim. Setting
 it costs nothing on the symmetric providers and keeps the same pipeline
 correct if you later switch to an asymmetric one, so prefer setting it.
 
+### Other purposes, where the backend supports them
+
+`query` and `document` are portable across every embedding provider. The
+field is an extensible string, though, and a provider **may** recognize
+additional well-known purposes when its own backend accepts them. Cohere
+does, for `classification` and `clustering`:
+
+```python
+cohere = CohereEmbeddingProvider(model="embed-v4.0", api_key="...")
+
+await cohere.embed(labels, config=EmbeddingRuntimeConfig(input_type="classification"))
+```
+
+This is deliberately per-provider rather than portable. The same call
+raises `ProviderInvalidRequest` on Jina, whose support varies by model
+version: a provider is bound to a model identifier, so that mapping
+cannot promise the value and declines it rather than letting the wire
+reject it later.
+
+**What an unrecognized value does depends on the provider**, and the
+difference matters:
+
+- The providers that map `input_type` onto a wire field (Cohere, Jina)
+  declare a recognized set and reject anything outside it before the
+  request is sent.
+- The providers that realize it as a client-side prefix (OpenAI, TEI)
+  have nothing bound to an unknown value, so it is a silent no-op: the
+  text is embedded unprefixed and no error is raised.
+
+That second case is worth knowing about, because a typo like
+`input_type="docuemnt"`, or a leftover `classification` after switching
+providers, will quietly index unprefixed vectors and cost you recall with
+no signal. So treat `query` / `document` as the portable pair, and reach
+for the other purposes only when you know which provider you are on.
+
 ## Long input lists are chunked for you
 
 Every hosted embedding API caps how many inputs one request may carry.
