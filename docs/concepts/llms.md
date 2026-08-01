@@ -643,9 +643,15 @@ example a vLLM `guided_decoding`:
 ```python
 config = RuntimeConfig.model_validate({
     "temperature": 0.2,
-    "guided_decoding": {"grammar": "..."},   # forwarded verbatim
+    "guided_decoding": {"grammar": "..."},   # forwarded as-is
 })
 ```
+
+The value itself is never translated or renamed. One caveat for
+byte-level consumers: the OpenAI Chat Completions mapping canonicalizes
+the request body for reproducibility, so a dict-valued extra keeps its
+value but its keys are emitted in sorted order rather than your insertion
+order.
 
 The one exception is a key that collides with a field the mapping
 **manages** for its own correctness (the model, the messages, a fail-loud
