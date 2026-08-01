@@ -172,8 +172,9 @@ def _cohere_input_type(input_type: str | None) -> str:
     ``"search_document"``; ``"classification"`` and ``"clustering"`` are
     identity-mapped. An absent ``input_type`` resolves to ``"search_document"``
     (the bulk-indexing default -- the wire requires a value). Raises
-    :class:`ProviderInvalidRequest` pre-send for an ``input_type`` outside the
-    recognized set, which includes ``"image"``.
+    :class:`ProviderInvalidRequest` pre-send for any ``input_type`` outside the
+    recognized set; ``"image"`` is deliberately excluded (a modality, not a
+    purpose for embedded text).
     """
     # Cohere v2 /v2/embed REQUIRES input_type on every request (unlike §8.1 /
     # §8.2, which omit the field when input_type is absent, and §8.3, which has
