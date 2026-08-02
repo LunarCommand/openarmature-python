@@ -12,6 +12,7 @@ the canonical category-string contract, and the
 from __future__ import annotations
 
 import json
+import logging
 from collections.abc import Callable
 from contextvars import Token
 from typing import Any, cast
@@ -511,7 +512,10 @@ async def test_complete_does_not_mutate_messages_or_tools() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Usage non-negative constraint (spec §6: "non-negative integer or None")
+# Usage counter handling (spec §6 / proposal 0101: a counter is a non-negative
+# integer or null; a malformed wire counter is treated as NOT REPORTED -- nulled,
+# never raised on, coerced, or clamped. The Usage model still forbids a negative
+# passed directly; the wire parse nulls it before it reaches the model.)
 # ---------------------------------------------------------------------------
 
 
@@ -520,41 +524,101 @@ def test_usage_negative_token_count_rejected_at_construction() -> None:
         Usage(prompt_tokens=-1, completion_tokens=0, total_tokens=0)
 
 
-async def test_complete_negative_usage_surfaces_as_invalid_response() -> None:
-    """A wire response carrying a negative token count MUST surface as
-    ``provider_invalid_response`` rather than silently passing through —
-    token counts are non-negative integers."""
-
-    def _bad(_req: httpx.Request) -> httpx.Response:
-        return httpx.Response(
-            200,
-            json={
-                "id": "x",
-                "object": "chat.completion",
-                "created": 0,
-                "model": "m",
-                "choices": [
-                    {
-                        "index": 0,
-                        "message": {"role": "assistant", "content": "ok"},
-                        "finish_reason": "stop",
-                    }
-                ],
-                "usage": {"prompt_tokens": -5, "completion_tokens": 1, "total_tokens": 1},
-            },
-        )
-
-    provider = OpenAIProvider(
-        base_url="http://test",
-        model="m",
-        api_key="k",
-        transport=httpx.MockTransport(_bad),
+async def test_complete_malformed_usage_counter_is_not_reported() -> None:
+    # 0101: a malformed counter (a negative prompt_tokens) is treated as not
+    # reported -- nulled, not raised on. The sound counters stand, the record
+    # stays present, and the verbatim value survives on raw.
+    transport = _make_openai_response_with_usage(
+        {"prompt_tokens": -5, "completion_tokens": 1, "total_tokens": 1}
     )
+    provider = OpenAIProvider(base_url="http://test", model="m", api_key="k", transport=transport)
     try:
-        with pytest.raises(ProviderInvalidResponse, match="invalid usage record"):
-            await provider.complete([UserMessage(content="hi")])
+        resp = await provider.complete([UserMessage(content="hi")])
     finally:
         await provider.aclose()
+    assert resp.usage is not None
+    assert resp.usage.prompt_tokens is None
+    assert resp.usage.completion_tokens == 1
+    assert resp.usage.total_tokens == 1
+    # The verbatim malformed value is preserved on raw.
+    assert resp.raw["usage"]["prompt_tokens"] == -5
+
+
+async def test_complete_all_malformed_usage_counters_null_together() -> None:
+    # 0101 / §6 null-together: every counter malformed -> a present record of
+    # nulls (NOT a null record), so LlmCompletionEvent.usage can mirror it.
+    # completion_tokens=True exercises the bool-is-not-a-counter exclusion.
+    transport = _make_openai_response_with_usage(
+        {"prompt_tokens": "abc", "completion_tokens": True, "total_tokens": -1}
+    )
+    provider = OpenAIProvider(base_url="http://test", model="m", api_key="k", transport=transport)
+    try:
+        resp = await provider.complete([UserMessage(content="hi")])
+    finally:
+        await provider.aclose()
+    assert resp.usage is not None
+    assert resp.usage.prompt_tokens is None
+    assert resp.usage.completion_tokens is None
+    assert resp.usage.total_tokens is None
+
+
+async def test_complete_malformed_usage_counter_is_not_coerced() -> None:
+    # 0101: a numeric-string counter is not reported (null), never coerced --
+    # a repaired counter is indistinguishable from a reported one.
+    transport = _make_openai_response_with_usage(
+        {"prompt_tokens": "12", "completion_tokens": 3, "total_tokens": 15}
+    )
+    provider = OpenAIProvider(base_url="http://test", model="m", api_key="k", transport=transport)
+    try:
+        resp = await provider.complete([UserMessage(content="hi")])
+    finally:
+        await provider.aclose()
+    assert resp.usage is not None
+    assert resp.usage.prompt_tokens is None
+    assert resp.usage.completion_tokens == 3
+    assert resp.usage.total_tokens == 15
+
+
+async def test_complete_malformed_total_tokens_is_nulled_addends_stand() -> None:
+    # 0101: a malformed wire total_tokens is nulled while the sound addends stand.
+    # NOTE (flagged for the batched release spec review): downstream the token-
+    # budget helper (0083) DERIVES the total from prompt + completion when both
+    # are reported (see test_token_budget_total_falls_back_to_prompt_plus_completion),
+    # so a nulled-total budget bound is still evaluated against the derived sum.
+    # 0101's "a nulled total means the total bound is not evaluated" reads, for
+    # OpenAI's direct wire total, as possibly wanting NOT-evaluated here; python
+    # cannot distinguish an absent wire total from a nulled malformed one (both
+    # -> None). Reconcile against the 0101 total-bound fixture at the v0.107.0 bump.
+    transport = _make_openai_response_with_usage(
+        {"prompt_tokens": 10, "completion_tokens": 20, "total_tokens": "garbage"}
+    )
+    provider = OpenAIProvider(base_url="http://test", model="m", api_key="k", transport=transport)
+    try:
+        resp = await provider.complete([UserMessage(content="hi")])
+    finally:
+        await provider.aclose()
+    assert resp.usage is not None
+    assert resp.usage.total_tokens is None
+    assert resp.usage.prompt_tokens == 10
+    assert resp.usage.completion_tokens == 20
+
+
+async def test_complete_malformed_usage_counter_logs_warning(caplog: Any) -> None:
+    # 0101: a reported-but-malformed counter logs a single WARNING (a misbehaving
+    # provider) while the call still succeeds, so a corrupt count is not silently
+    # lost. The shared parser attributes it to the "llm provider" source.
+    transport = _make_openai_response_with_usage(
+        {"prompt_tokens": "bad", "completion_tokens": 1, "total_tokens": 1}
+    )
+    provider = OpenAIProvider(base_url="http://test", model="m", api_key="k", transport=transport)
+    with caplog.at_level(logging.WARNING):
+        try:
+            await provider.complete([UserMessage(content="hi")])
+        finally:
+            await provider.aclose()
+    warnings = [r for r in caplog.records if "not a non-negative int" in r.getMessage()]
+    assert len(warnings) == 1
+    assert "llm provider reported a prompt_tokens" in caplog.text
 
 
 # ---------------------------------------------------------------------------
@@ -754,10 +818,10 @@ async def test_complete_cached_tokens_absent_when_prompt_tokens_details_not_a_di
         await provider.aclose()
 
 
-async def test_complete_negative_cached_tokens_surfaces_as_invalid_response() -> None:
-    # Same invariant the existing test pins for prompt_tokens — a
-    # wire response carrying a negative cache count MUST surface as
-    # ``provider_invalid_response`` rather than silently passing through.
+async def test_complete_malformed_cached_tokens_is_not_reported() -> None:
+    # 0101 out-of-scope note: cached_tokens follows the same not-reported rule
+    # -- a negative (malformed) cache count is nulled, not raised on, and the
+    # core counters stand.
     transport = _make_openai_response_with_usage(
         {
             "prompt_tokens": 100,
@@ -768,10 +832,13 @@ async def test_complete_negative_cached_tokens_surfaces_as_invalid_response() ->
     )
     provider = OpenAIProvider(base_url="http://test", model="m", api_key="k", transport=transport)
     try:
-        with pytest.raises(ProviderInvalidResponse, match="invalid usage record"):
-            await provider.complete([UserMessage(content="hi")])
+        resp = await provider.complete([UserMessage(content="hi")])
     finally:
         await provider.aclose()
+    assert resp.usage is not None
+    assert resp.usage.cached_tokens is None
+    assert resp.usage.prompt_tokens == 100
+    assert resp.usage.completion_tokens == 20
 
 
 async def test_complete_populates_cached_tokens_on_typed_event() -> None:

@@ -1682,6 +1682,35 @@ async def test_structured_output_failure_generation_redacts_output_when_payload_
     assert gen.metadata.get("finish_reason") == "length"
 
 
+async def test_malformed_usage_counter_omitted_from_langfuse_generation_usage() -> None:
+    # 0101: a not-reported (null) counter is omitted from the Generation usage.
+    # prompt_tokens / total_tokens are null, completion_tokens is sound, so the
+    # Generation carries output only. (The SDK adapter drops the None fields from
+    # usage_details; in the in-memory double, None IS the not-reported state.)
+    from openarmature.llm.response import Usage
+    from openarmature.observability.correlation import _reset_invocation_id, _set_invocation_id
+    from tests._helpers.typed_event import make_typed_event
+
+    client = InMemoryLangfuseClient()
+    observer = LangfuseObserver(client=client)
+    token = _set_invocation_id("inv-usage-null")
+    try:
+        await observer(
+            make_typed_event(
+                invocation_id="inv-usage-null",
+                usage=Usage(prompt_tokens=None, completion_tokens=7, total_tokens=None),
+            )
+        )
+    finally:
+        _reset_invocation_id(token)
+
+    gen = next(o for o in client.traces["inv-usage-null"].observations if o.type == "generation")
+    assert gen.usage is not None
+    assert gen.usage.input is None
+    assert gen.usage.output == 7
+    assert gen.usage.total is None
+
+
 async def test_typed_llm_event_back_dates_generation_using_latency_ms() -> None:
     # Generation observation's start/end timestamps reflect the
     # adapter-boundary latency rather than the typed event's arrival

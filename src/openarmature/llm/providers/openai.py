@@ -65,6 +65,7 @@ import jsonschema
 from pydantic import BaseModel, ValidationError
 
 from openarmature._managed_extras import ManagedArm, apply_managed_extras
+from openarmature._usage import nonneg_int
 from openarmature.graph.events import (
     LlmCompletionEvent,
     LlmFailedEvent,
@@ -1256,58 +1257,57 @@ class OpenAIProvider:
         except Exception as exc:
             raise ProviderInvalidResponse(f"could not parse assistant message: {exc}") from exc
 
-        # Usage is optional — build a Usage with all-None fields if
-        # the provider didn't report it. Per spec §6, token counts MUST
-        # be non-negative integers; a wire response that violates that
-        # surfaces as ``provider_invalid_response`` rather than
-        # silently passing through.
+        # Usage is optional -- build a Usage with all-None fields if the
+        # provider didn't report it. Per spec §6 / proposal 0101 a malformed
+        # counter (present on the wire but not a non-negative int) is treated
+        # as not reported: _nonneg_usage_int nulls it rather than raising, the
+        # completion succeeded and the verbatim value survives on ``raw``. When
+        # every counter is malformed the record is {null, null, null} (§6
+        # null-together); the typed event mirrors it (it reads response.usage).
         usage_wire_raw = payload.get("usage")
-        try:
-            if isinstance(usage_wire_raw, dict):
-                usage_wire = cast("dict[str, Any]", usage_wire_raw)
-                # cached_tokens sources from
-                # usage.prompt_tokens_details.cached_tokens per spec
-                # §8.1.2; vLLM and other OpenAI-compatible servers that
-                # surface implicit-cache stats follow the same nesting.
-                # Defaults to None when prompt_tokens_details is absent
-                # or when the nested cached_tokens key is missing
-                # (preserves the absent-vs-reported-zero distinction).
-                # cache_creation_tokens stays None — OpenAI-compatible
-                # providers do not report a discrete cache-creation
-                # count under this mapping.
-                prompt_tokens_details_raw = usage_wire.get("prompt_tokens_details")
-                prompt_tokens_details: dict[str, Any] | None = (
-                    cast("dict[str, Any]", prompt_tokens_details_raw)
-                    if isinstance(prompt_tokens_details_raw, dict)
-                    else None
+        if isinstance(usage_wire_raw, dict):
+            usage_wire = cast("dict[str, Any]", usage_wire_raw)
+            # cached_tokens sources from
+            # usage.prompt_tokens_details.cached_tokens per spec §8.1.2; vLLM
+            # and other OpenAI-compatible servers that surface implicit-cache
+            # stats follow the same nesting. Defaults to None when
+            # prompt_tokens_details is absent or when the nested cached_tokens
+            # key is missing (preserves the absent-vs-reported-zero
+            # distinction). cache_creation_tokens stays None -- OpenAI-compatible
+            # providers do not report a discrete cache-creation count here.
+            prompt_tokens_details_raw = usage_wire.get("prompt_tokens_details")
+            prompt_tokens_details: dict[str, Any] | None = (
+                cast("dict[str, Any]", prompt_tokens_details_raw)
+                if isinstance(prompt_tokens_details_raw, dict)
+                else None
+            )
+            # Conditional set: only pass cached_tokens when the wire reports the
+            # nested key, so pydantic tracks it as "set" only then and
+            # model_dump(exclude_unset=True) omits it when the provider didn't
+            # report it. A reported-but-malformed cached_tokens is set to None
+            # (reported as null), distinct from absent (not in the kwargs).
+            usage_kwargs: dict[str, Any] = {
+                "prompt_tokens": nonneg_int(
+                    usage_wire.get("prompt_tokens"), field="prompt_tokens", source="llm provider"
+                ),
+                "completion_tokens": nonneg_int(
+                    usage_wire.get("completion_tokens"), field="completion_tokens", source="llm provider"
+                ),
+                "total_tokens": nonneg_int(
+                    usage_wire.get("total_tokens"), field="total_tokens", source="llm provider"
+                ),
+            }
+            if prompt_tokens_details is not None and "cached_tokens" in prompt_tokens_details:
+                usage_kwargs["cached_tokens"] = nonneg_int(
+                    prompt_tokens_details["cached_tokens"], field="cached_tokens", source="llm provider"
                 )
-                # Conditional set: only pass cached_tokens to Usage(...)
-                # when the wire actually reports the nested key. Pydantic
-                # tracks the field as "set" only when explicitly passed;
-                # downstream consumers using model_dump(exclude_unset=True)
-                # then get a clean wire-shape projection (cached_tokens
-                # omitted entirely when the provider didn't report it).
-                # Attribute access (usage.cached_tokens) still returns
-                # None when absent per the spec's absent-vs-reported
-                # distinction. Malformed values surface as
-                # ProviderInvalidResponse via the same Pydantic validation
-                # path the other token-count fields take.
-                usage_kwargs: dict[str, Any] = {
-                    "prompt_tokens": usage_wire.get("prompt_tokens"),
-                    "completion_tokens": usage_wire.get("completion_tokens"),
-                    "total_tokens": usage_wire.get("total_tokens"),
-                }
-                if prompt_tokens_details is not None and "cached_tokens" in prompt_tokens_details:
-                    usage_kwargs["cached_tokens"] = prompt_tokens_details["cached_tokens"]
-                usage = Usage(**usage_kwargs)
-            else:
-                usage = Usage(
-                    prompt_tokens=None,
-                    completion_tokens=None,
-                    total_tokens=None,
-                )
-        except ValidationError as exc:
-            raise ProviderInvalidResponse(f"invalid usage record: {exc}") from exc
+            usage = Usage(**usage_kwargs)
+        else:
+            usage = Usage(
+                prompt_tokens=None,
+                completion_tokens=None,
+                total_tokens=None,
+            )
 
         # gen_ai.response.id / gen_ai.response.model semconv (spec
         # §5.5.3) read these off the Response. The wire fields are
