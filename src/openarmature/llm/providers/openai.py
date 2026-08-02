@@ -1260,7 +1260,7 @@ class OpenAIProvider:
         # Usage is optional -- build a Usage with all-None fields if the
         # provider didn't report it. Per spec §6 / proposal 0101 a malformed
         # counter (present on the wire but not a non-negative int) is treated
-        # as not reported: _nonneg_usage_int nulls it rather than raising, the
+        # as not reported: nonneg_int nulls it rather than raising, the
         # completion succeeded and the verbatim value survives on ``raw``. When
         # every counter is malformed the record is {null, null, null} (§6
         # null-together); the typed event mirrors it (it reads response.usage).
