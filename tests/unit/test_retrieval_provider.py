@@ -445,6 +445,91 @@ async def test_openai_embed_single_request_when_within_cap() -> None:
     assert isinstance(response.raw, dict)
 
 
+async def test_openai_embed_chunk_size_override_drives_chunking() -> None:
+    # 0103: OpenAI's 2048 cap is fixed, not construction-configurable, so a
+    # test-only chunk_size override drives the chunk-and-stitch path with a small
+    # body -- 5 inputs, chunk_size 2 => 3 requests [2, 2, 1], consecutive slices,
+    # vectors stitched in input order, usage summed, response identity from the
+    # first chunk. Mirror of fixture 043 case 1 (which rides the pin bump).
+    inputs = [f"e{i}" for i in range(5)]
+    chunks = [
+        [[0.0, 0.5], [0.1, 0.5]],
+        [[0.2, 0.5], [0.3, 0.5]],
+        [[0.4, 0.5]],
+    ]
+    responses = iter(
+        [
+            _openai_embed_body(
+                data=[{"object": "embedding", "index": i, "embedding": v} for i, v in enumerate(c)],
+                prompt_tokens=2,
+            )
+            | {"id": f"chunk-{n}"}
+            for n, c in enumerate(chunks)
+        ]
+    )
+    captured: list[dict[str, Any]] = []
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        captured.append(json.loads(req.content))
+        assert req.url.path == "/v1/embeddings"
+        return httpx.Response(200, json=next(responses))
+
+    provider = _openai_embed_provider(handler, chunk_size=2)
+    try:
+        response = await provider.embed(inputs)
+    finally:
+        await provider.aclose()
+
+    assert len(captured) == 3
+    assert [len(b["input"]) for b in captured] == [2, 2, 1]
+    assert captured[0]["input"] == inputs[0:2]
+    assert captured[1]["input"] == inputs[2:4]
+    assert captured[2]["input"] == inputs[4:5]
+    assert response.vectors == chunks[0] + chunks[1] + chunks[2]
+    assert response.usage is not None
+    assert response.usage.input_tokens == 6  # 2 per chunk, summed across 3
+    assert response.response_id == "chunk-0"  # the first chunk's id
+
+
+def test_openai_embed_chunk_size_must_be_positive() -> None:
+    # 0103: an override <= 0 is rejected at construction (mirrors TEI's guard).
+    def _never(_req: httpx.Request) -> httpx.Response:  # pragma: no cover - construction raises first
+        raise AssertionError("must not send when construction rejects chunk_size")
+
+    with pytest.raises(ValueError, match="chunk_size must be positive"):
+        _openai_embed_provider(_never, chunk_size=0)
+
+
+async def test_openai_embed_chunked_mid_chunk_failure_fails_loud() -> None:
+    # 0103 case 2: when one chunk of a chunked call fails, the whole call fails
+    # loud -- no partial stitch, no EmbeddingResponse. 3 inputs, chunk_size 2 =>
+    # count-chunks [2, 1]; chunk A returns 200, chunk B returns 400 (over-token).
+    # Both chunk requests reach the wire before the ProviderInvalidRequest raises
+    # (no client-side token estimation would have split chunk B).
+    call = 0
+
+    def handler(_req: httpx.Request) -> httpx.Response:
+        nonlocal call
+        call += 1
+        if call == 1:
+            return httpx.Response(
+                200,
+                json=_openai_embed_body(
+                    data=[{"object": "embedding", "index": i, "embedding": [0.0, 0.5]} for i in range(2)],
+                    prompt_tokens=2,
+                ),
+            )
+        return httpx.Response(400, json={"error": {"message": "input exceeds the token ceiling"}})
+
+    provider = _openai_embed_provider(handler, chunk_size=2)
+    with pytest.raises(ProviderInvalidRequest):
+        await provider.embed(["a", "b", "c"])
+    await provider.aclose()
+    # Both chunk requests reached the wire; the count-chunking did not
+    # short-circuit or token-sub-chunk chunk B.
+    assert call == 2
+
+
 async def test_openai_embed_chunked_usage_is_all_or_nothing() -> None:
     # Usage is summed ONLY when every chunk reports it. A 2049-input call
     # (2 chunks) where chunk 1 reports prompt_tokens but chunk 2 omits the usage
@@ -1384,6 +1469,29 @@ async def test_cohere_embed_over_length_maps_to_invalid_request(status: int) -> 
         await provider.embed(["a very long document that exceeds the embedding model context window"])
     await provider.aclose()
     assert captured[0]["truncate"] == "NONE"
+
+
+async def test_cohere_embed_empty_response_id_is_null() -> None:
+    # 0104: an empty-string id is not a present identifier -> null (it correlates
+    # nothing), distinct from 0097's empty-document echo which stays present.
+    def handler(_req: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=_cohere_embed_body(id="", vectors=[[0.1, 0.2]], input_tokens=3))
+
+    provider = _cohere_embed_provider(handler)
+    response = await provider.embed(["x"])
+    await provider.aclose()
+    assert response.response_id is None
+
+
+async def test_cohere_rerank_empty_response_id_is_null() -> None:
+    # 0104: the empty-string id -> null rule holds on the rerank surface too.
+    def handler(_req: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=_rerank_body(id="", results=[{"index": 0, "relevance_score": 0.9}]))
+
+    provider = _rerank_provider(handler)
+    response = await provider.rerank("q", ["a", "b"])
+    await provider.aclose()
+    assert response.response_id is None
 
 
 async def test_cohere_embed_no_usage_object_yields_null_usage() -> None:
@@ -2329,6 +2437,68 @@ async def test_jina_429_maps_to_rate_limit(surface: str) -> None:
                 await rprovider.rerank("q", ["a", "b"])
             finally:
                 await rprovider.aclose()
+
+
+@pytest.mark.parametrize("surface", ["embed", "rerank"])
+async def test_jina_400_maps_to_invalid_request(surface: str) -> None:
+    # §8.2 *Errors* (proposal 0104): a bare 400 -> provider_invalid_request on
+    # BOTH surfaces, aligning Jina with §8.1 / §8.3 / §8.4. Before 0104 it fell
+    # through to the transient provider_unavailable catch-all (only 422 was
+    # enumerated), inviting a pointless retry of a request that will not succeed.
+    def handler(_req: httpx.Request) -> httpx.Response:
+        return httpx.Response(400, json={"detail": "Bad request."})
+
+    with pytest.raises(ProviderInvalidRequest):
+        if surface == "embed":
+            provider = _jina_embed_provider(handler)
+            try:
+                await provider.embed(["x"])
+            finally:
+                await provider.aclose()
+        else:
+            rprovider = _jina_rerank_provider(handler)
+            try:
+                await rprovider.rerank("q", ["a", "b"])
+            finally:
+                await rprovider.aclose()
+
+
+async def test_jina_embed_empty_response_id_is_null() -> None:
+    # 0104: an empty-string id is not a present identifier -> null.
+    def handler(_req: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "id": "",
+                "model": "jina-embeddings-test",
+                "usage": {"total_tokens": 8},
+                "data": [{"index": 0, "embedding": [0.1, 0.2]}],
+            },
+        )
+
+    provider = _jina_embed_provider(handler)
+    response = await provider.embed(["x"])
+    await provider.aclose()
+    assert response.response_id is None
+
+
+async def test_jina_rerank_empty_response_id_is_null() -> None:
+    # 0104: the empty-string id -> null rule holds on the rerank surface too.
+    def handler(_req: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "id": "",
+                "model": "jina-reranker-test",
+                "usage": {"total_tokens": 3},
+                "results": [{"index": 0, "relevance_score": 0.9}],
+            },
+        )
+
+    provider = _jina_rerank_provider(handler)
+    response = await provider.rerank("q", ["a", "b"])
+    await provider.aclose()
+    assert response.response_id is None
 
 
 async def test_jina_rerank_over_length_422_maps_to_invalid_request() -> None:

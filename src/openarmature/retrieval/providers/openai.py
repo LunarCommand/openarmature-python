@@ -54,8 +54,10 @@ from ..response import EmbeddingResponse, EmbeddingRuntimeConfig
 
 # §8.3 *Batch chunking (2048-input cap)*: OpenAI /v1/embeddings accepts at most
 # 2048 inputs per request, so an over-cap embed call chunk-and-stitches over
-# consecutive <=2048 slices (the §8 general embed rule; a fixed vendor cap like
-# Cohere's 96, not a construction-configured chunk_size like TEI). OpenAI also
+# consecutive slices of the cap (the §8 general embed rule). The cap is a fixed
+# vendor 2048 (like Cohere's 96), not a real construction config like TEI's
+# chunk_size; __init__ exposes a TEST-ONLY chunk_size override of it (proposal
+# 0103) so a fixture can drive the chunking path with a small body. OpenAI also
 # enforces a summed-token ceiling per request, which the count-based rule does
 # not address: an over-token chunk still fails loud as provider_invalid_request
 # (§8's rule chunks by input count).
@@ -156,6 +158,7 @@ class OpenAIEmbeddingProvider:
         query_prefix: str | None = None,
         document_prefix: str | None = None,
         populate_caller_metadata: bool = True,
+        chunk_size: int | None = None,
     ) -> None:
         # base_url is the host root; the provider appends the /v1 routes, so
         # a trailing /v1 would produce a doubled /v1/v1 path that 404s (the
@@ -179,6 +182,14 @@ class OpenAIEmbeddingProvider:
         # ``genai_system`` surfaces as gen_ai.system on the embedding span.
         self._genai_system = genai_system
         self._populate_caller_metadata = populate_caller_metadata
+        # §8.3's OpenAI input cap is a FIXED vendor 2048, not a construction
+        # config like TEI's max-client-batch-size. ``chunk_size`` is a TEST-ONLY
+        # override of that fixed cap (conformance-adapter §5.14, proposal 0103)
+        # so a fixture can drive the chunk-and-stitch path with a small body;
+        # production leaves it None and the fixed 2048 applies.
+        if chunk_size is not None and chunk_size <= 0:
+            raise ValueError(f"chunk_size must be positive (got {chunk_size})")
+        self._chunk_size = chunk_size if chunk_size is not None else _OPENAI_EMBED_MAX_INPUTS
         self._headers: dict[str, str] = {"Content-Type": "application/json"}
         if api_key is not None:
             self._headers["Authorization"] = f"Bearer {api_key}"
@@ -343,7 +354,9 @@ class OpenAIEmbeddingProvider:
         return await chunk_and_stitch_embed(
             input_strings,
             model=self.model,
-            cap=_OPENAI_EMBED_MAX_INPUTS,
+            # The fixed vendor 2048 cap unless a test / conformance harness set a
+            # chunk_size override (0103); see __init__.
+            cap=self._chunk_size,
             embed_chunk=_embed_one,
         )
 

@@ -450,7 +450,7 @@ class CohereRerankProvider:
             results=scored,
             model=model if isinstance(model, str) else self.model,
             usage=usage,
-            response_id=response_id if isinstance(response_id, str) else None,
+            response_id=response_id if isinstance(response_id, str) and response_id else None,
             raw=body,
         )
 
@@ -786,7 +786,13 @@ class CohereEmbeddingProvider:
         response_id = body.get("id")
         # The /v2/embed envelope carries an id but no model, so the stitched
         # response reports the bound model.
-        return vectors, input_tokens, response_id if isinstance(response_id, str) else None, None, body
+        return (
+            vectors,
+            input_tokens,
+            response_id if isinstance(response_id, str) and response_id else None,
+            None,
+            body,
+        )
 
     def _parse_input_tokens(self, body: dict[str, Any]) -> int | None:
         """Extract meta.billed_units.input_tokens, or None.

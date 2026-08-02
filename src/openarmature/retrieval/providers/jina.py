@@ -140,12 +140,14 @@ def _classify_jina_http_error(resp: httpx.Response) -> LlmProviderError:
         return ProviderRateLimit(message or "HTTP 429")
     if status == 404:
         return ProviderInvalidModel(message or "model not found")
-    # §8.2 *Errors*: over-length / malformed request (422) ->
-    # provider_invalid_request (the fail-loud surface, fixture 021). Jina lists
-    # only 422 here (no 400 / 413, unlike the TEI / OpenAI sibling mappings), so
-    # a 400 falls through to provider_unavailable per the §8.2 enumeration.
-    if status == 422:
-        return ProviderInvalidRequest(message or "HTTP 422")
+    # §8.2 *Errors* (proposal 0104): a malformed / over-length request (400 /
+    # 422) -> provider_invalid_request, the fail-loud surface. This aligns Jina
+    # with the §8.1 / §8.3 / §8.4 mappings, which all map 400 ->
+    # provider_invalid_request. Before 0104, §8.2 enumerated only 422, so a bare
+    # 400 fell through to the transient provider_unavailable catch-all and
+    # invited a pointless retry of a request that will not succeed on retry.
+    if status in (400, 422):
+        return ProviderInvalidRequest(message or f"HTTP {status}")
     return ProviderUnavailable(message or f"HTTP {status}")
 
 
@@ -432,7 +434,7 @@ class JinaEmbeddingProvider:
             vectors=vectors,
             model=model if isinstance(model, str) else self.model,
             usage=usage,
-            response_id=response_id if isinstance(response_id, str) else None,
+            response_id=response_id if isinstance(response_id, str) and response_id else None,
             dimensions=dimensions,
             raw=body,
         )
@@ -688,7 +690,7 @@ class JinaRerankProvider:
             results=scored,
             model=model if isinstance(model, str) else self.model,
             usage=usage,
-            response_id=response_id if isinstance(response_id, str) else None,
+            response_id=response_id if isinstance(response_id, str) and response_id else None,
             raw=body,
         )
 
