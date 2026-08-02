@@ -354,6 +354,8 @@ class OpenAIEmbeddingProvider:
         return await chunk_and_stitch_embed(
             input_strings,
             model=self.model,
+            # The fixed vendor 2048 cap unless a test / conformance harness set a
+            # chunk_size override (0103); see __init__.
             cap=self._chunk_size,
             embed_chunk=_embed_one,
         )
