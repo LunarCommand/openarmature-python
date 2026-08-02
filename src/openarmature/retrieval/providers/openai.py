@@ -23,6 +23,9 @@ any OpenAI-compatible backend (vLLM, LocalAI, TEI's OpenAI surface). The
 
 from __future__ import annotations
 
+import base64
+import binascii
+import struct
 import time
 import uuid
 from collections.abc import Sequence
@@ -62,6 +65,34 @@ from ..response import EmbeddingResponse, EmbeddingRuntimeConfig
 # not address: an over-token chunk still fails loud as provider_invalid_request
 # (§8's rule chunks by input count).
 _OPENAI_EMBED_MAX_INPUTS = 2048
+
+
+def _decode_base64_embedding(encoded: str) -> list[float]:
+    # 0106 §8.3: a base64 ``data[].embedding`` is a base64-encoded array of
+    # little-endian IEEE-754 single-precision (float32) values. Decode to bytes,
+    # then read consecutive 4-byte little-endian float32s in order -- the same
+    # vector the float encoding carries as JSON numbers. Fail loud (§7) on a
+    # payload that cannot decode to a whole float32 vector rather than returning
+    # a truncated or padded one; the verbatim base64 value stays on ``raw``.
+    # ``validate=True`` is load-bearing: without it b64decode silently DISCARDS
+    # non-alphabet characters instead of rejecting them. A decoded length of 0
+    # (an empty vector) is malformed like an empty float array, so a positive
+    # multiple of 4 is required. Non-finite float32 values (NaN / +/-Inf /
+    # denormals) decode as-is: neither 0106 nor §4 requires finiteness, and the
+    # JSON float path accepts them too (json.loads parses NaN / Infinity), so the
+    # two encodings stay identical. Whether §4 should reject a non-finite vector
+    # is an open question for the spec review; any such guard applies to BOTH
+    # paths, not just this one.
+    try:
+        decoded = base64.b64decode(encoded, validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise ProviderInvalidResponse("embedding response has an invalid base64 vector") from exc
+    if not decoded or len(decoded) % 4 != 0:
+        raise ProviderInvalidResponse(
+            "embedding response base64 vector byte length is not a positive multiple of 4"
+        )
+    count = len(decoded) // 4
+    return list(struct.unpack(f"<{count}f", decoded))
 
 
 def _classify_embedding_http_error(resp: httpx.Response) -> LlmProviderError:
@@ -380,11 +411,11 @@ class OpenAIEmbeddingProvider:
         # input_type with no bound prefix leaves the input VERBATIM (the
         # symmetric no-op). input_type MUST NEVER land on the wire, so there is
         # no wire input_type key to manage here. encoding_format ("base64") rides
-        # the extras bag as a request pass-through only -- _parse_response decodes
-        # float embeddings (not base64 strings), so a base64 response raises
-        # provider_invalid_response; base64 is not an end-to-end response format
-        # yet (0106 territory), and 0105 defers encoding_format, so it stays an
-        # unmanaged pass-through.
+        # the extras bag as a request pass-through: it forwards to the wire
+        # untouched, and the response consumer (_parse_chunk) shape-decodes a
+        # base64 data[].embedding to float32 vectors (0106). It stays an UNMANAGED
+        # extras key -- the consumer keys on the response SHAPE, not the request
+        # param, so encoding_format is not a §6 managed-field (0105).
         inputs = apply_client_side_prefix(
             input_strings,
             input_type,
@@ -444,16 +475,28 @@ class OpenAIEmbeddingProvider:
         vectors: list[list[float]] = []
         for entry in ordered:
             embedding = entry.get("embedding")
-            if not isinstance(embedding, list) or not embedding:
-                raise ProviderInvalidResponse("embedding response entry has a missing or empty 'embedding'")
-            values = cast("list[Any]", embedding)
-            # Reject non-numeric vector values (JSON strings, bools) rather
-            # than coercing them: bool is an int subclass, and float("0.1")
-            # would silently accept a string, so the strict isinstance check
-            # is what makes "non-numeric is malformed" actually hold.
-            if not all(isinstance(x, (int, float)) and not isinstance(x, bool) for x in values):
-                raise ProviderInvalidResponse("embedding response has a non-numeric vector value")
-            vectors.append([float(x) for x in values])
+            # 0106 §8.3 shape-driven decode, exhaustive dispatch: a base64 string
+            # is the compact wire encoding of the same float32 vector; a non-empty
+            # JSON number array is the float vector verbatim. Any other shape
+            # (null / number / bool / object / empty / an array with non-numbers)
+            # is malformed. encoding_format keys nothing here -- the branch is on
+            # the response SHAPE, not the request param, so it stays an ordinary
+            # unmanaged extras key (not a §6 managed-field).
+            if isinstance(embedding, str):
+                vectors.append(_decode_base64_embedding(embedding))
+            elif isinstance(embedding, list) and embedding:
+                values = cast("list[Any]", embedding)
+                # Reject non-numeric vector values (JSON strings, bools) rather
+                # than coercing them: bool is an int subclass, and float("0.1")
+                # would silently accept a string, so the strict isinstance check
+                # is what makes "non-numeric is malformed" actually hold.
+                if not all(isinstance(x, (int, float)) and not isinstance(x, bool) for x in values):
+                    raise ProviderInvalidResponse("embedding response has a non-numeric vector value")
+                vectors.append([float(x) for x in values])
+            else:
+                raise ProviderInvalidResponse(
+                    "embedding response entry has a missing or malformed 'embedding'"
+                )
         # §4 (proposal 0093): usage is a record or null -- an absent or malformed
         # usage block yields usage = null, NEVER a fabricated record or a zero
         # (a zero would assert "zero tokens billed", a claim the provider never

@@ -10,8 +10,11 @@ NodeEvent phase dispatch).
 
 from __future__ import annotations
 
+import base64
 import json
 import logging
+import math
+import struct
 from typing import Any, Literal
 
 import httpx
@@ -685,6 +688,131 @@ async def test_openai_embed_reported_zero_prompt_tokens_yields_a_record() -> Non
     # absent figure. It yields a record carrying 0, NOT usage = null.
     assert response.usage is not None
     assert response.usage.input_tokens == 0
+
+
+# --- 0106: base64 embedding output-encoding decode (§8.3) ------------------
+def _b64_float32(floats: list[float]) -> str:
+    # Encode floats as little-endian IEEE-754 float32, base64-encoded -- the wire
+    # shape an OpenAI-compatible backend returns for encoding_format: "base64".
+    return base64.b64encode(struct.pack(f"<{len(floats)}f", *floats)).decode("ascii")
+
+
+async def test_openai_embed_decodes_base64_vectors() -> None:
+    # 0106: a base64 data[].embedding decodes to the same float32 vector. Uses
+    # exactly-representable values so the round-trip is bit-exact; raw keeps the
+    # base64 string verbatim (decode feeds vectors only, never raw).
+    vec = [0.5, -0.25, 2.0]
+    b64 = _b64_float32(vec)
+
+    def handler(_req: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json=_openai_embed_body(
+                data=[{"object": "embedding", "index": 0, "embedding": b64}], prompt_tokens=3
+            ),
+        )
+
+    provider = _openai_embed_provider(handler)
+    response = await provider.embed(["x"])
+    await provider.aclose()
+    assert response.vectors == [[0.5, -0.25, 2.0]]
+    assert response.dimensions == 3
+    assert isinstance(response.raw, dict)
+    assert response.raw["data"][0]["embedding"] == b64  # verbatim base64, not decoded
+
+
+async def test_openai_embed_base64_non_finite_floats_decode_as_is() -> None:
+    # 0106 / §4 do not require finiteness, and the JSON float path accepts NaN /
+    # Infinity too, so a base64 vector encoding NaN / +Inf / -Inf decodes verbatim
+    # rather than raising. Whether §4 should reject non-finite vectors is flagged
+    # for the batched spec review; this pins the CURRENT (accepting) behavior so
+    # the edge is known and tested, not accidental.
+    b64 = _b64_float32([float("nan"), float("inf"), float("-inf"), 0.5])
+
+    def handler(_req: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json=_openai_embed_body(
+                data=[{"object": "embedding", "index": 0, "embedding": b64}], prompt_tokens=1
+            ),
+        )
+
+    provider = _openai_embed_provider(handler)
+    response = await provider.embed(["x"])
+    await provider.aclose()
+    vec = response.vectors[0]
+    assert math.isnan(vec[0])
+    assert vec[1] == float("inf")
+    assert vec[2] == float("-inf")
+    assert vec[3] == 0.5
+
+
+async def test_openai_embed_base64_composes_with_chunking() -> None:
+    # 0106 + §8: base64 responses decode per-chunk and stitch in input order;
+    # raw is the list of per-request bodies with base64 preserved verbatim.
+    vecs = [[0.5, 0.25], [1.0, -1.0], [2.0, 0.0]]
+    b64s = [_b64_float32(v) for v in vecs]
+    responses = iter(
+        [
+            _openai_embed_body(
+                data=[
+                    {"object": "embedding", "index": 0, "embedding": b64s[0]},
+                    {"object": "embedding", "index": 1, "embedding": b64s[1]},
+                ],
+                prompt_tokens=2,
+            ),
+            _openai_embed_body(
+                data=[{"object": "embedding", "index": 0, "embedding": b64s[2]}], prompt_tokens=1
+            ),
+        ]
+    )
+
+    def handler(_req: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=next(responses))
+
+    provider = _openai_embed_provider(handler, chunk_size=2)  # 3 inputs => [2, 1]
+    response = await provider.embed(["a", "b", "c"])
+    await provider.aclose()
+    assert response.vectors == vecs
+    assert isinstance(response.raw, list)
+    assert response.raw[0]["data"][0]["embedding"] == b64s[0]
+
+
+@pytest.mark.parametrize(
+    ("embedding", "why"),
+    [
+        pytest.param("not!valid!base64", "invalid-alphabet", id="invalid-base64"),
+        pytest.param(
+            base64.b64encode(b"\x00\x01\x02\x03\x04").decode("ascii"), "5-bytes", id="not-multiple-of-4"
+        ),
+        pytest.param("", "empty", id="empty-base64"),
+        pytest.param(None, "null", id="null"),
+        pytest.param(5, "number", id="number"),
+        pytest.param(True, "bool", id="bool"),
+        pytest.param({"vec": [0.1]}, "object", id="object"),
+        pytest.param([], "empty-array", id="empty-array"),
+        pytest.param([0.1, "x"], "mixed-array", id="array-with-non-number"),
+    ],
+)
+async def test_openai_embed_malformed_embedding_is_provider_invalid_response(
+    embedding: Any, why: str
+) -> None:
+    # 0106 exhaustive dispatch + malformed-base64 boundary: only a base64 string
+    # and a non-empty JSON number array are accepted. Anything else -- invalid or
+    # non-multiple-of-4 base64, an empty vector, or a non-conforming shape -- is a
+    # malformed response (fail-loud), never a truncated / padded / coerced vector.
+    def handler(_req: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json=_openai_embed_body(
+                data=[{"object": "embedding", "index": 0, "embedding": embedding}], prompt_tokens=1
+            ),
+        )
+
+    provider = _openai_embed_provider(handler)
+    with pytest.raises(ProviderInvalidResponse):
+        await provider.embed(["x"])
+    await provider.aclose()
 
 
 @pytest.mark.parametrize("status", [400, 422])
