@@ -779,24 +779,20 @@ async def test_openai_embed_base64_composes_with_chunking() -> None:
 
 
 @pytest.mark.parametrize(
-    ("embedding", "why"),
+    "embedding",
     [
-        pytest.param("not!valid!base64", "invalid-alphabet", id="invalid-base64"),
-        pytest.param(
-            base64.b64encode(b"\x00\x01\x02\x03\x04").decode("ascii"), "5-bytes", id="not-multiple-of-4"
-        ),
-        pytest.param("", "empty", id="empty-base64"),
-        pytest.param(None, "null", id="null"),
-        pytest.param(5, "number", id="number"),
-        pytest.param(True, "bool", id="bool"),
-        pytest.param({"vec": [0.1]}, "object", id="object"),
-        pytest.param([], "empty-array", id="empty-array"),
-        pytest.param([0.1, "x"], "mixed-array", id="array-with-non-number"),
+        pytest.param("not!valid!base64", id="invalid-base64"),
+        pytest.param(base64.b64encode(b"\x00\x01\x02\x03\x04").decode("ascii"), id="not-multiple-of-4"),
+        pytest.param("", id="empty-base64"),
+        pytest.param(None, id="null"),
+        pytest.param(5, id="number"),
+        pytest.param(True, id="bool"),
+        pytest.param({"vec": [0.1]}, id="object"),
+        pytest.param([], id="empty-array"),
+        pytest.param([0.1, "x"], id="array-with-non-number"),
     ],
 )
-async def test_openai_embed_malformed_embedding_is_provider_invalid_response(
-    embedding: Any, why: str
-) -> None:
+async def test_openai_embed_malformed_embedding_is_provider_invalid_response(embedding: Any) -> None:
     # 0106 exhaustive dispatch + malformed-base64 boundary: only a base64 string
     # and a non-empty JSON number array are accepted. Anything else -- invalid or
     # non-multiple-of-4 base64, an empty vector, or a non-conforming shape -- is a

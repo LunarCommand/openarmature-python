@@ -477,7 +477,8 @@ class OpenAIEmbeddingProvider:
             embedding = entry.get("embedding")
             # 0106 §8.3 shape-driven decode, exhaustive dispatch: a base64 string
             # is the compact wire encoding of the same float32 vector; a non-empty
-            # JSON number array is the float vector verbatim. Any other shape
+            # JSON number array is read as the float vector (each element coerced
+            # to float). Any other shape
             # (null / number / bool / object / empty / an array with non-numbers)
             # is malformed. encoding_format keys nothing here -- the branch is on
             # the response SHAPE, not the request param, so it stays an ordinary
