@@ -1405,6 +1405,41 @@ async def test_token_budget_no_usage_omits_exceeded_signal() -> None:
     assert [p for p in points if "token_budget" in p[0]] == []
 
 
+async def test_malformed_usage_counter_reaches_no_otel_surface() -> None:
+    # 0101: a not-reported (null) counter reaches NONE of the OTel surfaces --
+    # not the span usage attrs, not the token.usage histogram, not the token-
+    # budget instruments. prompt_tokens and total_tokens are null (malformed on
+    # the wire); completion_tokens is sound.
+    from openarmature.llm.response import Usage
+    from openarmature.prompts import TokenBudget
+    from tests._helpers.typed_event import make_retry_attempt_event
+
+    event = make_retry_attempt_event(
+        model="test-model",
+        provider="openai",
+        usage=Usage(prompt_tokens=None, completion_tokens=7, total_tokens=None),
+        token_budget=TokenBudget(input_max_tokens=10, total_max_tokens=15),
+    )
+    points, llm_spans = await _drive_metrics_events([event])
+    attrs: dict[str, Any] = dict(llm_spans[0].attributes or {})
+
+    # Span: null counters omitted per-field, the sound one present (both mirrors).
+    assert "openarmature.llm.usage.prompt_tokens" not in attrs
+    assert "openarmature.llm.usage.total_tokens" not in attrs
+    assert "gen_ai.usage.input_tokens" not in attrs
+    assert attrs["openarmature.llm.usage.completion_tokens"] == 7
+    assert attrs["gen_ai.usage.output_tokens"] == 7
+
+    # Histogram: an observation only for the reported (output) counter.
+    token_points = [p for p in points if p[0] == "openarmature.gen_ai.client.token.usage"]
+    assert {p[3]["openarmature.gen_ai.token.type"] for p in token_points} == {"output"}
+
+    # Budget: input bound not evaluated (prompt null), total bound not evaluated
+    # (total null and can't derive -- prompt null). No span signal, no metric.
+    assert "openarmature.llm.token_budget.exceeded" not in attrs
+    assert [p for p in points if "token_budget" in p[0]] == []
+
+
 async def test_token_budget_both_bounds_exceeded_double_increment() -> None:
     # §11.2 (proposal 0083): a prompt declaring BOTH bounds, both exceeded,
     # increments the exceeded counter once per breached bound (kinds input +

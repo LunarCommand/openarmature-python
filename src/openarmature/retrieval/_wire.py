@@ -10,16 +10,14 @@ only the mapping helpers belong here.
 
 from __future__ import annotations
 
-import logging
 from collections.abc import Awaitable, Callable
 from typing import Any, cast
 
+from openarmature._usage import nonneg_int as _nonneg_int
 from openarmature.llm.errors import ProviderInvalidResponse
 
 from .provider import validate_embedding_input, validate_embedding_response
 from .response import EmbeddingResponse, EmbeddingUsage
-
-_log = logging.getLogger(__name__)
 
 
 # retrieval-provider §4 / §6 (proposal 0093): a usage figure is reported or it
@@ -46,22 +44,10 @@ _log = logging.getLogger(__name__)
 def nonneg_int(value: Any, *, field: str = "usage figure") -> int | None:
     """Return ``value`` when it is a non-negative int, else ``None``.
 
-    ``None`` (the figure was not reported) returns quietly; any other
-    non-conforming value is logged at WARNING as a misbehaving provider before
-    returning ``None``. ``field`` names the figure in that log line.
+    Delegates to the shared capability-neutral parser; ``field`` names the
+    figure and the WARNING log attributes it to the retrieval provider.
     """
-    # bool is an int subclass, so exclude it explicitly.
-    if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
-        return value
-    if value is not None:
-        _log.warning(
-            "retrieval provider reported a %s that is not a non-negative int "
-            "(got %s %.80r); recording usage as unknown",
-            field,
-            type(value).__name__,
-            value,
-        )
-    return None
+    return _nonneg_int(value, field=field, source="retrieval provider")
 
 
 def normalize_base_url(base_url: str, *, guard_prefix: str) -> str:
