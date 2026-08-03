@@ -2315,6 +2315,26 @@ class LangfuseObserver:
                 budget["total_max_tokens"] = total_max
             if budget:
                 metadata["token_budget"] = budget
+            # §8.4.3 (proposal 0109): a flat sibling token_budget_exceeded boolean
+            # gives the Langfuse FAILURE path parity with the OTel
+            # openarmature.llm.token_budget.exceeded attribute. Because this
+            # metadata is shared with the failed Generation, the flag SURVIVES the
+            # ERROR-precedence rule (the ERROR level / statusMessage still win as
+            # the primary signal). Same evaluation as the OTel span + §11 counter:
+            # true if any evaluated bound was crossed, false if all held, ABSENT
+            # when no bound is evaluable (a not-reported counter is not evaluated,
+            # per 0101), mirroring the attribute's suppression from a null counter.
+            # Two known limitations, both pending a spec follow-up: (a) the flag
+            # reflects the TERMINAL attempt's usage, so on a RETRIED call it can
+            # differ from the OTel per-attempt attribute -- the parity is of the
+            # FORMULA, not of per-attempt values, an intentional consequence of the
+            # terminal-only Generation; (b) like the token_budget bounds above,
+            # this unprefixed key shares the caller-metadata collision class -- a
+            # caller invocation-metadata key of the same name (applied later,
+            # unguarded) would shadow it until the reserved-key guard is extended.
+            evaluations = _token_budget_evaluations(token_budget, event.usage)
+            if evaluations:
+                metadata["token_budget_exceeded"] = any(ev["actual"] > ev["max"] for ev in evaluations)
         if event.caller_invocation_metadata is not None:
             _apply_caller_metadata(metadata, event.caller_invocation_metadata)
         # Response-side metadata. A completion always carries it; a

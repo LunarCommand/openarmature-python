@@ -274,17 +274,24 @@ def _sampling_from_dict(data: dict[str, Any]) -> SamplingConfig:
 
 def _token_budget_from_dict(data: dict[str, Any]) -> TokenBudget | None:
     # The sidecar carries the budget as a `token_budget` sub-object sibling to
-    # the sampling keys. Absent -> no budget (None). A non-object sub-value, or
-    # a bound failing validation, raises (the caller converts it to the
-    # fallback-eligible PromptStoreUnavailable). An all-null / empty budget
-    # collapses to None: "no bound declared" is None (parity with the langfuse
-    # backend + the None-when-no-budget contract), not a non-null all-null record.
+    # the sampling keys. Absent -> no budget (None). A non-object sub-value
+    # raises (the caller converts it to the fallback-eligible
+    # PromptStoreUnavailable). An UNRECOGNIZED key is ignored (proposal 0109:
+    # unrecognized keys tolerate-and-filter, converging with the langfuse
+    # backend -- a stray or future key does not invalidate a well-formed budget),
+    # so only the declared TokenBudget fields are lifted. A malformed VALUE for a
+    # RECOGNIZED bound still raises: 0109 leaves malformed-value handling to the
+    # backend, and the operator-authored sidecar fails loud (fallback-eligible).
+    # An all-null / empty budget collapses to None: "no bound declared" is None
+    # (parity with the langfuse backend + the None-when-no-budget contract).
     raw = data.get("token_budget")
     if raw is None:
         return None
     if not isinstance(raw, dict):
         raise ValueError(f"sidecar token_budget must be a JSON object, got {type(raw).__name__}")
-    budget = TokenBudget(**cast(dict[str, Any], raw))
+    sub = cast("dict[str, Any]", raw)
+    declared = {k: v for k, v in sub.items() if k in TokenBudget.model_fields}
+    budget = TokenBudget(**declared)
     if budget.input_max_tokens is None and budget.total_max_tokens is None:
         return None
     return budget
