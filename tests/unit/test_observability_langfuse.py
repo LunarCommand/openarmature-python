@@ -1481,6 +1481,7 @@ async def test_typed_llm_completion_over_budget_sets_warning_level() -> None:
     assert gen.level == "WARNING"
     assert gen.status_message == "token budget exceeded: input 20 > 10"
     assert gen.metadata.get("token_budget") == {"input_max_tokens": 10}
+    assert gen.metadata.get("token_budget_exceeded") is True  # 0109: flag on the WARNING path
 
 
 async def test_typed_llm_completion_under_budget_no_warning_level() -> None:
@@ -1513,6 +1514,40 @@ async def test_typed_llm_completion_under_budget_no_warning_level() -> None:
     assert gen.level == "DEFAULT"
     assert gen.status_message is None
     assert gen.metadata.get("token_budget") == {"input_max_tokens": 40}
+    assert gen.metadata.get("token_budget_exceeded") is False  # 0109: evaluated bound held
+
+
+async def test_typed_llm_completion_null_counter_omits_exceeded_flag() -> None:
+    # 0109 + 0101: a budget is declared and usage is PRESENT, but the only declared
+    # bound's counter is not reported (prompt_tokens is None), so that bound is not
+    # evaluated -> the flag is ABSENT (not false), distinct from the
+    # absent-via-null-usage case. Guards the per-counter suppression on the
+    # Langfuse surface (only a deferred conformance fixture covers it otherwise).
+    from openarmature.llm.response import Usage
+    from openarmature.observability.correlation import (
+        _reset_invocation_id,
+        _set_invocation_id,
+    )
+    from openarmature.prompts import TokenBudget
+    from tests._helpers.typed_event import make_typed_event
+
+    client = InMemoryLangfuseClient()
+    observer = LangfuseObserver(client=client)
+    token = _set_invocation_id("inv-tb-nullcount")
+    try:
+        await observer(
+            make_typed_event(
+                invocation_id="inv-tb-nullcount",
+                usage=Usage(prompt_tokens=None, completion_tokens=5, total_tokens=None),
+                token_budget=TokenBudget(input_max_tokens=10),
+            )
+        )
+    finally:
+        _reset_invocation_id(token)
+
+    gen = next(o for o in client.traces["inv-tb-nullcount"].observations if o.type == "generation")
+    assert gen.metadata.get("token_budget") == {"input_max_tokens": 10}
+    assert "token_budget_exceeded" not in gen.metadata
 
 
 async def test_typed_llm_completion_both_bounds_breach_statusmessage() -> None:
@@ -1544,6 +1579,7 @@ async def test_typed_llm_completion_both_bounds_breach_statusmessage() -> None:
     assert gen.level == "WARNING"
     assert gen.status_message == "token budget exceeded: input 20 > 10, total 30 > 15"
     assert gen.metadata.get("token_budget") == {"input_max_tokens": 10, "total_max_tokens": 15}
+    assert gen.metadata.get("token_budget_exceeded") is True  # 0109: flag on the multi-bound path
 
 
 async def test_typed_llm_failed_generation_carries_token_budget_metadata() -> None:
@@ -1576,6 +1612,9 @@ async def test_typed_llm_failed_generation_carries_token_budget_metadata() -> No
     gen = next(o for o in client.traces["inv-tb-fail"].observations if o.type == "generation")
     assert gen.level == "ERROR"
     assert gen.metadata.get("token_budget") == {"input_max_tokens": 10}
+    # 0109: this failure carries no usage, so no bound is evaluable and the flag
+    # is ABSENT (not false), mirroring the OTel attribute's null-counter suppression.
+    assert "token_budget_exceeded" not in gen.metadata
 
 
 async def test_structured_over_budget_failure_generation_is_error_not_warning() -> None:
@@ -1613,6 +1652,10 @@ async def test_structured_over_budget_failure_generation_is_error_not_warning() 
     assert gen.status_message == "structured_output_invalid"
     assert "token budget exceeded" not in (gen.status_message or "")
     assert gen.metadata.get("token_budget") == {"input_max_tokens": 10}
+    # 0109: the exceeded flag SURVIVES the ERROR-precedence rule -- the level is
+    # ERROR + the statusMessage is the category, but the flag is still present and
+    # true, giving the Langfuse failure path parity with the OTel span attribute.
+    assert gen.metadata.get("token_budget_exceeded") is True
 
 
 async def test_structured_output_failure_generation_renders_response_surface() -> None:

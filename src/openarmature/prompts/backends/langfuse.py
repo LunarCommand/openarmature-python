@@ -66,15 +66,6 @@ _SAMPLING_FIELDS = (
     "stop_sequences",
 )
 
-# Langfuse prompt `config.token_budget` sub-object keys that line up with
-# TokenBudget's declared fields (proposal 0083). Mirrors `_SAMPLING_FIELDS`:
-# the budget lives under a `token_budget` sub-object in the Langfuse config
-# (sibling to the flat sampling keys), matching the filesystem sidecar shape.
-_TOKEN_BUDGET_FIELDS = (
-    "input_max_tokens",
-    "total_max_tokens",
-)
-
 
 class LangfusePromptBackend:
     """Reads prompts from Langfuse's prompt registry.
@@ -198,14 +189,16 @@ def _token_budget_from_config(config: dict[str, Any] | None) -> TokenBudget | No
     if not isinstance(raw, dict):
         return None
     budget = cast("dict[str, Any]", raw)
-    declared = {k: budget[k] for k in _TOKEN_BUDGET_FIELDS if k in budget}
+    declared = {k: v for k, v in budget.items() if k in TokenBudget.model_fields}
     if not declared:
         return None
     # The Langfuse config is a remote-service payload: tolerate a malformed
-    # advisory bound (e.g. a negative value) by dropping the budget rather than
+    # advisory VALUE (e.g. a negative bound) by dropping the budget rather than
     # failing the fetch. The filesystem backend, whose sidecar is operator-
-    # authored, fails loud (fallback-eligible) instead -- an intentional
-    # divergence by data-source trust model, flagged to spec for confirmation.
+    # authored, fails loud (fallback-eligible) instead. Proposal 0109 confirmed
+    # this malformed-VALUE divergence is left to each backend's trust model; it
+    # converged only the unrecognized-KEY case (both backends field-filter a
+    # stray key -- above here, and in the filesystem _token_budget_from_dict).
     try:
         parsed = TokenBudget(**declared)
     except ValidationError:

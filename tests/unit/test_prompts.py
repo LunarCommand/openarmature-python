@@ -681,6 +681,50 @@ async def test_filesystem_backend_token_budget_per_prompt_sidecar(tmp_path: Path
     assert "token_budget" not in (prompt.sampling.model_extra or {})
 
 
+async def test_filesystem_backend_token_budget_unrecognized_key_is_filtered(tmp_path: Path) -> None:
+    # 0109: an unrecognized key alongside a valid bound is tolerated-and-filtered
+    # -- the recognized bound applies, the stray key is ignored, and the fetch
+    # succeeds (converging with the langfuse backend). Forward-compatible with a
+    # future spec / vendor key; a well-formed budget is not invalidated by it.
+    (tmp_path / "production").mkdir()
+    (tmp_path / "production" / "classify.j2").write_text("Classify: {{ topic }}", encoding="utf-8")
+    (tmp_path / "production" / "classify.config.json").write_text(
+        '{"token_budget": {"input_max_tokens": 10, "future_key": 5}}',
+        encoding="utf-8",
+    )
+
+    backend = FilesystemPromptBackend(
+        tmp_path,
+        sampling_source="per-prompt-sidecar",
+        token_budget_source="per-prompt-sidecar",
+    )
+    prompt = await backend.fetch("classify", "production")
+
+    assert prompt.token_budget is not None
+    assert prompt.token_budget.input_max_tokens == 10
+    assert prompt.token_budget.total_max_tokens is None
+
+
+async def test_filesystem_backend_token_budget_malformed_value_still_raises(tmp_path: Path) -> None:
+    # 0109 leaves malformed-VALUE handling to the backend: the operator-authored
+    # sidecar fails loud on a recognized bound with a bad value (a fallback-eligible
+    # PromptStoreUnavailable), distinct from the tolerated unrecognized-KEY case.
+    (tmp_path / "production").mkdir()
+    (tmp_path / "production" / "classify.j2").write_text("Classify: {{ topic }}", encoding="utf-8")
+    (tmp_path / "production" / "classify.config.json").write_text(
+        '{"token_budget": {"input_max_tokens": "oops"}}',
+        encoding="utf-8",
+    )
+
+    backend = FilesystemPromptBackend(
+        tmp_path,
+        sampling_source="per-prompt-sidecar",
+        token_budget_source="per-prompt-sidecar",
+    )
+    with pytest.raises(PromptStoreUnavailable):
+        await backend.fetch("classify", "production")
+
+
 async def test_filesystem_backend_token_budget_absent_sidecar(tmp_path: Path) -> None:
     (tmp_path / "production").mkdir()
     (tmp_path / "production" / "classify.j2").write_text("Classify: {{ topic }}", encoding="utf-8")
