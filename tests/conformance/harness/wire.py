@@ -234,6 +234,10 @@ def _get_carries_attr(exc: BaseException, name: str) -> Any:
         "output_content": "raw_content",
         "error_message": "failure_description",
     }
-    if hasattr(exc, name):
-        return getattr(exc, name)
+    # Single lookup for the direct case: a sentinel default avoids the
+    # hasattr + getattr double access (which would fire a descriptor twice).
+    missing = object()
+    direct = getattr(exc, name, missing)
+    if direct is not missing:
+        return direct
     return getattr(exc, aliases.get(name, name), None)
