@@ -90,14 +90,21 @@ _DEFAULT_RERANK_MODEL = "rerank-test"
 # driven through the general wire-capture harness). 038 ships with 0092:
 # TeiEmbeddingProvider.embed() chunk-and-stitches by its construction chunk_size
 # via the shared chunk_and_stitch_embed helper (also adopted by Cohere /v2/embed),
-# so no retrieval fixtures remain deferred.
+# so no retrieval fixtures remained deferred at that pin. The v0.107.0 pin bump
+# then re-defers 042 / 043 / 052, whose fixture-model wiring rides the v0.17.0
+# fixture-wiring PR (see the categorized entries below).
 _DEFERRED_FIXTURES: dict[str, str] = {
     # v0.17.0 spec-pin bump (v0.88.0 -> v0.107.0). Behavior for each of
     # these shipped + is unit-tested ahead of the pin; the conformance
     # fixture wiring rides the v0.17.0 fixture-wiring PR.
     # Proposal 0100 (spec v0.95.0) malformed ancillary figure not reported.
+    # Behavior shipped in v0.16.0 (chunk-stitch response_id nulling + all-or-
+    # nothing usage, 0092/0093); the gap is the `contains_event` matcher, which
+    # compares a record-valued field (usage) with `==` against a dict expectation
+    # and so never matches an EmbeddingUsage object. Matcher fix rides PR 6.
     "042-embed-chunk-malformed-usage-not-reported": (
-        "Proposal 0100 malformed ancillary figure; harness wiring rides the v0.17.0 fixture-wiring PR"
+        "Proposal 0100 malformed ancillary figure; contains_event matcher (record-vs-dict) "
+        "rides the v0.17.0 fixture-wiring PR"
     ),
     # Proposal 0103 (spec v0.98.0) §8.3 over-cap chunk-and-stitch + the
     # conformance-adapter §5.14 chunk_size construction directive.
