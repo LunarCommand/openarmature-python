@@ -974,7 +974,7 @@ note = "The §8.4 Cohere embed mapping recognizes input_type query / document / 
 [proposals."0100"]
 status = "implemented"
 since = "0.16.0"
-note = "A provider figure present on the wire but malformed (a token count as a string / negative / boolean) in an ancillary field (usage, response_id) is treated as not reported: the call succeeds, the figure is nulled, and the verbatim value stays on raw. An implementation MUST NOT raise on it and MUST NOT fabricate / coerce / clamp / repair it. Each figure is judged independently and the outcome follows §4 / §6's record rules; the rule binds the graph-engine §6 EmbeddingEvent / RerankEvent figures as well as the response. Behavior shipped + unit-tested ahead of the pin; the malformed-usage / malformed-id / chunk-stitch fixtures (incl. retrieval 042) ride the v0.17.0 fixture-wiring PR."
+note = "A provider figure present on the wire but malformed (a token count as a string / negative / boolean) in an ancillary field (usage, response_id) is treated as not reported: the call succeeds, the figure is nulled, and the verbatim value stays on raw. An implementation MUST NOT raise on it and MUST NOT fabricate / coerce / clamp / repair it. Each figure is judged independently and the outcome follows §4 / §6's record rules; the rule binds the graph-engine §6 EmbeddingEvent / RerankEvent figures as well as the response. Behavior shipped + unit-tested ahead of the pin; retrieval fixture 042 (chunk-and-stitch malformed usage) runs -- its chunk-stitch usage assertion needed the contains_event record-subset match wired into the harness."
 
 # Spec v0.96.0 (proposal 0101).  A malformed llm usage counter is not
 # reported; the observability guard chain reconciled (llm-provider §7).
@@ -997,7 +997,7 @@ note = "Generalizes the carries directive capability-neutrally (a key MUST name 
 [proposals."0103"]
 status = "implemented"
 since = "0.17.0"
-note = "§8.3's cap sentence pins that the §8 Batch chunking rule chunks by input COUNT only (the 2048-input cap); OpenAI's summed-token ceiling is NOT a chunking trigger, so an over-token request is sent and the provider's rejection surfaces as provider_invalid_request (no client-side token estimation). The mapping already implements count-based chunking (0092); the OpenAI embed provider gained a test-only chunk_size cap override (conformance-adapter §5.14) so a fixed-cap mapping's chunking fixture is self-enforcing. Behavior shipped + unit-tested ahead of the pin; fixture 043 (over-cap chunk-and-stitch + count-vs-token fail-loud) + the §5.14 harness directive ride the v0.17.0 fixture-wiring PR."
+note = "§8.3's cap sentence pins that the §8 Batch chunking rule chunks by input COUNT only (the 2048-input cap); OpenAI's summed-token ceiling is NOT a chunking trigger, so an over-token request is sent and the provider's rejection surfaces as provider_invalid_request (no client-side token estimation). The mapping already implements count-based chunking (0092); the OpenAI embed provider gained a test-only chunk_size cap override (conformance-adapter §5.14) so a fixed-cap mapping's chunking fixture is self-enforcing. Behavior shipped + unit-tested ahead of the pin; fixture 043 (over-cap chunk-and-stitch + count-vs-token fail-loud) runs, with the §5.14 chunk_size cap override threaded to the OpenAI embed provider construction in the harness."
 
 # Spec v0.99.0 (proposal 0104).  An empty-string response_id is null
 # (absent); §8.2 Jina maps a bare 400 to provider_invalid_request

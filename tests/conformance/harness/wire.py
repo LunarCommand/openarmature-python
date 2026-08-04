@@ -183,17 +183,19 @@ def assert_error_carries(exc: BaseException, carries: Mapping[str, Any]) -> None
             actual = _get_carries_attr(exc, key)
             if isinstance(expected, Mapping):
                 # A mapping-valued field (e.g. usage) is a subset match: each
-                # named key must equal the actual's value, reading a pydantic
-                # record's fields (Usage) or a plain mapping. Keys the fixture
-                # omits are ignored (the record MAY carry optional extras).
-                actual_map = _as_carries_mapping(actual)
+                # named key must be PRESENT on the actual with an equal value,
+                # reading a pydantic record's fields (Usage) or a plain mapping.
+                # Keys the fixture omits are ignored (the record MAY carry
+                # optional extras); requiring presence keeps a named key expected
+                # as null from matching a record that simply lacks the field.
+                actual_map = as_record_mapping(actual)
                 if actual_map is None:
                     raise AssertionError(
                         f"carries check failed: {key!r} is not a mapping/record "
                         f"(got {type(actual).__name__}); cannot subset-match {expected!r}"
                     )
                 for subkey, subval in cast("Mapping[str, Any]", expected).items():
-                    if actual_map.get(subkey) != subval:
+                    if subkey not in actual_map or actual_map[subkey] != subval:
                         raise AssertionError(
                             f"carries check failed: {key!r}[{subkey!r}] "
                             f"actual={actual_map.get(subkey)!r}, expected={subval!r}"
@@ -204,10 +206,11 @@ def assert_error_carries(exc: BaseException, carries: Mapping[str, Any]) -> None
                 )
 
 
-def _as_carries_mapping(value: Any) -> Mapping[str, Any] | None:
-    """Coerce a carries attribute to a mapping for subset comparison: a plain
-    Mapping passes through; a pydantic record (e.g. Usage) is dumped to a dict;
-    anything else returns None (not comparable as a mapping)."""
+def as_record_mapping(value: Any) -> Mapping[str, Any] | None:
+    """Coerce a value to a mapping for subset comparison: a plain Mapping
+    passes through; a pydantic record (e.g. Usage / EmbeddingUsage) is dumped to
+    a dict; anything else returns None (not comparable as a mapping). Shared by
+    the carries matcher (here) and the typed-event contains_event matcher."""
     if isinstance(value, Mapping):
         return cast("Mapping[str, Any]", value)
     dump = getattr(value, "model_dump", None)
