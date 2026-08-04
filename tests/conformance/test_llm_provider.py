@@ -122,13 +122,6 @@ _DEFERRED_FIXTURES: dict[str, str] = {
     # the conformance fixture wiring rides the v0.17.0 fixture-wiring PR,
     # except the provider/streaming rows, which stay deferred for their
     # existing reasons (Anthropic 0037 / Gemini 0038 / streaming 0062).
-    # Proposal 0098 (spec v0.93.0) structured-output carries-key rename.
-    "022-structured-output-parse-failure": (
-        "Proposal 0098 carries-key rename; wire.py carries adoption rides the v0.17.0 fixture-wiring PR"
-    ),
-    "023-structured-output-validation-failure": (
-        "Proposal 0098 carries-key rename; wire.py carries adoption rides the v0.17.0 fixture-wiring PR"
-    ),
     # Proposal 0095 (spec v0.91.0) adaptive call-level retry + reask.
     "061-call-level-retry-per-attempt-override": (
         "Proposal 0095 call.retry / wire_requests harness wiring; rides the v0.17.0 fixture-wiring PR"

@@ -217,9 +217,23 @@ def _as_carries_mapping(value: Any) -> Mapping[str, Any] | None:
 
 
 def _get_carries_attr(exc: BaseException, name: str) -> Any:
-    # Allow fixture-naming-friendly aliases for the carries block. The
-    # spec fixtures use ``raw_response_content`` (the wire-side label);
-    # the Python exception class names its attribute ``raw_content``.
-    aliases = {"raw_response_content": "raw_content"}
-    canonical = aliases.get(name, name)
-    return getattr(exc, canonical, None)
+    # Resolve a carries key to an exception attribute. Proposal 0098 renamed the
+    # structured_output_invalid carries keys to the llm-provider §7 error field
+    # names (output_content / error_message), but the Python
+    # StructuredOutputInvalid names those attributes raw_content /
+    # failure_description, so the alias below bridges the §7 names to the impl
+    # attributes. (The pre-0098 wire-side label raw_response_content is fully
+    # retired from the fixtures.)
+    #
+    # Resolve DIRECT-FIRST: an attribute named exactly as the carries key wins,
+    # and the alias is a fallback only when that attribute is absent. This keeps
+    # the alias from misdirecting a different error that legitimately exposes an
+    # output_content / error_message attribute, and stays correct if the impl
+    # ever renames its attributes to the §7 names.
+    aliases = {
+        "output_content": "raw_content",
+        "error_message": "failure_description",
+    }
+    if hasattr(exc, name):
+        return getattr(exc, name)
+    return getattr(exc, aliases.get(name, name), None)
