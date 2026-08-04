@@ -32,7 +32,7 @@
 
 [manifest]
 implementation = "openarmature-python"
-spec_pin = "v0.88.0"
+spec_pin = "v0.107.0"
 
 # Status values:
 #   implemented   — shipped behavior matches the proposal's contract
@@ -913,3 +913,162 @@ note = "Retrieval-provider general §8 *Batch chunking* rule for the embedding s
 status = "implemented"
 since = "0.16.0"
 note = "One uniform model across all four surfaces: a provider that reports no usage yields usage = null, never a fabricated record / zero / client-side estimate (§4 / §6). The response types were already widened (RerankResponse.usage is record | null from 0060a; EmbeddingResponse.usage from 0077), and both bundled observers already emitted the usage conditionally (OTel §5.5.8 gen_ai.usage.input_tokens guarded by `event.usage is not None`; Langfuse §8.4.5 usageDetails.input built only when a record is present), landed with the embedding observability in 0059b. Completed here: the OpenAIEmbeddingProvider no longer FABRICATES an EmbeddingUsage(input_tokens=0) when the OpenAI usage block is absent or malformed -- it surfaces usage = null (a *reported* zero still yields a record carrying 0; a malformed figure reads as not-reported rather than failing the call, since the vectors are sound and usage is secondary accounting -- the posture the Cohere and Jina mappings already took, and deliberately unlike the §6 document echo of 0097, where the corrupt field IS the payload). The other three embedding mappings were already conformant: TEI /embed and /rerank surface usage = null (§8.1 -- neither endpoint returns a usage object), and Cohere / Jina return null when the body reports no figure. The shared nonneg_int helper (one figure out of a vendor usage block: a non-negative int is reported, anything else is not) lifts into _wire.py and is adopted by all three of Cohere, Jina, and OpenAI. Conformance: the no-usage rendering fixtures 139 (OTel embedding span omits gen_ai.usage.input_tokens) + 140 (Langfuse embedding usageDetails carries no `input` key) are un-deferred and pass, joining the rerank pair 141 / 142 (wired with 0060b); retrieval fixtures 017 / 038 already assert usage: null for TEI /embed. Fixture 143 (embedding no-usage token METRIC not observed) was deferred behind the §11 metric-path gate -- NOT for a 0093 reason -- and is now realized: proposal 0067 wired the embedding metric path (_record_embedding_metrics), so 143 and its usage sibling 089 run. 0093 itself changes nothing in §11 or graph-engine §6 (both were already null-usage-aware), so no part of THIS proposal was left unimplemented by that carve-out; cf. 0060, whose sibling rerank metric fixture 109 is likewise now wired (v0.17.0)."
+
+# ------------------------------------------------------------------
+# v0.17.0 spec-pin bump v0.88.0 -> v0.107.0 (proposals 0094-0113).
+# Behavior for each of these shipped + is unit-tested AHEAD of the pin
+# (the adopt-ahead PRs); the spec's CONFORMANCE FIXTURES for the band
+# ride this bump and are wired into the harness in the dedicated
+# v0.17.0 fixture-wiring PR, so they are deferred here (see each
+# capability test file's _DEFERRED_FIXTURES). Provider-unimplemented
+# fixtures (Anthropic 0037 / Gemini 0038 / streaming 0062) stay deferred
+# for their existing reasons.
+# ------------------------------------------------------------------
+
+# Spec v0.89.0 (proposal 0094).  Subgraph declared same-name projection
+# boundary + reducer round-trip compile warning (graph-engine §2 /
+# conformance-adapter §5.8 / pipeline-utilities §9.3 / §11.4).
+[proposals."0094"]
+status = "implemented"
+since = "0.17.0"
+note = "A subgraph-as-node MAY declare its parent<->subgraph boundary as two field-name sets (in-set / out-set) crossing by the same name, compile-validated against both schemas, mutually exclusive with the explicit inputs/outputs maps (new compile-error category conflicting_projection_forms). A compile-time warning projection_reducer_round_trip flags a field projected in and back out through a non-round-trip-idempotent reducer (MUST for append / concat_flatten / bounded_append / merge_all; SHOULD for custom). Behavior shipped + unit-tested ahead of the pin; the graph-engine declared-boundary + round-trip fixtures (040 / 041 / 042) and the conformance-adapter expected_compile_warning directive ride the v0.17.0 fixture-wiring PR."
+
+# Spec v0.91.0 (proposal 0095).  Adaptive call-level retry: per-attempt
+# request override + structured-output reask (llm-provider §7.1 /
+# conformance-adapter §5.11).
+[proposals."0095"]
+status = "implemented"
+since = "0.17.0"
+note = "complete()'s retry parameter accepts an llm-provider retry-config extending the pipeline-utilities §6.1 record with two opt-in fields. per_attempt_override is a declarative retry override schedule (attempt 0 uses base config; the i-th override merges onto base for retry i; last entry carries forward). reask is a caller-supplied corrective-message builder: when set, structured_output_invalid becomes retryable-for-this-call (reusing max_attempts), and each failure appends the model's raw output as an assistant message plus the builder's return as a user message, accumulating across retries. OA authors no prompt text of its own. The per-attempt span carries openarmature.llm.retry_reason (transient | reask). Behavior shipped + unit-tested ahead of the pin; the llm-provider retry/reask fixtures (061-066) ride the v0.17.0 fixture-wiring PR. 0067 (the removed assistant-prefill continuation) is folded in via 0110."
+
+# Spec v0.90.0 (proposal 0096).  retrieval-provider raw widened to the
+# verbatim JSON of any top-level shape (§4 / §6 / §8).
+[proposals."0096"]
+status = "implemented"
+since = "0.16.0"
+note = "EmbeddingResponse.raw / RerankResponse.raw are dict[str, Any] | list[Any]: raw is the verbatim deserialized JSON of the successful provider response (object or array, matching the response top-level shape), never wrapped or reshaped. This carries bare-array wire (TEI /embed returns a list of vector arrays, /rerank a list of result objects). A chunk-and-stitch call's raw is the list of per-request verbatim responses, in order. The response types + the chunk-stitch raw clause shipped + are unit-tested ahead of the pin; the raw assertions added to the TEI + Cohere fixtures (017 / 014 / 015 / 038 / 037) ride the v0.17.0 fixture-wiring PR."
+
+# Spec v0.92.0 (proposal 0097).  rerank document echo generalized to
+# object shapes (retrieval-provider §6 / §8.2 Jina).
+[proposals."0097"]
+status = "implemented"
+since = "0.16.0"
+note = "ScoredDocument.document stays echoed text (string | null) but the echo rule spans object shapes: a string echo surfaces verbatim (empty string is present -> \"\", not null); an object echo yields its text content (a string-valued `text` key -> that string; any other object -> null); an absent / null echo -> null. The verbatim echo (whatever its shape) is preserved nested on raw (0096). §8.2 realizes it for Jina, whose rerank document is anyOf[string, TextDoc, ImageDoc, null]. A document echo that is not string / object / null is a malformed response -> provider_invalid_response. Behavior shipped + unit-tested ahead of the pin; fixture 019's added object-shape cases ride the v0.17.0 fixture-wiring PR."
+
+# Spec v0.93.0 (proposal 0098).  conformance-adapter §5.12 structured-
+# output carries keys aligned with the llm-provider §7 error field names.
+[proposals."0098"]
+status = "textual-only"
+since = "0.17.0"
+note = "A conformance-adapter directive rename with no shipped-module component: the three structured_output_invalid carries keys that did not track their §7 fields are renamed (raw_response_content -> output_content, failure_description_present -> error_message_present, failure_description_mentions -> error_message_mentions), and §5.12 states the key-naming convention normatively (a key MUST name a §7 error field, bare field = exact-equality with subset match for a mapping-valued field, _present / _mentions the closed flavor set). No openarmature-python shipped module changes; the conformance harness adopts the renamed keys (llm-provider fixtures 022 / 023) in the v0.17.0 fixture-wiring PR."
+
+# Spec v0.94.0 (proposal 0099).  Cohere /v2/embed input_type widened;
+# the extras-vs-managed-field claims pinned (retrieval-provider §8.4).
+[proposals."0099"]
+status = "implemented"
+since = "0.17.0"
+note = "The §8.4 Cohere embed mapping recognizes input_type query / document / classification / clustering (classification / clustering identity-mapped onto the wire), exercising §2's rule that a mapping MAY recognize additional well-known values its backend supports; the set is still fixed (an outside value is a pre-send provider_invalid_request), just wider, and image stays unrecognized. The prior claim that other values ride the extras bag is removed (input_type is a declared field, so it cannot). embedding_types is a mapping-managed wire key: an extras-supplied embedding_types MUST be merged with the mandatory \"float\" (ordered, de-duplicated, float first), never replace it. Behavior shipped + unit-tested ahead of the pin; fixture 033's new cases + the embedding_types merge fixture ride the v0.17.0 fixture-wiring PR."
+
+# Spec v0.95.0 (proposal 0100).  A malformed retrieval ancillary figure
+# is not reported, not provider_invalid_response (retrieval-provider §7).
+[proposals."0100"]
+status = "implemented"
+since = "0.16.0"
+note = "A provider figure present on the wire but malformed (a token count as a string / negative / boolean) in an ancillary field (usage, response_id) is treated as not reported: the call succeeds, the figure is nulled, and the verbatim value stays on raw. An implementation MUST NOT raise on it and MUST NOT fabricate / coerce / clamp / repair it. Each figure is judged independently and the outcome follows §4 / §6's record rules; the rule binds the graph-engine §6 EmbeddingEvent / RerankEvent figures as well as the response. Behavior shipped + unit-tested ahead of the pin; the malformed-usage / malformed-id / chunk-stitch fixtures (incl. retrieval 042) ride the v0.17.0 fixture-wiring PR."
+
+# Spec v0.96.0 (proposal 0101).  A malformed llm usage counter is not
+# reported; the observability guard chain reconciled (llm-provider §7).
+[proposals."0101"]
+status = "implemented"
+since = "0.17.0"
+note = "The llm sibling of 0100, whose Response.usage is an always-present record with individually-nullable counters. A counter present on the wire but malformed (non-integer, negative, boolean) is treated as not reported: that counter is null, the others stand, the verbatim value stays on raw, and the implementation MUST NOT raise / fabricate / coerce. A derived total_tokens (Anthropic) whose addend is not reported is itself null. The observability reconciliation threads the now-reachable null counter through every renderer: the graph-engine event mirrors the response, the §5.5.3 input-token span guard moves per-record -> per-field, the §11.2 histogram becomes per-counter, and the token-budget instruments do not evaluate a bound whose counter is not reported. Behavior shipped + unit-tested ahead of the pin; the llm counter + observability fixtures (070 / 071 stay provider/streaming-deferred) ride the v0.17.0 fixture-wiring PR."
+
+# Spec v0.97.0 (proposal 0102).  A general carries error-field-assertion
+# convention; migration + render error field surfaces ratified
+# (conformance-adapter §5.13).
+[proposals."0102"]
+status = "textual-only"
+since = "0.17.0"
+note = "Generalizes the carries directive capability-neutrally (a key MUST name a field the raised error's own capability spec defines it exposes; bare field = exact-equality with a subset match for a mapping-valued field; _present / _mentions the closed flavor set) and ratifies the checkpoint / prompt-render error surfaces to name the fields the reference implementation already exposes (pipeline-utilities §10.10 from_version / to_version / registered_migrations_count / registry_description; prompt-management §11 prompt_render_error variables / description). The implemented error surfaces already conform, so no openarmature-python shipped module changes; the sessions fixture 009 orphan-key edit + the directive generalization ride the v0.17.0 fixture-wiring PR."
+
+# Spec v0.98.0 (proposal 0103).  retrieval-provider §8.3 count-vs-token
+# boundary clarified + the OpenAI conformance holes closed; a §5.14
+# chunk_size construction directive.
+[proposals."0103"]
+status = "implemented"
+since = "0.17.0"
+note = "§8.3's cap sentence pins that the §8 Batch chunking rule chunks by input COUNT only (the 2048-input cap); OpenAI's summed-token ceiling is NOT a chunking trigger, so an over-token request is sent and the provider's rejection surfaces as provider_invalid_request (no client-side token estimation). The mapping already implements count-based chunking (0092); the OpenAI embed provider gained a test-only chunk_size cap override (conformance-adapter §5.14) so a fixed-cap mapping's chunking fixture is self-enforcing. Behavior shipped + unit-tested ahead of the pin; fixture 043 (over-cap chunk-and-stitch + count-vs-token fail-loud) + the §5.14 harness directive ride the v0.17.0 fixture-wiring PR."
+
+# Spec v0.99.0 (proposal 0104).  An empty-string response_id is null
+# (absent); §8.2 Jina maps a bare 400 to provider_invalid_request
+# (retrieval-provider §4 / §6 / §8.2).
+[proposals."0104"]
+status = "implemented"
+since = "0.17.0"
+note = "Two under-specified edges. (1) An empty-string response_id is not a usable identifier, so it is absent -- null, not surfaced as present-as-\"\" -- on both the response and the typed event, with the verbatim \"\" preserved on raw (deliberately diverging from 0097's empty-document handling: a document is content, an id is a correlation key). (2) §8.2's Jina error enumeration named only 422, so a bare 400 fell through to the transient provider_unavailable; a bare 400 now maps to provider_invalid_request, aligning §8.2 with the other mappings and the §7 semantics. Behavior shipped + unit-tested ahead of the pin; fixtures 044 / 045 ride the v0.17.0 fixture-wiring PR."
+
+# Spec v0.100.0 (proposal 0105).  A general managed-field collision rule
+# for extras keys; managed keys declared across both capabilities
+# (llm-provider §6).
+[proposals."0105"]
+status = "implemented"
+since = "0.17.0"
+note = "§6's extras pass-through forwards an undeclared key untouched, but said nothing about a key that collides with a wire field the mapping MANAGES. 0105 adds a bounded carve-out: an additive / list-shaped managed field MERGES the caller's value(s) with the mapping's (deterministic order, mapping-first, de-duplicated); a non-additive managed field (a scalar mode-switch or an object the mapping constructs wholesale) takes a matching extras value as a redundant no-op and REJECTS a conflicting one pre-send with provider_invalid_request. A field produced only conditionally is managed only while producing it; each §8.x mapping MUST enumerate its managed keys. The capability-neutral resolver (apply_managed_extras) shipped + is unit-tested ahead of the pin; the retrieval + llm-provider reject-arm fixtures (046-048, 072-074) ride the v0.17.0 fixture-wiring PR."
+
+# Spec v0.101.0 (proposal 0106).  retrieval-provider §8.3 base64
+# embedding output-encoding is decoded, not broken.
+[proposals."0106"]
+status = "implemented"
+since = "0.17.0"
+note = "The §8.3 consumer decodes data[].embedding by its wire shape: a JSON number array is the float vector verbatim; a base64 string is decoded as a little-endian IEEE-754 float32 array to the same vector; any other shape raises provider_invalid_response, and the dispatch is exhaustive. A base64 string that is not valid base64, or whose decoded byte length is not a multiple of 4, raises provider_invalid_response (fail-loud, verbatim response on raw). encoding_format stays an UNMANAGED extras key (the consumer keys on the response shape, not the request parameter), the wire default stays \"float\", and base64 composes with batch chunking. Behavior shipped + unit-tested ahead of the pin; fixtures 049 / 050 ride the v0.17.0 fixture-wiring PR."
+
+# Spec v0.102.0 (proposal 0107).  A normative home for header-only
+# conformance fixture directives (conformance-adapter §5).
+[proposals."0107"]
+status = "textual-only"
+since = "0.17.0"
+note = "Lifts a load-bearing set of conformance directives from fixture-header comments into §5: §5.15 documents the retrieval construction / call / mock / wire vocabulary, §5.5 gains typed_observers / contains_event, and §5.8 gains the caught_exception cause-chain assertion. Almost entirely documentation of directives the harness already behaves by; the one additive piece is a mock_embedding / mock_rerank raises: {error_type, message} sub-directive (the retrieval analogue of the tool path's mock_tool raises). No openarmature-python shipped module changes; the mock-raises directive + observability fixtures 150 / 151 ride the v0.17.0 fixture-wiring PR."
+
+# Spec v0.103.0 (proposal 0108).  declared-field-vs-extras wire-key
+# collision, unified under 0105 (llm-provider §6 / §8.1-8.3 +
+# retrieval-provider §8.2 / §10).
+[proposals."0108"]
+status = "implemented"
+since = "0.17.0"
+note = "0105 deferred a structurally different case: a wire key that realizes a DECLARED OA field, shadowed by an extras key of the wire name (llm stop<-stop_sequences, stream<-complete(stream=...), Jina task<-input_type, retrieval dimensions). 0108 settles it under 0105's arms: a wire key the mapping produces as a declared field's realization is managed while producing it (merge if additive, matching-no-op / conflicting-reject if scalar); when the declared field is absent the wire key is unmanaged and the extras key rides untouched (the escape hatch). §8.2 Anthropic's nonexistent seed parameter is also corrected to the unsupported-reject set. Behavior shipped + unit-tested ahead of the pin; the DISTINCT-name arm (Jina task, fixture 051) already passes. FLAGGED to the batched spec review: the SAME-name arm (llm temperature / retrieval dimensions, fixtures 075 / 052) is not reachable through the real caller path -- a declared-field-named key routes to the declared field, never into the extras model_extra -- so its reject is currently unexercisable; resolution + fixtures ride the v0.17.0 fixture-wiring PR."
+
+# Spec v0.104.0 (proposal 0109).  token-budget failure-path parity +
+# config extra-key handling (observability §8.4.3 / prompt-management
+# §3 / §5).
+[proposals."0109"]
+status = "implemented"
+since = "0.17.0"
+note = "Two refinements to 0083. (1) The Langfuse observer emits a single any-bound boolean generation.metadata.token_budget_exceeded regardless of observation.level, so an over-budget FAILURE (where ERROR level previously suppressed the WARNING) stays discoverable, at parity with the OTel exceeded attribute. (2) A backend sourcing Prompt.token_budget MUST ignore an unrecognized config key (recognized bounds apply; token_budget has no extras mapping) and a malformed / unrecognized token_budget MUST NOT break the call. Converges the two backends 0083 left divergent (partial-budget vs reject-to-fallback); malformed VALUES for a recognized bound stay backend discretion. Behavior shipped + unit-tested ahead of the pin; observability 155 / 156 + prompt-management 037 ride the v0.17.0 fixture-wiring PR."
+
+# Spec v0.104.1 (proposal 0110).  Remove the reask assistant-prefill
+# continuation branch (llm-provider §7.1 / conformance-adapter §5.11).
+[proposals."0110"]
+status = "implemented"
+since = "0.17.0"
+note = "0095's reask specified an assistant-prefill continuation branch (when the reask working transcript's last message is already an assistant caller-prefill, the model continues it) that is UNREACHABLE: §3 requires the last pre-call message to be user or tool, so the reask transcript never ends in assistant. 0110 removes the trio 0095 introduced for that one case (the §7.1 continuation clause, the §5.11 full-list messages sub-form, and fixture 067) -- a reask retry now always appends the model output as a fresh assistant message. The OpenAI reask path implements the post-removal contract (the continuation clause is not present); no fixture wiring is owed here since 067 is removed from the corpus."
+
+# Spec v0.105.0 (proposal 0111).  Fan-out round-trip warning extended to
+# the primary collect channel (pipeline-utilities §9.3).
+[proposals."0111"]
+status = "implemented"
+since = "0.17.0"
+note = "The §9.3 projection_reducer_round_trip pointer previously named only the inputs / extra_outputs channel; it now also covers the fan-out's primary collect_field / target_field channel. A parent field seeded into each instance via inputs and collected straight back out into that same field round-trips through the parent's reducer, doubling once per instance under a non-round-trip-idempotent reducer (append and kin); a collect_field not seeded from target_field via inputs does not warn. Behavior shipped + unit-tested ahead of the pin; fan-out fixture 078 (collect-channel round-trip + the no-false-positive case) rides the v0.17.0 fixture-wiring PR."
+
+# Spec v0.106.0 (proposal 0112).  Fan-out collect round-trip warning
+# extended to item-field seeding (pipeline-utilities §9.1).
+[proposals."0112"]
+status = "implemented"
+since = "0.17.0"
+note = "0111 scoped the collect-channel warning to inputs-based seeding; it now also fires on the items_field / item_field per-item spread (the DEFAULT fan-out mode) when item_field equals collect_field and items_field equals target_field, exactly as the inputs-seeded case does but in the more common spelling. A collect_field seeded from neither mechanism (or a different parent field) does not warn. Behavior shipped + unit-tested ahead of the pin; fixture 078's added item-seeded round-trip + no-false-positive cases ride the v0.17.0 fixture-wiring PR."
+
+# Spec v0.107.0 (proposal 0113).  Malformed extras on a merge-managed
+# wire field (llm-provider §6, inherited by retrieval-provider §8.4).
+[proposals."0113"]
+status = "partial"
+since = "0.17.0"
+note = "0113 pins the malformed case of the §6 Managed-field collision MERGE arm: a caller's extras value that is not the field's expected list shape, or a list containing any element not of the expected element type/shape, is treated as ABSENT (the mapping sends only the value(s) it would send with no such extra present -- all-or-nothing, no partial salvage, no raise / diagnostic); malformation is judged structurally (no semantic vocabulary check). PARTIAL: the retrieval-provider §8.4 embedding_types arm (a malformed extras embedding_types -> wire [\"float\"]) already ships via 0099's bespoke Cohere merge, and its fixture 053 passes. The GENERAL merge-arm malformed rule is NOT yet implemented -- the shared apply_managed_extras merge arm coerces a non-list-shaped extra to a one-element list rather than treating a malformed value as absent, so an llm stop malformed extra (fixture 081) is not yet handled. The general merge-arm malformed handling + fixture 081 ride the v0.17.0 fixture-wiring PR."

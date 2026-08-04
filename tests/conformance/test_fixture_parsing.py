@@ -626,6 +626,82 @@ _DEFERRED_FIXTURES: dict[str, str] = {
         "directive shapes the cross-cap parser does not model, "
         "runtime-driven in test_observability"
     ),
+    # ----- v0.17.0 spec-pin bump (v0.88.0 -> v0.107.0) ------------------
+    # These fixtures use directive shapes the cross-capability parser does
+    # not yet model. Behavior for each proposal shipped + is unit-tested
+    # ahead of the pin; the fixture-model wiring rides the v0.17.0
+    # fixture-wiring PR (041 parses cleanly -- only its runtime adapter is
+    # deferred, in test_conformance).
+    # Proposal 0094 (v0.89.0) declared-boundary + round-trip warning.
+    "graph-engine/040-subgraph-declared-same-name-boundary": (
+        "Proposal 0094 declared-boundary GraphFixture model; rides the v0.17.0 fixture-wiring PR"
+    ),
+    "graph-engine/042-reducer-round-trip-warning": (
+        "Proposal 0094 round-trip warning fixture model; rides the v0.17.0 fixture-wiring PR"
+    ),
+    # Proposal 0095 (v0.91.0) adaptive call-level retry + reask.
+    "llm-provider/061-call-level-retry-per-attempt-override": (
+        "Proposal 0095 call.retry / wire_requests directive model; rides the v0.17.0 fixture-wiring PR"
+    ),
+    "llm-provider/062-call-level-reask-success": (
+        "Proposal 0095 call.retry / wire_requests directive model; rides the v0.17.0 fixture-wiring PR"
+    ),
+    "llm-provider/063-call-level-reask-budget-exhausted": (
+        "Proposal 0095 call.retry / wire_requests directive model; rides the v0.17.0 fixture-wiring PR"
+    ),
+    "llm-provider/064-call-level-reask-off-by-default": (
+        "Proposal 0095 call.retry / wire_requests directive model; rides the v0.17.0 fixture-wiring PR"
+    ),
+    "llm-provider/065-call-level-reask-compose-override": (
+        "Proposal 0095 call.retry / wire_requests directive model; rides the v0.17.0 fixture-wiring PR"
+    ),
+    "llm-provider/066-call-level-reask-transient-interleave": (
+        "Proposal 0095 call.retry / wire_requests directive model; rides the v0.17.0 fixture-wiring PR"
+    ),
+    # Proposal 0101 (v0.96.0) malformed usage counter.
+    "llm-provider/070-usage-counter-derived-total-unreported-addend": (
+        "Proposal 0101 usage-counter fixture model; rides the v0.17.0 fixture-wiring PR"
+    ),
+    "llm-provider/071-usage-counter-malformed-streaming-terminal-chunk": (
+        "Proposal 0101 usage-counter fixture model; rides the v0.17.0 fixture-wiring PR"
+    ),
+    # Proposals 0105 (v0.100.0) / 0108 (v0.103.0) managed-field collision;
+    # the fixtures carry per-case `invariants` flags the parser does not model.
+    "llm-provider/072-managed-response-format-collision": (
+        "Proposal 0105 managed-collision invariants model; rides the v0.17.0 fixture-wiring PR"
+    ),
+    "llm-provider/073-managed-stream-options-collision": (
+        "Proposal 0105 managed-collision invariants model; rides the v0.17.0 fixture-wiring PR"
+    ),
+    "llm-provider/074-managed-structural-model-collision": (
+        "Proposal 0105 managed-collision invariants model; rides the v0.17.0 fixture-wiring PR"
+    ),
+    "llm-provider/075-managed-declared-scalar-collision": (
+        "Proposal 0108 managed-collision invariants model; rides the v0.17.0 fixture-wiring PR"
+    ),
+    "llm-provider/076-managed-declared-stop-merge": (
+        "Proposal 0108 managed-collision invariants model; rides the v0.17.0 fixture-wiring PR"
+    ),
+    "llm-provider/077-managed-declared-stream-collision": (
+        "Proposal 0108 managed-collision invariants model; rides the v0.17.0 fixture-wiring PR"
+    ),
+    "llm-provider/078-managed-anthropic-stream-reject": (
+        "Proposal 0108 managed-collision invariants model; rides the v0.17.0 fixture-wiring PR"
+    ),
+    "llm-provider/079-managed-anthropic-stop-merge": (
+        "Proposal 0108 managed-collision invariants model; rides the v0.17.0 fixture-wiring PR"
+    ),
+    "llm-provider/080-managed-gemini-stop-merge": (
+        "Proposal 0108 managed-collision invariants model; rides the v0.17.0 fixture-wiring PR"
+    ),
+    # Proposal 0113 (v0.107.0) malformed extras on a merge-managed field.
+    "llm-provider/081-managed-declared-stop-malformed": (
+        "Proposal 0113 malformed merge-managed extras invariants model; rides the v0.17.0 fixture-wiring PR"
+    ),
+    # Proposal 0109 (v0.104.0) token-budget config extra-key handling.
+    "prompt-management/037-token-budget-unrecognized-key-ignored": (
+        "Proposal 0109 token_budget extra-key fixture model; rides the v0.17.0 fixture-wiring PR"
+    ),
 }
 
 
