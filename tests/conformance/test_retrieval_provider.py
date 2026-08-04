@@ -33,6 +33,7 @@ from openarmature.retrieval import (
     CohereEmbeddingProvider,
     CohereRerankProvider,
     EmbeddingRuntimeConfig,
+    EmbeddingUsage,
     JinaEmbeddingProvider,
     JinaRerankProvider,
     OpenAIEmbeddingProvider,
@@ -42,6 +43,7 @@ from openarmature.retrieval import (
 )
 
 from ._deferral import skip_if_deferred
+from .harness import as_record_mapping
 
 # The wire endpoint each mapping posts to, keyed by the fixture's ``mapping``
 # directive (None => the harness-internal default). The wire-capture assertion
@@ -91,27 +93,13 @@ _DEFAULT_RERANK_MODEL = "rerank-test"
 # TeiEmbeddingProvider.embed() chunk-and-stitches by its construction chunk_size
 # via the shared chunk_and_stitch_embed helper (also adopted by Cohere /v2/embed),
 # so no retrieval fixtures remained deferred at that pin. The v0.107.0 pin bump
-# then re-defers 042 / 043 / 052, whose fixture-model wiring rides the v0.17.0
-# fixture-wiring PR (see the categorized entries below).
+# re-deferred 042 / 043 / 052; 042 (contains_event record match) and 043
+# (chunk_size directive) are now wired, leaving only 052 (the same-name declared
+# collision, held for the batched spec review).
 _DEFERRED_FIXTURES: dict[str, str] = {
     # v0.17.0 spec-pin bump (v0.88.0 -> v0.107.0). Behavior for each of
     # these shipped + is unit-tested ahead of the pin; the conformance
     # fixture wiring rides the v0.17.0 fixture-wiring PR.
-    # Proposal 0100 (spec v0.95.0) malformed ancillary figure not reported.
-    # Behavior shipped in v0.16.0 (chunk-stitch response_id nulling + all-or-
-    # nothing usage, 0092/0093); the gap is the `contains_event` matcher, which
-    # compares a record-valued field (usage) with `==` against a dict expectation
-    # and so never matches an EmbeddingUsage object. Matcher fix rides PR 6.
-    "042-embed-chunk-malformed-usage-not-reported": (
-        "Proposal 0100 malformed ancillary figure; contains_event matcher (record-vs-dict) "
-        "rides the v0.17.0 fixture-wiring PR"
-    ),
-    # Proposal 0103 (spec v0.98.0) §8.3 over-cap chunk-and-stitch + the
-    # conformance-adapter §5.14 chunk_size construction directive.
-    "043-embed-openai-chunk-and-stitch": (
-        "Proposal 0103 chunk_size construction directive (conformance-adapter §5.14); "
-        "harness wiring rides the v0.17.0 fixture-wiring PR"
-    ),
     # Proposal 0108 (spec v0.103.0) same-NAME declared-field collision. The
     # dimensions reject is coded (openai.py) but a declared-field-named extras
     # key routes to the declared field, never into model_extra, so the collision
@@ -233,6 +221,8 @@ def _build_provider(
                 transport=transport,
                 query_prefix=cast("str | None", block.get("query_prefix")),
                 document_prefix=cast("str | None", block.get("document_prefix")),
+                # §5.14 test-only cap override; absent -> the fixed vendor 2048.
+                chunk_size=cast("int | None", block.get("chunk_size")),
             )
         else:
             # The pre-0079 protocol fixtures (001-012, mapping absent) carry no
@@ -559,11 +549,30 @@ def _install_typed_collector(case: Mapping[str, Any]) -> tuple[list[Any], Callab
     return events, _cleanup
 
 
+def _contains_field_matches(actual: Any, expected: Any) -> bool:
+    # A Mapping-valued expectation (e.g. usage: {input_tokens: 500}) is a subset
+    # match against a record-valued field (EmbeddingUsage): coerce the field to a
+    # dict and require each named key to be PRESENT with an equal value, ignoring
+    # keys the fixture omits. Requiring presence keeps a named key expected as
+    # null from matching a record that simply lacks the field. Scalars and null
+    # use plain equality (so usage: null matches a null record).
+    if isinstance(expected, Mapping):
+        actual_map = as_record_mapping(actual)
+        if actual_map is None:
+            return False
+        return all(
+            k in actual_map and actual_map[k] == v for k, v in cast("Mapping[str, Any]", expected).items()
+        )
+    return bool(actual == expected)
+
+
 def _assert_contains_event(events: list[Any], expected: Mapping[str, Any]) -> None:
     """Assert each observer's contains_event against the collected events.
 
     ``contains_event`` names an event_type and a fields mapping; a collected
-    event of that type must match every listed field (dict / scalar equality).
+    event of that type must match every listed field. A scalar / null field uses
+    equality; a mapping-valued field is a subset match against the event's record
+    field (e.g. ``usage: {input_tokens: 500}`` vs an ``EmbeddingUsage``).
     """
     observers = cast("Mapping[str, Any]", expected.get("observers") or {})
     for obs_name, obs_expect in observers.items():
@@ -575,7 +584,9 @@ def _assert_contains_event(events: list[Any], expected: Mapping[str, Any]) -> No
         want_fields = cast("Mapping[str, Any]", contains.get("fields") or {})
         candidates = [e for e in events if type(e).__name__ == event_type]
         for event in candidates:
-            if all(getattr(event, key, None) == val for key, val in want_fields.items()):
+            if all(
+                _contains_field_matches(getattr(event, key, None), val) for key, val in want_fields.items()
+            ):
                 break
         else:
             raise AssertionError(
@@ -683,3 +694,20 @@ async def _run_rerank_case(
     finally:
         cleanup()
         await provider.aclose()
+
+
+def test_contains_field_matches() -> None:
+    # The contains_event field comparator: scalars / null by equality, a mapping
+    # expectation by record-subset (present-key required).
+    assert _contains_field_matches("embed_node", "embed_node")
+    assert not _contains_field_matches("a", "b")
+    assert _contains_field_matches(None, None)
+    # A mapping expectation subset-matches a record, ignoring unnamed fields.
+    assert _contains_field_matches(EmbeddingUsage(input_tokens=500), {"input_tokens": 500})
+    assert _contains_field_matches({"a": 1, "b": 2}, {"a": 1})
+    # A mapping expectation never matches a null / non-record actual.
+    assert not _contains_field_matches(None, {"input_tokens": 500})
+    # A named key the record lacks does not match even when expected null: the
+    # present-key requirement keeps a missing field from reading as an explicit
+    # null (the .get()-based comparison this replaced would have matched here).
+    assert not _contains_field_matches(EmbeddingUsage(input_tokens=500), {"missing": None})
