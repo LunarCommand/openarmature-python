@@ -117,6 +117,75 @@ _DEFERRED_FIXTURES: dict[str, str] = {
     # rejection. Unimplemented until a later v0.16.0 PR.
     "059-openai-streaming-wire": "Proposal 0062 streaming; not implemented",
     "060-stream-unsupported-mapping-rejects": "Proposal 0062 streaming; not implemented",
+    # ----- v0.17.0 spec-pin bump (v0.88.0 -> v0.107.0) ------------------
+    # Behavior for each of these shipped + is unit-tested ahead of the pin;
+    # the conformance fixture wiring rides the v0.17.0 fixture-wiring PR,
+    # except the provider/streaming rows, which stay deferred for their
+    # existing reasons (Anthropic 0037 / Gemini 0038 / streaming 0062).
+    # Proposal 0098 (spec v0.93.0) structured-output carries-key rename.
+    "022-structured-output-parse-failure": (
+        "Proposal 0098 carries-key rename; wire.py carries adoption rides the v0.17.0 fixture-wiring PR"
+    ),
+    "023-structured-output-validation-failure": (
+        "Proposal 0098 carries-key rename; wire.py carries adoption rides the v0.17.0 fixture-wiring PR"
+    ),
+    # Proposal 0095 (spec v0.91.0) adaptive call-level retry + reask.
+    "061-call-level-retry-per-attempt-override": (
+        "Proposal 0095 call.retry / wire_requests harness wiring; rides the v0.17.0 fixture-wiring PR"
+    ),
+    "062-call-level-reask-success": (
+        "Proposal 0095 call.retry / wire_requests harness wiring; rides the v0.17.0 fixture-wiring PR"
+    ),
+    "063-call-level-reask-budget-exhausted": (
+        "Proposal 0095 call.retry / wire_requests harness wiring; rides the v0.17.0 fixture-wiring PR"
+    ),
+    "064-call-level-reask-off-by-default": (
+        "Proposal 0095 call.retry / wire_requests harness wiring; rides the v0.17.0 fixture-wiring PR"
+    ),
+    "065-call-level-reask-compose-override": (
+        "Proposal 0095 call.retry / wire_requests harness wiring; rides the v0.17.0 fixture-wiring PR"
+    ),
+    "066-call-level-reask-transient-interleave": (
+        "Proposal 0095 call.retry / wire_requests harness wiring; rides the v0.17.0 fixture-wiring PR"
+    ),
+    # Proposal 0101 (spec v0.96.0) malformed usage counter.
+    "070-usage-counter-derived-total-unreported-addend": (
+        "Proposal 0101 derived-total addend; Anthropic provider not implemented (0037 not-yet)"
+    ),
+    "071-usage-counter-malformed-streaming-terminal-chunk": (
+        "Proposal 0101 malformed streaming terminal chunk; streaming not implemented (0062)"
+    ),
+    # Proposal 0105 (spec v0.100.0) managed-field collision, streaming arm.
+    "073-managed-stream-options-collision": (
+        "Proposal 0105 stream_options collision; streaming not implemented (0062)"
+    ),
+    # Proposal 0108 (spec v0.103.0) declared-field-vs-extras collision.
+    "075-managed-declared-scalar-collision": (
+        "Proposal 0108 same-name declared collision; caller-reachability flagged to spec, "
+        "wiring rides the v0.17.0 fixture-wiring PR"
+    ),
+    "077-managed-declared-stream-collision": (
+        "Proposal 0108 stream collision; streaming not implemented (0062)"
+    ),
+    "078-managed-anthropic-stream-reject": (
+        "Proposal 0108 managed stream reject; Anthropic provider not implemented (0037 not-yet)"
+    ),
+    "079-managed-anthropic-stop-merge": (
+        "Proposal 0108 stop merge; Anthropic provider not implemented (0037 not-yet)"
+    ),
+    "080-managed-gemini-stop-merge": (
+        "Proposal 0108 stop merge; Gemini provider not implemented (0038 not-yet)"
+    ),
+    # Proposal 0113 (spec v0.107.0) malformed extras on a merge-managed field.
+    # PARTIAL: retrieval embedding_types (fixture 053) works via 0099's bespoke
+    # merge, but the GENERAL apply_managed_extras merge arm coerces a malformed
+    # extra instead of treating it as absent, so llm stop malformed is not yet
+    # handled -- a behavior gap, not just harness wiring. The general merge-arm
+    # malformed rule + this fixture ride the v0.17.0 fixture-wiring PR.
+    "081-managed-declared-stop-malformed": (
+        "Proposal 0113 general merge-arm malformed handling not yet implemented; "
+        "rides the v0.17.0 fixture-wiring PR"
+    ),
 }
 
 

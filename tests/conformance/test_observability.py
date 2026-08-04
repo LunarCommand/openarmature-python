@@ -388,6 +388,56 @@ _DEFERRED_FIXTURES: dict[str, str] = {
     "136-langfuse-parallel-branches-dispatch-span": (
         "Langfuse parallel-branches dispatch-span parity (proposal 0088) not-yet implemented"
     ),
+    # ----- v0.17.0 spec-pin bump (v0.88.0 -> v0.107.0) ------------------
+    # Behavior for each of these shipped + is unit-tested ahead of the pin
+    # (test_observability_otel.py / test_observability_langfuse.py); the
+    # conformance fixture wiring rides the v0.17.0 fixture-wiring PR.
+    # Proposal 0101 (spec v0.96.0) malformed usage counter -> not reported,
+    # threaded through the span / metric / budget observability surfaces.
+    "144-otel-llm-span-omits-input-usage-on-null-counter": (
+        "Proposal 0101 null-counter observability; harness wiring rides the v0.17.0 fixture-wiring PR"
+    ),
+    "145-llm-metrics-no-input-token-observation-on-null-counter": (
+        "Proposal 0101 null-counter observability; harness wiring rides the v0.17.0 fixture-wiring PR"
+    ),
+    "146-token-budget-input-bound-not-evaluated-on-null-counter": (
+        "Proposal 0101 null-counter observability; harness wiring rides the v0.17.0 fixture-wiring PR"
+    ),
+    "147-otel-null-counter-reaches-no-span-histogram-or-budget": (
+        "Proposal 0101 null-counter observability; harness wiring rides the v0.17.0 fixture-wiring PR"
+    ),
+    "148-langfuse-generation-usage-omits-input-on-null-counter": (
+        "Proposal 0101 null-counter observability; harness wiring rides the v0.17.0 fixture-wiring PR"
+    ),
+    "149-malformed-wire-counter-nulled-through-mapping-to-event-and-span": (
+        "Proposal 0101 null-counter observability; harness wiring rides the v0.17.0 fixture-wiring PR"
+    ),
+    # Proposal 0107 (spec v0.102.0) mock_embedding / mock_rerank raises
+    # sub-directive -> literal error-field assertion.
+    "150-langfuse-embedding-failure-literal-error-fields": (
+        "Proposal 0107 mock-raises literal error fields; harness wiring rides the v0.17.0 fixture-wiring PR"
+    ),
+    "151-langfuse-rerank-failure-literal-error-fields": (
+        "Proposal 0107 mock-raises literal error fields; harness wiring rides the v0.17.0 fixture-wiring PR"
+    ),
+    # Spec v0.103.1 conformance coverage (0084 orphan-fallback arms + the
+    # embedding failure-metrics counterpart).
+    "152-otel-parallel-branch-orphan-llm-fallback": (
+        "Spec v0.103.1 orphan-fallback coverage; harness wiring rides the v0.17.0 fixture-wiring PR"
+    ),
+    "153-otel-mixed-nesting-orphan-llm-fallback": (
+        "Spec v0.103.1 orphan-fallback coverage; harness wiring rides the v0.17.0 fixture-wiring PR"
+    ),
+    "154-embedding-metrics-on-failure": (
+        "Spec v0.103.1 embedding failure-metrics coverage; harness wiring rides the v0.17.0 fixture-wiring PR"
+    ),
+    # Proposal 0109 (spec v0.104.0) token-budget failure-path parity.
+    "155-langfuse-token-budget-exceeded-flag-on-failure": (
+        "Proposal 0109 token_budget_exceeded flag; harness wiring rides the v0.17.0 fixture-wiring PR"
+    ),
+    "156-langfuse-token-budget-under-budget-flag-false": (
+        "Proposal 0109 token_budget_exceeded flag; harness wiring rides the v0.17.0 fixture-wiring PR"
+    ),
 }
 
 

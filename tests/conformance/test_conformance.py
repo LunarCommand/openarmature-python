@@ -85,6 +85,21 @@ _DEFERRED_FIXTURES: dict[str, str] = {
         "Proposal 0023 canonical state reducers; impl not yet shipped"
     ),
     "038-reducer-error-non-list-update": ("Proposal 0023 canonical state reducers; impl not yet shipped"),
+    # Proposal 0094 (spec v0.89.0) declared same-name subgraph projection
+    # boundary + reducer round-trip compile warning. Behavior shipped +
+    # unit-tested ahead of the pin (test_projection_declared_boundary.py);
+    # the runtime adapter (declared-boundary subgraph construction) + the
+    # GraphFixture directive model ride the v0.17.0 fixture-wiring PR.
+    "040-subgraph-declared-same-name-boundary": (
+        "Proposal 0094 declared-boundary adapter; rides the v0.17.0 fixture-wiring PR"
+    ),
+    "041-declared-boundary-compile-errors": (
+        "Proposal 0094 declared-boundary compile-error adapter; rides the v0.17.0 fixture-wiring PR"
+    ),
+    "042-reducer-round-trip-warning": (
+        "Proposal 0094 round-trip warning adapter (expected_compile_warning); "
+        "rides the v0.17.0 fixture-wiring PR"
+    ),
 }
 
 

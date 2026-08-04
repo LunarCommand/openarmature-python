@@ -620,6 +620,13 @@ _DEFERRED_FIXTURES: dict[str, str] = {
     "032-cross-variable-substring-stability": (
         "Proposal 0047 wire-byte stability (expected_shared_prefix directive); queued for v0.13.0"
     ),
+    # Proposal 0109 (spec v0.104.0) token-budget config extra-key handling.
+    # Behavior shipped + unit-tested ahead of the pin (both backends field-
+    # filter an unrecognized key off TokenBudget.model_fields); the fixture's
+    # token_budget-with-extra directive model rides the v0.17.0 fixture-wiring PR.
+    "037-token-budget-unrecognized-key-ignored": (
+        "Proposal 0109 token_budget extra-key fixture model; rides the v0.17.0 fixture-wiring PR"
+    ),
 }
 
 
