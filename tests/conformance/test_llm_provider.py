@@ -124,22 +124,28 @@ _DEFERRED_FIXTURES: dict[str, str] = {
     # existing reasons (Anthropic 0037 / Gemini 0038 / streaming 0062).
     # Proposal 0095 (spec v0.91.0) adaptive call-level retry + reask.
     "061-call-level-retry-per-attempt-override": (
-        "Proposal 0095 call.retry / wire_requests harness wiring; rides the v0.17.0 fixture-wiring PR"
+        "per-attempt LLM spans + wire_requests; see "
+        "test_observability_otel::test_call_level_reask_retry_fixture"
     ),
     "062-call-level-reask-success": (
-        "Proposal 0095 call.retry / wire_requests harness wiring; rides the v0.17.0 fixture-wiring PR"
+        "per-attempt LLM spans + wire_requests; see "
+        "test_observability_otel::test_call_level_reask_retry_fixture"
     ),
     "063-call-level-reask-budget-exhausted": (
-        "Proposal 0095 call.retry / wire_requests harness wiring; rides the v0.17.0 fixture-wiring PR"
+        "per-attempt LLM spans + wire_requests; see "
+        "test_observability_otel::test_call_level_reask_retry_fixture"
     ),
     "064-call-level-reask-off-by-default": (
-        "Proposal 0095 call.retry / wire_requests harness wiring; rides the v0.17.0 fixture-wiring PR"
+        "per-attempt LLM spans + wire_requests; see "
+        "test_observability_otel::test_call_level_reask_retry_fixture"
     ),
     "065-call-level-reask-compose-override": (
-        "Proposal 0095 call.retry / wire_requests harness wiring; rides the v0.17.0 fixture-wiring PR"
+        "per-attempt LLM spans + wire_requests; see "
+        "test_observability_otel::test_call_level_reask_retry_fixture"
     ),
     "066-call-level-reask-transient-interleave": (
-        "Proposal 0095 call.retry / wire_requests harness wiring; rides the v0.17.0 fixture-wiring PR"
+        "per-attempt LLM spans + wire_requests; see "
+        "test_observability_otel::test_call_level_reask_retry_fixture"
     ),
     # Proposal 0101 (spec v0.96.0) malformed usage counter.
     "070-usage-counter-derived-total-unreported-addend": (
