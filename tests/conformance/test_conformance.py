@@ -244,8 +244,14 @@ async def _run_runtime_case(spec: Mapping[str, Any], fixture_id: str) -> None:
     # Skip fixtures whose nodes use directives the legacy adapter doesn't
     # translate (fan_out, flaky variants, calls_llm, etc.). Each directive
     # is gated to the phase that lands its runtime support.
-    if not is_compile_outcome and (hit := _unsupported_directive(graph_spec)) is not None:
-        pytest.skip(f"{fixture_id}: unsupported node directive {hit}")
+    if not is_compile_outcome:
+        hit = _unsupported_directive(graph_spec)
+        if hit is None and graph_spec is not spec:
+            # A `graph:`-wrapped case's shared top-level subgraphs live on the
+            # case (spec), not graph_spec; scan them too.
+            hit = _unsupported_directive(spec)
+        if hit is not None:
+            pytest.skip(f"{fixture_id}: unsupported node directive {hit}")
 
     # Subgraph fixtures (006, 011, 013) declare an inner subgraph via the
     # singular `subgraph:` key. Fixture 019 introduces the plural `subgraphs:`
