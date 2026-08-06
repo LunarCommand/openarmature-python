@@ -528,6 +528,12 @@ class NodeSpec(_ForbidExtras):
     renders_prompt: str | None = None
     inputs: dict[str, str] | None = None
     outputs: dict[str, str] | None = None
+    # Proposal 0094 declared same-name projection boundary (fixtures 040-042):
+    # the in-set / out-set forms of a subgraph node's projection, naming the
+    # fields that cross by the same name. Mutually exclusive with inputs/outputs
+    # (the engine raises conflicting_projection_forms when both are declared).
+    projects_in: list[str] | None = None
+    projects_out: list[str] | None = None
     middleware: list[MiddlewareSpec] | None = None
     emits_log: EmitsLogSpec | None = None
     also_emits_via_global_tracer: GlobalTracerSpec | None = None

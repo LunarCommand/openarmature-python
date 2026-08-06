@@ -1,13 +1,16 @@
 """Run every spec conformance fixture against the engine.
 
 Discovers `NNN-*.yaml` files under `openarmature-spec/spec/graph-engine/
-conformance/` and parametrizes one test per fixture. The 007 table fixture
-expands to one parametrized case per entry in its `cases:` block.
+conformance/` and parametrizes one test per fixture. A fixture with a
+`cases:` block (e.g. 007 compile-errors, 040-042) runs its cases in a loop
+inside that one test; compile-outcome cases assert a case-level
+`expected_compile_error` / `expected_compile_warning`.
 """
 
 from __future__ import annotations
 
 import time
+import warnings
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, cast
@@ -18,6 +21,7 @@ import yaml
 from openarmature.graph import (
     END,
     CompileError,
+    CompileWarning,
     EdgeException,
     EndSentinel,
     GraphBuilder,
@@ -57,13 +61,13 @@ def _fixture_id(path: Path) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Standard runtime fixtures (everything except 007 compile-errors and 010
-# determinism, which have bespoke shapes).
+# Standard runtime fixtures (everything except 010 determinism, which has a
+# bespoke run-count shape). Compile-outcome fixtures (007 compile-errors, and
+# proposal 0094's 041/042) run through the shared per-case runner, which asserts
+# a case-level ``expected_compile_error`` / ``expected_compile_warning``.
 # ---------------------------------------------------------------------------
 
-_STANDARD_RUNTIME_FIXTURES = [
-    p for p in _fixture_paths() if p.stem not in {"007-compile-errors", "010-determinism"}
-]
+_STANDARD_RUNTIME_FIXTURES = [p for p in _fixture_paths() if p.stem not in {"010-determinism"}]
 
 
 # Fixtures whose implementation lands in a later PR of the 5-proposal
@@ -85,21 +89,6 @@ _DEFERRED_FIXTURES: dict[str, str] = {
         "Proposal 0023 canonical state reducers; impl not yet shipped"
     ),
     "038-reducer-error-non-list-update": ("Proposal 0023 canonical state reducers; impl not yet shipped"),
-    # Proposal 0094 (spec v0.89.0) declared same-name subgraph projection
-    # boundary + reducer round-trip compile warning. Behavior shipped +
-    # unit-tested ahead of the pin (test_projection_declared_boundary.py);
-    # the runtime adapter (declared-boundary subgraph construction) + the
-    # GraphFixture directive model ride the v0.17.0 fixture-wiring PR.
-    "040-subgraph-declared-same-name-boundary": (
-        "Proposal 0094 declared-boundary adapter; rides the v0.17.0 fixture-wiring PR"
-    ),
-    "041-declared-boundary-compile-errors": (
-        "Proposal 0094 declared-boundary compile-error adapter; rides the v0.17.0 fixture-wiring PR"
-    ),
-    "042-reducer-round-trip-warning": (
-        "Proposal 0094 round-trip warning adapter (expected_compile_warning); "
-        "rides the v0.17.0 fixture-wiring PR"
-    ),
 }
 
 
@@ -223,9 +212,14 @@ async def test_runtime_fixture(fixture_path: Path) -> None:
         return
 
     if "cases" in spec:
+        # Fixtures 040-042 declare a shared `subgraph:` / `subgraphs:` at the
+        # fixture top level, used by every case; thread them into each case so
+        # the per-case runner compiles them. A case that declares its own wins.
+        shared = {k: spec[k] for k in ("subgraph", "subgraphs") if k in spec}
         for case in cast("list[dict[str, Any]]", spec["cases"]):
+            merged = {**shared, **case} if shared else case
             try:
-                await _run_runtime_case(case, fixture_path.stem)
+                await _run_runtime_case(merged, fixture_path.stem)
             except AssertionError as e:
                 raise AssertionError(f"case {case.get('name')!r}: {e}") from e
         return
@@ -234,27 +228,100 @@ async def test_runtime_fixture(fixture_path: Path) -> None:
 
 
 async def _run_runtime_case(spec: Mapping[str, Any], fixture_id: str) -> None:
+    # A compile-outcome case (007-style, 041/042) wraps its graph under `graph:`
+    # alongside expected_compile_error / expected_compile_warning; other cases
+    # carry the graph inline. Resolve the graph spec, but read the compile-outcome
+    # directives and case-level blocks (observers, expected) from the case (`spec`).
+    graph_spec = cast("Mapping[str, Any]", spec.get("graph", spec))
+
+    # A compile-outcome case (expected_compile_error / expected_compile_warning)
+    # asserts a compile-time diagnostic and never executes node bodies, so it is
+    # exempt from the unsupported-directive skip gate below: gating it would let a
+    # runtime-only directive silently turn a MUST-fail-compile assertion into a
+    # skip (and pytest.skip, a BaseException, would abort the whole cases loop).
+    is_compile_outcome = "expected_compile_error" in spec or "expected_compile_warning" in spec
+
     # Skip fixtures whose nodes use directives the legacy adapter doesn't
     # translate (fan_out, flaky variants, calls_llm, etc.). Each directive
     # is gated to the phase that lands its runtime support.
-    if (hit := _unsupported_directive(spec)) is not None:
-        pytest.skip(f"{fixture_id}: unsupported node directive {hit}")
+    if not is_compile_outcome:
+        hit = _unsupported_directive(graph_spec)
+        if hit is None and graph_spec is not spec:
+            # A `graph:`-wrapped case's shared top-level subgraphs live on the
+            # case (spec), not graph_spec; scan them too.
+            hit = _unsupported_directive(spec)
+        if hit is not None:
+            pytest.skip(f"{fixture_id}: unsupported node directive {hit}")
 
     # Subgraph fixtures (006, 011, 013) declare an inner subgraph via the
     # singular `subgraph:` key. Fixture 019 introduces the plural `subgraphs:`
     # map for two-level nesting; subgraphs there can reference each other,
-    # so they're compiled in dependency order.
+    # so they're compiled in dependency order. Proposal 0094's declared-boundary
+    # fixtures (040-042) declare theirs at the fixture top level (threaded into
+    # the case by the dispatcher) or inside the wrapped graph spec, so collect
+    # from both.
     subgraphs: dict[str, Any] = {}
-    if "subgraph" in spec:
-        sub_spec = spec["subgraph"]
-        sub_built = build_graph(sub_spec, model_name=f"{sub_spec['name'].title()}State")
-        subgraphs[sub_spec["name"]] = sub_built.builder.compile()
-    if "subgraphs" in spec:
-        _compile_subgraphs_map(spec["subgraphs"], subgraphs)
+    sources = [spec] if graph_spec is spec else [spec, graph_spec]
+    for source in sources:
+        if "subgraph" in source:
+            sub_spec = source["subgraph"]
+            sub_built = build_graph(sub_spec, model_name=f"{sub_spec['name'].title()}State")
+            subgraphs[sub_spec["name"]] = sub_built.builder.compile()
+        if "subgraphs" in source:
+            _compile_subgraphs_map(source["subgraphs"], subgraphs)
 
-    built = build_graph(spec, subgraphs=subgraphs)
-    compiled = built.builder.compile()
-    initial = built.initial_state(spec.get("initial_state", {}))
+    built = build_graph(graph_spec, subgraphs=subgraphs)
+
+    # Proposal 0094: a case may assert a compile-time outcome. A compile ERROR
+    # (041) aborts before execution -- assert the category and stop. A compile
+    # WARNING (042) is advisory (a set of expected categories, possibly empty),
+    # so the graph still compiles and runs; capture the warnings, assert the set,
+    # then fall through to execute + assert final_state.
+    expected_compile_error = spec.get("expected_compile_error")
+    if expected_compile_error is not None:
+        # try/except/else rather than pytest.raises: a graph that compiles cleanly
+        # is a real conformance failure, and raising AssertionError (not pytest's
+        # Failed, a BaseException) keeps the cases loop's per-case name context.
+        try:
+            built.builder.compile()
+        except CompileError as exc:
+            assert exc.category == expected_compile_error, (
+                f"expected compile error {expected_compile_error!r}, got {exc.category!r}"
+            )
+        else:
+            raise AssertionError(
+                f"expected compile error {expected_compile_error!r}, but compilation succeeded"
+            )
+        return
+
+    expected_compile_warning = spec.get("expected_compile_warning")
+    if expected_compile_warning is not None:
+        # Captures warnings from the PARENT graph's compile. A declared subgraph's
+        # own round-trip warning fires during its compilation above (outside this
+        # scope); 0094's round-trip diagnostic is a parent-projection concern and
+        # the current fixtures' subgraphs are flat, so parent-level capture is the
+        # intended boundary.
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            compiled = built.builder.compile()
+        got = sorted(
+            {
+                cat
+                for w in caught
+                if isinstance(w.message, CompileWarning)
+                and (cat := getattr(w.message, "category", None)) is not None
+            }
+        )
+        want = sorted(cast("list[str]", expected_compile_warning))
+        assert got == want, f"expected compile warnings {want!r}, got {got!r}"
+        # A warn-only case (no runtime-assertion block) asserts just the warning
+        # set; a case that also carries expected / expected_error / invocations
+        # falls through to execute + assert that runtime outcome.
+        if not any(k in spec for k in ("expected", "expected_error", "invocations")):
+            return
+    else:
+        compiled = built.builder.compile()
+    initial = built.initial_state(graph_spec.get("initial_state", {}))
 
     # Wire observers per the fixture's `observers:` block (012–016, 018).
     # Each observer is recorded by name so we can assert event-by-event
@@ -707,40 +774,6 @@ async def _run_fixture_020_case(case: Mapping[str, Any]) -> None:
     )
     assert completed.error is not None
     assert completed.error.category == expected_category
-
-
-# ---------------------------------------------------------------------------
-# 007 compile-errors: one parametrized case per entry in the `cases:` table.
-# ---------------------------------------------------------------------------
-
-_COMPILE_ERROR_PATH = CONFORMANCE_DIR / "007-compile-errors.yaml"
-
-
-def _compile_error_cases() -> list[tuple[str, dict[str, Any], str]]:
-    spec = _load(_COMPILE_ERROR_PATH)
-    return [(c["name"], c["graph"], c["expected_compile_error"]) for c in spec["cases"]]
-
-
-@pytest.mark.parametrize(
-    ("graph_spec", "expected_category"),
-    [(g, e) for _, g, e in _compile_error_cases()],
-    ids=[name for name, _, _ in _compile_error_cases()],
-)
-def test_compile_error(graph_spec: dict[str, Any], expected_category: str) -> None:
-    # Cases that compose a subgraph (e.g. mapping_references_undeclared_field)
-    # need that subgraph compiled and registered before the parent compiles,
-    # and the parent must use a real SubgraphNode so the engine's compile-time
-    # projection validation runs.
-    subgraphs: dict[str, Any] = {}
-    if "subgraph" in graph_spec:
-        sub_spec = graph_spec["subgraph"]
-        sub_built = build_graph(sub_spec, model_name=f"{sub_spec['name'].title()}State")
-        subgraphs[sub_spec["name"]] = sub_built.builder.compile()
-
-    built = build_graph(graph_spec, subgraphs=subgraphs)
-    with pytest.raises(CompileError) as excinfo:
-        built.builder.compile()
-    assert excinfo.value.category == expected_category
 
 
 # ---------------------------------------------------------------------------

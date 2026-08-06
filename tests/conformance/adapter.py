@@ -22,6 +22,7 @@ from openarmature.graph import (
     END,
     BranchSpec,
     CompiledGraph,
+    DeclaredSameName,
     EndSentinel,
     ExplicitMapping,
     FanOutNode,
@@ -706,18 +707,66 @@ class BuiltGraph:
         return self.state_cls(**overrides)
 
 
+class _BothFormsProjection:
+    """A projection declaring BOTH the explicit rename maps and the declared
+    same-name sets, so the engine's compile-time ``_check_projection_forms``
+    (which duck-types on the exposed attributes) raises
+    ``conflicting_projection_forms`` (proposal 0094, fixture 041). It exists only
+    to drive that conflict; compilation fails before its project methods run.
+    """
+
+    def __init__(
+        self,
+        *,
+        inputs: Mapping[str, str] | None,
+        outputs: Mapping[str, str] | None,
+        in_fields: Sequence[str],
+        out_fields: Sequence[str],
+    ) -> None:
+        self.inputs = inputs
+        self.outputs = outputs
+        self.in_fields = frozenset(in_fields)
+        self.out_fields = frozenset(out_fields)
+
+    def project_in(self, parent_state: State, subgraph_state_cls: type[State]) -> State:
+        raise AssertionError("conflicting-forms projection must fail compilation, not execute")
+
+    def project_out(
+        self,
+        subgraph_final_state: State,
+        parent_state: State,
+        subgraph_state_cls: type[State],
+    ) -> Mapping[str, Any]:
+        raise AssertionError("conflicting-forms projection must fail compilation, not execute")
+
+
 def _projection_for(node_spec: Mapping[str, Any]) -> ProjectionStrategy[State, State]:
     """Pick the projection strategy declared on a subgraph node spec.
 
-    `inputs:` and/or `outputs:` in the YAML → `ExplicitMapping`. Both absent →
-    the default `FieldNameMatching`.
+    `inputs:` and/or `outputs:` → `ExplicitMapping`; `projects_in:` and/or
+    `projects_out:` → `DeclaredSameName` (proposal 0094); declaring both families
+    on one node → a combined strategy that exposes both, so `compile()` raises
+    `conflicting_projection_forms`; none of them → the default `FieldNameMatching`.
     """
 
     inputs = node_spec.get("inputs")
     outputs = node_spec.get("outputs")
-    if inputs is None and outputs is None:
-        return FieldNameMatching[State, State]()
-    return ExplicitMapping[State, State](inputs=inputs, outputs=outputs)
+    projects_in = node_spec.get("projects_in")
+    projects_out = node_spec.get("projects_out")
+    has_maps = inputs is not None or outputs is not None
+    has_sets = projects_in is not None or projects_out is not None
+    if has_maps and has_sets:
+        return _BothFormsProjection(
+            inputs=inputs,
+            outputs=outputs,
+            in_fields=projects_in or (),
+            out_fields=projects_out or (),
+        )
+    if has_sets:
+        return DeclaredSameName[State, State](in_fields=projects_in or (), out_fields=projects_out or ())
+    if has_maps:
+        return ExplicitMapping[State, State](inputs=inputs, outputs=outputs)
+    return FieldNameMatching[State, State]()
 
 
 def build_graph(
