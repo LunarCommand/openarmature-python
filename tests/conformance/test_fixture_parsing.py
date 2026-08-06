@@ -632,13 +632,6 @@ _DEFERRED_FIXTURES: dict[str, str] = {
     # ahead of the pin; the fixture-model wiring rides the v0.17.0
     # fixture-wiring PR (041 parses cleanly -- only its runtime adapter is
     # deferred, in test_conformance).
-    # Proposal 0094 (v0.89.0) declared-boundary + round-trip warning.
-    "graph-engine/040-subgraph-declared-same-name-boundary": (
-        "Proposal 0094 declared-boundary GraphFixture model; rides the v0.17.0 fixture-wiring PR"
-    ),
-    "graph-engine/042-reducer-round-trip-warning": (
-        "Proposal 0094 round-trip warning fixture model; rides the v0.17.0 fixture-wiring PR"
-    ),
     # Proposal 0095 (v0.91.0) adaptive call-level retry + reask.
     "llm-provider/061-call-level-retry-per-attempt-override": (
         "Proposal 0095 call.retry / wire_requests directive model; rides the v0.17.0 fixture-wiring PR"
