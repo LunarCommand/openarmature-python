@@ -634,22 +634,28 @@ _DEFERRED_FIXTURES: dict[str, str] = {
     # deferred, in test_conformance).
     # Proposal 0095 (v0.91.0) adaptive call-level retry + reask.
     "llm-provider/061-call-level-retry-per-attempt-override": (
-        "Proposal 0095 call.retry / wire_requests directive model; rides the v0.17.0 fixture-wiring PR"
+        "Proposal 0095 asserts per-attempt spans + wire_requests; driven via yaml in "
+        "tests/unit/test_observability_otel.py::test_call_level_reask_retry_fixture"
     ),
     "llm-provider/062-call-level-reask-success": (
-        "Proposal 0095 call.retry / wire_requests directive model; rides the v0.17.0 fixture-wiring PR"
+        "Proposal 0095 asserts per-attempt spans + wire_requests; driven via yaml in "
+        "tests/unit/test_observability_otel.py::test_call_level_reask_retry_fixture"
     ),
     "llm-provider/063-call-level-reask-budget-exhausted": (
-        "Proposal 0095 call.retry / wire_requests directive model; rides the v0.17.0 fixture-wiring PR"
+        "Proposal 0095 asserts per-attempt spans + wire_requests; driven via yaml in "
+        "tests/unit/test_observability_otel.py::test_call_level_reask_retry_fixture"
     ),
     "llm-provider/064-call-level-reask-off-by-default": (
-        "Proposal 0095 call.retry / wire_requests directive model; rides the v0.17.0 fixture-wiring PR"
+        "Proposal 0095 asserts per-attempt spans + wire_requests; driven via yaml in "
+        "tests/unit/test_observability_otel.py::test_call_level_reask_retry_fixture"
     ),
     "llm-provider/065-call-level-reask-compose-override": (
-        "Proposal 0095 call.retry / wire_requests directive model; rides the v0.17.0 fixture-wiring PR"
+        "Proposal 0095 asserts per-attempt spans + wire_requests; driven via yaml in "
+        "tests/unit/test_observability_otel.py::test_call_level_reask_retry_fixture"
     ),
     "llm-provider/066-call-level-reask-transient-interleave": (
-        "Proposal 0095 call.retry / wire_requests directive model; rides the v0.17.0 fixture-wiring PR"
+        "Proposal 0095 asserts per-attempt spans + wire_requests; driven via yaml in "
+        "tests/unit/test_observability_otel.py::test_call_level_reask_retry_fixture"
     ),
     # Proposal 0101 (v0.96.0) malformed usage counter.
     "llm-provider/070-usage-counter-derived-total-unreported-addend": (

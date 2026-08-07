@@ -2103,6 +2103,235 @@ async def test_call_level_retry_fixture_per_attempt_spans(fixture_id: str) -> No
             assert span.status.status_code == StatusCode.OK
 
 
+def _reask_appended_message_matches(actual: dict[str, Any], expected: dict[str, Any]) -> bool:
+    # A wire_requests appended message matches by role plus either exact content
+    # or content_contains (a substring list, used when the reask template
+    # interpolates an implementation-defined field like error_message).
+    if actual.get("role") != expected.get("role"):
+        return False
+    if "content_contains" in expected:
+        content = actual.get("content") or ""
+        return isinstance(content, str) and all(sub in content for sub in expected["content_contains"])
+    return actual.get("content") == expected.get("content")
+
+
+def _assert_reask_carries(exc: Any, carries: dict[str, Any]) -> None:
+    # Minimal llm-provider §7 carries check for the reask driver: the
+    # StructuredOutputInvalid names its attributes raw_content /
+    # failure_description (0098's output_content / error_message §7 names alias
+    # onto them), honoring the _present / _mentions suffixes and a mapping-valued
+    # subset (usage).
+    alias = {"output_content": "raw_content", "error_message": "failure_description"}
+    for key, want in carries.items():
+        if key.endswith("_present"):
+            attr = alias.get(key[:-8], key[:-8])
+            assert (getattr(exc, attr, None) is not None) == bool(want), f"carries {key}"
+        elif key.endswith("_mentions"):
+            attr = alias.get(key[:-9], key[:-9])
+            actual = getattr(exc, attr, None)
+            assert isinstance(actual, str) and want in actual, f"carries {key}: {actual!r} lacks {want!r}"
+        else:
+            actual: Any = getattr(exc, alias.get(key, key), None)
+            if isinstance(want, dict):
+                dump: Any = actual.model_dump() if hasattr(actual, "model_dump") else actual
+                for k, v in cast("dict[str, Any]", want).items():
+                    assert dump.get(k) == v, f"carries {key}[{k}]={dump.get(k)!r} != {v!r}"
+            else:
+                assert actual == want, f"carries {key}={actual!r} != {want!r}"
+
+
+@pytest.mark.parametrize(
+    "fixture_id",
+    [
+        "061-call-level-retry-per-attempt-override",
+        "062-call-level-reask-success",
+        "063-call-level-reask-budget-exhausted",
+        "064-call-level-reask-off-by-default",
+        "065-call-level-reask-compose-override",
+        "066-call-level-reask-transient-interleave",
+    ],
+)
+async def test_call_level_reask_retry_fixture(fixture_id: str) -> None:
+    # Proposal 0095 §7.1: drive each adaptive call-level retry fixture (per-attempt
+    # request override + structured-output reask) through the provider + an OTel
+    # observer + a CAPTURING mock. Assert the per-attempt outbound wire_requests
+    # (sampling / appended reask transcript), the per-attempt llm_spans (incl.
+    # retry_reason), and the final response or raised error surface. These are
+    # span-heavy fixtures, so they run here rather than the generic llm-provider
+    # harness (which has no observer), mirroring
+    # test_call_level_retry_fixture_per_attempt_spans above.
+    import json
+    from pathlib import Path
+
+    import httpx
+    import yaml
+    from opentelemetry.trace import StatusCode
+
+    from openarmature.graph.events import LlmRetryAttemptEvent
+    from openarmature.graph.middleware import deterministic_backoff
+    from openarmature.llm import LlmRetryConfig, RuntimeConfig
+    from openarmature.llm.errors import LlmProviderError, StructuredOutputInvalid
+    from openarmature.llm.messages import UserMessage
+    from openarmature.llm.providers.openai import OpenAIProvider
+    from openarmature.observability.correlation import (
+        _reset_active_dispatch,
+        _reset_invocation_id,
+        _set_active_dispatch,
+        _set_invocation_id,
+    )
+
+    fixture_dir = (
+        Path(__file__).resolve().parents[2] / "openarmature-spec" / "spec" / "llm-provider" / "conformance"
+    )
+    spec = cast("dict[str, Any]", yaml.safe_load((fixture_dir / f"{fixture_id}.yaml").read_text()))
+    responses = cast("list[dict[str, Any]]", spec["mock_provider"]["responses"])
+    call = cast("dict[str, Any]", spec["call"])
+    expected = cast("dict[str, Any]", spec["expected"])
+
+    # Capturing handler: record each outbound body, return the fixture responses
+    # in order.
+    bodies: list[dict[str, Any]] = []
+    response_iter = iter(responses)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        bodies.append(cast("dict[str, Any]", json.loads(request.content)))
+        entry = next(response_iter)
+        body = entry.get("body")
+        content = json.dumps(body).encode() if body is not None else b""
+        return httpx.Response(int(entry.get("status", 200)), content=content)
+
+    retry_cfg = cast("dict[str, Any]", call["retry"])
+    seconds = float(cast("dict[str, Any]", retry_cfg.get("backoff") or {}).get("seconds", 0.0))
+    overrides = [
+        RuntimeConfig(**o) for o in cast("list[dict[str, Any]]", retry_cfg.get("per_attempt_override") or [])
+    ] or None
+    reask_template = cast("dict[str, Any]", retry_cfg.get("reask") or {}).get("template")
+
+    def _reask(exc: StructuredOutputInvalid) -> str:
+        return (
+            cast("str", reask_template)
+            .replace("{output_content}", exc.raw_content or "")
+            .replace("{error_message}", exc.failure_description or "")
+        )
+
+    retry = LlmRetryConfig(
+        max_attempts=int(retry_cfg["max_attempts"]),
+        backoff=deterministic_backoff(seconds),
+        per_attempt_override=overrides,
+        reask=_reask if reask_template else None,
+    )
+    config = RuntimeConfig(**cast("dict[str, Any]", call["config"])) if "config" in call else None
+    response_schema = call.get("response_schema")
+    messages = [
+        UserMessage(content=cast("str", m["content"])) for m in cast("list[dict[str, Any]]", call["messages"])
+    ]
+    base_len = len(messages)
+    # 0095 §5 immutability snapshot: complete() must COPY, never mutate the
+    # caller's messages / config; re-checked after the call below.
+    messages_before = [m.model_copy(deep=True) for m in messages]
+    config_before = config.model_copy(deep=True) if config is not None else None
+
+    captured: list[Any] = []
+    disp_token = _set_active_dispatch(lambda e: captured.append(e))
+    inv_token = _set_invocation_id("inv-reask")
+    try:
+        # Provider construction inside the try so a construction (or aclose) raise
+        # cannot leak the dispatch / invocation-id ContextVars into a later test.
+        provider = OpenAIProvider(
+            base_url="http://test", model="gpt-test", api_key="k", transport=httpx.MockTransport(handler)
+        )
+        try:
+            if "raises" in expected:
+                with pytest.raises(LlmProviderError) as excinfo:
+                    await provider.complete(
+                        messages, config=config, response_schema=response_schema, retry=retry
+                    )
+                raises = cast("dict[str, Any]", expected["raises"])
+                assert excinfo.value.category == raises["category"]
+                if raises.get("carries"):
+                    _assert_reask_carries(excinfo.value, cast("dict[str, Any]", raises["carries"]))
+            else:
+                result = await provider.complete(
+                    messages, config=config, response_schema=response_schema, retry=retry
+                )
+                exp_resp = cast("dict[str, Any]", expected["response"])
+                exp_msg = cast("dict[str, Any]", exp_resp["message"])
+                # The WHOLE declared response surface: content plus the parsed
+                # structured value (the defining result; derived from content
+                # independently, so content-equality does not imply it),
+                # finish_reason, tool_calls, and usage.
+                assert result.message.content == exp_msg["content"]
+                if "parsed" in exp_resp:
+                    assert result.parsed == exp_resp["parsed"], (
+                        f"parsed {result.parsed!r} != {exp_resp['parsed']!r}"
+                    )
+                if "finish_reason" in exp_resp:
+                    assert result.finish_reason == exp_resp["finish_reason"]
+                if "tool_calls" in exp_msg:
+                    assert result.message.tool_calls == exp_msg["tool_calls"]
+                if "usage" in exp_resp:
+                    usage_dump = result.usage.model_dump()
+                    for k, v in cast("dict[str, Any]", exp_resp["usage"]).items():
+                        assert usage_dump.get(k) == v, f"usage[{k}]={usage_dump.get(k)!r} != {v!r}"
+        finally:
+            await provider.aclose()
+    finally:
+        _reset_invocation_id(inv_token)
+        _reset_active_dispatch(disp_token)
+
+    # 0095 §5: the caller's messages / config are never mutated (copied per attempt).
+    assert messages == messages_before, "caller messages list was mutated"
+    assert config == config_before, "caller config was mutated"
+
+    # Per-attempt outbound wire_requests: sampling + appended reask transcript.
+    exp_wire = cast("list[dict[str, Any]]", expected.get("wire_requests") or [])
+    assert len(bodies) == len(exp_wire), f"{len(bodies)} outbound requests vs {len(exp_wire)} wire_requests"
+    for i, exp in enumerate(exp_wire):
+        body = bodies[i]
+        for key, val in cast("dict[str, Any]", exp.get("sampling") or {}).items():
+            assert body.get(key) == val, f"attempt {i} sampling {key}={body.get(key)!r} != {val!r}"
+        if "appended_messages" in exp:
+            appended = cast("list[dict[str, Any]]", body.get("messages") or [])[base_len:]
+            exp_appended = cast("list[dict[str, Any]]", exp["appended_messages"])
+            assert len(appended) == len(exp_appended), (
+                f"attempt {i}: {len(appended)} appended vs {len(exp_appended)} expected"
+            )
+            for act_msg, exp_m in zip(appended, exp_appended, strict=True):
+                assert _reask_appended_message_matches(act_msg, exp_m), (
+                    f"attempt {i}: appended {act_msg!r} does not match {exp_m!r}"
+                )
+
+    # Per-attempt llm_spans: replay the retry-attempt events through an observer.
+    exporter = InMemorySpanExporter()
+    observer = OTelObserver(span_processor=SimpleSpanProcessor(exporter))
+    inv_token2 = _set_invocation_id("inv-reask")
+    try:
+        for event in captured:
+            if isinstance(event, LlmRetryAttemptEvent):
+                await observer(event)
+    finally:
+        _reset_invocation_id(inv_token2)
+    observer.shutdown()
+
+    spans = [s for s in exporter.get_finished_spans() if s.name == "openarmature.llm.complete"]
+    expected_spans = cast("list[dict[str, Any]]", expected["llm_spans"])
+    assert len(spans) == len(expected_spans)
+    spans_by_index = {dict(s.attributes or {})["openarmature.llm.attempt_index"]: s for s in spans}
+    for exp_span in expected_spans:
+        idx = exp_span["attempt_index"]
+        span = spans_by_index[idx]
+        span_attrs = dict(span.attributes or {})
+        for key, val in cast("dict[str, Any]", exp_span.get("attributes") or {}).items():
+            assert span_attrs.get(key) == val, f"attempt {idx}: {key}={span_attrs.get(key)!r} != {val!r}"
+        for absent in cast("list[str]", exp_span.get("attributes_absent") or []):
+            assert absent not in span_attrs, f"attempt {idx}: {absent} unexpectedly present"
+        if exp_span.get("error_category"):
+            assert span.status.status_code == StatusCode.ERROR
+            assert span_attrs.get("openarmature.error.category") == exp_span["error_category"]
+        else:
+            assert span.status.status_code == StatusCode.OK
+
+
 # ---------------------------------------------------------------------------
 # §7 log bridge: correlation_id injection
 # ---------------------------------------------------------------------------
