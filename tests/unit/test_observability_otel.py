@@ -2228,7 +2228,7 @@ async def test_call_level_reask_retry_fixture(fixture_id: str) -> None:
     base_len = len(messages)
     # 0095 §5 immutability snapshot: complete() must COPY, never mutate the
     # caller's messages / config; re-checked after the call below.
-    messages_before = list(messages)
+    messages_before = [m.model_copy(deep=True) for m in messages]
     config_before = config.model_copy(deep=True) if config is not None else None
 
     captured: list[Any] = []
