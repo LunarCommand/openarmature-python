@@ -95,7 +95,15 @@ def apply_managed_extras(
             # produced, so there is nothing to collide with).
             body[key] = value
         elif arm == "merge":
-            body[key] = _merge_list(body.get(key), value)
+            # A malformed extra for a merge-managed field (not a string, not a
+            # list of strings) is structurally invalid and, per 0113, is treated
+            # as absent: the managed value stands alone. No partial salvage of
+            # the well-formed elements, no raise -- merge is all-or-nothing.
+            if _is_mergeable_extra(value):
+                # Resolve the managed base the same way the reject arm does: a
+                # relied-upon wire default lives in `defaults`, not `body`.
+                base = defaults[key] if key in defaults else body.get(key)
+                body[key] = _merge_list(base, value)
         else:  # "reject"
             managed_value = defaults[key] if key in defaults else body.get(key)
             if managed_value == value:
@@ -108,6 +116,16 @@ def apply_managed_extras(
                 f"extras value {_summarize(value)}); a managed field cannot be "
                 f"overridden via extras"
             )
+
+
+def _is_mergeable_extra(value: Any) -> bool:
+    """Whether an extras value has the string-or-array-of-strings shape a
+    merge-managed wire field accepts (e.g. OpenAI ``stop``)."""
+    if isinstance(value, str):
+        return True
+    if isinstance(value, list):
+        return all(isinstance(item, str) for item in cast("list[Any]", value))
+    return False
 
 
 def _merge_list(managed_value: Any, extra_value: Any) -> list[Any]:

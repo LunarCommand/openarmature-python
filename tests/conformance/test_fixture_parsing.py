@@ -664,38 +664,24 @@ _DEFERRED_FIXTURES: dict[str, str] = {
     "llm-provider/071-usage-counter-malformed-streaming-terminal-chunk": (
         "Proposal 0101 usage-counter fixture model; rides the v0.17.0 fixture-wiring PR"
     ),
-    # Proposals 0105 (v0.100.0) / 0108 (v0.103.0) managed-field collision;
-    # the fixtures carry per-case `invariants` flags the parser does not model.
-    "llm-provider/072-managed-response-format-collision": (
-        "Proposal 0105 managed-collision invariants model; rides the v0.17.0 fixture-wiring PR"
-    ),
+    # Managed-field collision (0105/0108/0113): the per-case `invariants` block is
+    # now modeled, so 072/074/075/076/081 parse and are un-deferred. The rows below
+    # stay deferred on a SECOND, unrelated parse blocker -- a fixture shape whose
+    # runtime proposal is still unimplemented -- not on the invariants model:
     "llm-provider/073-managed-stream-options-collision": (
-        "Proposal 0105 managed-collision invariants model; rides the v0.17.0 fixture-wiring PR"
-    ),
-    "llm-provider/074-managed-structural-model-collision": (
-        "Proposal 0105 managed-collision invariants model; rides the v0.17.0 fixture-wiring PR"
-    ),
-    "llm-provider/075-managed-declared-scalar-collision": (
-        "Proposal 0108 managed-collision invariants model; rides the v0.17.0 fixture-wiring PR"
-    ),
-    "llm-provider/076-managed-declared-stop-merge": (
-        "Proposal 0108 managed-collision invariants model; rides the v0.17.0 fixture-wiring PR"
+        "Proposal 0062 streaming fixture shape (`no_token_events_emitted`) not modeled"
     ),
     "llm-provider/077-managed-declared-stream-collision": (
-        "Proposal 0108 managed-collision invariants model; rides the v0.17.0 fixture-wiring PR"
+        "Proposal 0062 streaming fixture shape (`no_token_events_emitted`) not modeled"
     ),
     "llm-provider/078-managed-anthropic-stream-reject": (
-        "Proposal 0108 managed-collision invariants model; rides the v0.17.0 fixture-wiring PR"
+        "Proposal 0037 Anthropic fixture shape (top-level `mapping`) not modeled"
     ),
     "llm-provider/079-managed-anthropic-stop-merge": (
-        "Proposal 0108 managed-collision invariants model; rides the v0.17.0 fixture-wiring PR"
+        "Proposal 0037 Anthropic fixture shape (top-level `mapping`) not modeled"
     ),
     "llm-provider/080-managed-gemini-stop-merge": (
-        "Proposal 0108 managed-collision invariants model; rides the v0.17.0 fixture-wiring PR"
-    ),
-    # Proposal 0113 (v0.107.0) malformed extras on a merge-managed field.
-    "llm-provider/081-managed-declared-stop-malformed": (
-        "Proposal 0113 malformed merge-managed extras invariants model; rides the v0.17.0 fixture-wiring PR"
+        "Proposal 0038 Gemini fixture shape (top-level `mapping`) not modeled"
     ),
     # Proposal 0109 (v0.104.0) token-budget config extra-key handling.
     "prompt-management/037-token-budget-unrecognized-key-ignored": (

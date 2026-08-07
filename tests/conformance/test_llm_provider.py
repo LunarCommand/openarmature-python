@@ -160,8 +160,9 @@ _DEFERRED_FIXTURES: dict[str, str] = {
     ),
     # Proposal 0108 (spec v0.103.0) declared-field-vs-extras collision.
     "075-managed-declared-scalar-collision": (
-        "Proposal 0108 same-name declared collision; caller-reachability flagged to spec, "
-        "wiring rides the v0.17.0 fixture-wiring PR"
+        "Proposal 0108 same-name declared collision: the coded reject is unreachable via "
+        "the real caller path (a declared-name key routes to the declared field, never "
+        "model_extra), so adoption is held pending the batched spec review"
     ),
     "077-managed-declared-stream-collision": (
         "Proposal 0108 stream collision; streaming not implemented (0062)"
@@ -174,16 +175,6 @@ _DEFERRED_FIXTURES: dict[str, str] = {
     ),
     "080-managed-gemini-stop-merge": (
         "Proposal 0108 stop merge; Gemini provider not implemented (0038 not-yet)"
-    ),
-    # Proposal 0113 (spec v0.107.0) malformed extras on a merge-managed field.
-    # PARTIAL: retrieval embedding_types (fixture 053) works via 0099's bespoke
-    # merge, but the GENERAL apply_managed_extras merge arm coerces a malformed
-    # extra instead of treating it as absent, so llm stop malformed is not yet
-    # handled -- a behavior gap, not just harness wiring. The general merge-arm
-    # malformed rule + this fixture ride the v0.17.0 fixture-wiring PR.
-    "081-managed-declared-stop-malformed": (
-        "Proposal 0113 general merge-arm malformed handling not yet implemented; "
-        "rides the v0.17.0 fixture-wiring PR"
     ),
 }
 

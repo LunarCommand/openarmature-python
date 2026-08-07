@@ -110,6 +110,12 @@ class LlmProviderExpected(_ForbidExtras):
     response: LlmProviderResponseAssertion | None = None
     raises: LlmProviderRaisesAssertion | None = None
     success: bool | None = None
+    # Managed-collision fixtures (072/074/076/081) attach a block of documentary
+    # boolean flags naming the invariant each case proves. The machine assertion
+    # is the case's ``expected_wire_request`` / ``raises``; these are prose the
+    # reader checks against. Typed ``dict[str, bool]`` (not ``Any``) so a machine
+    # assertion mis-filed under ``invariants`` (a nested dict) is still rejected.
+    invariants: dict[str, bool] | None = None
 
 
 # ---------------------------------------------------------------------------
