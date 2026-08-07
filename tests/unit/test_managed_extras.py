@@ -90,6 +90,42 @@ def test_merge_arm_onto_absent_managed_value() -> None:
     assert body["stop"] == ["A", "B"]
 
 
+def test_merge_arm_malformed_list_element_is_treated_as_absent() -> None:
+    # 0113: a merge extra with a non-string element is structurally malformed and
+    # treated as absent -- all-or-nothing, the well-formed "END" is NOT salvaged
+    # and no error is raised. The managed value stands alone.
+    body: dict[str, Any] = {"stop": ["STOP"]}
+    apply_managed_extras(body, {"stop": ["END", 123]}, {"stop": "merge"})
+    assert body["stop"] == ["STOP"]
+
+
+def test_merge_arm_malformed_scalar_is_treated_as_absent() -> None:
+    # 0113: a non-string scalar has no string-or-array-of-strings shape, so it is
+    # malformed and treated as absent rather than coerced onto the wire.
+    body: dict[str, Any] = {"stop": ["STOP"]}
+    apply_managed_extras(body, {"stop": 5}, {"stop": "merge"})
+    assert body["stop"] == ["STOP"]
+
+
+def test_merge_arm_empty_string_element_is_well_formed_and_merges() -> None:
+    # 0113 judges malformation STRUCTURALLY: an empty string is a well-typed
+    # string, so ["A", ""] is a list of strings -- well-formed -- and merges. The
+    # mapping does not semantically validate element values, so a "" stop token
+    # reaches the wire and the provider decides. Pins the structural-only rule
+    # against a future narrowing to a semantic (non-empty) check.
+    body: dict[str, Any] = {"stop": ["STOP"]}
+    apply_managed_extras(body, {"stop": ["A", ""]}, {"stop": "merge"})
+    assert body["stop"] == ["STOP", "A", ""]
+
+
+def test_merge_arm_empty_list_is_well_formed_no_op() -> None:
+    # An empty list is well-formed (every element -- none -- is a string) and
+    # merges as a no-op, leaving the managed value untouched.
+    body: dict[str, Any] = {"stop": ["STOP"]}
+    apply_managed_extras(body, {"stop": []}, {"stop": "merge"})
+    assert body["stop"] == ["STOP"]
+
+
 def test_conditionally_managed_field_when_not_produced_rides_untouched() -> None:
     # The escape hatch: a field the mapping is NOT currently producing is absent
     # from `managed`, so its extra rides untouched (e.g. Jina task with no
