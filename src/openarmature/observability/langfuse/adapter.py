@@ -34,18 +34,27 @@
 from __future__ import annotations
 
 import json
+import threading
 from contextlib import ExitStack
 from datetime import datetime
-from typing import TYPE_CHECKING, Any, cast
+from typing import Any, cast
 
-from .client import LangfuseGenerationHandle, LangfuseSpanHandle, LangfuseUsage, ObservationLevel
+from pydantic import SecretStr
+
+from .client import (
+    ISOLATION_ISOLATED,
+    ISOLATION_LEAKED,
+    ISOLATION_SHARED_ACCEPTED,
+    ISOLATION_UNDETECTABLE,
+    LangfuseGenerationHandle,
+    LangfuseSpanHandle,
+    LangfuseUsage,
+    ObservationLevel,
+)
 from .trace_id import _is_uuid, _to_otel_trace_id
 
-if TYPE_CHECKING:
-    from langfuse import Langfuse
-
 try:
-    from langfuse import propagate_attributes
+    from langfuse import Langfuse, propagate_attributes
     from langfuse.types import TraceContext
 except ImportError as exc:  # pragma: no cover - exercised by extras-not-installed path
     raise ImportError(
@@ -70,6 +79,57 @@ def _stringify_metadata(metadata: dict[str, Any] | None) -> dict[str, str]:
         else:
             out[key] = str(value)
     return out
+
+
+# Proposal 0116 (observability §6 payload-leak invariant). OA reuses ONE isolated
+# TracerProvider per credential (public_key), so a second surface that the SDK's
+# per-public_key resource-manager singleton resolves to OA's own provider
+# satisfies the invariant instead of reading as a leak. Process-wide and
+# lock-guarded, mirroring the scope of the SDK's own singleton.
+_ISOLATED_PROVIDERS: dict[str, Any] = {}
+_ISOLATED_PROVIDERS_LOCK = threading.Lock()
+
+
+def _reuse_isolated_provider(public_key: str) -> Any:
+    """Return the one isolated ``TracerProvider`` OA uses for ``public_key``,
+    building it on first use. A bare provider is the whole isolation: the SDK
+    adds its own span processor to whatever provider it is handed and does not
+    register a handed-in provider globally."""
+    from opentelemetry.sdk.trace import TracerProvider
+
+    with _ISOLATED_PROVIDERS_LOCK:
+        provider = _ISOLATED_PROVIDERS.get(public_key)
+        if provider is None:
+            provider = TracerProvider()
+            _ISOLATED_PROVIDERS[public_key] = provider
+        return provider
+
+
+def _classify_isolation(client: Any, provider: Any, accept_shared_provider: bool) -> str:
+    """Classify what the SDK actually bound the client's observations to.
+
+    The SDK caches one resource manager per public_key, so a handed-in provider
+    is honored only when OA is the first constructor for that key; otherwise the
+    cached client keeps its original provider and OA's would-be-isolated provider
+    is discarded.
+    """
+    # Proposal 0116 payload-leak invariant: OA establishes the binding to pick the
+    # raise / suppress arm.
+    if accept_shared_provider:
+        return ISOLATION_SHARED_ACCEPTED
+    # Guarded read of the SDK-internal binding: a future SDK that stops exposing
+    # it leaves us unable to establish isolation, so the observer takes the
+    # portable suppress floor rather than a false all-clear.
+    resources = getattr(client, "_resources", None)
+    bound = getattr(resources, "tracer_provider", None) if resources is not None else None
+    if bound is None:
+        # A client with tracing disabled legitimately has no provider and exports
+        # nothing, so there is no leak to guard -- distinct from a future SDK that
+        # hides the binding (the genuine undetectable case).
+        if not getattr(client, "_tracing_enabled", True):
+            return ISOLATION_ISOLATED
+        return ISOLATION_UNDETECTABLE
+    return ISOLATION_ISOLATED if bound is provider else ISOLATION_LEAKED
 
 
 class _SpanHandle:
@@ -193,6 +253,9 @@ class LangfuseSDKAdapter:
 
     def __init__(self, client: Langfuse) -> None:
         self._client = client
+        # 0116 isolation status; None for a caller-supplied client (mode a),
+        # set by from_credentials for the OA-constructed path (mode b).
+        self._isolation_status: str | None = None
         # Trace info cache, applied via propagate_attributes around
         # EVERY observation (not just the first). Langfuse v4's trace
         # name/metadata processing uses last-attribute-wins semantics,
@@ -202,6 +265,59 @@ class LangfuseSDKAdapter:
         # every observation under the same trace_id keeps the value
         # consistent. Cache cleanup is deferred to a future PR.
         self._trace_info: dict[str, dict[str, Any]] = {}
+
+    @classmethod
+    def from_credentials(
+        cls,
+        *,
+        public_key: str,
+        secret_key: SecretStr,
+        host: str | None = None,
+        accept_shared_provider: bool = False,
+        **langfuse_kwargs: Any,
+    ) -> LangfuseSDKAdapter:
+        """Build the adapter over an OA-constructed ``Langfuse`` client, from
+        credentials rather than a caller-supplied instance.
+
+        ``secret_key`` is a ``pydantic.SecretStr``: it is masked in OA's own
+        reprs and logs, and its plaintext is read only at the ``Langfuse`` call.
+        The SDK holds the plaintext thereafter, so an SDK-side construction
+        failure can still surface it in that frame.
+
+        By default OA constructs the client on a dedicated ``TracerProvider``
+        (reused per credential) so its observations do not share a provider with
+        the application. The Langfuse SDK caches one resource manager per
+        ``public_key``, so a client for that key constructed elsewhere first
+        keeps its original provider and OA's dedicated provider is discarded;
+        ``from_credentials`` reads the actual binding back and records an
+        isolation status (``isolated`` / ``leaked`` / ``undetectable``) that
+        :meth:`LangfuseObserver.from_credentials` turns into the raise / suppress
+        arms. ``accept_shared_provider=True`` skips isolation, binds the ambient
+        provider, and records ``shared_accepted``.
+
+        ``langfuse_kwargs`` pass through to the ``Langfuse`` constructor
+        (``release`` / ``environment`` / ...); ``tracer_provider`` is managed
+        here and may not be supplied through it. Client-config kwargs the SDK
+        applies only while building its own provider (``sample_rate`` and the
+        ``environment`` / ``release`` Resource attributes) are not reflected on
+        OA's dedicated provider under isolation.
+        """
+        if "tracer_provider" in langfuse_kwargs:
+            raise ValueError(
+                "tracer_provider is managed by from_credentials "
+                "(via `accept_shared_provider`); do not pass it through langfuse_kwargs"
+            )
+        provider = None if accept_shared_provider else _reuse_isolated_provider(public_key)
+        client = Langfuse(
+            public_key=public_key,
+            secret_key=secret_key.get_secret_value(),
+            host=host,
+            tracer_provider=provider,
+            **langfuse_kwargs,
+        )
+        adapter = cls(client)
+        adapter._isolation_status = _classify_isolation(client, provider, accept_shared_provider)
+        return adapter
 
     def trace(
         self,

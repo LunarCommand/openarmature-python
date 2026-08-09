@@ -40,6 +40,7 @@ from .client import (
     ObservationLevel,
     ObservationType,
 )
+from .errors import LangfuseProviderIsolationUnavailable
 from .observer import LangfuseObserver
 from .trace_id import langfuse_trace_id
 
@@ -62,6 +63,7 @@ __all__ = [
     "LangfuseGenerationHandle",
     "LangfuseObservation",
     "LangfuseObserver",
+    "LangfuseProviderIsolationUnavailable",
     "LangfuseSpanHandle",
     "LangfuseTrace",
     "LangfuseUsage",
