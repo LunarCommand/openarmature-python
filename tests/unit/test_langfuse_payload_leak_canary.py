@@ -23,10 +23,16 @@ pytest.importorskip("langfuse")
 
 from openarmature.graph.events import (  # noqa: E402
     CaughtException,
+    EmbeddingEvent,
+    EmbeddingFailedEvent,
     FailureIsolatedEvent,
     InvocationCompletedEvent,
     InvocationStartedEvent,
+    LlmCompletionEvent,
     LlmFailedEvent,
+    RerankEvent,
+    RerankFailedEvent,
+    ToolCallEvent,
     ToolCallFailedEvent,
 )
 from openarmature.observability.correlation import (  # noqa: E402
@@ -42,16 +48,47 @@ from openarmature.observability.langfuse.client import (  # noqa: E402
     ISOLATION_LEAKED,
     ISOLATION_UNDETECTABLE,
 )
+from openarmature.retrieval import ScoredDocument  # noqa: E402
 
-# One sentinel per harvested channel, so a leak names which channel leaked.
+# One sentinel per harvested channel, so a leak names which channel leaked. Every
+# gated emission site has to appear here, or its assertion below passes vacuously.
 STATE_IN = "CANARY-state-input-8f21"
 STATE_OUT = "CANARY-state-output-3b77"
+LLM_IN = "CANARY-llm-input-2ba8"
+LLM_OUT = "CANARY-llm-output-6f30"
 LLM_MSG = "CANARY-llm-error-5c04"
 TOOL_ARG = "CANARY-tool-argument-9d13"
+TOOL_RESULT = "CANARY-tool-result-4e81"
 TOOL_MSG = "CANARY-tool-error-1a56"
+EMBED_IN = "CANARY-embedding-input-0c95"
+EMBED_MSG = "CANARY-embedding-error-7d24"
+RERANK_QUERY = "CANARY-rerank-query-3a67"
+RERANK_DOC = "CANARY-rerank-document-8b12"
+RERANK_MSG = "CANARY-rerank-error-5e49"
 MARKER_MSG = "CANARY-isolated-exception-7e92"
 
-ALL_SENTINELS = (STATE_IN, STATE_OUT, LLM_MSG, TOOL_ARG, TOOL_MSG, MARKER_MSG)
+# Everything harvested. The marker message is prohibited outright rather than
+# gated, so it is asserted separately as well.
+ALL_SENTINELS = (
+    STATE_IN,
+    STATE_OUT,
+    LLM_IN,
+    LLM_OUT,
+    LLM_MSG,
+    TOOL_ARG,
+    TOOL_RESULT,
+    TOOL_MSG,
+    EMBED_IN,
+    EMBED_MSG,
+    RERANK_QUERY,
+    RERANK_DOC,
+    RERANK_MSG,
+    MARKER_MSG,
+)
+
+# The subset that must reach an isolated client, proving each channel is really
+# driven. The marker is excluded: it never rides a Langfuse observation.
+GATED_SENTINELS = tuple(s for s in ALL_SENTINELS if s != MARKER_MSG)
 
 _INV = "inv-canary"
 
@@ -80,7 +117,7 @@ async def _drive_every_channel(observer: LangfuseObserver) -> None:
                 provider="openai",
                 model="test-model",
                 latency_ms=1.0,
-                input_messages=[],
+                input_messages=[{"role": "user", "content": LLM_IN}],
                 request_params={},
                 request_extras={},
                 active_prompt=None,
@@ -88,6 +125,31 @@ async def _drive_every_channel(observer: LangfuseObserver) -> None:
                 call_id="cc-llm",
                 error_category="provider_unavailable",
                 error_message=LLM_MSG,
+            )
+        )
+        await observer(
+            LlmCompletionEvent(
+                invocation_id=_INV,
+                correlation_id=None,
+                node_name="call_llm",
+                namespace=("call_llm",),
+                attempt_index=0,
+                fan_out_index=None,
+                branch_name=None,
+                provider="openai",
+                model="test-model",
+                response_id="resp-1",
+                response_model="test-model",
+                usage=None,
+                latency_ms=1.0,
+                finish_reason="stop",
+                input_messages=[{"role": "user", "content": LLM_IN}],
+                output_content=LLM_OUT,
+                request_params={},
+                request_extras={},
+                active_prompt=None,
+                active_prompt_group=None,
+                call_id="cc-llm-ok",
             )
         )
         await observer(
@@ -106,6 +168,124 @@ async def _drive_every_channel(observer: LangfuseObserver) -> None:
                 latency_ms=1.0,
                 error_type="ValueError",
                 error_message=TOOL_MSG,
+            )
+        )
+        await observer(
+            ToolCallEvent(
+                invocation_id=_INV,
+                correlation_id=None,
+                node_name="run_tool",
+                namespace=("run_tool",),
+                attempt_index=0,
+                fan_out_index=None,
+                branch_name=None,
+                call_id="cc-tool-ok",
+                tool_name="lookup",
+                tool_call_id="call_2",
+                arguments={"query": TOOL_ARG},
+                result={"answer": TOOL_RESULT},
+                latency_ms=1.0,
+            )
+        )
+        await observer(
+            EmbeddingFailedEvent(
+                invocation_id=_INV,
+                correlation_id=None,
+                node_name="embed",
+                namespace=("embed",),
+                attempt_index=0,
+                fan_out_index=None,
+                branch_name=None,
+                provider="openai",
+                model="embed-model",
+                latency_ms=1.0,
+                input_strings=[EMBED_IN],
+                request_params={},
+                request_extras={},
+                active_prompt=None,
+                active_prompt_group=None,
+                call_id="cc-embed",
+                error_category="provider_unavailable",
+                error_message=EMBED_MSG,
+            )
+        )
+        await observer(
+            EmbeddingEvent(
+                invocation_id=_INV,
+                correlation_id=None,
+                node_name="embed",
+                namespace=("embed",),
+                attempt_index=0,
+                fan_out_index=None,
+                branch_name=None,
+                provider="openai",
+                model="embed-model",
+                response_id="resp-e",
+                response_model="embed-model",
+                usage=None,
+                latency_ms=1.0,
+                input_strings=[EMBED_IN],
+                input_count=1,
+                dimensions=2,
+                output_vectors=[[0.1, 0.2]],
+                request_params={},
+                request_extras={},
+                active_prompt=None,
+                active_prompt_group=None,
+                call_id="cc-embed-ok",
+            )
+        )
+        await observer(
+            RerankFailedEvent(
+                invocation_id=_INV,
+                correlation_id=None,
+                node_name="rerank",
+                namespace=("rerank",),
+                attempt_index=0,
+                fan_out_index=None,
+                branch_name=None,
+                provider="cohere",
+                model="rerank-model",
+                latency_ms=1.0,
+                query=RERANK_QUERY,
+                documents=[RERANK_DOC],
+                document_count=1,
+                top_k=1,
+                request_params={},
+                request_extras={},
+                active_prompt=None,
+                active_prompt_group=None,
+                call_id="cc-rerank",
+                error_category="provider_unavailable",
+                error_message=RERANK_MSG,
+            )
+        )
+        await observer(
+            RerankEvent(
+                invocation_id=_INV,
+                correlation_id=None,
+                node_name="rerank",
+                namespace=("rerank",),
+                attempt_index=0,
+                fan_out_index=None,
+                branch_name=None,
+                provider="cohere",
+                model="rerank-model",
+                response_id="resp-r",
+                response_model="rerank-model",
+                usage=None,
+                latency_ms=1.0,
+                query=RERANK_QUERY,
+                documents=[RERANK_DOC],
+                document_count=1,
+                top_k=1,
+                result_count=1,
+                output_results=[ScoredDocument(index=0, relevance_score=0.9, document=RERANK_DOC)],
+                request_params={},
+                request_extras={},
+                active_prompt=None,
+                active_prompt_group=None,
+                call_id="cc-rerank-ok",
             )
         )
         await observer(
@@ -195,7 +375,7 @@ async def test_channels_are_actually_exercised_when_isolated() -> None:
     observer, client = _observer_on(ISOLATION_ISOLATED)
     await _drive_every_channel(observer)
     captured = _captured_text(client)
-    missing = [s for s in (STATE_IN, STATE_OUT, LLM_MSG, TOOL_ARG, TOOL_MSG) if s not in captured]
+    missing = [s for s in GATED_SENTINELS if s not in captured]
     assert not missing, f"channel not exercised, so the leak test proves nothing: {missing}"
 
 
