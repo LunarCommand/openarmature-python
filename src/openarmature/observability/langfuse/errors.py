@@ -12,7 +12,16 @@
 from __future__ import annotations
 
 
-class LangfuseProviderIsolationUnavailable(Exception):
+class ObservabilityError(Exception):
+    """Base for errors raised by the bundled observability backends.
+
+    Distinct from the graph-engine, llm-provider, and prompt-management
+    hierarchies: these are raised while wiring or driving an observability
+    backend, not while running a graph or calling a provider.
+    """
+
+
+class LangfuseProviderIsolationUnavailable(ObservabilityError):
     """OA cannot keep its payload-bearing Langfuse observations off a
     TracerProvider shared with the application, and the caller has not accepted
     a shared provider, so construction fails loud rather than leaking.

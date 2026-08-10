@@ -450,6 +450,82 @@ class LangfuseObserver:
                 f"payload_byte_cap={self.payload_byte_cap} below the spec §5.5.5 "
                 f"minimum of {_PAYLOAD_MIN_BYTES} bytes"
             )
+        self._apply_isolation_policy()
+
+    def _apply_isolation_policy(self) -> None:
+        # Proposal 0116 / 0117 payload-leak arms. They live here rather than in
+        # from_credentials so every observer over an OA-constructed client is
+        # guarded, including one built by handing a from_credentials adapter to
+        # the plain constructor. A caller-supplied client (mode a) records no
+        # status, so this is a no-op there and the caller keeps their provider.
+        status = getattr(self.client, "_isolation_status", None)
+        if status is None:
+            return
+        if status == ISOLATION_LEAKED and self._construction_channels_live():
+            from openarmature.observability.langfuse.errors import (
+                LangfuseProviderIsolationUnavailable,
+            )
+
+            raise LangfuseProviderIsolationUnavailable(
+                "OA constructed a Langfuse client whose observations would reach a "
+                "TracerProvider shared with the application (the SDK caches one client "
+                "per public_key, and one was already bound to a provider OA did not "
+                "isolate), and a payload channel is live so payloads would leak. Pass "
+                "accept_shared_provider=True to proceed onto the shared provider, or "
+                "construct OA's Langfuse client before any other client for this key."
+            )
+        if status == ISOLATION_UNDETECTABLE:
+            # Portable floor: the binding cannot be established, so close every
+            # construction-time channel. Warned unconditionally -- harvested error
+            # content is suppressed at emission whether or not a payload channel
+            # is live, so silence would leave that invisible.
+            _logger.warning(
+                "cannot establish the Langfuse client's TracerProvider binding; "
+                "suppressing all provider and state payloads, and omitting failed "
+                "observations' error messages, to avoid a possible leak to a shared provider"
+            )
+            self.disable_provider_payload = True
+            self.disable_state_payload = True
+            self.trace_input_from_state = None
+            self.trace_output_from_state = None
+        elif status == ISOLATION_LEAKED:
+            # No construction-time channel is live, so nothing is refused; the
+            # error-message channel is still suppressed at emission, which the
+            # operator would otherwise have no way to notice.
+            _logger.info(
+                "OA's Langfuse client is bound to a TracerProvider it did not isolate; "
+                "failed observations' error messages are omitted to avoid a leak"
+            )
+        elif status == ISOLATION_SHARED_ACCEPTED:
+            # A provider-binding decision, not a payload one, so it is reported
+            # whatever the payload knobs say.
+            _logger.warning(
+                "accept_shared_provider=True: OA's Langfuse observations may reach a "
+                "TracerProvider shared with the application (acknowledged)"
+            )
+
+    def _construction_channels_live(self) -> bool:
+        # Any payload channel knowable at construction (0117): the provider
+        # payload, the Trace state payload, or a supplied state hook, which emits
+        # regardless of the state knob.
+        return (
+            not self.disable_provider_payload
+            or not self.disable_state_payload
+            or self.trace_input_from_state is not None
+            or self.trace_output_from_state is not None
+        )
+
+    def _isolation_blocks_payload(self) -> bool:
+        # Emission-time half of the invariant. The knobs are public fields on a
+        # mutable dataclass, so a channel re-opened after construction would
+        # otherwise escape the arms above; every payload site consults this.
+        return getattr(self.client, "_isolation_status", None) in (
+            ISOLATION_LEAKED,
+            ISOLATION_UNDETECTABLE,
+        )
+
+    def _emits_provider_payload(self) -> bool:
+        return not self.disable_provider_payload and not self._isolation_blocks_payload()
 
     @classmethod
     def from_credentials(
@@ -485,19 +561,6 @@ class LangfuseObserver:
         ordinary observer fields (``disable_provider_payload`` /
         ``disable_llm_spans`` / ...).
         """
-        # Any construction-determinable payload channel makes a shared provider a
-        # leak (0117): the provider payload, the Trace-level state payload, or a
-        # supplied trace_input/output-from-state hook (a supplied hook emits
-        # regardless of the knob, so treat *supplied* as potentially-live). The
-        # failed-observation error-message channel is not construction-knowable,
-        # so it does not gate here; it is suppressed per-emission via the status.
-        emits_payloads = (
-            not bool(observer_kwargs.get("disable_provider_payload", True))
-            or not bool(observer_kwargs.get("disable_state_payload", True))
-            or observer_kwargs.get("trace_input_from_state") is not None
-            or observer_kwargs.get("trace_output_from_state") is not None
-        )
-
         from openarmature.observability.langfuse.adapter import LangfuseSDKAdapter
 
         client = LangfuseSDKAdapter.from_credentials(
@@ -507,42 +570,9 @@ class LangfuseObserver:
             accept_shared_provider=accept_shared_provider,
             **(langfuse_kwargs or {}),
         )
-
-        if emits_payloads:
-            status = client._isolation_status
-            if status == ISOLATION_LEAKED:
-                from openarmature.observability.langfuse.errors import (
-                    LangfuseProviderIsolationUnavailable,
-                )
-
-                raise LangfuseProviderIsolationUnavailable(
-                    "OA constructed a Langfuse client whose observations would reach a "
-                    "TracerProvider shared with the application (the SDK caches one client "
-                    "per public_key, and one was already bound to a provider OA did not "
-                    "isolate), and a payload channel is live so payloads would leak. Pass "
-                    "accept_shared_provider=True to proceed onto the shared provider, or "
-                    "construct OA's Langfuse client before any other client for this key."
-                )
-            if status == ISOLATION_UNDETECTABLE:
-                # Portable floor: cannot establish the binding, so suppress EVERY
-                # construction-time channel (fail-safe) and log a warning. The
-                # error-message channel is suppressed per-emission via the status.
-                _logger.warning(
-                    "cannot establish the Langfuse client's TracerProvider binding; "
-                    "suppressing all provider and state payloads to avoid a possible "
-                    "leak to a shared provider"
-                )
-                observer_kwargs["disable_provider_payload"] = True
-                observer_kwargs["disable_state_payload"] = True
-                observer_kwargs["trace_input_from_state"] = None
-                observer_kwargs["trace_output_from_state"] = None
-            elif status == ISOLATION_SHARED_ACCEPTED:
-                _logger.warning(
-                    "accept_shared_provider=True with payload channels enabled: OA's "
-                    "Langfuse observations may reach a TracerProvider shared with the "
-                    "application (acknowledged)"
-                )
-
+        # The raise / suppress / warn arms run in __post_init__ off the client's
+        # recorded isolation status, so they apply to this path and equally to an
+        # observer built by handing a from_credentials adapter to the constructor.
         return cls(client=client, **observer_kwargs)
 
     def _omit_harvested_error(self) -> bool:
@@ -550,10 +580,7 @@ class LangfuseObserver:
         # non-detectable suppress floor -- a failed observation's harvested
         # error_message / error_type must not reach the shared provider. Isolated,
         # opted-in, and caller-supplied (mode a) clients emit normally.
-        return getattr(self.client, "_isolation_status", None) in (
-            ISOLATION_LEAKED,
-            ISOLATION_UNDETECTABLE,
-        )
+        return self._isolation_blocks_payload()
 
     async def __call__(
         self,
@@ -980,6 +1007,14 @@ class LangfuseObserver:
         self.client.update_trace(id=event.invocation_id, output=output_value)
 
     def _resolve_trace_input(self, event: InvocationStartedEvent) -> Any:
+        # Isolation floor: on a provider OA could not establish as isolated, the
+        # state channel is closed whatever the levers say, so a knob or hook set
+        # after construction cannot reopen it.
+        if self._isolation_blocks_payload():
+            stub: dict[str, Any] = {"entry_node": event.entry_node}
+            if event.correlation_id is not None:
+                stub["correlation_id"] = event.correlation_id
+            return stub
         # Lever 1: caller hook.
         if self.trace_input_from_state is not None:
             try:
@@ -1002,6 +1037,9 @@ class LangfuseObserver:
         return stub
 
     def _resolve_trace_output(self, event: InvocationCompletedEvent) -> Any:
+        # Isolation floor, as for the input side.
+        if self._isolation_blocks_payload():
+            return {"final_node": event.final_node, "status": event.status}
         # Lever 1: caller hook.
         if self.trace_output_from_state is not None:
             try:
@@ -1915,7 +1953,7 @@ class LangfuseObserver:
         model_parameters: dict[str, Any] = dict(event.request_params or {})
         input_value: Any = None
         output_value: Any = None
-        if not self.disable_provider_payload:
+        if self._emits_provider_payload():
             if event.input_messages:
                 input_value = self._maybe_truncate_for_input(event.input_messages)
             if event.output_content is not None:
@@ -2000,12 +2038,17 @@ class LangfuseObserver:
         if not self._omit_harvested_error():
             if event.error_type is not None:
                 metadata["error_type"] = event.error_type
-            metadata["error_message"] = event.error_message
+            # A structured_output_invalid message quotes the model's own failing
+            # output, so for that category the message is response-derived payload
+            # and follows the payload knob as well as the isolation gate. Other
+            # categories describe the call, not the response.
+            if not (event.error_category == "structured_output_invalid" and self.disable_provider_payload):
+                metadata["error_message"] = event.error_message
         model_parameters: dict[str, Any] = dict(event.request_params or {})
         input_value: Any = None
         output_value: Any = None
         end_kwargs: dict[str, Any] = {}
-        if not self.disable_provider_payload:
+        if self._emits_provider_payload():
             if event.input_messages:
                 input_value = self._maybe_truncate_for_input(event.input_messages)
             if event.request_extras:
@@ -2016,7 +2059,7 @@ class LangfuseObserver:
         # level + category. metadata.finish_reason is added for this category by
         # _typed_event_metadata.
         if event.error_category == "structured_output_invalid":
-            if not self.disable_provider_payload and event.output_content is not None:
+            if self._emits_provider_payload() and event.output_content is not None:
                 output_value = self._maybe_truncate_for_output(event.output_content)
             usage = self._usage_from_typed_event(event)
             if usage is not None:
@@ -2083,7 +2126,7 @@ class LangfuseObserver:
             metadata["openarmature_tool_call_id"] = event.tool_call_id
         input_value: Any = None
         output_value: Any = None
-        if not self.disable_provider_payload:
+        if self._emits_provider_payload():
             if event.arguments is not None:
                 input_value = self._maybe_truncate_for_input(event.arguments)
             if isinstance(event, ToolCallEvent):
@@ -2175,7 +2218,7 @@ class LangfuseObserver:
         if event.caller_invocation_metadata is not None:
             _apply_caller_metadata(metadata, event.caller_invocation_metadata)
         input_value: Any = None
-        if not self.disable_provider_payload and event.input_strings:
+        if self._emits_provider_payload() and event.input_strings:
             input_value = self._maybe_truncate_for_input(event.input_strings)
         if isinstance(event, EmbeddingEvent):
             metadata["openarmature_input_count"] = event.input_count
@@ -2184,7 +2227,7 @@ class LangfuseObserver:
             if event.response_id is not None:
                 metadata["openarmature_response_id"] = event.response_id
             output_value: Any = None
-            if not self.disable_provider_payload and event.output_vectors:
+            if self._emits_provider_payload() and event.output_vectors:
                 output_value = self._maybe_truncate_for_input(event.output_vectors)
             usage = LangfuseUsage(input=event.usage.input_tokens) if event.usage is not None else None
             target_trace_id = self._trace_id_for(inv_state, event.namespace, event.fan_out_index)
@@ -2290,7 +2333,7 @@ class LangfuseObserver:
         if event.top_k is not None:
             metadata["openarmature_top_k"] = event.top_k
         input_value: Any = None
-        if not self.disable_provider_payload:
+        if self._emits_provider_payload():
             input_value = self._maybe_truncate_for_input(
                 {"query": event.query, "documents": list(event.documents)}
             )
@@ -2300,7 +2343,7 @@ class LangfuseObserver:
             if event.response_id is not None:
                 metadata["openarmature_response_id"] = event.response_id
             output_value: Any = None
-            if not self.disable_provider_payload and event.output_results:
+            if self._emits_provider_payload() and event.output_results:
                 output_value = self._maybe_truncate_for_input(
                     [result.model_dump(exclude_none=True) for result in event.output_results]
                 )

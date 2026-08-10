@@ -127,22 +127,22 @@ Wrap the SDK client with `LangfuseSDKAdapter` and pass it to the
 observer:
 
 ```python
-from langfuse import Langfuse
-from openarmature.observability.langfuse import (
-    LangfuseObserver,
-    LangfuseSDKAdapter,
-)
+from pydantic import SecretStr
+from openarmature.observability.langfuse import LangfuseObserver
 
-langfuse_client = Langfuse(
+observer = LangfuseObserver.from_credentials(
     public_key="pk-lf-...",
-    secret_key="sk-lf-...",
+    secret_key=SecretStr("sk-lf-..."),
     host="https://cloud.langfuse.com",
-)
-observer = LangfuseObserver(
-    client=LangfuseSDKAdapter(langfuse_client),
     disable_provider_payload=False,
 )
 ```
+
+openarmature builds the client on a dedicated `TracerProvider` here, so
+its observations stay off the provider your application registered
+globally. Building the client yourself binds that global provider
+unless you pass `tracer_provider=`, which exports every observation,
+prompts and completions included, to your app's tracing backend too.
 
 The adapter bridges `langfuse>=4.6,<5`'s unified `start_observation`
 API onto OA's four-method `LangfuseClient` Protocol. v4 has no

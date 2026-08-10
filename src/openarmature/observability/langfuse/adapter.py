@@ -34,7 +34,10 @@
 from __future__ import annotations
 
 import json
+import logging
+import os
 import threading
+from collections.abc import Mapping
 from contextlib import ExitStack
 from datetime import datetime
 from typing import Any, cast
@@ -89,23 +92,81 @@ def _stringify_metadata(metadata: dict[str, Any] | None) -> dict[str, str]:
 _ISOLATED_PROVIDERS: dict[str, Any] = {}
 _ISOLATED_PROVIDERS_LOCK = threading.Lock()
 
+_logger = logging.getLogger("openarmature.observability")
 
-def _reuse_isolated_provider(public_key: str) -> Any:
+
+def _resolve_sample_rate(langfuse_kwargs: Mapping[str, Any]) -> float:
+    """Resolve the sampling ratio the caller asked the Langfuse client for.
+
+    The SDK applies its ``sample_rate`` only while building a provider of its
+    own, which the isolated path bypasses, so the ratio has to be put on OA's
+    provider instead or sampling silently does nothing.
+    """
+    raw = langfuse_kwargs.get("sample_rate")
+    if raw is None:
+        raw = os.environ.get("LANGFUSE_SAMPLE_RATE")
+    if raw is None:
+        return 1.0
+    try:
+        rate = float(raw)
+    except (TypeError, ValueError):
+        return 1.0
+    return min(max(rate, 0.0), 1.0)
+
+
+def _reuse_isolated_provider(public_key: str, sample_rate: float = 1.0) -> Any:
     """Return the one isolated ``TracerProvider`` OA uses for ``public_key``,
-    building it on first use. A bare provider is the whole isolation: the SDK
-    adds its own span processor to whatever provider it is handed and does not
-    register a handed-in provider globally."""
+    building it on first use. A dedicated provider is the whole isolation: the
+    SDK adds its own span processor to whatever provider it is handed and does
+    not register a handed-in provider globally.
+
+    The provider is reused per credential, so the first call's sampling ratio
+    governs -- matching the SDK, which likewise caches one client per key and
+    ignores a later call's configuration.
+    """
     from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace.sampling import TraceIdRatioBased
 
     with _ISOLATED_PROVIDERS_LOCK:
         provider = _ISOLATED_PROVIDERS.get(public_key)
         if provider is None:
-            provider = TracerProvider()
+            if sample_rate >= 1.0:
+                provider = TracerProvider()
+            else:
+                provider = TracerProvider(sampler=TraceIdRatioBased(sample_rate))
             _ISOLATED_PROVIDERS[public_key] = provider
         return provider
 
 
-def _classify_isolation(client: Any, provider: Any, accept_shared_provider: bool) -> str:
+def _resolve_shared_provider() -> Any:
+    """Resolve the ambient provider for the accept-a-shared-provider opt-out, or
+    ``None`` when there is nothing registered to share.
+
+    Handing the SDK ``None`` is not the same as sharing: with no global provider
+    registered yet the SDK builds one and registers it globally, and OTel allows
+    that only once, so OA's opt-out would capture the process-global slot and the
+    application's own later registration would be silently ignored. Resolving the
+    provider here keeps the opt-out to what it says: bind to what is already there.
+    """
+    from opentelemetry import trace as otel_trace
+    from opentelemetry.trace import ProxyTracerProvider
+
+    provider = otel_trace.get_tracer_provider()
+    return None if isinstance(provider, ProxyTracerProvider) else provider
+
+
+def _public_key_is_cached(public_key: str) -> bool:
+    """Whether the SDK already holds a client for this credential, so the
+    configuration of the call about to be made will be discarded."""
+    try:
+        from langfuse._client.resource_manager import LangfuseResourceManager
+    except ImportError:  # pragma: no cover - SDK internal moved
+        return False
+    instances = getattr(LangfuseResourceManager, "_instances", None)
+    return bool(instances) and public_key in instances
+
+
+def _classify_isolation(client: Any, public_key: str, accept_shared_provider: bool) -> str:
     """Classify what the SDK actually bound the client's observations to.
 
     The SDK caches one resource manager per public_key, so a handed-in provider
@@ -114,22 +175,26 @@ def _classify_isolation(client: Any, provider: Any, accept_shared_provider: bool
     is discarded.
     """
     # Proposal 0116 payload-leak invariant: OA establishes the binding to pick the
-    # raise / suppress arm.
-    if accept_shared_provider:
-        return ISOLATION_SHARED_ACCEPTED
+    # raise / suppress arm. A client with tracing disabled exports nothing at all,
+    # so it is checked first -- there is no binding to establish and no leak to
+    # guard, whatever provider the cached manager happens to hold.
+    if not getattr(client, "_tracing_enabled", True):
+        return ISOLATION_ISOLATED
     # Guarded read of the SDK-internal binding: a future SDK that stops exposing
     # it leaves us unable to establish isolation, so the observer takes the
     # portable suppress floor rather than a false all-clear.
     resources = getattr(client, "_resources", None)
     bound = getattr(resources, "tracer_provider", None) if resources is not None else None
     if bound is None:
-        # A client with tracing disabled legitimately has no provider and exports
-        # nothing, so there is no leak to guard -- distinct from a future SDK that
-        # hides the binding (the genuine undetectable case).
-        if not getattr(client, "_tracing_enabled", True):
-            return ISOLATION_ISOLATED
         return ISOLATION_UNDETECTABLE
-    return ISOLATION_ISOLATED if bound is provider else ISOLATION_LEAKED
+    # Membership, not identity: a client the SDK resolved onto the provider OA
+    # established for this credential satisfies the invariant even when the
+    # caller opted into sharing, so the opt-out is read only if it is needed.
+    with _ISOLATED_PROVIDERS_LOCK:
+        established = _ISOLATED_PROVIDERS.get(public_key)
+    if bound is established:
+        return ISOLATION_ISOLATED
+    return ISOLATION_SHARED_ACCEPTED if accept_shared_provider else ISOLATION_LEAKED
 
 
 class _SpanHandle:
@@ -307,7 +372,39 @@ class LangfuseSDKAdapter:
                 "tracer_provider is managed by from_credentials "
                 "(via `accept_shared_provider`); do not pass it through langfuse_kwargs"
             )
-        provider = None if accept_shared_provider else _reuse_isolated_provider(public_key)
+        # Validate at the boundary: the SDK falls back to LANGFUSE_* environment
+        # credentials for a blank value, so an empty config field would silently
+        # authenticate against whatever ambient project is configured instead of
+        # failing. Never echo the value itself.
+        if not public_key or not public_key.strip():
+            raise ValueError("public_key is required and must not be blank")
+        if not secret_key.get_secret_value().strip():
+            raise ValueError("secret_key is required and must not be blank")
+
+        sample_rate = _resolve_sample_rate(langfuse_kwargs)
+        provider = None
+        if accept_shared_provider:
+            provider = _resolve_shared_provider()
+            if provider is None:
+                # Nothing is registered to share, and passing the SDK None would
+                # let it capture the process-global slot. Isolate instead.
+                _logger.warning(
+                    "accept_shared_provider=True but no TracerProvider is registered yet; "
+                    "using an isolated provider rather than letting the Langfuse SDK claim "
+                    "the process-global one"
+                )
+        if provider is None:
+            provider = _reuse_isolated_provider(public_key, sample_rate)
+
+        # The SDK caches one client per credential, so a second construction for
+        # the same key returns the first client and drops this call's secret_key /
+        # host / other options. Say so rather than let the discard pass silently.
+        if _public_key_is_cached(public_key):
+            _logger.warning(
+                "a Langfuse client already exists for this public_key; the SDK returns the "
+                "cached client, so this call's host and client options are not applied"
+            )
+
         client = Langfuse(
             public_key=public_key,
             secret_key=secret_key.get_secret_value(),
@@ -316,7 +413,7 @@ class LangfuseSDKAdapter:
             **langfuse_kwargs,
         )
         adapter = cls(client)
-        adapter._isolation_status = _classify_isolation(client, provider, accept_shared_provider)
+        adapter._isolation_status = _classify_isolation(client, public_key, accept_shared_provider)
         return adapter
 
     def trace(

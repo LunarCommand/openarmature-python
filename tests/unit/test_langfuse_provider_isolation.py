@@ -92,13 +92,83 @@ def test_binding_not_exposed_status_undetectable() -> None:
     assert adapter._isolation_status == ISOLATION_UNDETECTABLE
 
 
-def test_accept_shared_provider_binds_ambient_status_shared_accepted() -> None:
-    with patch(f"{_ADAPTER}.Langfuse", side_effect=_langfuse_binding_other) as mock_lf:
-        adapter = LangfuseSDKAdapter.from_credentials(
-            public_key="pk", secret_key=SecretStr("sk"), accept_shared_provider=True
-        )
-    assert mock_lf.call_args.kwargs["tracer_provider"] is None
+def test_accept_shared_provider_binds_the_ambient_provider() -> None:
+    # Opt-out with a real ambient provider: OA binds THAT provider (never None,
+    # which would let the SDK claim the process-global slot).
+    from opentelemetry.sdk.trace import TracerProvider
+
+    ambient = TracerProvider()
+
+    def bind_ambient(**kwargs: Any) -> MagicMock:
+        client = MagicMock()
+        client._resources.tracer_provider = kwargs["tracer_provider"]
+        return client
+
+    with patch(f"{_ADAPTER}._resolve_shared_provider", return_value=ambient):
+        with patch(f"{_ADAPTER}.Langfuse", side_effect=bind_ambient) as mock_lf:
+            adapter = LangfuseSDKAdapter.from_credentials(
+                public_key="pk", secret_key=SecretStr("sk"), accept_shared_provider=True
+            )
+    assert mock_lf.call_args.kwargs["tracer_provider"] is ambient
     assert adapter._isolation_status == ISOLATION_SHARED_ACCEPTED
+
+
+def test_accept_shared_provider_with_no_ambient_provider_isolates_instead(caplog: Any) -> None:
+    # Nothing registered to share: handing the SDK None would make it construct
+    # and globally register its own provider, capturing the one-shot global slot,
+    # so OA isolates instead and says so.
+    with patch(f"{_ADAPTER}._resolve_shared_provider", return_value=None):
+        with patch(f"{_ADAPTER}.Langfuse", side_effect=_langfuse_binding_passed) as mock_lf:
+            with caplog.at_level("WARNING", logger="openarmature.observability"):
+                adapter = LangfuseSDKAdapter.from_credentials(
+                    public_key="pk", secret_key=SecretStr("sk"), accept_shared_provider=True
+                )
+    assert mock_lf.call_args.kwargs["tracer_provider"] is not None
+    assert adapter._isolation_status == ISOLATION_ISOLATED
+    assert "no TracerProvider is registered yet" in caplog.text
+
+
+def test_opted_in_but_actually_isolated_is_classified_isolated() -> None:
+    # Membership, not the flag: when the SDK resolved the client onto OA's own
+    # isolated provider, the opt-out must not mark it shared (which would emit a
+    # false warning and disable the error gate).
+    with patch(f"{_ADAPTER}._resolve_shared_provider", return_value=None):
+        with patch(f"{_ADAPTER}.Langfuse", side_effect=_langfuse_binding_passed):
+            adapter = LangfuseSDKAdapter.from_credentials(
+                public_key="pk", secret_key=SecretStr("sk"), accept_shared_provider=True
+            )
+    assert adapter._isolation_status == ISOLATION_ISOLATED
+
+
+def test_blank_credentials_are_rejected_at_the_boundary() -> None:
+    # The SDK falls back to ambient LANGFUSE_* env credentials for a blank value,
+    # so a blank field must fail rather than silently authenticate elsewhere.
+    with patch(f"{_ADAPTER}.Langfuse"):
+        with pytest.raises(ValueError, match="public_key"):
+            LangfuseSDKAdapter.from_credentials(public_key="  ", secret_key=SecretStr("sk"))
+        with pytest.raises(ValueError, match="secret_key"):
+            LangfuseSDKAdapter.from_credentials(public_key="pk", secret_key=SecretStr(""))
+
+
+def test_cached_public_key_warns_that_client_config_is_discarded(caplog: Any) -> None:
+    # The SDK caches one client per credential, so a second construction drops
+    # this call's host / options; that discard must not be silent.
+    with patch(f"{_ADAPTER}._public_key_is_cached", return_value=True):
+        with patch(f"{_ADAPTER}.Langfuse", side_effect=_langfuse_binding_passed):
+            with caplog.at_level("WARNING", logger="openarmature.observability"):
+                LangfuseSDKAdapter.from_credentials(public_key="pk", secret_key=SecretStr("sk"))
+    assert "cached client" in caplog.text
+
+
+def test_sample_rate_is_applied_to_the_isolated_provider() -> None:
+    # The SDK applies sample_rate only on a provider it builds, which isolation
+    # bypasses, so the ratio has to land on OA's provider or sampling is a no-op.
+    from opentelemetry.sdk.trace.sampling import TraceIdRatioBased
+
+    with patch(f"{_ADAPTER}.Langfuse", side_effect=_langfuse_binding_passed) as mock_lf:
+        LangfuseSDKAdapter.from_credentials(public_key="pk", secret_key=SecretStr("sk"), sample_rate=0.25)
+    provider = mock_lf.call_args.kwargs["tracer_provider"]
+    assert isinstance(provider.sampler, TraceIdRatioBased)
 
 
 def test_isolated_provider_reused_per_public_key() -> None:
@@ -263,3 +333,136 @@ def test_tracing_disabled_classified_isolated_not_undetectable() -> None:
     with patch(f"{_ADAPTER}.Langfuse", side_effect=_langfuse_tracing_disabled):
         adapter = LangfuseSDKAdapter.from_credentials(public_key="pk", secret_key=SecretStr("sk"))
     assert adapter._isolation_status == ISOLATION_ISOLATED
+
+
+def test_tracing_disabled_on_a_foreign_provider_is_still_no_leak() -> None:
+    # Tracing off exports nothing whatever provider the cached manager holds, so
+    # it must not classify LEAKED and refuse the call.
+    def disabled_on_foreign(**kwargs: Any) -> MagicMock:
+        client = MagicMock()
+        client._resources.tracer_provider = object()
+        client._tracing_enabled = False
+        return client
+
+    with patch(f"{_ADAPTER}.Langfuse", side_effect=disabled_on_foreign):
+        adapter = LangfuseSDKAdapter.from_credentials(public_key="pk", secret_key=SecretStr("sk"))
+    assert adapter._isolation_status == ISOLATION_ISOLATED
+
+
+# --- the guard applies to every path to an OA-constructed client --------------
+
+
+def test_adapter_built_client_is_guarded_through_the_plain_constructor() -> None:
+    # The arms live in __post_init__, so handing a from_credentials adapter to the
+    # ordinary constructor is guarded exactly like the observer factory.
+    with patch(f"{_ADAPTER}.Langfuse", side_effect=_langfuse_binding_other):
+        adapter = LangfuseSDKAdapter.from_credentials(public_key="pk", secret_key=SecretStr("sk"))
+    with pytest.raises(LangfuseProviderIsolationUnavailable):
+        LangfuseObserver(client=adapter, disable_provider_payload=False)
+
+
+def test_payload_knob_reopened_after_construction_is_still_blocked() -> None:
+    # The knobs are public fields on a mutable dataclass; emission consults the
+    # isolation status so a channel re-opened afterwards cannot leak.
+    obs = LangfuseObserver(client=MagicMock(_isolation_status=ISOLATION_LEAKED))
+    obs.disable_provider_payload = False
+    assert obs._emits_provider_payload() is False
+
+
+def test_state_channel_reopened_after_construction_falls_back_to_the_stub() -> None:
+    from openarmature.graph.events import InvocationStartedEvent
+
+    obs = LangfuseObserver(client=MagicMock(_isolation_status=ISOLATION_LEAKED))
+    obs.disable_state_payload = False
+    obs.trace_input_from_state = _hook
+    resolved = obs._resolve_trace_input(
+        InvocationStartedEvent(
+            initial_state={"secret": "pii"},
+            invocation_id="inv-1",
+            correlation_id=None,
+            entry_node="start",
+        )
+    )
+    assert resolved == {"entry_node": "start"}  # the minimal stub, no state
+
+
+# --- behavioral: what actually lands on the observation -----------------------
+
+
+async def test_failed_tool_observation_omits_error_message_on_a_leaked_provider() -> None:
+    # The gate's effect, not just its predicate: the harvested message and type
+    # are absent, and Tool has no category so nothing is smuggled into
+    # statusMessage either.
+    from openarmature.graph.events import ToolCallFailedEvent
+    from openarmature.observability.correlation import _reset_invocation_id, _set_invocation_id
+    from openarmature.observability.langfuse import InMemoryLangfuseClient
+
+    client = InMemoryLangfuseClient()
+    client._isolation_status = ISOLATION_LEAKED  # type: ignore[attr-defined]
+    observer = LangfuseObserver(client=client)
+    token = _set_invocation_id("inv-leak")
+    try:
+        await observer(
+            ToolCallFailedEvent(
+                invocation_id="inv-leak",
+                correlation_id=None,
+                node_name="run_tool",
+                namespace=("run_tool",),
+                attempt_index=0,
+                fan_out_index=None,
+                branch_name=None,
+                call_id="cc-1",
+                tool_name="get_weather",
+                tool_call_id="call_1",
+                arguments={"city": "Paris"},
+                latency_ms=3.0,
+                error_type="ValueError",
+                error_message="rejected SSN 123-45-6789",
+            )
+        )
+    finally:
+        _reset_invocation_id(token)
+
+    obs = next(o for o in client.traces["inv-leak"].observations if o.type == "tool")
+    assert obs.level == "ERROR"
+    assert "error_message" not in obs.metadata
+    assert "error_type" not in obs.metadata
+    assert obs.status_message is None
+
+
+async def test_failed_tool_observation_keeps_error_message_when_isolated() -> None:
+    # The converse: an isolated client reports errors normally, so the gate does
+    # not break legitimate error reporting.
+    from openarmature.graph.events import ToolCallFailedEvent
+    from openarmature.observability.correlation import _reset_invocation_id, _set_invocation_id
+    from openarmature.observability.langfuse import InMemoryLangfuseClient
+
+    client = InMemoryLangfuseClient()
+    client._isolation_status = ISOLATION_ISOLATED  # type: ignore[attr-defined]
+    observer = LangfuseObserver(client=client)
+    token = _set_invocation_id("inv-ok")
+    try:
+        await observer(
+            ToolCallFailedEvent(
+                invocation_id="inv-ok",
+                correlation_id=None,
+                node_name="run_tool",
+                namespace=("run_tool",),
+                attempt_index=0,
+                fan_out_index=None,
+                branch_name=None,
+                call_id="cc-2",
+                tool_name="get_weather",
+                tool_call_id="call_2",
+                arguments={"city": "Paris"},
+                latency_ms=3.0,
+                error_type="TimeoutError",
+                error_message="tool timed out",
+            )
+        )
+    finally:
+        _reset_invocation_id(token)
+
+    obs = next(o for o in client.traces["inv-ok"].observations if o.type == "tool")
+    assert obs.metadata.get("error_message") == "tool timed out"
+    assert obs.status_message == "tool timed out"

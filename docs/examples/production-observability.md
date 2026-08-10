@@ -27,7 +27,8 @@ part is the observability wiring:
   `OTLPSpanExporter` pointed at HyperDX / Honeycomb / Tempo / any
   OTLP backend).
 - `LangfuseObserver` attached with an `InMemoryLangfuseClient`
-  (production swaps for `LangfuseSDKAdapter(Langfuse(...))`).
+  (production swaps for `LangfuseObserver.from_credentials(...)`, which
+  isolates the client's `TracerProvider`).
 - Both observers consume the same `NodeEvent` stream
   independently; node code never knows there are two backends.
 - `LangfuseObserver` carries `trace_input_from_state` and
