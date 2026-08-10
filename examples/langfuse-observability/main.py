@@ -252,21 +252,22 @@ async def main() -> None:
 
     # The bundled in-memory client captures everything the observer
     # would have sent to Langfuse; Trace, Observations, Generation
-    # fields; without needing a Langfuse account. For production:
+    # fields; without needing a Langfuse account. For production, build
+    # the observer from credentials so OA owns the Langfuse client and
+    # keeps its observations on a dedicated TracerProvider:
     #
-    #     from langfuse import Langfuse
-    #     from openarmature.observability.langfuse import LangfuseSDKAdapter
+    #     from pydantic import SecretStr
     #
-    #     langfuse_client = Langfuse(
+    #     observer = LangfuseObserver.from_credentials(
     #         public_key="pk-lf-...",
-    #         secret_key="sk-lf-...",
+    #         secret_key=SecretStr("sk-lf-..."),
     #         host="https://cloud.langfuse.com",
     #     )
-    #     client = LangfuseSDKAdapter(langfuse_client)
     #
-    # Validated against ``langfuse>=4.6,<5``. The adapter bridges
-    # langfuse v4's unified ``start_observation`` API onto OA's
-    # ``LangfuseClient`` Protocol; the observer code doesn't change.
+    # A Langfuse client you construct yourself binds the globally
+    # registered TracerProvider unless you pass ``tracer_provider=``,
+    # which also exports every observation to your app's tracing
+    # backend. Validated against ``langfuse>=4.6,<5``.
     client = InMemoryLangfuseClient()
 
     # disable_provider_payload=False opts in to capturing the input messages

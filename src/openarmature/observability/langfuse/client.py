@@ -38,6 +38,16 @@ ObservationType = Literal["span", "generation", "event", "tool", "embedding", "r
 # Langfuse-supported `level` values per spec §8.4.2 (statusMessage pair).
 ObservationLevel = Literal["DEFAULT", "DEBUG", "INFO", "WARNING", "ERROR"]
 
+# Isolation status of an OA-constructed Langfuse client (proposals 0114 / 0116 /
+# 0117 payload-leak invariant). Recorded on LangfuseSDKAdapter by from_credentials
+# and read by the observer's per-emission payload-leak gate. Defined here (SDK-free)
+# so the observer can consult it without importing the SDK-gated adapter. ``None``
+# means a caller-supplied client (mode a), where the caller owns the provider.
+ISOLATION_ISOLATED = "isolated"
+ISOLATION_LEAKED = "leaked"
+ISOLATION_UNDETECTABLE = "undetectable"
+ISOLATION_SHARED_ACCEPTED = "shared_accepted"
+
 
 @dataclass
 class LangfuseUsage:
@@ -678,6 +688,10 @@ class InMemoryLangfuseClient:
 
 
 __all__ = [
+    "ISOLATION_ISOLATED",
+    "ISOLATION_LEAKED",
+    "ISOLATION_SHARED_ACCEPTED",
+    "ISOLATION_UNDETECTABLE",
     "InMemoryLangfuseClient",
     "LangfuseClient",
     "LangfuseGenerationHandle",

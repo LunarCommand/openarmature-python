@@ -38,9 +38,13 @@ requestId / featureFlag) propagating to both observers in one
   in-process so the demo can print it at the end without needing a
   real Langfuse account.  ``InMemorySpanExporter`` does the
   symmetric job for OTel.  Production code swaps in
-  ``LangfuseSDKAdapter(Langfuse(...))`` and
-  ``BatchSpanProcessor(OTLPSpanExporter(...))`` respectively; the
-  observer call surface doesn't change.
+  ``LangfuseObserver.from_credentials(public_key=..., secret_key=...)``
+  and ``BatchSpanProcessor(OTLPSpanExporter(...))`` respectively; the
+  observer call surface doesn't change.  Prefer ``from_credentials``
+  over building the Langfuse client yourself: OA then binds the client
+  to a dedicated ``TracerProvider``, whereas a client constructed
+  without ``tracer_provider=`` binds the globally registered one and
+  exports every observation to your app's tracing backend too.
 - **Queryable accumulator observer + per-invocation drain.** A
   third observer (``LlmUsageAccumulator``) rolls up LLM token
   totals per invocation, including a cache-hit ratio from

@@ -1123,7 +1123,31 @@ pip install 'openarmature[langfuse]'
 Production wire-up:
 
 ```python
+from pydantic import SecretStr
+from openarmature.observability.langfuse import LangfuseObserver
+
+observer = LangfuseObserver.from_credentials(
+    public_key="pk-lf-...",
+    secret_key=SecretStr("sk-lf-..."),
+    host="https://cloud.langfuse.com",
+    disable_provider_payload=False,
+)
+```
+
+Prefer `from_credentials`: openarmature builds the Langfuse client on a
+dedicated `TracerProvider`, so its observations do not also land on the
+provider your application registered globally. A client you build
+yourself binds the global provider unless you pass `tracer_provider=`,
+which exports every observation, prompts and completions included, to
+your application's tracing backend as well.
+
+If you must build the client yourself (to reuse an existing instance,
+say), isolate it explicitly and hand it in; openarmature never mutates
+a client you supply:
+
+```python
 from langfuse import Langfuse
+from opentelemetry.sdk.trace import TracerProvider
 from openarmature.observability.langfuse import (
     LangfuseObserver,
     LangfuseSDKAdapter,
@@ -1133,6 +1157,7 @@ langfuse_client = Langfuse(
     public_key="pk-lf-...",
     secret_key="sk-lf-...",
     host="https://cloud.langfuse.com",
+    tracer_provider=TracerProvider(),   # keep observations off the global provider
 )
 observer = LangfuseObserver(
     client=LangfuseSDKAdapter(langfuse_client),
