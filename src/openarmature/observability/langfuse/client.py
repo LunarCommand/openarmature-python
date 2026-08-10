@@ -688,6 +688,10 @@ class InMemoryLangfuseClient:
 
 
 __all__ = [
+    "ISOLATION_ISOLATED",
+    "ISOLATION_LEAKED",
+    "ISOLATION_SHARED_ACCEPTED",
+    "ISOLATION_UNDETECTABLE",
     "InMemoryLangfuseClient",
     "LangfuseClient",
     "LangfuseGenerationHandle",

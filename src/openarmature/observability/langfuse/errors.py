@@ -11,6 +11,8 @@
 
 from __future__ import annotations
 
+from typing import ClassVar
+
 
 class ObservabilityError(Exception):
     """Base for errors raised by the bundled observability backends.
@@ -30,4 +32,4 @@ class LangfuseProviderIsolationUnavailable(ObservabilityError):
     without matching the message.
     """
 
-    category = "langfuse_provider_isolation_unavailable"
+    category: ClassVar[str] = "langfuse_provider_isolation_unavailable"

@@ -2034,7 +2034,9 @@ class LangfuseObserver:
         # message as well as the category-as-statusMessage on the
         # observation. error_type is null when no impl-side type was
         # available; the metadata key is omitted in that case so the
-        # absence-is-meaningful semantic is preserved.
+        # absence-is-meaningful semantic is preserved. Both harvested rows
+        # are omitted entirely when OA could not establish that the client's
+        # provider is isolated; the category still rides as statusMessage.
         if not self._omit_harvested_error():
             if event.error_type is not None:
                 metadata["error_type"] = event.error_type
@@ -2093,6 +2095,8 @@ class LangfuseObserver:
         ``error_type`` / ``error_message`` in metadata and as the status
         message) on a ToolCallFailedEvent. ``input`` (arguments) /
         ``output`` (result) are payload-gated per ``disable_provider_payload``.
+        The error rows and the status message are omitted when openarmature
+        could not establish that the client's provider is isolated.
         """
         from openarmature.observability.correlation import (
             current_correlation_id,
@@ -2139,6 +2143,10 @@ class LangfuseObserver:
         status_message: str | None = None
         if isinstance(event, ToolCallFailedEvent):
             level = "ERROR"
+            # Omitted when OA could not establish that the client's provider is
+            # isolated. A tool failure carries no error category, so nothing is
+            # left to put in statusMessage: it stays null rather than falling
+            # back to the message, which would smuggle the harvested string out.
             if not self._omit_harvested_error():
                 if event.error_type is not None:
                     metadata["error_type"] = event.error_type
@@ -2175,7 +2183,9 @@ class LangfuseObserver:
 
         Failure (``EmbeddingFailedEvent``): ERROR level with the
         ``error_category`` as the status message and ``error_type`` /
-        ``error_message`` in metadata, mirroring the tool failure. The
+        ``error_message`` in metadata, mirroring the tool failure; the two
+        error rows are omitted when openarmature could not establish that the
+        client's provider is isolated, and the category still rides. The
         request-side ``input`` strings are still payload-gated; there is NO
         ``output`` (no response received).
         """
@@ -2245,7 +2255,9 @@ class LangfuseObserver:
             handle.end(end_time=end_time)
             return
         # Failure path: request-side input_count survives; the response-derived
-        # rows do not. No output. ERROR level + category-as-statusMessage.
+        # rows do not. No output. ERROR level + category-as-statusMessage. The
+        # harvested error rows below are omitted when OA could not establish
+        # that the client's provider is isolated; the category still rides.
         metadata["openarmature_input_count"] = len(event.input_strings)
         if not self._omit_harvested_error():
             if event.error_type is not None:
@@ -2284,7 +2296,9 @@ class LangfuseObserver:
         (``{query, documents}``) + ``output`` (scored results).
 
         Failure (``RerankFailedEvent``): ERROR level with the ``error_category``
-        as the status message and ``error_type`` / ``error_message`` in
+        as the status message; the ``error_type`` / ``error_message`` rows are
+        omitted when openarmature could not establish that the client's provider
+        is isolated. Otherwise ``error_type`` / ``error_message`` ride in
         metadata, mirroring the tool / embedding failure. The request-side
         ``input`` is still payload-gated; there is NO ``output`` (no response
         received).
@@ -2370,7 +2384,9 @@ class LangfuseObserver:
             handle.end(end_time=end_time)
             return
         # Failure path: the request-side metadata survives; the response-derived
-        # rows do not. No output. ERROR level + category-as-statusMessage.
+        # rows do not. No output. ERROR level + category-as-statusMessage. The
+        # harvested error rows below are omitted when OA could not establish
+        # that the client's provider is isolated; the category still rides.
         if not self._omit_harvested_error():
             if event.error_type is not None:
                 metadata["error_type"] = event.error_type
