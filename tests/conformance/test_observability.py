@@ -259,7 +259,6 @@ _SUPPORTED_FIXTURES = frozenset(
         "095-tool-call-id-links-to-llm-request",
         "096-tool-call-payload-gating",
         "097-otel-tool-span-attributes",
-        "098-langfuse-tool-observation",
         # v0.16.0 — proposal 0059 embedding observability (0059b). A
         # calls_embed node awaits OpenAIEmbeddingProvider.embed() inside the
         # node body; the typed EmbeddingEvent / EmbeddingFailedEvent drive the
@@ -279,7 +278,6 @@ _SUPPORTED_FIXTURES = frozenset(
         "081-embedding-event-active-prompt-populated",
         "082-otel-embedding-span-attributes",
         "083-langfuse-embedding-observation",
-        "137-langfuse-embedding-failure-observation",
         "139-otel-embedding-no-usage-input-tokens-omitted",
         "140-langfuse-embedding-no-usage-usagedetails-omitted",
         # proposal 0067 §11 embedding metrics: token.usage (input only) +
@@ -306,7 +304,6 @@ _SUPPORTED_FIXTURES = frozenset(
         "106-rerank-event-active-prompt-populated",
         "107-otel-rerank-span-attributes",
         "108-langfuse-rerank-observation",
-        "138-langfuse-rerank-failure-observation",
         "141-otel-rerank-no-usage-attributes-omitted",
         "142-langfuse-rerank-no-usage-usagedetails-omitted",
         "109-rerank-metrics-token-and-duration",
@@ -326,6 +323,32 @@ _SUPPORTED_FIXTURES = frozenset(
 #
 # _DEFERRED_FIXTURES — not run because the capability is unimplemented.
 _DEFERRED_FIXTURES: dict[str, str] = {
+    # Proposal 0118 (spec v0.112.0) gates a failed observation's error_message on
+    # disable_provider_payload. The behavior ships ahead of the pin, so at the
+    # pinned v0.107.0 these three still assert the message PRESENT under the
+    # default posture, which 0118 forbids. Spec reconciles all three at v0.112.0
+    # (137/138 assert it absent with error_type retained; 098 gains the tool
+    # anti-smuggling case).
+    #
+    # Un-deferring needs BOTH the pin bump AND the `metadata_absent` directive in
+    # _assert_langfuse_observation_tree: 137/138 express the withholding through
+    # that directive alone, so re-listing them while it is unimplemented restores
+    # a vacuous pass rather than coverage. 098 is unaffected (it asserts a null
+    # statusMessage, which is implemented). The directive is on the harness-guard
+    # branch; the source behavior here is covered meanwhile by the default-posture
+    # unit tests in tests/unit/test_langfuse_provider_isolation.py.
+    "098-langfuse-tool-observation": (
+        "Proposal 0118 error-message gating: fixture asserts the pre-0118 shape; "
+        "reconciled at the v0.112.0 pin bump"
+    ),
+    "137-langfuse-embedding-failure-observation": (
+        "Proposal 0118 error-message gating: fixture asserts the pre-0118 shape; "
+        "reconciled at the v0.112.0 pin bump"
+    ),
+    "138-langfuse-rerank-failure-observation": (
+        "Proposal 0118 error-message gating: fixture asserts the pre-0118 shape; "
+        "reconciled at the v0.112.0 pin bump"
+    ),
     # Proposal 0045 IS implemented (v0.11.0), but the nested-case Langfuse
     # fixture stays deferred: it needs runtime-state item-list lookup for
     # nested fan-outs plus an augment_metadata_from_outer_item directive
@@ -415,10 +438,16 @@ _DEFERRED_FIXTURES: dict[str, str] = {
     # Proposal 0107 (spec v0.102.0) mock_embedding / mock_rerank raises
     # sub-directive -> literal error-field assertion.
     "150-langfuse-embedding-failure-literal-error-fields": (
-        "Proposal 0107 mock-raises literal error fields; harness wiring rides the v0.17.0 fixture-wiring PR"
+        "Proposal 0107 mock-raises literal error fields; harness wiring rides the v0.17.0 "
+        "fixture-wiring PR. Also asserts the pre-0118 shape at this pin: spec moves both "
+        "cases to disable_provider_payload=false at v0.112.0, since asserting the message "
+        "literally is their purpose"
     ),
     "151-langfuse-rerank-failure-literal-error-fields": (
-        "Proposal 0107 mock-raises literal error fields; harness wiring rides the v0.17.0 fixture-wiring PR"
+        "Proposal 0107 mock-raises literal error fields; harness wiring rides the v0.17.0 "
+        "fixture-wiring PR. Also asserts the pre-0118 shape at this pin: spec moves both "
+        "cases to disable_provider_payload=false at v0.112.0, since asserting the message "
+        "literally is their purpose"
     ),
     # Spec v0.103.1 conformance coverage (0084 orphan-fallback arms + the
     # embedding failure-metrics counterpart).
@@ -5036,6 +5065,12 @@ async def _run_tool_case(case: Mapping[str, Any]) -> None:
         lf_kwargs: dict[str, Any] = {"client": langfuse_client}
         if "disable_provider_payload" in case:
             lf_kwargs["disable_provider_payload"] = bool(case["disable_provider_payload"])
+        # A per-observer block overrides the shared top-level flag, so a fixture
+        # can drive the two observers at different postures; mirrors the
+        # embedding and rerank runners.
+        lf_cfg = cast("dict[str, Any] | None", case.get("langfuse_observer")) or {}
+        if "disable_provider_payload" in lf_cfg:
+            lf_kwargs["disable_provider_payload"] = bool(lf_cfg["disable_provider_payload"])
         graph.attach_observer(LangfuseObserver(**lf_kwargs))
 
     try:

@@ -408,3 +408,17 @@ def test_adapter_built_client_is_guarded_on_every_construction_path() -> None:
         LangfuseObserver(client=leaked_client, disable_state_payload=False)
     with pytest.raises(LangfuseProviderIsolationUnavailable):
         LangfuseObserver(client=leaked_client, trace_input_from_state=lambda s: s)
+
+
+async def test_payloads_off_withholds_every_harvested_channel_on_an_isolated_client() -> None:
+    # The case that separates the payload flag from the isolation status: the
+    # provider IS isolated, so an isolation-only gate would emit everything, but
+    # payloads are off so nothing harvested may be rendered. Without this, a site
+    # reverted to the retired isolation predicate passes the whole suite.
+    client = InMemoryLangfuseClient()
+    client._isolation_status = ISOLATION_ISOLATED  # type: ignore[attr-defined]
+    observer = LangfuseObserver(client=client)  # every payload knob at its default
+    await _drive_every_channel(observer)
+    captured = _captured_text(client)
+    leaked = [s for s in ALL_SENTINELS if s in captured]
+    assert not leaked, f"payloads are disabled but harvested content was rendered: {leaked}"

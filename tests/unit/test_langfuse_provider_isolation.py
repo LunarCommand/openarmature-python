@@ -252,7 +252,7 @@ def test_observer_undetectable_suppresses_all_channels_and_warns(caplog: Any) ->
     assert obs.disable_provider_payload is True
     assert obs.disable_state_payload is True
     assert obs.trace_input_from_state is None
-    assert "suppressing all provider and state payloads" in caplog.text
+    assert "suppressing the provider and state payloads you enabled" in caplog.text
 
 
 def test_observer_accept_shared_provider_warns_and_proceeds(caplog: Any) -> None:
@@ -310,21 +310,30 @@ def test_all_channels_off_on_leak_does_not_raise() -> None:
     assert obs.disable_provider_payload is True
 
 
-@pytest.mark.parametrize(
-    "status,expected",
-    [
-        (ISOLATION_LEAKED, True),
-        (ISOLATION_UNDETECTABLE, True),
-        (ISOLATION_ISOLATED, False),
-        (ISOLATION_SHARED_ACCEPTED, False),
-        (None, False),
-    ],
-)
-def test_omit_harvested_error_gate(status: Any, expected: bool) -> None:
-    # The per-emission gate: a failed observation's harvested error_message /
-    # error_type is dropped only when OA has not established isolation.
+def test_error_message_follows_the_payload_flag_not_the_isolation_status() -> None:
+    # 0118: the flag governs the harvested error message. With payloads off it is
+    # never emitted, whatever the provider turned out to be -- including a plain
+    # caller-supplied client, which records no isolation status at all.
+    for status in (ISOLATION_ISOLATED, ISOLATION_SHARED_ACCEPTED, None):
+        obs = LangfuseObserver(client=MagicMock(_isolation_status=status))
+        assert obs.disable_provider_payload is True  # the default posture
+        assert obs._emits_harvested_error_message() is False
+
+
+def test_error_message_emits_with_payloads_on_and_an_isolated_provider() -> None:
+    obs = LangfuseObserver(
+        client=MagicMock(_isolation_status=ISOLATION_ISOLATED), disable_provider_payload=False
+    )
+    assert obs._emits_harvested_error_message() is True
+
+
+@pytest.mark.parametrize("status", [ISOLATION_LEAKED, ISOLATION_UNDETECTABLE])
+def test_error_message_withheld_on_a_provider_not_established_as_isolated(status: str) -> None:
+    # Not a second gate: the §6 arms already closed the flag for these statuses
+    # (suppress-all), or refused construction outright, so the message cannot ride.
     obs = LangfuseObserver(client=MagicMock(_isolation_status=status))
-    assert obs._omit_harvested_error() is expected
+    obs.disable_provider_payload = False  # a caller reopening it post-construction
+    assert obs._emits_harvested_error_message() is False
 
 
 def test_tracing_disabled_classified_isolated_not_undetectable() -> None:
@@ -389,17 +398,17 @@ def test_state_channel_reopened_after_construction_falls_back_to_the_stub() -> N
 # --- behavioral: what actually lands on the observation -----------------------
 
 
-async def test_failed_tool_observation_omits_error_message_on_a_leaked_provider() -> None:
-    # The gate's effect, not just its predicate: the harvested message and type
-    # are absent, and Tool has no category so nothing is smuggled into
-    # statusMessage either.
+async def test_failed_tool_observation_omits_message_under_the_default_posture() -> None:
+    # The gate's effect, not just its predicate. error_type is NOT gated (0118) --
+    # it is the only failure discriminator a tool observation has, since a tool
+    # failure carries no error category -- but the message is withheld and must
+    # not be smuggled into statusMessage in its place.
     from openarmature.graph.events import ToolCallFailedEvent
     from openarmature.observability.correlation import _reset_invocation_id, _set_invocation_id
     from openarmature.observability.langfuse import InMemoryLangfuseClient
 
     client = InMemoryLangfuseClient()
-    client._isolation_status = ISOLATION_LEAKED  # type: ignore[attr-defined]
-    observer = LangfuseObserver(client=client)
+    observer = LangfuseObserver(client=client)  # disable_provider_payload defaults True
     token = _set_invocation_id("inv-leak")
     try:
         await observer(
@@ -426,20 +435,19 @@ async def test_failed_tool_observation_omits_error_message_on_a_leaked_provider(
     obs = next(o for o in client.traces["inv-leak"].observations if o.type == "tool")
     assert obs.level == "ERROR"
     assert "error_message" not in obs.metadata
-    assert "error_type" not in obs.metadata
+    assert obs.metadata.get("error_type") == "ValueError"  # ungated classification token
     assert obs.status_message is None
 
 
-async def test_failed_tool_observation_keeps_error_message_when_isolated() -> None:
-    # The converse: an isolated client reports errors normally, so the gate does
-    # not break legitimate error reporting.
+async def test_failed_tool_observation_keeps_error_message_with_payloads_on() -> None:
+    # The converse: with payloads enabled the message reports normally, so the
+    # gate does not break legitimate error triage.
     from openarmature.graph.events import ToolCallFailedEvent
     from openarmature.observability.correlation import _reset_invocation_id, _set_invocation_id
     from openarmature.observability.langfuse import InMemoryLangfuseClient
 
     client = InMemoryLangfuseClient()
-    client._isolation_status = ISOLATION_ISOLATED  # type: ignore[attr-defined]
-    observer = LangfuseObserver(client=client)
+    observer = LangfuseObserver(client=client, disable_provider_payload=False)
     token = _set_invocation_id("inv-ok")
     try:
         await observer(
@@ -466,3 +474,140 @@ async def test_failed_tool_observation_keeps_error_message_when_isolated() -> No
     obs = next(o for o in client.traces["inv-ok"].observations if o.type == "tool")
     assert obs.metadata.get("error_message") == "tool timed out"
     assert obs.status_message == "tool timed out"
+
+
+# The Tool test above covers one of the four gated sites. These cover the other
+# three: without them, reverting any of the LLM / Embedding / Retriever handlers
+# to the retired isolation predicate passes the whole suite.
+
+
+async def _one_observation(observer: LangfuseObserver, client: Any, event: Any, obs_type: str) -> Any:
+    from openarmature.observability.correlation import _reset_invocation_id, _set_invocation_id
+
+    token = _set_invocation_id(_INV_DEFAULT)
+    try:
+        await observer(event)
+    finally:
+        _reset_invocation_id(token)
+    return next(o for o in client.traces[_INV_DEFAULT].observations if o.type == obs_type)
+
+
+_INV_DEFAULT = "inv-default-posture"
+
+
+async def test_failed_llm_generation_omits_message_under_the_default_posture() -> None:
+    from openarmature.graph.events import LlmFailedEvent
+    from openarmature.observability.langfuse import InMemoryLangfuseClient
+
+    client = InMemoryLangfuseClient()
+    observer = LangfuseObserver(client=client)  # disable_provider_payload defaults True
+    obs = await _one_observation(
+        observer,
+        client,
+        LlmFailedEvent(
+            invocation_id=_INV_DEFAULT,
+            correlation_id=None,
+            node_name="call_llm",
+            namespace=("call_llm",),
+            attempt_index=0,
+            fan_out_index=None,
+            branch_name=None,
+            provider="openai",
+            model="m",
+            latency_ms=1.0,
+            input_messages=[],
+            request_params={},
+            request_extras={},
+            active_prompt=None,
+            active_prompt_group=None,
+            call_id="cc-1",
+            error_category="provider_unavailable",
+            error_message="upstream said: prompt was 'secret'",
+        ),
+        "generation",
+    )
+    assert "error_message" not in obs.metadata
+    assert obs.status_message == "provider_unavailable"  # the category still rides
+
+
+async def test_failed_embedding_omits_message_under_the_default_posture() -> None:
+    from openarmature.graph.events import EmbeddingFailedEvent
+    from openarmature.observability.langfuse import InMemoryLangfuseClient
+
+    client = InMemoryLangfuseClient()
+    observer = LangfuseObserver(client=client)
+    obs = await _one_observation(
+        observer,
+        client,
+        EmbeddingFailedEvent(
+            invocation_id=_INV_DEFAULT,
+            correlation_id=None,
+            node_name="embed",
+            namespace=("embed",),
+            attempt_index=0,
+            fan_out_index=None,
+            branch_name=None,
+            provider="openai",
+            model="m",
+            latency_ms=1.0,
+            input_strings=["x"],
+            request_params={},
+            request_extras={},
+            active_prompt=None,
+            active_prompt_group=None,
+            call_id="cc-2",
+            error_category="provider_unavailable",
+            error_message="upstream said: input was 'secret'",
+        ),
+        "embedding",
+    )
+    assert "error_message" not in obs.metadata
+    assert obs.status_message == "provider_unavailable"
+
+
+async def test_failed_rerank_omits_message_under_the_default_posture() -> None:
+    from openarmature.graph.events import RerankFailedEvent
+    from openarmature.observability.langfuse import InMemoryLangfuseClient
+
+    client = InMemoryLangfuseClient()
+    observer = LangfuseObserver(client=client)
+    obs = await _one_observation(
+        observer,
+        client,
+        RerankFailedEvent(
+            invocation_id=_INV_DEFAULT,
+            correlation_id=None,
+            node_name="rerank",
+            namespace=("rerank",),
+            attempt_index=0,
+            fan_out_index=None,
+            branch_name=None,
+            provider="cohere",
+            model="m",
+            latency_ms=1.0,
+            query="q",
+            documents=["d"],
+            document_count=1,
+            top_k=1,
+            request_params={},
+            request_extras={},
+            active_prompt=None,
+            active_prompt_group=None,
+            call_id="cc-3",
+            error_category="provider_unavailable",
+            error_message="upstream said: query was 'secret'",
+        ),
+        "retriever",
+    )
+    assert "error_message" not in obs.metadata
+    assert obs.status_message == "provider_unavailable"
+
+
+def test_undetectable_under_the_default_posture_neither_raises_nor_warns(caplog: Any) -> None:
+    # With no channel live the suppress arm takes nothing away, so warning there
+    # would contradict the documented "an un-isolatable client is harmless".
+    with _patched_adapter(ISOLATION_UNDETECTABLE):
+        with caplog.at_level("WARNING", logger="openarmature.observability"):
+            obs = LangfuseObserver.from_credentials(public_key="pk", secret_key=SecretStr("sk"))
+    assert obs.disable_provider_payload is True
+    assert "cannot establish" not in caplog.text
