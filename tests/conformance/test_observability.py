@@ -5018,6 +5018,13 @@ def _assert_langfuse_observation_tree(
         children = cast("list[dict[str, Any]] | None", exp.get("children"))
         if children:
             _assert_langfuse_observation_tree(trace, children, parent_id=match.id)
+    # Every observation under this parent must be accounted for. Leaving
+    # leftovers unasserted lets an unexpected observation ride silently, the
+    # same shape as an unimplemented directive being skipped.
+    assert not remaining, (
+        f"unexpected Langfuse observations under parent {parent_id!r}: "
+        f"{[(o.type, o.name) for o in remaining]}"
+    )
 
 
 async def _run_tool_fixture(spec: Mapping[str, Any]) -> None:
