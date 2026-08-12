@@ -334,9 +334,10 @@ _DEFERRED_FIXTURES: dict[str, str] = {
     # _assert_langfuse_observation_tree: 137/138 express the withholding through
     # that directive alone, so re-listing them while it is unimplemented restores
     # a vacuous pass rather than coverage. 098 is unaffected (it asserts a null
-    # statusMessage, which is implemented). The directive is on the harness-guard
-    # branch; the source behavior here is covered meanwhile by the default-posture
-    # unit tests in tests/unit/test_langfuse_provider_isolation.py.
+    # statusMessage, which is implemented). The directive landed in #267, so the
+    # pin bump is now the only remaining prerequisite; the source behavior here is
+    # covered meanwhile by the default-posture unit tests in
+    # tests/unit/test_langfuse_provider_isolation.py.
     "098-langfuse-tool-observation": (
         "Proposal 0118 error-message gating: fixture asserts the pre-0118 shape; "
         "reconciled at the v0.112.0 pin bump"
