@@ -2299,11 +2299,44 @@ def _assert_observation_tree(
         _assert_observation(trace, actual, expected)
 
 
+# Every key this comparator implements. An expected block is a chain of
+# ``if "<key>" in expected`` checks, so a key nobody implements is silently
+# skipped and its assertion is dead while still reading like coverage -- which is
+# how the 0118 ``metadata_absent`` directive would have landed. Anything outside
+# this set fails loudly instead, so a spec-side directive we have not built yet
+# surfaces as a gap rather than a false pass.
+_OBSERVATION_DIRECTIVES = frozenset(
+    {
+        "children",
+        "input_is_raw_string_with_marker",
+        "input_parses_as_messages",
+        "level",
+        "metadata",
+        "metadata_absent",
+        "model",
+        "modelParameters",
+        "name",
+        "output",
+        "prompt_entity_link",
+        "prompt_entity_link_absent",
+        "statusMessage",
+        "type",
+        "usage",
+    }
+)
+
+
 def _assert_observation(
     trace: LangfuseTrace,
     actual: LangfuseObservation,
     expected: dict[str, Any],
 ) -> None:
+    unimplemented = set(expected) - _OBSERVATION_DIRECTIVES
+    assert not unimplemented, (
+        f"observation {actual.name!r} declares directives this harness does not implement: "
+        f"{sorted(unimplemented)}. They would otherwise be silently skipped; implement them "
+        f"in _assert_observation (and add them to _OBSERVATION_DIRECTIVES)."
+    )
     if "type" in expected:
         assert actual.type == expected["type"], (
             f"observation {actual.name!r} type: expected {expected['type']!r}, got {actual.type!r}"
@@ -2383,6 +2416,14 @@ def _assert_observation(
     _assert_augment_keys_not_leaked(
         f"observation[{actual.name}].metadata", actual.metadata, expected_metadata
     )
+    # `metadata:` subset-matches, so it cannot express an absence; a gated field
+    # that must NOT be rendered needs its own directive. Sibling of the OTel
+    # span-level `attributes_absent`.
+    for absent_key in cast("list[str]", expected.get("metadata_absent") or []):
+        assert absent_key not in actual.metadata, (
+            f"observation {actual.name!r} metadata[{absent_key!r}] MUST NOT be present; "
+            f"found {actual.metadata[absent_key]!r}"
+        )
 
     expected_children = cast("list[dict[str, Any]]", expected.get("children") or [])
     actual_children = trace.children_of(actual.id)

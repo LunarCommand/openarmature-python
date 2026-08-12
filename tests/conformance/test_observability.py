@@ -4913,6 +4913,24 @@ def _build_tool_graph(case: Mapping[str, Any]) -> tuple[Any, type[Any], list[Any
 _USAGE_DETAIL_ATTR: dict[str, str] = {"searchUnits": "search_units"}
 
 
+# Every key this comparator implements; see the guard in the loop below.
+_LANGFUSE_OBSERVATION_DIRECTIVES = frozenset(
+    {
+        "children",
+        "input",
+        "level",
+        "metadata",
+        "metadata_absent",
+        "model",
+        "name",
+        "output",
+        "statusMessage",
+        "type",
+        "usageDetails",
+    }
+)
+
+
 def _assert_langfuse_observation_tree(
     trace: Any, expected: list[dict[str, Any]], parent_id: str | None = None
 ) -> None:
@@ -4926,6 +4944,16 @@ def _assert_langfuse_observation_tree(
     # same-shape expected siblings can't both bind to one actual.
     remaining = list(trace.children_of(parent_id))
     for exp in expected:
+        # An expected block is a chain of ``if "<key>" in exp`` checks, so a key
+        # nobody implements is silently skipped: the assertion is dead while
+        # still reading like coverage. Fail on an unimplemented directive instead,
+        # so a spec-side addition surfaces as a gap rather than a false pass.
+        unimplemented = set(exp) - _LANGFUSE_OBSERVATION_DIRECTIVES
+        assert not unimplemented, (
+            f"langfuse observation {exp.get('name')!r} declares directives this harness does "
+            f"not implement: {sorted(unimplemented)}. Implement them in "
+            f"_assert_langfuse_observation_tree (and add them to _LANGFUSE_OBSERVATION_DIRECTIVES)."
+        )
         exp_type = cast("str", exp["type"])
         exp_name = cast("str | None", exp.get("name"))
         match = next(
@@ -4979,6 +5007,13 @@ def _assert_langfuse_observation_tree(
         for key, val in cast("dict[str, Any]", exp.get("metadata") or {}).items():
             assert _value_matches(match.metadata.get(key), val), (
                 f"{exp_name!r}: metadata.{key} {match.metadata.get(key)!r} != {val!r}"
+            )
+        # `metadata` subset-matches, so a field that MUST NOT be rendered needs
+        # its own directive; sibling of the OTel span-level attributes_absent.
+        for absent_key in cast("list[str]", exp.get("metadata_absent") or []):
+            assert absent_key not in match.metadata, (
+                f"{exp_name!r}: metadata[{absent_key!r}] MUST NOT be present; "
+                f"found {match.metadata[absent_key]!r}"
             )
         children = cast("list[dict[str, Any]] | None", exp.get("children"))
         if children:
