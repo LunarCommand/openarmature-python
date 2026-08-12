@@ -493,13 +493,17 @@ class LangfuseObserver:
         elif status == ISOLATION_LEAKED:
             # Reachable only when no construction-time channel is live, so nothing
             # is refused and nothing is currently leaking. Reported because the
-            # binding is a latent problem: enabling a payload channel later would
-            # raise rather than emit. Deliberately silent about the error message,
-            # which disable_provider_payload governs, not this status.
+            # binding is a latent problem, and the two ways of enabling a channel
+            # fail closed differently: re-opening a knob on THIS observer is caught
+            # at emission by _isolation_blocks_payload() and the payload is
+            # withheld, while constructing a NEW observer over the same client with
+            # a channel live raises in __post_init__. Deliberately silent about the
+            # error message, which disable_provider_payload governs, not this status.
             _logger.info(
                 "OA's Langfuse client is bound to a TracerProvider it did not isolate; "
-                "no payload channel is enabled, so nothing is being exported to it, but "
-                "enabling one would fail closed until the client is constructed first"
+                "no payload channel is enabled, so nothing is being exported to it; "
+                "enabling one fails closed (the payload is withheld, or construction is "
+                "refused) until OA's client is constructed before any other for this key"
             )
         elif status == ISOLATION_SHARED_ACCEPTED:
             # A provider-binding decision, not a payload one, so it is reported
@@ -2197,12 +2201,11 @@ class LangfuseObserver:
         strings + ``output`` vectors.
 
         Failure (``EmbeddingFailedEvent``): ERROR level with the
-        ``error_category`` as the status message and ``error_type`` /
-        ``error_message`` in metadata, mirroring the tool failure; the two
-        ``error_message`` row follows ``disable_provider_payload``, while
-        ``error_type`` and the category are never gated. The
-        request-side ``input`` strings are still payload-gated; there is NO
-        ``output`` (no response received).
+        ``error_category`` as the status message; the ``error_message`` row
+        follows ``disable_provider_payload`` while ``error_type`` is never
+        gated, mirroring the tool / rerank failure. The request-side ``input``
+        strings are still payload-gated; there is NO ``output`` (no response
+        received).
         """
         from openarmature.observability.correlation import (
             current_correlation_id,
