@@ -476,25 +476,34 @@ class LangfuseObserver:
             )
         if status == ISOLATION_UNDETECTABLE:
             # Portable floor: the binding cannot be established, so close every
-            # construction-time channel. Warned unconditionally -- harvested error
-            # content is suppressed at emission whether or not a payload channel
-            # is live, so silence would leave that invisible.
-            _logger.warning(
-                "cannot establish the Langfuse client's TracerProvider binding; "
-                "suppressing all provider and state payloads, and omitting failed "
-                "observations' error messages, to avoid a possible leak to a shared provider"
-            )
+            # construction-time channel. Warned only when a channel was actually
+            # live: with the default posture nothing is being taken away, and a
+            # warning there would contradict the documented "an un-isolatable
+            # client is harmless and neither raises nor warns".
+            if self._construction_channels_live():
+                _logger.warning(
+                    "cannot establish the Langfuse client's TracerProvider binding; "
+                    "suppressing the provider and state payloads you enabled, to avoid "
+                    "a possible leak to a shared provider"
+                )
             self.disable_provider_payload = True
             self.disable_state_payload = True
             self.trace_input_from_state = None
             self.trace_output_from_state = None
         elif status == ISOLATION_LEAKED:
-            # No construction-time channel is live, so nothing is refused; the
-            # error-message channel is still suppressed at emission, which the
-            # operator would otherwise have no way to notice.
+            # Reachable only when no construction-time channel is live, so nothing
+            # is refused and nothing is currently leaking. Reported because the
+            # binding is a latent problem, and the two ways of enabling a channel
+            # fail closed differently: re-opening a knob on THIS observer is caught
+            # at emission by _isolation_blocks_payload() and the payload is
+            # withheld, while constructing a NEW observer over the same client with
+            # a channel live raises in __post_init__. Deliberately silent about the
+            # error message, which disable_provider_payload governs, not this status.
             _logger.info(
                 "OA's Langfuse client is bound to a TracerProvider it did not isolate; "
-                "failed observations' error messages are omitted to avoid a leak"
+                "no payload channel is enabled, so nothing is being exported to it; "
+                "enabling one fails closed (the payload is withheld, or construction is "
+                "refused) until OA's client is constructed before any other for this key"
             )
         elif status == ISOLATION_SHARED_ACCEPTED:
             # A provider-binding decision, not a payload one, so it is reported
@@ -575,12 +584,27 @@ class LangfuseObserver:
         # observer built by handing a from_credentials adapter to the constructor.
         return cls(client=client, **observer_kwargs)
 
-    def _omit_harvested_error(self) -> bool:
-        # 0117: on a provider OA did not establish is isolated -- LEAKED, or the
-        # non-detectable suppress floor -- a failed observation's harvested
-        # error_message / error_type must not reach the shared provider. Isolated,
-        # opted-in, and caller-supplied (mode a) clients emit normally.
-        return self._isolation_blocks_payload()
+    # NOTE: an emitted error_message is written verbatim, not through the
+    # payload_byte_cap truncation every other payload-classified field uses. The
+    # cap is not applied because 0118 classifies the field for GATING without
+    # saying it is subject to §5.5.5 truncation, and fixtures 150/151 exist to
+    # assert the message LITERALLY, which truncation would contradict. A provider
+    # that returns a very large exception string therefore renders it in full.
+    # Raised for the batched spec review rather than changed unilaterally.
+    def _emits_harvested_error_message(self) -> bool:
+        # A failed observation's error_message is harvested exception text, so the
+        # provider-payload flag governs it (0118) for every failure category and on
+        # every provider observation -- the category does not tell you what the
+        # string contains, and a provider 4xx routinely quotes the request or the
+        # flagged prompt.
+        #
+        # There is no separate isolation check: once the flag covers the field the
+        # §6 arms already decide every configuration. Flag on, nothing is emitted
+        # to suppress; flag off on an isolated provider, it emits legitimately;
+        # flag off on a detected shared provider, construction raised; flag off
+        # where isolation could not be established, suppress-all set the flag; flag
+        # off with the caller opted in, it emits as an acknowledged leak.
+        return self._emits_provider_payload()
 
     async def __call__(
         self,
@@ -2030,22 +2054,15 @@ class LangfuseObserver:
             calling_branch_name_chain=event.branch_name_chain,
         )
         metadata = self._typed_event_metadata(event, correlation_id)
-        # Failure-specific metadata rows: surface error_type + error_
-        # message as well as the category-as-statusMessage on the
-        # observation. error_type is null when no impl-side type was
-        # available; the metadata key is omitted in that case so the
-        # absence-is-meaningful semantic is preserved. Both harvested rows
-        # are omitted entirely when OA could not establish that the client's
-        # provider is isolated; the category still rides as statusMessage.
-        if not self._omit_harvested_error():
-            if event.error_type is not None:
-                metadata["error_type"] = event.error_type
-            # A structured_output_invalid message quotes the model's own failing
-            # output, so for that category the message is response-derived payload
-            # and follows the payload knob as well as the isolation gate. Other
-            # categories describe the call, not the response.
-            if not (event.error_category == "structured_output_invalid" and self.disable_provider_payload):
-                metadata["error_message"] = event.error_message
+        # error_type is a classification token, not harvested content, so it is
+        # never gated; it is optional and absent when no impl-side type was
+        # available, and the metadata key is omitted in that case so the
+        # absence-is-meaningful semantic is preserved. The category rides as
+        # statusMessage either way.
+        if event.error_type is not None:
+            metadata["error_type"] = event.error_type
+        if self._emits_harvested_error_message():
+            metadata["error_message"] = event.error_message
         model_parameters: dict[str, Any] = dict(event.request_params or {})
         input_value: Any = None
         output_value: Any = None
@@ -2095,8 +2112,8 @@ class LangfuseObserver:
         ``error_type`` / ``error_message`` in metadata and as the status
         message) on a ToolCallFailedEvent. ``input`` (arguments) /
         ``output`` (result) are payload-gated per ``disable_provider_payload``.
-        The error rows and the status message are omitted when openarmature
-        could not establish that the client's provider is isolated.
+        The ``error_message`` row and the status message follow
+        ``disable_provider_payload``; ``error_type`` is never gated.
         """
         from openarmature.observability.correlation import (
             current_correlation_id,
@@ -2143,13 +2160,15 @@ class LangfuseObserver:
         status_message: str | None = None
         if isinstance(event, ToolCallFailedEvent):
             level = "ERROR"
-            # Omitted when OA could not establish that the client's provider is
-            # isolated. A tool failure carries no error category, so nothing is
-            # left to put in statusMessage: it stays null rather than falling
-            # back to the message, which would smuggle the harvested string out.
-            if not self._omit_harvested_error():
-                if event.error_type is not None:
-                    metadata["error_type"] = event.error_type
+            # error_type is a classification token and is never gated, which
+            # matters most here: a tool failure carries no error category, so it
+            # is the only failure discriminator the observation has.
+            if event.error_type is not None:
+                metadata["error_type"] = event.error_type
+            # A tool failure has no category to fall back on, so when the message
+            # is withheld statusMessage stays null rather than taking the message
+            # instead, which would smuggle the harvested string out.
+            if self._emits_harvested_error_message():
                 metadata["error_message"] = event.error_message
                 status_message = event.error_message
         target_trace_id = self._trace_id_for(inv_state, event.namespace, event.fan_out_index)
@@ -2182,12 +2201,11 @@ class LangfuseObserver:
         strings + ``output`` vectors.
 
         Failure (``EmbeddingFailedEvent``): ERROR level with the
-        ``error_category`` as the status message and ``error_type`` /
-        ``error_message`` in metadata, mirroring the tool failure; the two
-        error rows are omitted when openarmature could not establish that the
-        client's provider is isolated, and the category still rides. The
-        request-side ``input`` strings are still payload-gated; there is NO
-        ``output`` (no response received).
+        ``error_category`` as the status message; the ``error_message`` row
+        follows ``disable_provider_payload`` while ``error_type`` is never
+        gated, mirroring the tool / rerank failure. The request-side ``input``
+        strings are still payload-gated; there is NO ``output`` (no response
+        received).
         """
         from openarmature.observability.correlation import (
             current_correlation_id,
@@ -2255,13 +2273,13 @@ class LangfuseObserver:
             handle.end(end_time=end_time)
             return
         # Failure path: request-side input_count survives; the response-derived
-        # rows do not. No output. ERROR level + category-as-statusMessage. The
-        # harvested error rows below are omitted when OA could not establish
-        # that the client's provider is isolated; the category still rides.
+        # rows do not. No output. ERROR level + category-as-statusMessage.
         metadata["openarmature_input_count"] = len(event.input_strings)
-        if not self._omit_harvested_error():
-            if event.error_type is not None:
-                metadata["error_type"] = event.error_type
+        # error_type is a classification token and is never gated; the category
+        # rides as statusMessage whether or not the message is emitted.
+        if event.error_type is not None:
+            metadata["error_type"] = event.error_type
+        if self._emits_harvested_error_message():
             metadata["error_message"] = event.error_message
         target_trace_id = self._trace_id_for(inv_state, event.namespace, event.fan_out_index)
         handle = self.client.embedding(
@@ -2296,10 +2314,9 @@ class LangfuseObserver:
         (``{query, documents}``) + ``output`` (scored results).
 
         Failure (``RerankFailedEvent``): ERROR level with the ``error_category``
-        as the status message; the ``error_type`` / ``error_message`` rows are
-        omitted when openarmature could not establish that the client's provider
-        is isolated. Otherwise ``error_type`` / ``error_message`` ride in
-        metadata, mirroring the tool / embedding failure. The request-side
+        as the status message; the ``error_message`` row follows
+        ``disable_provider_payload`` while ``error_type`` is never gated,
+        mirroring the tool / embedding failure. The request-side
         ``input`` is still payload-gated; there is NO ``output`` (no response
         received).
         """
@@ -2384,12 +2401,12 @@ class LangfuseObserver:
             handle.end(end_time=end_time)
             return
         # Failure path: the request-side metadata survives; the response-derived
-        # rows do not. No output. ERROR level + category-as-statusMessage. The
-        # harvested error rows below are omitted when OA could not establish
-        # that the client's provider is isolated; the category still rides.
-        if not self._omit_harvested_error():
-            if event.error_type is not None:
-                metadata["error_type"] = event.error_type
+        # rows do not. No output. ERROR level + category-as-statusMessage.
+        # error_type is a classification token and is never gated; the category
+        # rides as statusMessage whether or not the message is emitted.
+        if event.error_type is not None:
+            metadata["error_type"] = event.error_type
+        if self._emits_harvested_error_message():
             metadata["error_message"] = event.error_message
         target_trace_id = self._trace_id_for(inv_state, event.namespace, event.fan_out_index)
         handle = self.client.retriever(

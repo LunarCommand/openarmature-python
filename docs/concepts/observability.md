@@ -1239,6 +1239,22 @@ serialized form with the §5.5.5 truncation marker
 parsing back to native shape. The unparseable JSON IS the
 truncation signal in the Langfuse UI.
 
+`disable_provider_payload` also governs a **failed** observation's
+`error_message`, on all four provider observations (Generation,
+Embedding, Tool, Retriever) and for every failure category. An
+exception string is harvested runtime content: a provider 4xx routinely
+quotes the request or the flagged prompt, and a structured-output
+failure quotes the model's own output. So with payloads at their
+default-off, a failed observation carries no exception text.
+
+What remains is enough to triage the failure. `error_type` is a
+classification token (an exception class name or vendor code), never
+gated, and the error category still rides as the observation's status
+message wherever the event carries one. A **tool** failure has no
+category, so its status message is null rather than falling back to the
+exception string. The full exception text is unaffected on the OTel
+side.
+
 ### Prompt linkage
 
 When a Prompt's source backend exposes a Langfuse Prompt entity
