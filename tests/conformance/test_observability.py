@@ -456,11 +456,6 @@ _DEFERRED_FIXTURES: dict[str, str] = {
     # langfuse_client construction directive, expected_construction_error, and
     # the four payload-scoped leak assertions. 158 additionally gates arms on the
     # requires_capability audience gate.
-    "157-langfuse-provider-isolation": (
-        "needs the conformance-adapter 6.4 provider-faithful Langfuse fake and the "
-        "langfuse_client construction directive; src side is unit-tested meanwhile in "
-        "tests/unit/test_langfuse_provider_isolation.py"
-    ),
     "158-langfuse-payload-leak-fail-closed": (
         "needs the provider-faithful fake, the langfuse_client singleton sub-directives, "
         "expected_construction_error, and the payload-scoped leak assertions; src side is "
@@ -519,6 +514,9 @@ _LANGFUSE_HARNESS_FIXTURES: frozenset[str] = frozenset(
         # under `disable_provider_payload`. Its langfuse_trace shape lives in the
         # sibling harness, like 123 and 130.
         "159-langfuse-llm-failure-error-message",
+        # 157 (proposals 0114 / 0115): provider isolation, driven by the dedicated
+        # runner in the sibling harness.
+        "157-langfuse-provider-isolation",
     }
 )
 
