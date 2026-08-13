@@ -510,6 +510,11 @@ async def test_langfuse_fixture(fixture_path: Path) -> None:
                 report_recognized_skip(fixture_stem, case_name, gate)
                 continue
             ran_134 += 1
+            # 134 bypasses _run_case, where the guard otherwise lives, so it is
+            # the one dispatch path that has to call it itself.
+            _reject_unimplemented_assertions(
+                fixture_stem, case_name, cast("Mapping[str, Any]", case.get("expected") or {})
+            )
             try:
                 await _run_langfuse_134(case)
             except AssertionError as e:
@@ -548,12 +553,6 @@ async def test_langfuse_fixture(fixture_path: Path) -> None:
                 report_recognized_skip(fixture_stem, case_name, gate)
                 continue
             ran += 1
-            # Only cases that actually RUN are checked: a gated-out or deferred
-            # case never reaches its assertions, so an unimplemented one there is
-            # not a live coverage claim.
-            _reject_unimplemented_assertions(
-                fixture_stem, case_name, cast("Mapping[str, Any]", case.get("expected") or {})
-            )
             if fixture_subgraphs is not None and "subgraphs" not in case:
                 case["subgraphs"] = fixture_subgraphs
             if fixture_inner_subgraphs is not None and "inner_subgraphs" not in case:
@@ -1063,6 +1062,15 @@ def _resolve_detached_wrapper_names(case: Mapping[str, Any]) -> frozenset[str]:
 
 
 async def _run_case(case: Mapping[str, Any], *, fixture_stem: str | None = None) -> None:
+    # Chokepoint for the guard: both the multi-case loop and the single-case path
+    # funnel through here, so wiring it at the call sites instead would leave a
+    # future dispatch path free to skip it silently. `_run_langfuse_134` bypasses
+    # this function entirely and so carries its own call.
+    _reject_unimplemented_assertions(
+        fixture_stem or "<fixture>",
+        cast("str", case.get("name") or "<unnamed>"),
+        cast("Mapping[str, Any]", case.get("expected") or {}),
+    )
     # 039 additionally enforces proposal 0045's MUST-NOT scoping (an augmented
     # key absent from an observation's expected metadata must be absent in the
     # actual); other fixtures keep the established subset semantics.
