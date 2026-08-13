@@ -244,10 +244,15 @@ def test_otel_runner_rejects_a_gate_it_does_not_implement() -> None:
     otel_runner._reject_unsupported_capability_gate("007-x", {"name": "c"})
 
 
+def _fixture_files(spec_root: Path) -> list[Path]:
+    """Every conformance fixture under a `<capability>/conformance/` tree."""
+    return sorted(spec_root.glob("*/conformance/*.yaml"))
+
+
 def _gated_fixtures(spec_root: Path) -> list[str]:
     """Fixture paths, relative to spec_root, carrying `requires_capability`."""
     found: list[str] = []
-    for fixture in sorted(spec_root.glob("*/conformance/*.yaml")):
+    for fixture in _fixture_files(spec_root):
         try:
             loaded: Any = yaml.safe_load(fixture.read_text())
         except yaml.YAMLError:  # pragma: no cover - malformed fixtures are the parse suite's job
@@ -294,7 +299,21 @@ def test_every_gated_fixture_belongs_to_a_runner_that_implements_the_gate() -> N
     # for it -- executing an arm meant for a different adapter class, silently.
     # Only the Langfuse runner implements the gate today, so any gated fixture
     # outside observability/ is a wiring gap this must surface.
-    spec_root = langfuse_runner.CONFORMANCE_DIR.parents[2]
+    #
+    # CONFORMANCE_DIR is `<submodule>/spec/observability/conformance`, so the
+    # directory holding the capability folders is parents[1] (`<submodule>/spec`),
+    # NOT parents[2] (the submodule root, which holds no capability folders at
+    # all and globs nothing).
+    spec_root = langfuse_runner.CONFORMANCE_DIR.parents[1]
+    scanned = _fixture_files(spec_root)
+    # Non-vacuity on the sweep's INPUT, not merely on its detector. The detector
+    # is pinned separately against a synthetic tree, and that test passing is
+    # exactly what made a wrong root look verified: the detector worked while the
+    # haystack was empty, so the sweep reported a clean pass over nothing.
+    assert langfuse_runner.CONFORMANCE_DIR in {f.parent for f in scanned}, (
+        f"the sweep root {spec_root} does not contain the observability conformance directory, "
+        f"so it scanned {len(scanned)} fixtures and would report no gated fixtures whatever lands."
+    )
     unhandled = [f for f in _gated_fixtures(spec_root) if not f.startswith("observability/")]
     assert not unhandled, (
         f"fixtures {unhandled} carry `requires_capability`, but only the observability Langfuse "
