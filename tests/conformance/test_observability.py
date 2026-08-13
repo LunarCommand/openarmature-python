@@ -259,6 +259,12 @@ _SUPPORTED_FIXTURES = frozenset(
         "095-tool-call-id-links-to-llm-request",
         "096-tool-call-payload-gating",
         "097-otel-tool-span-attributes",
+        # 098 (proposal 0118, spec v0.112.0): reconciled at this pin. Its
+        # failure case moves to disable_provider_payload=false (asserting the
+        # message literally is its purpose) and it gains a default-posture
+        # failure case carrying the Tool anti-smuggling clause, which 158
+        # cannot cover for a detection-capable adapter (that arm raises first).
+        "098-langfuse-tool-observation",
         # v0.16.0 — proposal 0059 embedding observability (0059b). A
         # calls_embed node awaits OpenAIEmbeddingProvider.embed() inside the
         # node body; the typed EmbeddingEvent / EmbeddingFailedEvent drive the
@@ -278,6 +284,10 @@ _SUPPORTED_FIXTURES = frozenset(
         "081-embedding-event-active-prompt-populated",
         "082-otel-embedding-span-attributes",
         "083-langfuse-embedding-observation",
+        # 137 / 138 (proposal 0118): the payload-suppressed cases now assert the
+        # harvested error message ABSENT with error_type retained, via the
+        # metadata_absent directive that landed in #267.
+        "137-langfuse-embedding-failure-observation",
         "139-otel-embedding-no-usage-input-tokens-omitted",
         "140-langfuse-embedding-no-usage-usagedetails-omitted",
         # proposal 0067 §11 embedding metrics: token.usage (input only) +
@@ -304,6 +314,7 @@ _SUPPORTED_FIXTURES = frozenset(
         "106-rerank-event-active-prompt-populated",
         "107-otel-rerank-span-attributes",
         "108-langfuse-rerank-observation",
+        "138-langfuse-rerank-failure-observation",
         "141-otel-rerank-no-usage-attributes-omitted",
         "142-langfuse-rerank-no-usage-usagedetails-omitted",
         "109-rerank-metrics-token-and-duration",
@@ -338,18 +349,6 @@ _DEFERRED_FIXTURES: dict[str, str] = {
     # pin bump is now the only remaining prerequisite; the source behavior here is
     # covered meanwhile by the default-posture unit tests in
     # tests/unit/test_langfuse_provider_isolation.py.
-    "098-langfuse-tool-observation": (
-        "Proposal 0118 error-message gating: fixture asserts the pre-0118 shape; "
-        "reconciled at the v0.112.0 pin bump"
-    ),
-    "137-langfuse-embedding-failure-observation": (
-        "Proposal 0118 error-message gating: fixture asserts the pre-0118 shape; "
-        "reconciled at the v0.112.0 pin bump"
-    ),
-    "138-langfuse-rerank-failure-observation": (
-        "Proposal 0118 error-message gating: fixture asserts the pre-0118 shape; "
-        "reconciled at the v0.112.0 pin bump"
-    ),
     # Proposal 0045 IS implemented (v0.11.0), but the nested-case Langfuse
     # fixture stays deferred: it needs runtime-state item-list lookup for
     # nested fan-outs plus an augment_metadata_from_outer_item directive
@@ -438,17 +437,35 @@ _DEFERRED_FIXTURES: dict[str, str] = {
     ),
     # Proposal 0107 (spec v0.102.0) mock_embedding / mock_rerank raises
     # sub-directive -> literal error-field assertion.
+    # The 0118 half of these two resolved at this pin (both cases moved to
+    # disable_provider_payload=false, since asserting the message literally is
+    # their purpose). What remains is the 0107 mock-raises harness wiring.
     "150-langfuse-embedding-failure-literal-error-fields": (
-        "Proposal 0107 mock-raises literal error fields; harness wiring rides the v0.17.0 "
-        "fixture-wiring PR. Also asserts the pre-0118 shape at this pin: spec moves both "
-        "cases to disable_provider_payload=false at v0.112.0, since asserting the message "
-        "literally is their purpose"
+        "Proposal 0107 mock_embedding raises sub-directive not yet wired; rides the "
+        "remaining v0.17.0 fixture-wiring PR (observability 144-156)"
     ),
     "151-langfuse-rerank-failure-literal-error-fields": (
-        "Proposal 0107 mock-raises literal error fields; harness wiring rides the v0.17.0 "
-        "fixture-wiring PR. Also asserts the pre-0118 shape at this pin: spec moves both "
-        "cases to disable_provider_payload=false at v0.112.0, since asserting the message "
-        "literally is their purpose"
+        "Proposal 0107 mock_rerank raises sub-directive not yet wired; rides the "
+        "remaining v0.17.0 fixture-wiring PR (observability 144-156)"
+    ),
+    # 157 / 158 (proposals 0115 / 0116 / 0117 / 0118, spec v0.109.0-v0.112.0).
+    # The src side shipped ahead of this pin and is unit-tested; what these need
+    # is harness machinery: the provider-faithful Langfuse fake of
+    # conformance-adapter 6.4 (records observation content AND emits it through
+    # its bound TracerProvider, so a leak to a shared provider is catchable), the
+    # langfuse_client construction directive, expected_construction_error, and
+    # the four payload-scoped leak assertions. 158 additionally gates arms on the
+    # requires_capability audience gate.
+    "157-langfuse-provider-isolation": (
+        "needs the conformance-adapter 6.4 provider-faithful Langfuse fake and the "
+        "langfuse_client construction directive; src side is unit-tested meanwhile in "
+        "tests/unit/test_langfuse_provider_isolation.py"
+    ),
+    "158-langfuse-payload-leak-fail-closed": (
+        "needs the provider-faithful fake, the langfuse_client singleton sub-directives, "
+        "expected_construction_error, and the payload-scoped leak assertions; src side is "
+        "unit-tested meanwhile in tests/unit/test_langfuse_provider_isolation.py and "
+        "tests/unit/test_langfuse_payload_leak_canary.py"
     ),
     # Spec v0.103.1 conformance coverage (0084 orphan-fallback arms + the
     # embedding failure-metrics counterpart).
@@ -498,6 +515,10 @@ _LANGFUSE_HARNESS_FIXTURES: frozenset[str] = frozenset(
         # sibling harness; the generic topology path cannot model the
         # `calls_llm_from_wrapper` orphan-call primitive.
         "134-langfuse-nested-fan-out-parent-resolution",
+        # 159 (proposal 0118): the failed Generation's harvested error message
+        # under `disable_provider_payload`. Its langfuse_trace shape lives in the
+        # sibling harness, like 123 and 130.
+        "159-langfuse-llm-failure-error-message",
     }
 )
 

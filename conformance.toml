@@ -32,7 +32,7 @@
 
 [manifest]
 implementation = "openarmature-python"
-spec_pin = "v0.107.0"
+spec_pin = "v0.112.0"
 
 # Adapter-level conformance capabilities (conformance-adapter §5.5, proposal
 # 0116). A fixture case may carry `requires_capability`, which selects the arm of
@@ -1093,3 +1093,42 @@ note = "0111 scoped the collect-channel warning to inputs-based seeding; it now 
 status = "implemented"
 since = "0.17.0"
 note = "0113 pins the malformed case of the §6 Managed-field collision MERGE arm: a caller's extras value that is not the field's expected list shape, or a list containing any element not of the expected element type/shape, is treated as ABSENT (the mapping sends only the value(s) it would send with no such extra present -- all-or-nothing, no partial salvage, no raise / diagnostic); malformation is judged structurally (no semantic vocabulary check). The shared apply_managed_extras merge arm gates on well-formedness (a string, or a list whose every element is a string): a malformed extra is skipped and the managed value stands alone. Fixture 081 (llm stop) exercises the general rule; the retrieval-provider §8.4 embedding_types arm (a malformed extras embedding_types -> wire [\"float\"], fixture 053) already shipped via 0099's bespoke Cohere merge."
+
+# ---- v0.17.0 spec-pin bump v0.107.0 -> v0.112.0 (proposals 0114-0118).
+# The Langfuse client-ownership and provider-isolation arc, opened by a
+# registered consumer's leak report and settled across five spec releases.
+
+# Spec v0.108.0 (proposal 0114).  Langfuse client ownership and
+# tracer-provider isolation (observability §6 / §8.9).
+[proposals."0114"]
+status = "implemented"
+since = "0.17.0"
+note = "Pins the two-mode Langfuse client ownership model. Mode (b): LangfuseObserver.from_credentials(public_key=..., secret_key=..., host=...) (over LangfuseSDKAdapter.from_credentials) builds an OA-owned client on a dedicated TracerProvider, so its observations no longer bind the globally-registered provider and export onto the application's OTel backend. Mode (a), a caller-supplied client, is never mutated: the caller stays responsible for isolating its tracer_provider and OA documents the remedy. secret_key is a pydantic SecretStr, masked in OA's reprs and logs with the plaintext read only at the SDK call; a blank credential is rejected at the boundary rather than falling through to the SDK's ambient LANGFUSE_* environment fallback. Fixture 157 is deferred: it needs the §6.4 provider-faithful fake and the langfuse_client construction directive, and is unit-tested meanwhile in tests/unit/test_langfuse_provider_isolation.py."
+
+# Spec v0.109.0 (proposal 0115).  Conformance primitives for Langfuse
+# provider isolation (conformance-adapter §5.5 / §6.4).
+[proposals."0115"]
+status = "partial"
+since = "0.17.0"
+note = "The adapter-capability half is implemented: conformance.toml declares langfuse_bound_provider_detection and the harness gates a case on requires_capability, treating a mismatched arm as a recognized skip and an undeclared capability name as an error. The §6.4 provider-faithful Langfuse fake (records observation content AND emits it as OTel spans through its bound TracerProvider, so a leak to a shared provider is catchable) and the langfuse_client construction directive are NOT yet built, so fixtures 157 / 158 stay deferred. The four leak assertions are declared in the expectations model so those fixtures parse at this pin, and the Langfuse runner fails loudly if an activated fixture reaches for one, so a declared-but-unimplemented assertion cannot read as coverage."
+
+# Spec v0.110.0 (proposal 0116).  Fail closed when Langfuse payloads
+# would reach a shared provider (observability §6).
+[proposals."0116"]
+status = "implemented"
+since = "0.17.0"
+note = "The Langfuse v4 SDK caches one client per public_key, so mode (b)'s dedicated provider takes effect only when OA is the first constructor for that credential; otherwise the SDK returns the cached client on its original provider and discards OA's. OA reuses one isolated provider per credential and reads the actual binding back after construction. Where a construction-determinable payload channel is live and OA establishes the client is bound to a provider it did not isolate, construction raises a categorized LangfuseProviderIsolationUnavailable before any observation is emitted; where OA cannot establish the binding at all it suppresses every channel and logs one WARNING; accept_shared_provider=True is the single opt-out, binding the provider the application already registered rather than letting the SDK construct and globally register one. With no channel live (the default posture) an un-isolatable client neither raises nor warns. Fixture 158 is deferred on the same §6.4 machinery as 157."
+
+# Spec v0.111.0 (proposal 0117).  Payload-leak invariant broadened to all
+# harvested-payload channels (observability §6 / §8.4).
+[proposals."0117"]
+status = "implemented"
+since = "0.17.0"
+note = "0116 guarded only the provider-payload channel. A sweep of OA's Langfuse observation surface found two more channels carrying payload OA harvests from the runtime: the Trace-level state input / output (disable_state_payload plus the trace_input_from_state / trace_output_from_state hooks, which emit regardless of the knob) and a failed observation's error_message. All three are covered. The scoping clause exempting caller-ATTACHED dimensions (correlation_id, session_id, the promoted userId, trace name, arbitrary caller metadata) is honored: those are opaque cross-backend join keys the caller owns and they ride verbatim. Fixture 158's six added cases ride with it."
+
+# Spec v0.112.0 (proposal 0118).  The harvested error message comes under
+# the payload flag (observability §5.5.4 / §8.4 / §8.7).
+[proposals."0118"]
+status = "implemented"
+since = "0.17.0"
+note = "disable_provider_payload now gates a failed provider call's harvested exception TEXT on all four provider observations, closing a hole in the flag's promise: a structured_output_invalid message commonly quotes the model output that failed validation, so a caller could set the flag, watch generation.output disappear as promised, and still receive that text in metadata.error_message. error_type is NOT gated: it is a classification token, so suppressing it buys no privacy while removing the only failure discriminator on a Tool observation, which has no error category at all; for the same reason it no longer counts toward the payload-bearing classification. The §8.4 exhaustive-mapping rule is honored too: the failure-isolation marker span carried the caught exception's message although no §8.4.x table maps it, which is non-conforming over-emission, and it now carries only error_category. Fixtures 098 / 137 / 138 are un-deferred and reconciled at this pin, and 159 is wired."
