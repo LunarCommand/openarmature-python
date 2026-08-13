@@ -19,6 +19,7 @@ import copy
 import json
 from collections.abc import Callable, Mapping, Sequence
 from contextvars import ContextVar
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
@@ -26,6 +27,7 @@ from typing import Any, cast
 import httpx
 import pytest
 import yaml
+from pydantic import SecretStr
 
 from openarmature.graph import END, BranchSpec, ExplicitMapping, GraphBuilder
 from openarmature.llm import OpenAIProvider
@@ -51,6 +53,19 @@ from .harness.capabilities import (
     capability_skip_reason,
     report_recognized_skip,
 )
+from .harness.langfuse_provider_fake import (
+    OBSERVATION_OUTPUT_ATTR,
+    OBSERVATION_TYPE_ATTR,
+    ProviderFaithfulLangfuseClient,
+    langfuse_observation_spans,
+)
+from .harness.langfuse_real_client import (
+    CONFORMANCE_HOST,
+    CONFORMANCE_PUBLIC_KEY,
+    CONFORMANCE_SECRET_KEY,
+    langfuse_sdk_without_egress,
+)
+from .test_observability import _reset_otel_global_tracer_provider
 
 CONFORMANCE_DIR = (
     Path(__file__).resolve().parents[2] / "openarmature-spec" / "spec" / "observability" / "conformance"
@@ -154,6 +169,12 @@ _LANGFUSE_FIXTURES = frozenset(
         # non-vacuous: flag on asserts the message absent with the category
         # retained, flag off asserts it present.
         "159-langfuse-llm-failure-error-message",
+        # 157 (proposals 0114 / 0115): the two provider-isolation MUSTs. Driven by
+        # a dedicated runner: it needs the caller's global TracerProvider, a second
+        # observer on openarmature's own private provider, and for mode
+        # `credentials` a REAL Langfuse client with its egress removed, so the
+        # adapter path under test is the shipped one.
+        "157-langfuse-provider-isolation",
     }
 )
 
@@ -407,7 +428,27 @@ def _fixture_id(path: Path) -> str:
 
 
 def _load(path: Path) -> dict[str, Any]:
-    return cast("dict[str, Any]", yaml.safe_load(path.read_text()))
+    spec = cast("dict[str, Any]", yaml.safe_load(path.read_text()))
+    for entry in cast("list[Any]", spec.get("cases") or [spec]):
+        if isinstance(entry, dict):
+            _normalize_observer_config(cast("dict[str, Any]", entry))
+    return spec
+
+
+def _normalize_observer_config(case: dict[str, Any]) -> None:
+    """Fold the `langfuse_observer_config` spelling onto `langfuse_observer`."""
+    # Some fixtures spell the observer block `langfuse_observer_config` (059) and
+    # others `langfuse_observer`. Only the second was ever read, so 059's two
+    # cases -- which differ ONLY by this key -- both ran at the default and its
+    # state-payload-ENABLED case was a duplicate of the default-config one that
+    # had never exercised the path it names. Normalising here is the same move
+    # already made for the fixture-level subgraph folds.
+    config = case.pop("langfuse_observer_config", None)
+    if config is None:
+        return
+    merged = dict(cast("dict[str, Any]", case.get("langfuse_observer") or {}))
+    merged.update(cast("dict[str, Any]", config))
+    case["langfuse_observer"] = merged
 
 
 # ---------------------------------------------------------------------------
@@ -495,6 +536,28 @@ class _MockPromptBackend:
 async def test_langfuse_fixture(fixture_path: Path) -> None:
     spec = _load(fixture_path)
     fixture_stem = fixture_path.stem
+    if fixture_stem == _FIXTURE_157:
+        cases_157 = cast("list[dict[str, Any]]", spec["cases"])
+        excluded_157: dict[str, str] = {}
+        ran_157 = 0
+        for case in cases_157:
+            case_name = cast("str", case.get("name") or "<unnamed>")
+            gate = capability_skip_reason(case.get("requires_capability"))
+            if gate is not None:
+                excluded_157[case_name] = gate
+                report_recognized_skip(fixture_stem, case_name, gate)
+                continue
+            ran_157 += 1
+            _reject_unknown_directives(fixture_stem, case_name, case, handled_expected=_EXPECTED_157)
+            _reject_unimplemented_assertions(
+                fixture_stem, case_name, cast("Mapping[str, Any]", case.get("expected") or {})
+            )
+            try:
+                await _run_langfuse_157(case)
+            except AssertionError as e:
+                raise AssertionError(f"case {case_name!r}: {e}") from e
+        assert_some_case_ran(fixture_stem, ran_157, excluded_157)
+        return
     if fixture_stem == _FIXTURE_134:
         # 134's nested double fan-out + `calls_llm_from_wrapper` orphan primitive
         # are not modeled by the generic `_run_case` topology path; each case is
@@ -512,6 +575,7 @@ async def test_langfuse_fixture(fixture_path: Path) -> None:
             ran_134 += 1
             # 134 bypasses _run_case, where the guard otherwise lives, so it is
             # the one dispatch path that has to call it itself.
+            _reject_unknown_directives(fixture_stem, case_name, case, handled_expected=_EXPECTED_134)
             _reject_unimplemented_assertions(
                 fixture_stem, case_name, cast("Mapping[str, Any]", case.get("expected") or {})
             )
@@ -1066,6 +1130,12 @@ async def _run_case(case: Mapping[str, Any], *, fixture_stem: str | None = None)
     # funnel through here, so wiring it at the call sites instead would leave a
     # future dispatch path free to skip it silently. `_run_langfuse_134` bypasses
     # this function entirely and so carries its own call.
+    _reject_unknown_directives(
+        fixture_stem or "<fixture>",
+        cast("str", case.get("name") or "<unnamed>"),
+        case,
+        handled_expected=_EXPECTED_DIRECTIVES,
+    )
     _reject_unimplemented_assertions(
         fixture_stem or "<fixture>",
         cast("str", case.get("name") or "<unnamed>"),
@@ -2373,15 +2443,175 @@ def _assert_observation_tree(
 # like coverage. Both fixtures are deferred, so nothing should reach these today;
 # this fails loudly if an activated one ever does, rather than waiting for someone
 # to notice the assertion was never running.
-_UNIMPLEMENTED_OBSERVABILITY_ASSERTIONS = frozenset(
+# The identity half, implemented by `_assert_isolation_expectations`.
+_IMPLEMENTED_LEAK_ASSERTIONS = frozenset(
     {
         "no_langfuse_observations_on_global",
         "no_langfuse_observations_on_private",
         "langfuse_observations_on_global",
+    }
+)
+
+# The payload-scoped half, still declared-for-parsing only: it needs a
+# payload-bearing / payload-free classification, which arrives with fixture 158.
+# Every leak assertion the corpus uses must be in one set or the other, which is
+# what stops a key being neither implemented nor guarded.
+_UNIMPLEMENTED_OBSERVABILITY_ASSERTIONS = frozenset(
+    {
         "no_payload_bearing_langfuse_observations_on_global",
         "payload_bearing_langfuse_observations_on_global",
     }
 )
+
+
+# Case-level and `expected`-level keys this runner implements. Enumerated because
+# a fixture case is consumed by `if "<key>" in case` chains, so a key nobody
+# implements is silently ignored and the case reads like coverage while asserting
+# less than it says. This is the sibling of `_OBSERVATION_DIRECTIVES` one and two
+# levels up: that set guards an observation entry, these guard the case and its
+# expected block.
+#
+# A new key at a pin bump SHOULD fail here. Implementing a directive means adding
+# it to the set, which makes acceptance a deliberate act rather than a default.
+_CASE_DIRECTIVES = frozenset(
+    {
+        # Graph shape and identity.
+        "edges",
+        "entry",
+        "initial_state",
+        "inner_subgraphs",
+        "name",
+        "nodes",
+        "render_variables",
+        "state",
+        "subgraph",
+        "subgraphs",
+        # Assertions.
+        "expected",
+        "expected_error",
+        "invariants",
+        # Caller-supplied invocation dimensions.
+        "caller_correlation_id",
+        "caller_invocation_id",
+        "caller_metadata",
+        # Observer / client construction.
+        "caller_global_otel_active",
+        "langfuse_client",
+        "langfuse_observer",
+        "detached_fan_outs",
+        "detached_subgraphs",
+        # Mocks and backends.
+        "checkpointer",
+        "mock_llm",
+        "prompt_backend",
+        # Resume / multi-run.
+        "first_run_expected",
+        "first_run_expected_error",
+        "resume",
+        # Audience gate (conformance-adapter §5.5).
+        "requires_capability",
+    }
+)
+
+# Prose the fixture carries for a reader. Kept apart from the implemented set so
+# nothing inert is mistaken for something the runner acts on.
+_DOCUMENTARY_CASE_KEYS = frozenset({"description"})
+
+# Sub-keys of `langfuse_client`, guarded separately: the case-level diff below
+# does not descend into nested mappings, so without this a sub-directive the
+# runner drops looks identical to one it honours.
+_LANGFUSE_CLIENT_DIRECTIVES = frozenset({"mode", "provider"})
+_DEFERRED_LANGFUSE_CLIENT_DIRECTIVES: dict[str, str] = {
+    "preexisting_same_key_client": (
+        "priming the SDK's per-credential cache lands with fixture 158; 157 declares it false, "
+        "which `langfuse_sdk_without_egress` already guarantees by clearing the cache"
+    ),
+    "accept_shared_provider": "the shared-provider opt-out lands with fixture 158",
+}
+
+# Derived from the implemented-leak set rather than restating it: the three
+# identity keys were spelled out here, in _EXPECTED_157 and in
+# _IMPLEMENTED_LEAK_ASSERTIONS, so they could drift apart silently.
+_EXPECTED_DIRECTIVES = _IMPLEMENTED_LEAK_ASSERTIONS | frozenset(
+    {
+        "detached_trace_count",
+        "invariants",
+        "langfuse_trace",
+        "langfuse_traces",
+        "no_payload_bearing_langfuse_observations_on_global",
+        "payload_bearing_langfuse_observations_on_global",
+    }
+)
+
+# What each hand-built runner actually reads. Narrower than the generic set on
+# purpose: 157 and 134 handle their own expectations and must not inherit credit
+# for keys only `_run_case` implements.
+_EXPECTED_157 = _IMPLEMENTED_LEAK_ASSERTIONS | frozenset({"langfuse_trace"})
+_EXPECTED_134 = frozenset({"langfuse_trace", "invariants"})
+
+# Declared by an activated fixture, NOT read by this runner. Each entry is a named
+# skip with a reason rather than an indistinguishable member of the implemented
+# set, because a reader takes that set as a contract. Deleting an entry without
+# implementing the key makes the guard fail, which is the point.
+_DEFERRED_EXPECTED_DIRECTIVES: dict[str, str] = {
+    "invocation_id": (
+        "fixtures 035 / 036 also spell the caller-invocation-id assertion under "
+        "`expected.langfuse_trace.metadata.invocation_id`, which IS asserted; the top-level "
+        "spelling is a second, unread copy and wiring it needs a ruling on which is normative"
+    ),
+    "log_records": (
+        "the `level` key on log records arrives with fixture 158, whose suppress-floor cases "
+        "assert a WARNING; no activated fixture uses it yet"
+    ),
+}
+
+
+def _reject_unknown_directives(
+    fixture_stem: str,
+    case_name: str,
+    case: Mapping[str, Any],
+    *,
+    handled_expected: frozenset[str],
+) -> None:
+    """Fail on a case or expected key this runner does not act on."""
+    # `handled_expected` is per-RUNNER, not file-global. Three runners live in this
+    # file with different coverage, so a shared set would let one runner's
+    # implementation vouch for a key another runner silently drops.
+    unknown_case = sorted(set(case) - _CASE_DIRECTIVES - _DOCUMENTARY_CASE_KEYS)
+    assert not unknown_case, (
+        f"{fixture_stem}::{case_name} declares case-level directives this harness does not "
+        f"read: {unknown_case}. They would otherwise be silently ignored while the case still "
+        f"reads like coverage; implement them and add them to _CASE_DIRECTIVES."
+    )
+    client_cfg = case.get("langfuse_client")
+    if isinstance(client_cfg, dict):
+        unknown_client = sorted(
+            set(cast("dict[str, Any]", client_cfg))
+            - _LANGFUSE_CLIENT_DIRECTIVES
+            - set(_DEFERRED_LANGFUSE_CLIENT_DIRECTIVES)
+        )
+        assert not unknown_client, (
+            f"{fixture_stem}::{case_name} declares langfuse_client sub-directives this harness "
+            f"does not read: {unknown_client}."
+        )
+    expected = case.get("expected")
+    if not isinstance(expected, dict):
+        return
+    # `_UNIMPLEMENTED_OBSERVABILITY_ASSERTIONS` is subtracted here so the more
+    # specific guard owns those keys: they are KNOWN and deliberately unimplemented,
+    # which is a different failure from a key nobody recognises, and they carry a
+    # message naming what has to be built before a fixture may use them.
+    unknown_expected = sorted(
+        set(cast("dict[str, Any]", expected))
+        - handled_expected
+        - set(_DEFERRED_EXPECTED_DIRECTIVES)
+        - _UNIMPLEMENTED_OBSERVABILITY_ASSERTIONS
+    )
+    assert not unknown_expected, (
+        f"{fixture_stem}::{case_name} declares expected-block directives this runner does not "
+        f"read: {unknown_expected}. Same failure shape as an unimplemented observation "
+        f"directive; implement them, or record them in _DEFERRED_EXPECTED_DIRECTIVES with a reason."
+    )
 
 
 def _reject_unimplemented_assertions(fixture_stem: str, case_name: str, expected: Mapping[str, Any]) -> None:
@@ -2649,3 +2879,232 @@ def _assert_string_or_placeholder(label: str, actual: str | None, expected: Any)
 # Unused helper kept for the SamplingConfig import to avoid a future
 # F401 when 024's prompt-sampling path lands.
 _ = SamplingConfig
+
+
+# ---------------------------------------------------------------------------
+# Fixture 157 — Langfuse provider isolation (proposals 0114 / 0115)
+# ---------------------------------------------------------------------------
+
+_FIXTURE_157 = "157-langfuse-provider-isolation"
+
+
+@dataclass
+class _IsolationCapture:
+    """The provider surfaces the leak assertions read."""
+
+    global_exporter: Any  # the caller's globally-registered provider
+    private_exporter: Any  # openarmature's own OTel observer provider
+    isolated_exporter: Any | None  # the provider openarmature built for Langfuse
+
+
+def _attach_exporter(provider: Any) -> Any:
+    from opentelemetry.sdk.trace.export import SimpleSpanProcessor  # noqa: PLC0415
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import (  # noqa: PLC0415
+        InMemorySpanExporter,
+    )
+
+    exporter = InMemorySpanExporter()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    return exporter
+
+
+def _isolated_provider_for(public_key: str) -> Any:
+    from openarmature.observability.langfuse import adapter as langfuse_adapter  # noqa: PLC0415
+
+    return langfuse_adapter._ISOLATED_PROVIDERS.get(public_key)
+
+
+def _build_isolation_observer(
+    case: Mapping[str, Any], observer_kwargs: dict[str, Any], global_provider: Any
+) -> tuple[LangfuseObserver, Any]:
+    """Build the observer per the case's `langfuse_client` mode."""
+    client_cfg = cast("dict[str, Any]", case.get("langfuse_client") or {})
+    if cast("str", client_cfg.get("mode", "supplied")) == "credentials":
+        # `preexisting_same_key_client` and `accept_shared_provider` are 158's and
+        # land with it: 157 exercises neither, and a branch no fixture reaches is
+        # how an assertion ends up shipping unverified.
+        observer = LangfuseObserver.from_credentials(
+            public_key=CONFORMANCE_PUBLIC_KEY,
+            secret_key=SecretStr(CONFORMANCE_SECRET_KEY),
+            host=CONFORMANCE_HOST,
+            **observer_kwargs,
+        )
+        # openarmature's own isolated provider, read back so the fixture can prove
+        # the observations went THERE rather than merely not going elsewhere.
+        isolated = _isolated_provider_for(CONFORMANCE_PUBLIC_KEY)
+        # Fatal rather than "skip the check": if openarmature stops registering an
+        # isolated provider under this key, the positive half of the isolate case
+        # would vanish silently and the remaining assertions are satisfied by a run
+        # that emitted nothing.
+        assert isolated is not None, (
+            "openarmature registered no isolated TracerProvider for this credential, so the "
+            "non-vacuity half of the isolate case could not be checked"
+        )
+        return observer, _attach_exporter(isolated)
+    # mode: supplied -- the CALLER owns the client and the provider it is bound to,
+    # and openarmature must not rebind it. `provider: global` means the caller
+    # built it on the globally-registered provider.
+    provider_spelling = cast("str", client_cfg.get("provider", "global"))
+    # Mapping an unmodelled spelling onto None would be actively wrong, not merely
+    # unsupported: the fake reads None as "none supplied" and resolves it back to
+    # the globally-registered provider, so a future `provider: isolated` case would
+    # get a client on the global provider and its leak verdict would be inverted.
+    assert provider_spelling == "global", (
+        f"langfuse_client.provider={provider_spelling!r} is not modelled by this runner; "
+        f"only 'global' is. Construct the intended provider explicitly rather than letting it "
+        f"fall through to the caller's global one."
+    )
+    client = ProviderFaithfulLangfuseClient(global_provider)
+    return LangfuseObserver(client=client, **observer_kwargs), None
+
+
+def _assert_isolation_expectations(
+    expected: Mapping[str, Any], capture: _IsolationCapture, private_spans: list[Any]
+) -> None:
+    """The §5.5 identity leak assertions."""
+    global_langfuse = langfuse_observation_spans(capture.global_exporter.get_finished_spans())
+    private_langfuse = langfuse_observation_spans(private_spans)
+
+    if expected.get("no_langfuse_observations_on_global") is True:
+        assert not global_langfuse, (
+            f"Langfuse observations reached the caller's global provider: {[s.name for s in global_langfuse]}"
+        )
+    if expected.get("no_langfuse_observations_on_private") is True:
+        # Non-vacuity: openarmature's own OTel spans DO land here, so an empty
+        # exporter would mean nothing was recorded rather than that nothing leaked.
+        assert private_spans, (
+            "openarmature's private provider recorded no spans at all, so this assertion "
+            "would hold whether or not a Langfuse observation leaked onto it"
+        )
+        assert not private_langfuse, (
+            f"Langfuse observations reached openarmature's own OTel provider: "
+            f"{[s.name for s in private_langfuse]}"
+        )
+    if expected.get("langfuse_observations_on_global") is True:
+        assert global_langfuse, (
+            "no Langfuse observation reached the caller's global provider; a supplied client "
+            "bound to it must keep emitting there, since openarmature must not rebind it"
+        )
+    expected_trace = expected.get("langfuse_trace")
+    if isinstance(expected_trace, dict):
+        # The fixture's OWN declared non-vacuity proof. Substituting a weaker
+        # "at least one observation exists" check let the node span alone satisfy
+        # it, so a dropped Generation would have left the case green while the
+        # fixture read as proving one was emitted and isolated.
+        _assert_isolated_observations_match(cast("dict[str, Any]", expected_trace), capture)
+
+
+def _assert_isolated_observations_match(
+    expected_trace: Mapping[str, Any], capture: _IsolationCapture
+) -> None:
+    """Check the fixture's expected observation tree against the isolated provider."""
+    # A real Langfuse client has no recorded side, so the expectation is read off
+    # the spans it exported: name, type and output are what the fixture pins.
+    assert capture.isolated_exporter is not None, (
+        "langfuse_trace was declared but this case has no isolated provider to read it from"
+    )
+    spans = langfuse_observation_spans(capture.isolated_exporter.get_finished_spans())
+    by_name = {s.name: dict(s.attributes or {}) for s in spans}
+
+    def _walk(entries: list[Any]) -> None:
+        for entry in entries:
+            node = cast("dict[str, Any]", entry)
+            name = cast("str", node["name"])
+            assert name in by_name, (
+                f"expected a Langfuse observation named {name!r} on openarmature's isolated "
+                f"provider; saw {sorted(by_name)}"
+            )
+            attrs = by_name[name]
+            assert attrs.get(OBSERVATION_TYPE_ATTR) == node["type"], (
+                f"observation {name!r} type: expected {node['type']!r}, "
+                f"got {attrs.get(OBSERVATION_TYPE_ATTR)!r}"
+            )
+            if "output" in node:
+                assert attrs.get(OBSERVATION_OUTPUT_ATTR) == node["output"], (
+                    f"observation {name!r} output: expected {node['output']!r}, "
+                    f"got {attrs.get(OBSERVATION_OUTPUT_ATTR)!r}"
+                )
+            _walk(cast("list[Any]", node.get("children") or []))
+
+    _walk(cast("list[Any]", expected_trace.get("observations") or []))
+
+
+async def _run_langfuse_157(case: Mapping[str, Any]) -> None:
+    from opentelemetry import trace as otel_trace  # noqa: PLC0415
+    from opentelemetry.sdk.trace import TracerProvider  # noqa: PLC0415
+    from opentelemetry.sdk.trace.export import SimpleSpanProcessor  # noqa: PLC0415
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import (  # noqa: PLC0415
+        InMemorySpanExporter,
+    )
+
+    from openarmature.observability.langfuse import adapter as langfuse_adapter  # noqa: PLC0415
+    from openarmature.observability.otel.observer import OTelObserver  # noqa: PLC0415
+
+    observer_cfg = cast("dict[str, Any]", case.get("langfuse_observer") or {})
+    observer_kwargs: dict[str, Any] = {}
+    if "disable_provider_payload" in observer_cfg:
+        observer_kwargs["disable_provider_payload"] = bool(observer_cfg["disable_provider_payload"])
+
+    llm_provider = OpenAIProvider(
+        base_url="http://mock-llm.test",
+        model=_resolve_llm_model(case),
+        api_key="test",
+        transport=_build_mock_llm_handler(cast("list[dict[str, Any]]", case["mock_llm"])),
+    )
+    state_fields = cast("dict[str, dict[str, Any]]", case["state"]["fields"])
+    state_cls = build_state_cls("LangfuseIsolationState", state_fields)
+    builder = GraphBuilder(state_cls)
+    for node_name, node_spec in cast("dict[str, Any]", case["nodes"]).items():
+        builder.add_node(
+            node_name,
+            _build_node_body(
+                node_name=node_name,
+                node_spec=cast("dict[str, Any]", node_spec),
+                provider=llm_provider,
+                prompt_manager=None,
+                render_variables={},
+            ),
+        )
+    for edge in cast("list[dict[str, str]]", case["edges"]):
+        target_raw = edge["to"]
+        builder.add_edge(edge["from"], END if target_raw == "END" else target_raw)
+    builder.set_entry(cast("str", case["entry"]))
+
+    prior_global = otel_trace.get_tracer_provider()
+    global_provider = TracerProvider()
+    global_exporter = _attach_exporter(global_provider)
+    private_exporter = InMemorySpanExporter()
+    # openarmature keys its isolated providers in a module global that outlives the
+    # case, so a stale entry would let the next case inherit this one's verdict.
+    with langfuse_sdk_without_egress():
+        # Snapshotted INSIDE the block whose `finally` restores it. Clearing it
+        # before entering meant an exception from the context manager's own private
+        # import would leave the dict empty for the rest of the process, and every
+        # later from_credentials would build a fresh provider.
+        prior_isolated = dict(langfuse_adapter._ISOLATED_PROVIDERS)
+        langfuse_adapter._ISOLATED_PROVIDERS.clear()
+        try:
+            if bool(case.get("caller_global_otel_active", False)):
+                _reset_otel_global_tracer_provider(global_provider)
+            graph = builder.compile()
+            langfuse_observer, isolated_exporter = _build_isolation_observer(
+                case, observer_kwargs, global_provider
+            )
+            graph.attach_observer(langfuse_observer)
+            # openarmature's OWN OTel provider: the second shared-provider spelling
+            # §6 forbids a Langfuse observation from reaching.
+            graph.attach_observer(OTelObserver(span_processor=SimpleSpanProcessor(private_exporter)))
+
+            await graph.invoke(state_cls(**cast("dict[str, Any]", case.get("initial_state") or {})))
+            await graph.drain()
+            langfuse_observer.force_flush()
+
+            _assert_isolation_expectations(
+                cast("dict[str, Any]", case.get("expected") or {}),
+                _IsolationCapture(global_exporter, private_exporter, isolated_exporter),
+                list(private_exporter.get_finished_spans()),
+            )
+        finally:
+            langfuse_adapter._ISOLATED_PROVIDERS.clear()
+            langfuse_adapter._ISOLATED_PROVIDERS.update(prior_isolated)
+            _reset_otel_global_tracer_provider(prior_global)

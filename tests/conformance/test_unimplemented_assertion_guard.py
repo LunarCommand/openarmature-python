@@ -37,12 +37,19 @@ def test_set_covers_every_leak_assertion_the_deferred_fixtures_use() -> None:
 
     leak_keys = {k for k in used if "langfuse_observations" in k or "payload_bearing" in k}
     assert leak_keys, "no leak assertions found in 157 / 158; this check is reading nothing"
-    unguarded = sorted(leak_keys - langfuse_runner._UNIMPLEMENTED_OBSERVABILITY_ASSERTIONS)
-    assert not unguarded, (
-        f"fixtures 157 / 158 assert {unguarded}, which the expectations model accepts for parsing "
-        f"but no comparator implements and nothing guards. Add them to "
-        f"_UNIMPLEMENTED_OBSERVABILITY_ASSERTIONS, or implement them."
+    accounted = (
+        langfuse_runner._IMPLEMENTED_LEAK_ASSERTIONS | langfuse_runner._UNIMPLEMENTED_OBSERVABILITY_ASSERTIONS
     )
+    unaccounted = sorted(leak_keys - accounted)
+    assert not unaccounted, (
+        f"fixtures 157 / 158 assert {unaccounted}, which the expectations model accepts for "
+        f"parsing but which is neither implemented nor guarded. Implement it, or add it to "
+        f"_UNIMPLEMENTED_OBSERVABILITY_ASSERTIONS so an activated fixture reaching it fails loudly."
+    )
+    overlap = sorted(
+        langfuse_runner._IMPLEMENTED_LEAK_ASSERTIONS & langfuse_runner._UNIMPLEMENTED_OBSERVABILITY_ASSERTIONS
+    )
+    assert not overlap, f"{overlap} are listed as both implemented and unimplemented"
 
 
 def test_every_unimplemented_key_is_a_real_model_field() -> None:
