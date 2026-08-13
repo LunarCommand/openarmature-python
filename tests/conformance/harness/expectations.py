@@ -198,6 +198,17 @@ class ObservabilityExpected(_ForbidExtras):
     no_openarmature_spans_on_global: bool | None = None
     no_edge_spans: bool | None = None
     no_llm_provider_span: bool | None = None
+    # Langfuse provider-isolation leak assertions (proposals 0115 / 0116,
+    # fixtures 157 / 158). Declared so those fixtures PARSE at this pin; the
+    # assertions themselves are not implemented yet, and both fixtures are
+    # deferred accordingly. `_UNIMPLEMENTED_OBSERVABILITY_ASSERTIONS` in the
+    # Langfuse runner fails loudly if an ACTIVATED fixture reaches for one, so a
+    # declared-but-unimplemented key cannot pass as coverage.
+    no_langfuse_observations_on_global: bool | None = None
+    no_langfuse_observations_on_private: bool | None = None
+    langfuse_observations_on_global: bool | None = None
+    no_payload_bearing_langfuse_observations_on_global: bool | None = None
+    payload_bearing_langfuse_observations_on_global: bool | None = None
     # Invariants block (fixture 011 determinism).
     invariants: dict[str, Any] | None = None
     determinism_check: dict[str, Any] | None = None
@@ -259,6 +270,12 @@ _OBSERVABILITY_KEYS = frozenset(
         "no_openarmature_spans_on_global",
         "no_edge_spans",
         "no_llm_provider_span",
+        # proposals 0115 / 0116 (fixtures 157 / 158) Langfuse leak assertions.
+        "no_langfuse_observations_on_global",
+        "no_langfuse_observations_on_private",
+        "langfuse_observations_on_global",
+        "no_payload_bearing_langfuse_observations_on_global",
+        "payload_bearing_langfuse_observations_on_global",
         "determinism_check",
         "invocation_count",
         # proposal 0064 (fixture 084) Langfuse Trace-level expectations

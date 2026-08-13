@@ -146,6 +146,14 @@ _LANGFUSE_FIXTURES = frozenset(
         # `calls_llm_from_wrapper` orphan primitive are not modeled by the generic
         # ``_run_case`` topology path (precedent: the 039 hand-built runner).
         "134-langfuse-nested-fan-out-parent-resolution",
+        # 159 (proposal 0118, spec v0.112.0): `disable_provider_payload` governs a
+        # failed Generation's harvested exception text. Both cases run on a normal
+        # provider and need no isolation machinery, only the existing per-observer
+        # payload flag, so this rides the pin bump rather than waiting on the
+        # provider-faithful fake that 157 / 158 need. Each case keeps the other
+        # non-vacuous: flag on asserts the message absent with the category
+        # retained, flag off asserts it present.
+        "159-langfuse-llm-failure-error-message",
     }
 )
 
@@ -540,6 +548,12 @@ async def test_langfuse_fixture(fixture_path: Path) -> None:
                 report_recognized_skip(fixture_stem, case_name, gate)
                 continue
             ran += 1
+            # Only cases that actually RUN are checked: a gated-out or deferred
+            # case never reaches its assertions, so an unimplemented one there is
+            # not a live coverage claim.
+            _reject_unimplemented_assertions(
+                fixture_stem, case_name, cast("Mapping[str, Any]", case.get("expected") or {})
+            )
             if fixture_subgraphs is not None and "subgraphs" not in case:
                 case["subgraphs"] = fixture_subgraphs
             if fixture_inner_subgraphs is not None and "inner_subgraphs" not in case:
@@ -2342,9 +2356,42 @@ def _assert_observation_tree(
 # how the 0118 ``metadata_absent`` directive would have landed. Anything outside
 # this set fails loudly instead, so a spec-side directive we have not built yet
 # surfaces as a gap rather than a false pass.
+# Assertion keys the expectations model accepts so fixtures 157 / 158 parse at the
+# v0.112.0 pin, but which no comparator implements yet (they need the
+# provider-faithful fake and the `langfuse_client` construction directive).
+#
+# Declaring a field to make a fixture parse is how an assertion quietly becomes
+# dead: the key validates, the comparator never looks at it, and the fixture reads
+# like coverage. Both fixtures are deferred, so nothing should reach these today;
+# this fails loudly if an activated one ever does, rather than waiting for someone
+# to notice the assertion was never running.
+_UNIMPLEMENTED_OBSERVABILITY_ASSERTIONS = frozenset(
+    {
+        "no_langfuse_observations_on_global",
+        "no_langfuse_observations_on_private",
+        "langfuse_observations_on_global",
+        "no_payload_bearing_langfuse_observations_on_global",
+        "payload_bearing_langfuse_observations_on_global",
+    }
+)
+
+
+def _reject_unimplemented_assertions(fixture_stem: str, case_name: str, expected: Mapping[str, Any]) -> None:
+    """Fail if a case reaches for a leak assertion no comparator implements."""
+    unimplemented = sorted(set(expected) & _UNIMPLEMENTED_OBSERVABILITY_ASSERTIONS)
+    if unimplemented:
+        raise AssertionError(
+            f"{fixture_stem}::{case_name} declares assertions this harness accepts for parsing "
+            f"but does not implement: {unimplemented}. They are declared in "
+            f"harness/expectations.py so fixtures 157 / 158 parse at this pin; implement them "
+            f"with the provider-faithful fake before activating a fixture that uses them."
+        )
+
+
 _OBSERVATION_DIRECTIVES = frozenset(
     {
         "children",
+        "input",
         "input_is_raw_string_with_marker",
         "input_parses_as_messages",
         "level",
@@ -2433,6 +2480,15 @@ def _assert_observation(
         )
         assert "[truncated," in actual.input, (
             f"observation {actual.name!r} input missing truncation marker: {actual.input!r}"
+        )
+    if "input" in expected:
+        # Plain equality on the rendered input, the counterpart of `output`. The
+        # two shaped forms above (`input_parses_as_messages`,
+        # `input_is_raw_string_with_marker`) assert structure; this asserts the
+        # value, which is what a fixture needs to pin `input: null` on a payload-
+        # suppressed observation.
+        assert actual.input == expected["input"], (
+            f"observation {actual.name!r} input: expected {expected['input']!r}, got {actual.input!r}"
         )
     if "output" in expected:
         assert actual.output == expected["output"], (
