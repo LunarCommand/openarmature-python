@@ -496,7 +496,7 @@ async def test_langfuse_fixture(fixture_path: Path) -> None:
         ran_134 = 0
         for case in cases_134:
             case_name = cast("str", case.get("name") or "<unnamed>")
-            gate = capability_skip_reason(cast("Mapping[str, Any] | None", case.get("requires_capability")))
+            gate = capability_skip_reason(case.get("requires_capability"))
             if gate is not None:
                 excluded_134[case_name] = gate
                 report_recognized_skip(fixture_stem, case_name, gate)
@@ -531,7 +531,7 @@ async def test_langfuse_fixture(fixture_path: Path) -> None:
                 # test id.
                 excluded[case_name] = "per-case deferral (_DEFERRED_CASES)"
                 continue
-            gate = capability_skip_reason(cast("Mapping[str, Any] | None", case.get("requires_capability")))
+            gate = capability_skip_reason(case.get("requires_capability"))
             if gate is not None:
                 # Recognized skip: this case's arm belongs to an adapter class we
                 # are not. Same in-loop `continue` as a deferral, for the same
@@ -552,7 +552,7 @@ async def test_langfuse_fixture(fixture_path: Path) -> None:
     else:
         # Single-case fixture: no siblings to abandon, so a gate here is a real
         # pytest skip -- visible in the run summary rather than a silent no-op.
-        gate = capability_skip_reason(cast("Mapping[str, Any] | None", spec.get("requires_capability")))
+        gate = capability_skip_reason(spec.get("requires_capability"))
         if gate is not None:
             pytest.skip(f"{fixture_stem}: {gate}")
         await _run_case(spec, fixture_stem=fixture_stem)

@@ -19,7 +19,7 @@ import warnings
 from collections.abc import Mapping
 from functools import cache
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 _CONFORMANCE_TOML = Path(__file__).resolve().parents[3] / "conformance.toml"
 
@@ -63,7 +63,7 @@ def adapter_capabilities() -> Mapping[str, bool]:
     return dict(declared)
 
 
-def capability_skip_reason(requires: Mapping[str, Any] | None) -> str | None:
+def capability_skip_reason(requires: object) -> str | None:
     """Return why this case is gated out, or ``None`` when it should run."""
     # Pure by design: the caller decides how to record the skip. The conformance
     # runners iterate a fixture's cases inside a single parametrized test, so a
@@ -77,10 +77,24 @@ def capability_skip_reason(requires: Mapping[str, Any] | None) -> str | None:
     # capability or the manifest has not caught up with a newly-added capability
     # name -- and in the second case every gating case switches itself off while
     # still reporting green.
+    if requires is None:
+        return None
+    if not isinstance(requires, Mapping):
+        # Checked BEFORE the falsy test, which a malformed value would otherwise
+        # slip through: `requires_capability: []` is falsy, so it would read as
+        # ungated and run the case against an arm meant for a different adapter
+        # class, silently. A non-empty malformed value would instead surface as
+        # an AttributeError from `.items()`, which says nothing useful about the
+        # fixture-authoring mistake behind it.
+        raise AssertionError(
+            f"case requires_capability must be a mapping of capability name to boolean, got "
+            f"{type(requires).__name__}: {requires!r}. A non-mapping would otherwise read as "
+            f"ungated and assert the wrong adapter arm."
+        )
     if not requires:
         return None
     declared = adapter_capabilities()
-    for name, required in requires.items():
+    for name, required in cast("Mapping[str, Any]", requires).items():
         if not isinstance(required, bool):
             raise AssertionError(
                 f"case requires_capability {name} = {required!r} is {type(required).__name__}, "

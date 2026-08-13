@@ -26,11 +26,23 @@ def test_declared_detection_capability_matches_the_installed_sdk() -> None:
     # demotes every client to `undetectable`, and this is what goes red.
     import inspect
 
+    # Only the SDK's ABSENCE is a legitimate skip: without langfuse installed the
+    # claim is untestable. A langfuse that no longer exposes the internal is the
+    # very failure this test exists for, so it raises rather than skipping -- an
+    # importorskip on the internal path would turn the load-bearing case green.
     langfuse = pytest.importorskip(
         "langfuse",
         reason="the declared capability is a claim about the installed Langfuse SDK",
     )
-    resource_manager = pytest.importorskip("langfuse._client.resource_manager")
+    try:
+        from langfuse._client import resource_manager
+    except ImportError as exc:
+        raise AssertionError(
+            "langfuse is installed but langfuse._client.resource_manager is gone. "
+            "conformance.toml declares langfuse_bound_provider_detection = true, and the probe in "
+            "adapter._classify_isolation reads that module's tracer_provider. Re-point the probe "
+            "or drop the claim; a skip here would let the stale claim ship."
+        ) from exc
 
     assert adapter_capabilities()["langfuse_bound_provider_detection"] is True
 
@@ -73,6 +85,16 @@ def test_undeclared_capability_is_an_error_not_a_skip() -> None:
     # that gates on it -- green, and asserting nothing. Here it raises instead.
     with pytest.raises(AssertionError, match="does not declare"):
         capability_skip_reason({"some_future_capability": True})
+
+
+@pytest.mark.parametrize("malformed", [[], ["langfuse_bound_provider_detection"], "true", 1])
+def test_non_mapping_requirement_is_rejected(malformed: object) -> None:
+    # A fixture comes from YAML, so the gate can be handed any shape. The empty
+    # list is the dangerous one: it is falsy, so a bare truthiness check would
+    # read it as ungated and run the case against the wrong adapter arm with
+    # nothing going red.
+    with pytest.raises(AssertionError, match="must be a mapping"):
+        capability_skip_reason(malformed)
 
 
 def test_non_boolean_requirement_is_rejected_not_coerced() -> None:
