@@ -162,8 +162,8 @@ def test_no_provider_supplied_binds_the_global_one() -> None:
     # client both unable to leak and classified isolated, so 158's raise arm could
     # never fire.
     provider, exporter = _provider()
-    previous = otel_trace._TRACER_PROVIDER
-    otel_trace._TRACER_PROVIDER = provider
+    previous = otel_trace._TRACER_PROVIDER  # type: ignore[attr-defined] # pyright: ignore[reportPrivateUsage]
+    otel_trace._TRACER_PROVIDER = provider  # type: ignore[attr-defined] # pyright: ignore[reportPrivateUsage]
     try:
         client = ProviderFaithfulLangfuseClient()
         assert client.tracer_provider is provider
@@ -171,7 +171,7 @@ def test_no_provider_supplied_binds_the_global_one() -> None:
         client.trace(id="t")
         client.span(trace_id="t", name="node").end()
     finally:
-        otel_trace._TRACER_PROVIDER = previous
+        otel_trace._TRACER_PROVIDER = previous  # type: ignore[attr-defined] # pyright: ignore[reportPrivateUsage]
     assert len(langfuse_observation_spans(exporter.get_finished_spans())) == 1
 
 

@@ -2529,15 +2529,15 @@ _DEFERRED_LANGFUSE_CLIENT_DIRECTIVES: dict[str, str] = {
     "accept_shared_provider": "the shared-provider opt-out lands with fixture 158",
 }
 
-_EXPECTED_DIRECTIVES = frozenset(
+# Derived from the implemented-leak set rather than restating it: the three
+# identity keys were spelled out here, in _EXPECTED_157 and in
+# _IMPLEMENTED_LEAK_ASSERTIONS, so they could drift apart silently.
+_EXPECTED_DIRECTIVES = _IMPLEMENTED_LEAK_ASSERTIONS | frozenset(
     {
         "detached_trace_count",
         "invariants",
         "langfuse_trace",
         "langfuse_traces",
-        "langfuse_observations_on_global",
-        "no_langfuse_observations_on_global",
-        "no_langfuse_observations_on_private",
         "no_payload_bearing_langfuse_observations_on_global",
         "payload_bearing_langfuse_observations_on_global",
     }
@@ -2546,14 +2546,7 @@ _EXPECTED_DIRECTIVES = frozenset(
 # What each hand-built runner actually reads. Narrower than the generic set on
 # purpose: 157 and 134 handle their own expectations and must not inherit credit
 # for keys only `_run_case` implements.
-_EXPECTED_157 = frozenset(
-    {
-        "langfuse_trace",
-        "langfuse_observations_on_global",
-        "no_langfuse_observations_on_global",
-        "no_langfuse_observations_on_private",
-    }
-)
+_EXPECTED_157 = _IMPLEMENTED_LEAK_ASSERTIONS | frozenset({"langfuse_trace"})
 _EXPECTED_134 = frozenset({"langfuse_trace", "invariants"})
 
 # Declared by an activated fixture, NOT read by this runner. Each entry is a named

@@ -95,9 +95,20 @@ def test_the_installed_version_is_within_the_declared_range() -> None:
     # Non-vacuity for everything above: the checks are only meaningful against a
     # version we claim to support. This also surfaces drift between what is
     # installed and what openarmature.org/compatibility records as verified.
+    import re
     from importlib.metadata import version
 
     installed = version("langfuse")
-    major, minor = (int(part) for part in installed.split(".")[:2])
+    # Regex rather than int() on the split parts: a PEP 440 two-component
+    # pre-release such as 4.7rc1 attaches its suffix to the MINOR, so splitting
+    # raises ValueError on a version that is inside our declared range. A bare
+    # ValueError from a guard test also reads identically to a genuine range
+    # violation, which is the more expensive confusion.
+    match = re.match(r"^(\d+)\.(\d+)", installed)
+    assert match is not None, (
+        f"cannot parse a major.minor out of langfuse version {installed!r}; this guard cannot "
+        f"confirm the installed SDK is inside the declared range"
+    )
+    major, minor = int(match.group(1)), int(match.group(2))
     assert (major, minor) >= (4, 6), f"langfuse {installed} is below the declared floor of 4.6"
     assert major < 5, f"langfuse {installed} is outside the declared range (<5)"
