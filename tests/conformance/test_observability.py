@@ -641,6 +641,25 @@ def test_observability_fixture_coverage_is_complete() -> None:
 # ---------------------------------------------------------------------------
 
 
+def _reject_unsupported_capability_gate(fixture_id: str, spec: Mapping[str, Any]) -> None:
+    """Fail if a fixture routed here carries an audience gate this runner ignores."""
+    # `requires_capability` (conformance-adapter §5.5) selects which adapter class
+    # a case applies to. This runner implements no gate, so ignoring one would
+    # silently assert the arm meant for a different adapter class rather than
+    # skip -- an appearance is an error until this runner grows the same per-case
+    # handling the Langfuse runner has. The repo-wide companion check is
+    # test_capability_gate_wiring.py's sweep over every fixture directory, which
+    # catches a gate landing in a runner that never reaches this function.
+    cases = cast("list[Mapping[str, Any]]", spec.get("cases") or [spec])
+    gated = [cast("str", c.get("name") or "<unnamed>") for c in cases if c.get("requires_capability")]
+    if gated:
+        raise AssertionError(
+            f"{fixture_id}: cases {gated} carry `requires_capability`, which this runner does "
+            f"not implement. Wire the gate (tests/conformance/harness/capabilities.py) before "
+            f"activating them -- ignoring it asserts an arm meant for a different adapter class."
+        )
+
+
 @pytest.mark.parametrize("fixture_path", _fixture_paths(), ids=_fixture_id)
 async def test_observability_fixture(fixture_path: Path) -> None:
     fixture_id = fixture_path.stem
@@ -660,6 +679,7 @@ async def test_observability_fixture(fixture_path: Path) -> None:
         pytest.skip(f"{fixture_id}: unaccounted -- see the coverage guard")
 
     spec = _load(fixture_path)
+    _reject_unsupported_capability_gate(fixture_id, spec)
     if fixture_id == "001-otel-basic-trace":
         await _run_fixture_001(spec)
     elif fixture_id == "002-otel-subgraph-hierarchy":

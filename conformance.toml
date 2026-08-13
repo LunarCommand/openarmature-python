@@ -34,6 +34,27 @@
 implementation = "openarmature-python"
 spec_pin = "v0.107.0"
 
+# Adapter-level conformance capabilities (conformance-adapter §5.5, proposal
+# 0116). A fixture case may carry `requires_capability`, which selects the arm of
+# a contract that applies to this adapter; a case whose requirement this table
+# contradicts is a recognized skip rather than a failure.
+#
+# The section cited here arrives with the pin bump: at spec_pin v0.107.0 no
+# fixture carries `requires_capability` yet, so this table is declared ahead of
+# the fixtures that read it rather than orphaned.
+#
+# §5.5 lets an adapter leave a capability undeclared and be treated as
+# non-capable. This harness is stricter and errors on an undeclared name instead
+# — silence reads the same whether the capability is genuinely absent or the
+# table has not caught up with a newly-added one, and in the second case every
+# case gating on it switches itself off while still reporting green.
+[adapter_capabilities]
+# Whether the adapter can establish which TracerProvider a Langfuse client is
+# bound to. True here: the v4 SDK exposes it via `client._resources`, so this
+# implementation takes 0116's raise arm on a detected shared provider rather
+# than the portable suppress floor.
+langfuse_bound_provider_detection = true
+
 # Status values:
 #   implemented   — shipped behavior matches the proposal's contract
 #   partial       — partial impl; consult `note` for what's missing
