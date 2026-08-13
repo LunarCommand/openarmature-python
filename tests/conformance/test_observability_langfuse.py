@@ -46,6 +46,11 @@ from openarmature.prompts import (
 from openarmature.prompts.context import with_active_prompt
 
 from .adapter import build_graph, build_state_cls
+from .harness.capabilities import (
+    assert_some_case_ran,
+    capability_skip_reason,
+    report_recognized_skip,
+)
 
 CONFORMANCE_DIR = (
     Path(__file__).resolve().parents[2] / "openarmature-spec" / "spec" / "observability" / "conformance"
@@ -486,12 +491,22 @@ async def test_langfuse_fixture(fixture_path: Path) -> None:
         # 134's nested double fan-out + `calls_llm_from_wrapper` orphan primitive
         # are not modeled by the generic `_run_case` topology path; each case is
         # driven by a dedicated hand-built runner (cf. the 039 hand-built path).
-        for case in cast("list[dict[str, Any]]", spec["cases"]):
+        cases_134 = cast("list[dict[str, Any]]", spec["cases"])
+        excluded_134: dict[str, str] = {}
+        ran_134 = 0
+        for case in cases_134:
             case_name = cast("str", case.get("name") or "<unnamed>")
+            gate = capability_skip_reason(case.get("requires_capability"))
+            if gate is not None:
+                excluded_134[case_name] = gate
+                report_recognized_skip(fixture_stem, case_name, gate)
+                continue
+            ran_134 += 1
             try:
                 await _run_langfuse_134(case)
             except AssertionError as e:
                 raise AssertionError(f"case {case_name!r}: {e}") from e
+        assert_some_case_ran(fixture_stem, ran_134, excluded_134)
         return
     if "cases" in spec:
         # Fold fixture-level ``subgraphs`` / ``inner_subgraphs`` into
@@ -501,14 +516,30 @@ async def test_langfuse_fixture(fixture_path: Path) -> None:
         # resolve ``branches.fraud_check.subgraph: fraud_check``.
         fixture_subgraphs = cast("dict[str, Any] | None", spec.get("subgraphs"))
         fixture_inner_subgraphs = cast("dict[str, Any] | None", spec.get("inner_subgraphs"))
-        for case in cast("list[dict[str, Any]]", spec["cases"]):
+        cases = cast("list[dict[str, Any]]", spec["cases"])
+        # Why a case was left out, for the failure message below. The load-bearing
+        # count is `ran`, not the size of this dict: cases sharing a name would
+        # collapse into one entry here and let an empty run look partial.
+        excluded: dict[str, str] = {}
+        ran = 0
+        for case in cases:
             case_name = cast("str", case.get("name") or "<unnamed>")
             if (fixture_stem, case_name) in _DEFERRED_CASES:
                 # Per-case deferral. Skipping inside the loop rather
                 # than emitting a separate pytest.skip lets us keep the
                 # surrounding cases running under the same parametrized
                 # test id.
+                excluded[case_name] = "per-case deferral (_DEFERRED_CASES)"
                 continue
+            gate = capability_skip_reason(case.get("requires_capability"))
+            if gate is not None:
+                # Recognized skip: this case's arm belongs to an adapter class we
+                # are not. Same in-loop `continue` as a deferral, for the same
+                # reason -- and warned about, so a passing run still shows it.
+                excluded[case_name] = gate
+                report_recognized_skip(fixture_stem, case_name, gate)
+                continue
+            ran += 1
             if fixture_subgraphs is not None and "subgraphs" not in case:
                 case["subgraphs"] = fixture_subgraphs
             if fixture_inner_subgraphs is not None and "inner_subgraphs" not in case:
@@ -517,7 +548,13 @@ async def test_langfuse_fixture(fixture_path: Path) -> None:
                 await _run_case(case, fixture_stem=fixture_stem)
             except AssertionError as e:
                 raise AssertionError(f"case {case_name!r}: {e}") from e
+        assert_some_case_ran(fixture_stem, ran, excluded)
     else:
+        # Single-case fixture: no siblings to abandon, so a gate here is a real
+        # pytest skip -- visible in the run summary rather than a silent no-op.
+        gate = capability_skip_reason(spec.get("requires_capability"))
+        if gate is not None:
+            pytest.skip(f"{fixture_stem}: {gate}")
         await _run_case(spec, fixture_stem=fixture_stem)
 
 
