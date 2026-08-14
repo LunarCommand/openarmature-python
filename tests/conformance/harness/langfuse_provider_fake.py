@@ -33,7 +33,7 @@
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import Any, cast
 
 from opentelemetry import trace as otel_trace
 
@@ -57,6 +57,24 @@ TRACE_INPUT_ATTR = "langfuse.trace.input"
 TRACE_OUTPUT_ATTR = "langfuse.trace.output"
 
 _OBSERVATION_PREFIX = "langfuse.observation."
+
+
+def _render_metadata(metadata: Any) -> dict[str, Any]:
+    """Render metadata onto span attributes the way a Langfuse v4 client does."""
+    # Mirrors `langfuse._client.attributes._flatten_and_serialize_metadata`: a dict
+    # becomes one attribute per key under `<prefix>.<key>`, with str / int values
+    # passed through unserialized; anything else becomes a single serialized blob
+    # under the bare prefix. Emitting the blob unconditionally, as this fake first
+    # did, is exactly the harness-invented summary the module header rules out --
+    # and it let the classifier's error-message limb pass here while being a
+    # constant False against a real client.
+    if not isinstance(metadata, dict):
+        return {OBSERVATION_METADATA_ATTR: _encode(metadata)}
+    rendered: dict[str, Any] = {}
+    for key, value in cast("dict[str, Any]", metadata).items():
+        name = f"{OBSERVATION_METADATA_ATTR}.{key}"
+        rendered[name] = value if isinstance(value, str | int) else _encode(value)
+    return rendered
 
 
 def _encode(value: Any) -> str:
@@ -114,7 +132,8 @@ class _ProviderBinding:
         if observation.output is not None:
             span.set_attribute(OBSERVATION_OUTPUT_ATTR, _encode(observation.output))
         if observation.metadata:
-            span.set_attribute(OBSERVATION_METADATA_ATTR, _encode(observation.metadata))
+            for name, value in _render_metadata(observation.metadata).items():
+                span.set_attribute(name, value)
         span.set_attribute(OBSERVATION_LEVEL_ATTR, observation.level)
         if observation.status_message is not None:
             span.set_attribute(OBSERVATION_STATUS_MESSAGE_ATTR, observation.status_message)
@@ -242,6 +261,84 @@ class ProviderFaithfulLangfuseClient(InMemoryLangfuseClient):
         return recorded and self._binding.flush_provider(timeout_ms)
 
 
+# The §8.4.1 minimal Trace stubs. openarmature writes one of these whenever the
+# isolation floor suppresses the state channel, and `_resolve_trace_input` /
+# `_resolve_trace_output` NEVER return None, so a classifier that treats any
+# non-None trace payload as "payload present" is a constant true and 158's
+# payload-free assertions could never hold.
+_TRACE_STUB_KEYS = ({"entry_node"}, {"entry_node", "correlation_id"}, {"final_node", "status"})
+
+
+def _is_trace_stub(rendered: str) -> bool:
+    try:
+        value = json.loads(rendered)
+    except (TypeError, ValueError):
+        return False
+    if not isinstance(value, dict):
+        return False
+    return set(cast("dict[str, Any]", value)) in _TRACE_STUB_KEYS
+
+
+# The metadata key whose VALUE is harvested exception text. Every other metadata
+# row openarmature writes is a classification token or a lineage id.
+_ERROR_MESSAGE_KEY = "error_message"
+
+# How a Langfuse v4 client renders a dict metadata mapping: one flattened
+# attribute per key, `langfuse.observation.metadata.<key>`. The bare, unsuffixed
+# attribute appears ONLY for non-dict metadata. Reading just the bare name
+# therefore misses the error-message channel entirely on a real client, which is
+# the only client `mode: credentials` uses.
+_FLATTENED_METADATA_PREFIX = OBSERVATION_METADATA_ATTR + "."
+
+
+def _metadata_carries_error_message(attributes: dict[str, Any]) -> bool:
+    if attributes.get(_FLATTENED_METADATA_PREFIX + _ERROR_MESSAGE_KEY) is not None:
+        return True
+    # Non-dict metadata renders as one serialized blob under the bare name. Parse
+    # it rather than substring-matching: a caller metadata VALUE containing the
+    # words "error_message" would otherwise classify a payload-free observation
+    # as bearing.
+    blob = attributes.get(OBSERVATION_METADATA_ATTR)
+    if blob is None:
+        return False
+    try:
+        value = json.loads(cast("str", blob))
+    except (TypeError, ValueError):
+        return False
+    return isinstance(value, dict) and _ERROR_MESSAGE_KEY in cast("dict[str, Any]", value)
+
+
+def span_is_payload_bearing(span: Any) -> bool:
+    """Whether an exported observation carries harvested payload."""
+    # Per §6.4 as narrowed by 0118, harvested payload is provider input / output, a
+    # Trace-level state input / output, or a failed observation's `error_message`.
+    # A payload-FREE observation is the §8.4.1 minimal stub, or a failed one
+    # carrying only its classifications: `error_type` is a classification token, so
+    # it does not make an observation payload-bearing.
+    #
+    # `status_message` is deliberately NOT a channel here. openarmature writes an
+    # error CATEGORY there on most failure paths, and only duplicates the harvested
+    # message into it alongside `metadata.error_message`. Treating the attribute
+    # itself as payload would misclassify every category-only failure as a leak.
+    # `test_harvested_status_message_never_travels_without_its_metadata_row` pins
+    # that coupling, so the narrower rule here cannot go quietly stale.
+    attributes: dict[str, Any] = dict(span.attributes or {})
+    if attributes.get(OBSERVATION_INPUT_ATTR) is not None:
+        return True
+    if attributes.get(OBSERVATION_OUTPUT_ATTR) is not None:
+        return True
+    for name in (TRACE_INPUT_ATTR, TRACE_OUTPUT_ATTR):
+        rendered = attributes.get(name)
+        if rendered is not None and not _is_trace_stub(cast("str", rendered)):
+            return True
+    return _metadata_carries_error_message(attributes)
+
+
+def payload_bearing_spans(spans: Any) -> list[Any]:
+    """The payload-bearing Langfuse observations among an exporter's spans."""
+    return [s for s in langfuse_observation_spans(spans) if span_is_payload_bearing(s)]
+
+
 def langfuse_observation_spans(spans: Any) -> list[Any]:
     """The openarmature Langfuse observations among an exporter's spans."""
     selected: list[Any] = []
@@ -253,6 +350,8 @@ def langfuse_observation_spans(spans: Any) -> list[Any]:
 
 
 __all__ = [
+    "payload_bearing_spans",
+    "span_is_payload_bearing",
     "OBSERVATION_INPUT_ATTR",
     "OBSERVATION_METADATA_ATTR",
     "OBSERVATION_OUTPUT_ATTR",

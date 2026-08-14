@@ -448,20 +448,6 @@ _DEFERRED_FIXTURES: dict[str, str] = {
         "Proposal 0107 mock_rerank raises sub-directive not yet wired; rides the "
         "remaining v0.17.0 fixture-wiring PR (observability 144-156)"
     ),
-    # 157 / 158 (proposals 0115 / 0116 / 0117 / 0118, spec v0.109.0-v0.112.0).
-    # The src side shipped ahead of this pin and is unit-tested; what these need
-    # is harness machinery: the provider-faithful Langfuse fake of
-    # conformance-adapter 6.4 (records observation content AND emits it through
-    # its bound TracerProvider, so a leak to a shared provider is catchable), the
-    # langfuse_client construction directive, expected_construction_error, and
-    # the four payload-scoped leak assertions. 158 additionally gates arms on the
-    # requires_capability audience gate.
-    "158-langfuse-payload-leak-fail-closed": (
-        "needs the provider-faithful fake, the langfuse_client singleton sub-directives, "
-        "expected_construction_error, and the payload-scoped leak assertions; src side is "
-        "unit-tested meanwhile in tests/unit/test_langfuse_provider_isolation.py and "
-        "tests/unit/test_langfuse_payload_leak_canary.py"
-    ),
     # Spec v0.103.1 conformance coverage (0084 orphan-fallback arms + the
     # embedding failure-metrics counterpart).
     "152-otel-parallel-branch-orphan-llm-fallback": (
@@ -517,6 +503,9 @@ _LANGFUSE_HARNESS_FIXTURES: frozenset[str] = frozenset(
         # 157 (proposals 0114 / 0115): provider isolation, driven by the dedicated
         # runner in the sibling harness.
         "157-langfuse-provider-isolation",
+        # 158 (proposals 0116 / 0117 / 0118): the payload-leak arms, driven by the
+        # same isolation runner in the sibling harness.
+        "158-langfuse-payload-leak-fail-closed",
     }
 )
 

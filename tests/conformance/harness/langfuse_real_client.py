@@ -43,9 +43,7 @@ CONFORMANCE_SECRET_KEY = "sk-lf-conformance"
 # Nothing listens here. Belt and braces alongside the processor swap below: if a
 # future SDK grows a second egress path, it fails fast against a closed port
 # rather than reaching a real project.
-#
-# `preexisting_same_key_client` (priming the credential before openarmature
-# constructs) lands with fixture 158, which is the only fixture that uses it.
+
 CONFORMANCE_HOST = "http://127.0.0.1:9"
 
 
@@ -101,9 +99,30 @@ def langfuse_sdk_without_egress() -> Iterator[None]:
         resource_manager.LangfuseSpanProcessor = prior_processor  # type: ignore[assignment, misc]
 
 
+def prime_credential_on(tracer_provider: Any) -> Any:
+    """Construct a client for the conformance credential first, as an
+    application would, so openarmature is not the first constructor for it.
+
+    This is `preexisting_same_key_client`. Because the SDK's own per-credential
+    cache is in play, the discard it models is the real one: openarmature's later
+    construction is handed THIS client on THIS provider and the isolated provider
+    it asked for is dropped. That is the mechanism the whole isolation contract
+    exists to detect, and no fake could have reproduced it faithfully.
+    """
+    from langfuse import Langfuse
+
+    return Langfuse(
+        public_key=CONFORMANCE_PUBLIC_KEY,
+        secret_key=CONFORMANCE_SECRET_KEY,
+        host=CONFORMANCE_HOST,
+        tracer_provider=tracer_provider,
+    )
+
+
 __all__ = [
     "CONFORMANCE_HOST",
     "CONFORMANCE_PUBLIC_KEY",
     "CONFORMANCE_SECRET_KEY",
     "langfuse_sdk_without_egress",
+    "prime_credential_on",
 ]

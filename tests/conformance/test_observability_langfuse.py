@@ -15,9 +15,11 @@
 
 from __future__ import annotations
 
+import contextlib
 import copy
 import json
-from collections.abc import Callable, Mapping, Sequence
+import logging
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -38,6 +40,7 @@ from openarmature.observability.langfuse import (
     LangfuseObserver,
     LangfuseTrace,
 )
+from openarmature.observability.langfuse.errors import ObservabilityError
 from openarmature.prompts import (
     Prompt,
     PromptManager,
@@ -58,12 +61,14 @@ from .harness.langfuse_provider_fake import (
     OBSERVATION_TYPE_ATTR,
     ProviderFaithfulLangfuseClient,
     langfuse_observation_spans,
+    payload_bearing_spans,
 )
 from .harness.langfuse_real_client import (
     CONFORMANCE_HOST,
     CONFORMANCE_PUBLIC_KEY,
     CONFORMANCE_SECRET_KEY,
     langfuse_sdk_without_egress,
+    prime_credential_on,
 )
 from .test_observability import _reset_otel_global_tracer_provider
 
@@ -175,6 +180,11 @@ _LANGFUSE_FIXTURES = frozenset(
         # `credentials` a REAL Langfuse client with its egress removed, so the
         # adapter path under test is the shipped one.
         "157-langfuse-provider-isolation",
+        # 158 (proposals 0116 / 0117 / 0118): the payload-leak invariant's arms.
+        # Against our detection-capable declaration this runs the four raise cases
+        # plus the ungated opt-out; the five non-capable suppress-floor cases are
+        # recognized skips, and one case is deferred by name below.
+        "158-langfuse-payload-leak-fail-closed",
     }
 )
 
@@ -183,9 +193,21 @@ _LANGFUSE_FIXTURES = frozenset(
 # ``(fixture_stem, case_name)``.  The case-loop in the runner ``continue``s
 # past matching cases — NOT ``pytest.skip``, which would skip the whole
 # fixture's test invocation and hide the surrounding cases that DO run.
-# Currently empty; the harness covers every activated case. Kept as a named hook
-# so future per-case deferrals don't need to re-introduce the pattern.
-_DEFERRED_CASES: frozenset[tuple[str, str]] = frozenset()
+# Each entry carries its reason, which is reported as a RecognizedSkip so the
+# deferral is visible on a PASSING run rather than only inside an assertion
+# failure message.
+_DEFERRED_CASES: dict[tuple[str, str], str] = {
+    (
+        "158-langfuse-payload-leak-fail-closed",
+        "locked_down_failure_on_detected_shared_provider_does_not_raise",
+    ): (
+        "drives a `calls_rerank` node, and this harness's node builder has no retrieval "
+        "support at all (137 / 138 reach retrieval through the OTel runner instead); "
+        "building rerank node construction here as a side effect of an isolation change "
+        "is how unexercised harness code gets in, so it rides the retrieval fixture "
+        "cluster that 150 / 151 also wait on"
+    ),
+}
 
 
 # Mocks the spec fixture 037 references for ``trace_input_from_state`` /
@@ -536,19 +558,38 @@ class _MockPromptBackend:
 async def test_langfuse_fixture(fixture_path: Path) -> None:
     spec = _load(fixture_path)
     fixture_stem = fixture_path.stem
-    if fixture_stem == _FIXTURE_157:
+    if fixture_stem in _ISOLATION_FIXTURES:
         cases_157 = cast("list[dict[str, Any]]", spec["cases"])
         excluded_157: dict[str, str] = {}
         ran_157 = 0
         for case in cases_157:
             case_name = cast("str", case.get("name") or "<unnamed>")
+            # Gate FIRST, so a deferred case still has its `requires_capability`
+            # block validated: checking the deferral first let a typo'd capability
+            # name slip past the declare-it-or-fail guard.
             gate = capability_skip_reason(case.get("requires_capability"))
             if gate is not None:
                 excluded_157[case_name] = gate
                 report_recognized_skip(fixture_stem, case_name, gate)
                 continue
+            deferral = _DEFERRED_CASES.get((fixture_stem, case_name))
+            if deferral is not None:
+                # Reported through the same channel as the capability gate. Writing
+                # the reason into `excluded_157` alone made the deferral invisible
+                # on a green run, because that dict is rendered only inside
+                # `assert_some_case_ran`'s failure message -- so the suite looked
+                # identical whether this fixture asserted eleven cases or five.
+                excluded_157[case_name] = f"per-case deferral: {deferral}"
+                report_recognized_skip(fixture_stem, case_name, f"per-case deferral: {deferral}")
+                continue
             ran_157 += 1
-            _reject_unknown_directives(fixture_stem, case_name, case, handled_expected=_EXPECTED_157)
+            _reject_unknown_directives(
+                fixture_stem,
+                case_name,
+                case,
+                handled_expected=_EXPECTED_ISOLATION,
+                handled_case=_ISOLATION_CASE_DIRECTIVES,
+            )
             _reject_unimplemented_assertions(
                 fixture_stem, case_name, cast("Mapping[str, Any]", case.get("expected") or {})
             )
@@ -2434,34 +2475,27 @@ def _assert_observation_tree(
 # how the 0118 ``metadata_absent`` directive would have landed. Anything outside
 # this set fails loudly instead, so a spec-side directive we have not built yet
 # surfaces as a gap rather than a false pass.
-# Assertion keys the expectations model accepts so fixtures 157 / 158 parse at the
-# v0.112.0 pin, but which no comparator implements yet (they need the
-# provider-faithful fake and the `langfuse_client` construction directive).
+# Every leak assertion, all implemented by `_assert_isolation_expectations`: the
+# three identity keys are asserted by 157, the two payload-scoped ones by 158.
 #
 # Declaring a field to make a fixture parse is how an assertion quietly becomes
 # dead: the key validates, the comparator never looks at it, and the fixture reads
-# like coverage. Both fixtures are deferred, so nothing should reach these today;
-# this fails loudly if an activated one ever does, rather than waiting for someone
-# to notice the assertion was never running.
-# The identity half, implemented by `_assert_isolation_expectations`.
+# like coverage. `_UNIMPLEMENTED_OBSERVABILITY_ASSERTIONS` below is the loud half
+# of that guard, and every key the corpus uses must sit in one set or the other.
 _IMPLEMENTED_LEAK_ASSERTIONS = frozenset(
     {
         "no_langfuse_observations_on_global",
         "no_langfuse_observations_on_private",
         "langfuse_observations_on_global",
-    }
-)
-
-# The payload-scoped half, still declared-for-parsing only: it needs a
-# payload-bearing / payload-free classification, which arrives with fixture 158.
-# Every leak assertion the corpus uses must be in one set or the other, which is
-# what stops a key being neither implemented nor guarded.
-_UNIMPLEMENTED_OBSERVABILITY_ASSERTIONS = frozenset(
-    {
         "no_payload_bearing_langfuse_observations_on_global",
         "payload_bearing_langfuse_observations_on_global",
     }
 )
+
+# Empty: every leak assertion the corpus uses is now implemented. Kept as the
+# named hook for the next declared-but-unimplemented one, because the alternative
+# is quietly allowlisting it and letting a fixture read as coverage.
+_UNIMPLEMENTED_OBSERVABILITY_ASSERTIONS: frozenset[str] = frozenset()
 
 
 # Case-level and `expected`-level keys this runner implements. Enumerated because
@@ -2520,33 +2554,41 @@ _DOCUMENTARY_CASE_KEYS = frozenset({"description"})
 # Sub-keys of `langfuse_client`, guarded separately: the case-level diff below
 # does not descend into nested mappings, so without this a sub-directive the
 # runner drops looks identical to one it honours.
-_LANGFUSE_CLIENT_DIRECTIVES = frozenset({"mode", "provider"})
-_DEFERRED_LANGFUSE_CLIENT_DIRECTIVES: dict[str, str] = {
-    "preexisting_same_key_client": (
-        "priming the SDK's per-credential cache lands with fixture 158; 157 declares it false, "
-        "which `langfuse_sdk_without_egress` already guarantees by clearing the cache"
-    ),
-    "accept_shared_provider": "the shared-provider opt-out lands with fixture 158",
-}
+_LANGFUSE_CLIENT_DIRECTIVES = frozenset(
+    {"mode", "provider", "preexisting_same_key_client", "accept_shared_provider"}
+)
+_DEFERRED_LANGFUSE_CLIENT_DIRECTIVES: dict[str, str] = {}
 
-# Derived from the implemented-leak set rather than restating it: the three
-# identity keys were spelled out here, in _EXPECTED_157 and in
-# _IMPLEMENTED_LEAK_ASSERTIONS, so they could drift apart silently.
-_EXPECTED_DIRECTIVES = _IMPLEMENTED_LEAK_ASSERTIONS | frozenset(
+# Per-runner, because each runner is granted credit only for what it READS.
+#
+# The leak assertions and `log_records` live exclusively in
+# `_assert_isolation_expectations`, which only the isolation runner calls. Unioning
+# `_IMPLEMENTED_LEAK_ASSERTIONS` into the generic set to keep the identity keys DRY
+# also handed `_run_case` credit for six keys it never reads, converting a loud
+# `_reject_unimplemented_assertions` failure into silent coverage for any future
+# fixture on that path. DRY across runners is the wrong axis here: what these sets
+# record is which code exists, so they may only be shared where the code is.
+_EXPECTED_DIRECTIVES = frozenset(
     {
         "detached_trace_count",
         "invariants",
         "langfuse_trace",
         "langfuse_traces",
-        "no_payload_bearing_langfuse_observations_on_global",
-        "payload_bearing_langfuse_observations_on_global",
     }
 )
 
 # What each hand-built runner actually reads. Narrower than the generic set on
-# purpose: 157 and 134 handle their own expectations and must not inherit credit
-# for keys only `_run_case` implements.
-_EXPECTED_157 = _IMPLEMENTED_LEAK_ASSERTIONS | frozenset({"langfuse_trace"})
+# purpose: the isolation runner and 134 handle their own expectations and must not
+# inherit credit for keys only `_run_case` implements, and vice versa.
+# Case-level keys only the isolation runner reads. `disable_provider_payload` has a
+# nested spelling under `langfuse_observer` that `_run_case` reads and a case-level
+# one that only this runner reads; granting the case-level name file-wide would let
+# a fixture on the generic path declare it and have it silently dropped.
+_ISOLATION_CASE_DIRECTIVES = _CASE_DIRECTIVES | frozenset(
+    {"disable_provider_payload", "expected_construction_error"}
+)
+
+_EXPECTED_ISOLATION = _IMPLEMENTED_LEAK_ASSERTIONS | frozenset({"langfuse_trace", "log_records"})
 _EXPECTED_134 = frozenset({"langfuse_trace", "invariants"})
 
 # Declared by an activated fixture, NOT read by this runner. Each entry is a named
@@ -2559,10 +2601,6 @@ _DEFERRED_EXPECTED_DIRECTIVES: dict[str, str] = {
         "`expected.langfuse_trace.metadata.invocation_id`, which IS asserted; the top-level "
         "spelling is a second, unread copy and wiring it needs a ruling on which is normative"
     ),
-    "log_records": (
-        "the `level` key on log records arrives with fixture 158, whose suppress-floor cases "
-        "assert a WARNING; no activated fixture uses it yet"
-    ),
 }
 
 
@@ -2572,16 +2610,19 @@ def _reject_unknown_directives(
     case: Mapping[str, Any],
     *,
     handled_expected: frozenset[str],
+    handled_case: frozenset[str] = _CASE_DIRECTIVES,
 ) -> None:
     """Fail on a case or expected key this runner does not act on."""
-    # `handled_expected` is per-RUNNER, not file-global. Three runners live in this
-    # file with different coverage, so a shared set would let one runner's
-    # implementation vouch for a key another runner silently drops.
-    unknown_case = sorted(set(case) - _CASE_DIRECTIVES - _DOCUMENTARY_CASE_KEYS)
+    # BOTH sets are per-RUNNER, not file-global. Three runners live in this file
+    # with different coverage, so a shared set would let one runner's
+    # implementation vouch for a key another runner silently drops. That is not
+    # hypothetical: `disable_provider_payload` has two spellings, and only the
+    # isolation runner reads the case-level one.
+    unknown_case = sorted(set(case) - handled_case - _DOCUMENTARY_CASE_KEYS)
     assert not unknown_case, (
         f"{fixture_stem}::{case_name} declares case-level directives this harness does not "
         f"read: {unknown_case}. They would otherwise be silently ignored while the case still "
-        f"reads like coverage; implement them and add them to _CASE_DIRECTIVES."
+        f"reads like coverage; implement them and add them to the runner's case-directive set."
     )
     client_cfg = case.get("langfuse_client")
     if isinstance(client_cfg, dict):
@@ -2886,6 +2927,8 @@ _ = SamplingConfig
 # ---------------------------------------------------------------------------
 
 _FIXTURE_157 = "157-langfuse-provider-isolation"
+_FIXTURE_158 = "158-langfuse-payload-leak-fail-closed"
+_ISOLATION_FIXTURES = frozenset({_FIXTURE_157, _FIXTURE_158})
 
 
 @dataclass
@@ -2895,6 +2938,43 @@ class _IsolationCapture:
     global_exporter: Any  # the caller's globally-registered provider
     private_exporter: Any  # openarmature's own OTel observer provider
     isolated_exporter: Any | None  # the provider openarmature built for Langfuse
+
+
+# The observer method that emits the isolation-decision WARNINGs §6 mandates.
+# `from_credentials` emits its own, unrelated, WARNINGs on the same logger, so the
+# `log_records` assertion discriminates on this rather than on level alone.
+_ISOLATION_DECISION_FUNC = "_apply_isolation_policy"
+
+
+def _assert_isolation_decision_emitter_exists() -> None:
+    # Renaming the method would leave the filter above matching nothing, which
+    # fails as "no WARNING was emitted" and would send a reader hunting a
+    # behaviour change that did not happen. Name the real cause instead.
+    assert hasattr(LangfuseObserver, _ISOLATION_DECISION_FUNC), (
+        f"LangfuseObserver has no {_ISOLATION_DECISION_FUNC}; the log_records assertion "
+        f"discriminates on that call site, so it must be updated alongside the rename"
+    )
+
+
+@contextlib.contextmanager
+def _caplog_at_warning() -> Iterator[list[Any]]:
+    """Capture openarmature's observability WARNING records for the case."""
+    records: list[Any] = []
+
+    class _Sink(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            records.append(record)
+
+    logger = logging.getLogger("openarmature.observability")
+    handler = _Sink(level=logging.WARNING)
+    previous = logger.level
+    logger.addHandler(handler)
+    logger.setLevel(logging.WARNING)
+    try:
+        yield records
+    finally:
+        logger.removeHandler(handler)
+        logger.setLevel(previous)
 
 
 def _attach_exporter(provider: Any) -> Any:
@@ -2920,22 +3000,34 @@ def _build_isolation_observer(
     """Build the observer per the case's `langfuse_client` mode."""
     client_cfg = cast("dict[str, Any]", case.get("langfuse_client") or {})
     if cast("str", client_cfg.get("mode", "supplied")) == "credentials":
-        # `preexisting_same_key_client` and `accept_shared_provider` are 158's and
-        # land with it: 157 exercises neither, and a branch no fixture reaches is
-        # how an assertion ends up shipping unverified.
+        if bool(client_cfg.get("preexisting_same_key_client", False)):
+            # The application constructs FIRST, so the SDK's own per-credential
+            # cache hands openarmature that client on the global provider and
+            # discards the isolated one it asked for. That is genuinely the SDK's
+            # cache rather than a simulation, which is what makes this arm mean
+            # something.
+            prime_credential_on(global_provider)
         observer = LangfuseObserver.from_credentials(
             public_key=CONFORMANCE_PUBLIC_KEY,
             secret_key=SecretStr(CONFORMANCE_SECRET_KEY),
             host=CONFORMANCE_HOST,
+            accept_shared_provider=bool(client_cfg.get("accept_shared_provider", False)),
             **observer_kwargs,
         )
         # openarmature's own isolated provider, read back so the fixture can prove
         # the observations went THERE rather than merely not going elsewhere.
         isolated = _isolated_provider_for(CONFORMANCE_PUBLIC_KEY)
-        # Fatal rather than "skip the check": if openarmature stops registering an
-        # isolated provider under this key, the positive half of the isolate case
-        # would vanish silently and the remaining assertions are satisfied by a run
-        # that emitted nothing.
+        if bool(client_cfg.get("accept_shared_provider", False)):
+            # Under the opt-out openarmature deliberately does NOT build an
+            # isolated provider: it binds the one the application registered. So
+            # there is nothing to attach to, and the case's own
+            # `payload_bearing_langfuse_observations_on_global` is what proves the
+            # observations went somewhere.
+            return observer, None
+        # Otherwise fatal rather than "skip the check": if openarmature stops
+        # registering an isolated provider under this key, the positive half of the
+        # isolate case would vanish silently, and what remains is satisfied by a run
+        # that emitted nothing at all.
         assert isolated is not None, (
             "openarmature registered no isolated TracerProvider for this credential, so the "
             "non-vacuity half of the isolate case could not be checked"
@@ -2959,7 +3051,11 @@ def _build_isolation_observer(
 
 
 def _assert_isolation_expectations(
-    expected: Mapping[str, Any], capture: _IsolationCapture, private_spans: list[Any]
+    expected: Mapping[str, Any],
+    capture: _IsolationCapture,
+    private_spans: list[Any],
+    *,
+    log_records: list[Any] | None = None,
 ) -> None:
     """The §5.5 identity leak assertions."""
     global_langfuse = langfuse_observation_spans(capture.global_exporter.get_finished_spans())
@@ -2980,11 +3076,54 @@ def _assert_isolation_expectations(
             f"Langfuse observations reached openarmature's own OTel provider: "
             f"{[s.name for s in private_langfuse]}"
         )
+    if expected.get("no_payload_bearing_langfuse_observations_on_global") is True:
+        bearing = payload_bearing_spans(capture.global_exporter.get_finished_spans())
+        assert not bearing, (
+            f"payload-bearing Langfuse observations reached the caller's global provider: "
+            f"{[s.name for s in bearing]}"
+        )
+    if expected.get("payload_bearing_langfuse_observations_on_global") is True:
+        # The opt-out arm, and the non-vacuity partner for every `no_payload_bearing`
+        # case above: those are satisfied by a run that emitted nothing at all, so
+        # without a case proving payload-bearing observations CAN reach the global
+        # provider the set as a whole would assert very little.
+        bearing = payload_bearing_spans(capture.global_exporter.get_finished_spans())
+        assert bearing, (
+            "no payload-bearing Langfuse observation reached the caller's global provider; "
+            "with the shared provider accepted, openarmature proceeds onto it and its payload "
+            "is expected to land there"
+        )
     if expected.get("langfuse_observations_on_global") is True:
         assert global_langfuse, (
             "no Langfuse observation reached the caller's global provider; a supplied client "
             "bound to it must keep emitting there, since openarmature must not rebind it"
         )
+    expected_logs = expected.get("log_records")
+    if isinstance(expected_logs, list):
+        # §5.5's `level` key. The suppress and opt-out arms mandate a WARNING, and
+        # this is the only observable half of that obligation: without it those
+        # cases assert the payload outcome while the "logs one WARNING" MUST goes
+        # unchecked.
+        #
+        # Matched by EMITTING CALL SITE, not by level alone. Every 158 case primes
+        # the credential, so `from_credentials` always logs its own unrelated
+        # cached-client WARNING on this same logger inside the capture window. A
+        # level-only match is satisfied by that incidental record, and downgrading
+        # the mandated emitter on its own then leaves the case green -- verified as
+        # a surviving mutant before this was narrowed.
+        assert log_records is not None, "log_records was declared but nothing captured logs"
+        _assert_isolation_decision_emitter_exists()
+        for wanted in cast("list[dict[str, Any]]", expected_logs):
+            level = cast("str", wanted["level"])
+            matched = [
+                r for r in log_records if r.levelname == level and r.funcName == _ISOLATION_DECISION_FUNC
+            ]
+            assert matched, (
+                f"expected a {level} log record from the isolation decision "
+                f"({_ISOLATION_DECISION_FUNC}); captured "
+                f"{[(r.levelname, r.funcName, r.getMessage()[:50]) for r in log_records]}"
+            )
+
     expected_trace = expected.get("langfuse_trace")
     if isinstance(expected_trace, dict):
         # The fixture's OWN declared non-vacuity proof. Substituting a weaker
@@ -3042,8 +3181,17 @@ async def _run_langfuse_157(case: Mapping[str, Any]) -> None:
 
     observer_cfg = cast("dict[str, Any]", case.get("langfuse_observer") or {})
     observer_kwargs: dict[str, Any] = {}
-    if "disable_provider_payload" in observer_cfg:
-        observer_kwargs["disable_provider_payload"] = bool(observer_cfg["disable_provider_payload"])
+    for flag in ("disable_provider_payload", "disable_state_payload"):
+        if flag in observer_cfg:
+            observer_kwargs[flag] = bool(observer_cfg[flag])
+    # The state channel and its two hooks are payload channels in their own right
+    # (0117), and 158's `state_channel_preexists_raises` / `hook_preexists_raises`
+    # exist precisely to show the raise fires on those with the provider payload
+    # already suppressed. Reading only `disable_provider_payload` left those cases
+    # with no live channel, so nothing raised and the arm proved nothing.
+    for hook in ("trace_input_from_state", "trace_output_from_state"):
+        if hook in observer_cfg:
+            observer_kwargs[hook] = _resolve_trace_io_hook(cast("str", observer_cfg[hook]))
 
     llm_provider = OpenAIProvider(
         base_url="http://mock-llm.test",
@@ -3087,13 +3235,59 @@ async def _run_langfuse_157(case: Mapping[str, Any]) -> None:
             if bool(case.get("caller_global_otel_active", False)):
                 _reset_otel_global_tracer_provider(global_provider)
             graph = builder.compile()
-            langfuse_observer, isolated_exporter = _build_isolation_observer(
-                case, observer_kwargs, global_provider
-            )
-            graph.attach_observer(langfuse_observer)
             # openarmature's OWN OTel provider: the second shared-provider spelling
             # §6 forbids a Langfuse observation from reaching.
-            graph.attach_observer(OTelObserver(span_processor=SimpleSpanProcessor(private_exporter)))
+            #
+            # Attached BEFORE the Langfuse observer is constructed, because a
+            # case-level `disable_provider_payload` is the negative control for
+            # "the two suppressions are independent" -- 158's
+            # `..._otel_not_suppressing` leaves the OTel side emitting payload and
+            # still expects the Langfuse construction to raise. Built after that
+            # construction, as it first was, the flag sat behind the
+            # `expected_construction_error` early return and never executed for the
+            # only case that declares it, so the case was indistinguishable from its
+            # sibling. Deleting the whole block left the suite green.
+            otel_kwargs: dict[str, Any] = {}
+            if "disable_provider_payload" in case:
+                otel_kwargs["disable_provider_payload"] = bool(case["disable_provider_payload"])
+            otel_observer = OTelObserver(span_processor=SimpleSpanProcessor(private_exporter), **otel_kwargs)
+            if "disable_provider_payload" in case:
+                # Asserted, not merely passed. Under `expected_construction_error`
+                # the raise happens before anything is emitted, so no conforming run
+                # can OBSERVE this flag's effect -- which is what a negative control
+                # is, and why dropping the wiring above left the suite green. Pinning
+                # the resulting config is the part that can be checked: it proves the
+                # directive was read and honoured rather than accepted and dropped,
+                # which is what `_ISOLATION_CASE_DIRECTIVES` vouches for.
+                assert otel_observer.disable_provider_payload == bool(case["disable_provider_payload"]), (
+                    "the case-level disable_provider_payload did not reach the OTel "
+                    "observer, so the case cannot show the two suppressions are independent"
+                )
+            graph.attach_observer(otel_observer)
+            expected_construction = cast("dict[str, Any] | None", case.get("expected_construction_error"))
+            with _caplog_at_warning() as records:
+                if expected_construction is not None:
+                    # Setup-scope assertion: construction itself is the behaviour
+                    # under test. It must fail BEFORE an observer exists, so there
+                    # is no run and no observation, which is the point.
+                    with pytest.raises(ObservabilityError) as excinfo:
+                        _build_isolation_observer(case, observer_kwargs, global_provider)
+                    category = getattr(excinfo.value, "category", None)
+                    assert category == expected_construction["category"], (
+                        f"construction error category: expected "
+                        f"{expected_construction['category']!r}, got {category!r}"
+                    )
+                    _assert_isolation_expectations(
+                        cast("dict[str, Any]", case.get("expected") or {}),
+                        _IsolationCapture(global_exporter, private_exporter, None),
+                        list(private_exporter.get_finished_spans()),
+                        log_records=records,
+                    )
+                    return
+                langfuse_observer, isolated_exporter = _build_isolation_observer(
+                    case, observer_kwargs, global_provider
+                )
+            graph.attach_observer(langfuse_observer)
 
             await graph.invoke(state_cls(**cast("dict[str, Any]", case.get("initial_state") or {})))
             await graph.drain()
@@ -3103,6 +3297,7 @@ async def _run_langfuse_157(case: Mapping[str, Any]) -> None:
                 cast("dict[str, Any]", case.get("expected") or {}),
                 _IsolationCapture(global_exporter, private_exporter, isolated_exporter),
                 list(private_exporter.get_finished_spans()),
+                log_records=records,
             )
         finally:
             langfuse_adapter._ISOLATED_PROVIDERS.clear()
