@@ -55,6 +55,42 @@ spec_pin = "v0.112.0"
 # than the portable suppress floor.
 langfuse_bound_provider_detection = true
 
+# External dependencies this implementation requires, and the private upstream
+# surface it reaches into (coord thread discuss-external-dependency-tracking).
+#
+# The split from openarmature.org/compatibility's matrix is deliberate: that
+# matrix records what the SPEC's normative text is written against, which is one
+# implementation-independent row. This records what THIS implementation requires,
+# has verified, and depends on, which differs per implementation. Spec renders a
+# per-implementation block from these keys.
+#
+# `verified_on` is the date the pin was last deliberately moved or re-verified,
+# NOT the date CI last passed. A date that sits well back while `requires` still
+# admits newer versions is telling the reader something true, and is not nudged
+# forward by runs that merely pass.
+#
+# `internals` is the SOURCE the guard in tests/unit/test_langfuse_sdk_internals.py
+# parametrizes over, so the published list and the enforced list cannot drift:
+# adding a path here without it existing upstream fails, and losing one upstream
+# fails too.
+[external_dependencies.langfuse]
+requires = ">=4.6,<5"
+verified = "4.7.1"
+verified_on = "2026-08-13"
+note = "The declared range currently resolves as far as 4.14.x, well past `verified`. Every listed internal still exists there and the suite passes against it, but 4.7.1 is the version this implementation deliberately tests against. Losing one of these internals does not raise to the caller: the graph observer isolates observer errors, so an observation simply stops being emitted and a leak assertion reads clean, which is why they are guarded rather than trusted."
+internals = [
+    "langfuse._client.client.Langfuse._resources",
+    "langfuse._client.client.Langfuse._tracing_enabled",
+    "langfuse._client.client.Langfuse._otel_tracer",
+    "langfuse._client.client.Langfuse._create_remote_parent_span",
+    "langfuse._client.resource_manager.LangfuseResourceManager.tracer_provider",
+    "langfuse._client.resource_manager.LangfuseResourceManager._instances",
+    "langfuse._client.span.LangfuseGeneration",
+    "langfuse._client.span.LangfuseTool",
+    "langfuse._client.span.LangfuseEmbedding",
+    "langfuse._client.span.LangfuseRetriever",
+]
+
 # Status values:
 #   implemented   — shipped behavior matches the proposal's contract
 #   partial       — partial impl; consult `note` for what's missing

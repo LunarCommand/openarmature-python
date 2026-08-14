@@ -21,9 +21,15 @@
 
 from __future__ import annotations
 
+import importlib
 import inspect
+import tomllib
+from pathlib import Path
+from typing import Any, cast
 
 import pytest
+
+_CONFORMANCE_TOML = Path(__file__).resolve().parents[2] / "conformance.toml"
 
 langfuse = pytest.importorskip("langfuse", reason="the langfuse extra is optional")
 
@@ -64,31 +70,70 @@ def test_the_per_credential_cache_is_where_the_adapter_looks() -> None:
     assert isinstance(LangfuseResourceManager._instances, dict)
 
 
-@pytest.mark.parametrize(
-    ("symbol", "spelling"),
-    [("_otel_tracer", "self._otel_tracer"), ("_create_remote_parent_span", "def _create_remote_parent_span")],
-)
-def test_the_back_dated_observation_internals_exist(symbol: str, spelling: str) -> None:
-    # Every provider observation carrying a start_time goes through
-    # _start_back_dated_observation, which needs both. Losing either does not
-    # raise to the caller: the graph observer isolates observer errors, so the
-    # observation simply stops being emitted and a leak assertion reads clean.
+def _declared() -> dict[str, Any]:
+    # Read at collection time to parametrize, so a missing section surfaces as a
+    # named failure rather than a bare KeyError from inside pytest's collector.
+    with _CONFORMANCE_TOML.open("rb") as handle:
+        manifest = tomllib.load(handle)
+    entry = cast("dict[str, Any]", manifest.get("external_dependencies", {})).get("langfuse")
+    assert entry is not None, (
+        "conformance.toml has no [external_dependencies.langfuse] section. It is the published "
+        "record of the private SDK surface this implementation depends on, and the source these "
+        "guards parametrize over; without it nothing checks that surface."
+    )
+    missing = sorted({"requires", "verified", "verified_on", "internals"} - set(entry))
+    assert not missing, f"[external_dependencies.langfuse] is missing required keys: {missing}"
+    return cast("dict[str, Any]", entry)
+
+
+def _resolve(path: str) -> tuple[Any, str]:
+    """Split a dotted path into the deepest importable owner and the final name."""
+    parts = path.split(".")
+    for cut in range(len(parts) - 1, 0, -1):
+        try:
+            owner: Any = importlib.import_module(".".join(parts[:cut]))
+        except ImportError:
+            continue
+        for attr in parts[cut:-1]:
+            owner = getattr(owner, attr)
+        return owner, parts[-1]
+    raise AssertionError(f"no importable module in {path!r}")
+
+
+@pytest.mark.parametrize("path", _declared()["internals"])
+def test_each_declared_internal_still_exists(path: str) -> None:
+    # Parametrized over conformance.toml's `internals` list rather than a copy of
+    # it, so the PUBLISHED surface and the ENFORCED surface are the same list.
+    # Restating it here would let the public record drift from what is checked,
+    # which is the failure this whole guard exists to prevent.
     #
-    # Checked in the source rather than with hasattr, because `_otel_tracer` is an
-    # INSTANCE attribute and a class-level hasattr would report it missing on a
-    # perfectly good SDK.
-    assert spelling in inspect.getsource(langfuse.Langfuse), (
-        f"langfuse.Langfuse.{symbol} is gone; adapter._start_back_dated_observation depends "
-        f"on it, and its absence surfaces only as a swallowed observer warning"
+    # Losing any of these does not raise to the caller: the graph observer
+    # isolates observer errors, so an observation simply stops being emitted and
+    # a leak assertion reads clean.
+    owner, name = _resolve(path)
+    if hasattr(owner, name):
+        return
+    # Instance attributes (`self._resources`, `self._otel_tracer`) are not on the
+    # class, so a bare hasattr would report a perfectly good SDK as broken.
+    source = inspect.getsource(owner)
+    assert f"self.{name}" in source, (
+        f"{path} is gone from the installed langfuse SDK. openarmature's shipped adapter "
+        f"depends on it, and its absence surfaces only as a swallowed observer warning."
     )
 
 
-@pytest.mark.parametrize(
-    "name", ["LangfuseGeneration", "LangfuseTool", "LangfuseEmbedding", "LangfuseRetriever"]
-)
-def test_the_span_classes_the_adapter_constructs_exist(name: str) -> None:
-    span_module = pytest.importorskip("langfuse._client.span")
-    assert hasattr(span_module, name)
+def test_the_declared_internals_cover_what_the_adapter_imports() -> None:
+    # The list is only as good as its completeness, and completeness is not
+    # something the per-path checks above can see. The adapter constructs four
+    # private span classes; an earlier version of this file guarded two.
+    adapter_source = inspect.getsource(importlib.import_module("openarmature.observability.langfuse.adapter"))
+    declared = set(_declared()["internals"])
+    for name in ("LangfuseGeneration", "LangfuseTool", "LangfuseEmbedding", "LangfuseRetriever"):
+        if name in adapter_source:
+            assert any(entry.endswith(f".{name}") for entry in declared), (
+                f"the adapter imports {name} but conformance.toml does not declare it, so a "
+                f"rename upstream would go unguarded and unpublished"
+            )
 
 
 def test_the_installed_version_is_within_the_declared_range() -> None:
@@ -99,6 +144,12 @@ def test_the_installed_version_is_within_the_declared_range() -> None:
     from importlib.metadata import version
 
     installed = version("langfuse")
+    declared = _declared()
+    assert installed == declared["verified"], (
+        f"conformance.toml publishes langfuse {declared['verified']} as the verified version "
+        f"but {installed} is installed. Either move the pin deliberately and update `verified` "
+        f"and `verified_on`, or restore the lock; the published number must be the tested one."
+    )
     # Regex rather than int() on the split parts: a PEP 440 two-component
     # pre-release such as 4.7rc1 attaches its suffix to the MINOR, so splitting
     # raises ValueError on a version that is inside our declared range. A bare
