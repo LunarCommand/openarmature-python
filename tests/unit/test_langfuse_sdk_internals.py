@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import importlib
 import inspect
+import re
 import tomllib
 from pathlib import Path
 from typing import Any, cast
@@ -95,9 +96,20 @@ def _resolve(path: str) -> tuple[Any, str]:
         except ImportError:
             continue
         for attr in parts[cut:-1]:
+            # Asserted rather than left to getattr: a renamed intermediate (a
+            # class, say) would otherwise surface as a bare AttributeError, and
+            # the message IS this guard's product. Losing one of these paths shows
+            # up nowhere else, because the graph observer swallows observer errors.
+            assert hasattr(owner, attr), (
+                f"{path}: {attr!r} is missing from {owner!r}, so the rest of the path cannot be "
+                f"resolved. openarmature's shipped adapter depends on this path."
+            )
             owner = getattr(owner, attr)
         return owner, parts[-1]
-    raise AssertionError(f"no importable module in {path!r}")
+    raise AssertionError(
+        f"no importable module in {path!r}; the declared internal names a module that no "
+        f"longer exists in the installed SDK"
+    )
 
 
 @pytest.mark.parametrize("path", _declared()["internals"])
@@ -123,17 +135,32 @@ def test_each_declared_internal_still_exists(path: str) -> None:
 
 
 def test_the_declared_internals_cover_what_the_adapter_imports() -> None:
-    # The list is only as good as its completeness, and completeness is not
-    # something the per-path checks above can see. The adapter constructs four
-    # private span classes; an earlier version of this file guarded two.
+    # The completeness half: the per-path checks above verify what IS declared and
+    # can say nothing about what the adapter depends on but nobody declared.
+    #
+    # Parsed from the actual import statements rather than matched against names
+    # written out here. A hardcoded list is not a completeness check: an earlier
+    # version enumerated four span classes, so a fifth added later would have gone
+    # unnoticed by the very test meant to catch that. A substring search over the
+    # module source would also match a name in prose, and a suffix match would
+    # accept the same name exported by a different module.
     adapter_source = inspect.getsource(importlib.import_module("openarmature.observability.langfuse.adapter"))
+    imported = set(re.findall(r"from\s+langfuse\._client\.span\s+import\s+(\w+)", adapter_source))
+    assert imported, (
+        "found no `from langfuse._client.span import ...` in the adapter. Either it stopped "
+        "importing private span classes, in which case the declared internals should shrink, "
+        "or this pattern no longer matches and the check is reading nothing."
+    )
     declared = set(_declared()["internals"])
-    for name in ("LangfuseGeneration", "LangfuseTool", "LangfuseEmbedding", "LangfuseRetriever"):
-        if name in adapter_source:
-            assert any(entry.endswith(f".{name}") for entry in declared), (
-                f"the adapter imports {name} but conformance.toml does not declare it, so a "
-                f"rename upstream would go unguarded and unpublished"
-            )
+    missing = sorted(
+        f"langfuse._client.span.{name}"
+        for name in imported
+        if f"langfuse._client.span.{name}" not in declared
+    )
+    assert not missing, (
+        f"the adapter imports {missing} but conformance.toml does not declare them, so a rename "
+        f"upstream would go both unguarded and unpublished"
+    )
 
 
 def test_the_installed_version_is_within_the_declared_range() -> None:

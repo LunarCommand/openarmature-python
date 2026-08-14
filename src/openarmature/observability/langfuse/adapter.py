@@ -1,8 +1,13 @@
 # Bridges the langfuse Python SDK (v4.6+) onto the LangfuseClient
-# Protocol. Validated against langfuse==4.7.0; the [langfuse] extras
-# pin to `>=4.6,<5`. SDK churn before v4 (v2/v3 API removed in v4) is
-# not supported — projects on v2/v3 should write their own adapter or
-# upgrade.
+# Protocol. The version this adapter is verified against, and the private
+# SDK surface it depends on, are published in `conformance.toml` under
+# `[external_dependencies.langfuse]` and enforced by
+# `tests/unit/test_langfuse_sdk_internals.py`. Named there rather than
+# here so there is one authority: a version in a comment goes stale
+# silently, which is exactly what that manifest entry exists to prevent.
+# The [langfuse] extras pin to `>=4.6,<5`. SDK churn before v4 (v2/v3
+# API removed in v4) is not supported — projects on v2/v3 should write
+# their own adapter or upgrade.
 #
 # Shape mismatch the adapter handles:
 #   - v4 has no explicit `client.trace(...)` — traces are auto-created
