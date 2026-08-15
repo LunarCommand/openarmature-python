@@ -453,12 +453,6 @@ _DEFERRED_FIXTURES: dict[str, str] = {
         "mock_llm usage plumbing"
     ),
     # Proposal 0109 (spec v0.104.0) token-budget failure-path parity.
-    "155-langfuse-token-budget-exceeded-flag-on-failure": (
-        "Proposal 0109 token_budget_exceeded flag; harness wiring rides the v0.17.0 fixture-wiring PR"
-    ),
-    "156-langfuse-token-budget-under-budget-flag-false": (
-        "Proposal 0109 token_budget_exceeded flag; harness wiring rides the v0.17.0 fixture-wiring PR"
-    ),
 }
 
 
@@ -484,6 +478,8 @@ _LANGFUSE_HARNESS_FIXTURES: frozenset[str] = frozenset(
         "036-caller-invocation-id-non-uuid",
         "037-langfuse-trace-input-output",
         "059-implementation-attribution-langfuse",
+        "155-langfuse-token-budget-exceeded-flag-on-failure",
+        "156-langfuse-token-budget-under-budget-flag-false",
         # 134 -- proposal 0084 Langfuse parent resolution (nested exact-match +
         # orphan fallback). Driven by a dedicated hand-built runner in the
         # sibling harness; the generic topology path cannot model the

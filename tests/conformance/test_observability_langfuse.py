@@ -159,6 +159,8 @@ _LANGFUSE_FIXTURES = frozenset(
         # to metadata.token_budget.*. Drives the input-exceeded path via
         # renders_prompt + the prompt's token_budget block.
         "130-langfuse-token-budget-warning-level",
+        "155-langfuse-token-budget-exceeded-flag-on-failure",
+        "156-langfuse-token-budget-under-budget-flag-false",
         # 134 (proposal 0084): the Langfuse Generation parent resolves by the same
         # chain-aware §5.5 rule as the OTel span parent -- both the nested
         # exact-match (case 1, mirrors OTel 132) and the orphan fallback (case 2,
