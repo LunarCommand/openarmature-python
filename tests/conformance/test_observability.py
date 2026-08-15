@@ -4517,6 +4517,133 @@ async def _run_metrics_case(case: Mapping[str, Any]) -> None:
     points = _collect_metric_points(reader)
     expected_metrics = cast("list[dict[str, Any]]", case["expected"].get("metrics") or [])
     _assert_metric_points(points, expected_metrics)
+    _assert_metrics_invariants(case, points, exporter.get_finished_spans())
+
+
+_METRICS_INVARIANTS = {
+    # Proposal 0101 null-counter arms (fixtures 145 / 147).
+    "no_input_token_usage_observation_when_prompt_tokens_null",
+    "output_token_usage_observation_recorded_when_completion_sound",
+    "null_prompt_tokens_reaches_no_span_histogram_or_budget_surface",
+    "span_omits_both_input_usage_attributes",
+    "no_input_token_usage_observation",
+    "no_token_budget_instrument_observation_for_unevaluable_input_bound",
+    "exceeded_span_signal_absent_not_false",
+    # Pre-existing metrics fixtures (088 / 090 / 091 / 125). These were being
+    # silently dropped too: the driver read no invariants at all, so adding the
+    # guard above surfaced them.
+    "one_duration_observation_per_call",
+    "two_token_usage_observations_input_and_output",
+    "errored_call_records_duration_with_error_type",
+    "no_token_usage_observation_on_failure",
+    "no_measurements_recorded_when_metrics_off",
+    "duration_records_error_type_on_failure",
+    "token_usage_recorded_on_structured_output_failure",
+    # Documentary: states that the duration VALUE is deliberately not asserted
+    # (it is wall-clock). Recognized so it cannot read as unhandled, but there is
+    # nothing to check.
+    "duration_value_not_asserted",
+}
+
+
+def _assert_metrics_invariants(
+    case: Mapping[str, Any],
+    points: Sequence[tuple[str, float, int, dict[str, Any]]],
+    spans: Sequence[Any],
+) -> None:
+    """Evaluate the named invariants on a metrics fixture."""
+    # These are ABSENCE predicates, which the `metrics:` list shape cannot
+    # express -- it asserts presence only. 145 and 147 say so in their own
+    # comments, so for those two the invariants ARE the assertion: without this
+    # the fixtures pass while checking nothing but the positive rows. Mirrors the
+    # token-budget driver's guard, whose absence here is what let that happen.
+    invariants = cast("dict[str, Any]", case["expected"].get("invariants") or {})
+    unknown = set(invariants) - _METRICS_INVARIANTS
+    assert not unknown, f"unhandled metrics invariant(s): {sorted(unknown)}"
+    if not invariants:
+        return
+
+    usage_points = [p for p in points if p[0] == "openarmature.gen_ai.client.token.usage"]
+    input_usage = [p for p in usage_points if p[3].get("openarmature.gen_ai.token.type") == "input"]
+    output_usage = [p for p in usage_points if p[3].get("openarmature.gen_ai.token.type") == "output"]
+    budget_points = [
+        p
+        for p in points
+        if p[0]
+        in (
+            "openarmature.gen_ai.client.token_budget.exceeded",
+            "openarmature.gen_ai.client.token_budget.utilization",
+        )
+    ]
+    input_attrs = ("openarmature.gen_ai.usage.input_tokens", "gen_ai.usage.input_tokens")
+
+    def _spans_carrying(*names: str) -> list[tuple[str, str]]:
+        return [(s.name, n) for s in spans for n in names if n in dict(s.attributes or {})]
+
+    if invariants.get("no_input_token_usage_observation_when_prompt_tokens_null") or invariants.get(
+        "no_input_token_usage_observation"
+    ):
+        assert not input_usage, (
+            f"a null prompt_tokens MUST record no input token.usage observation; got {input_usage}"
+        )
+    if invariants.get("output_token_usage_observation_recorded_when_completion_sound"):
+        # The non-vacuity partner: without it the absence above is satisfied by
+        # an implementation that recorded no usage observations at all.
+        assert output_usage, (
+            f"a sound completion_tokens MUST still record an output token.usage "
+            f"observation; got only {usage_points}"
+        )
+    if invariants.get("span_omits_both_input_usage_attributes"):
+        carrying = _spans_carrying(*input_attrs)
+        assert not carrying, (
+            f"a null prompt_tokens MUST leave both input-usage span attributes absent; present as {carrying}"
+        )
+    if invariants.get("no_token_budget_instrument_observation_for_unevaluable_input_bound"):
+        input_budget = [
+            p for p in budget_points if p[3].get("openarmature.gen_ai.token_budget.kind") == "input"
+        ]
+        assert not input_budget, (
+            f"an unevaluable input bound MUST record no token-budget observation; got {input_budget}"
+        )
+    if invariants.get("exceeded_span_signal_absent_not_false"):
+        attr = "openarmature.llm.token_budget.exceeded"
+        carrying = _spans_carrying(attr)
+        assert not carrying, (
+            f"with no evaluable bound the {attr} span attribute MUST be absent rather than "
+            f"false; present on {carrying}"
+        )
+    duration_points = [p for p in points if p[0] == "openarmature.gen_ai.client.operation.duration"]
+
+    if invariants.get("one_duration_observation_per_call"):
+        assert len(duration_points) == 1, (
+            f"expected exactly one operation.duration observation per call; got {duration_points}"
+        )
+    if invariants.get("two_token_usage_observations_input_and_output"):
+        assert len(input_usage) == 1 and len(output_usage) == 1, (
+            f"expected one input and one output token.usage observation; got {usage_points}"
+        )
+    if invariants.get("errored_call_records_duration_with_error_type") or invariants.get(
+        "duration_records_error_type_on_failure"
+    ):
+        assert duration_points, "a failed call MUST still record operation.duration"
+        assert all(p[3].get("error.type") for p in duration_points), (
+            f"a failed call's duration observation MUST carry error.type; got {duration_points}"
+        )
+    if invariants.get("no_token_usage_observation_on_failure"):
+        assert not usage_points, (
+            f"a failure with no usage MUST record no token.usage observation; got {usage_points}"
+        )
+    if invariants.get("token_usage_recorded_on_structured_output_failure"):
+        # A structured-output failure DOES carry usage, so the counterpart above
+        # must not be over-applied to every failure.
+        assert usage_points, "a structured-output failure carries usage, so token.usage MUST still record"
+    if invariants.get("no_measurements_recorded_when_metrics_off"):
+        assert not points, f"metrics disabled MUST record no measurements at all; got {points}"
+    if invariants.get("null_prompt_tokens_reaches_no_span_histogram_or_budget_surface"):
+        # The umbrella claim: none of the three surfaces sees the null counter.
+        assert not input_usage, f"histogram surface: {input_usage}"
+        assert not _spans_carrying(*input_attrs), "span surface carries an input-usage attribute"
+        assert not budget_points, f"budget surface: {budget_points}"
 
 
 # ---------------------------------------------------------------------------
