@@ -33,7 +33,7 @@ from __future__ import annotations
 
 import copy
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
@@ -194,6 +194,7 @@ _SUPPORTED_FIXTURES = frozenset(
         "065-llm-completion-event-active-prompt-null",
         "067-llm-completion-event-call-id-always-present-and-distinct",
         "068-llm-completion-event-response-model-distinct-from-request",
+        "149-malformed-wire-counter-nulled-through-mapping-to-event-and-span",
         "071-llm-failure-event-call-id-distinct-from-completion-event",
         "072-llm-failure-event-mutual-exclusion-with-completion-event",
         # proposal 0082: the LlmFailedEvent response-side surface on a
@@ -227,6 +228,8 @@ _SUPPORTED_FIXTURES = frozenset(
         # Captured via a private MeterProvider + InMemoryMetricReader (the
         # §6.9 metric-capture primitive). 089 (embeddings) is deferred.
         "088-llm-metrics-token-and-duration",
+        "145-llm-metrics-no-input-token-observation-on-null-counter",
+        "147-otel-null-counter-reaches-no-span-histogram-or-budget",
         "090-metrics-error-type-on-duration",
         "091-metrics-disabled-no-measurements",
         # proposal 0082: the OTel error span (124) renders the response-side
@@ -245,6 +248,7 @@ _SUPPORTED_FIXTURES = frozenset(
         # NOT on a no-usage provider_unavailable failure. The Langfuse WARNING
         # (130) runs in the dedicated test_observability_langfuse harness.
         "126-token-budget-input-exceeded",
+        "146-token-budget-input-bound-not-evaluated-on-null-counter",
         "127-token-budget-total-exceeded",
         "128-token-budget-under-budget-no-warning",
         "129-token-budget-absent-unchanged",
@@ -288,6 +292,7 @@ _SUPPORTED_FIXTURES = frozenset(
         # harvested error message ABSENT with error_type retained, via the
         # metadata_absent directive that landed in #267.
         "137-langfuse-embedding-failure-observation",
+        "150-langfuse-embedding-failure-literal-error-fields",
         "139-otel-embedding-no-usage-input-tokens-omitted",
         "140-langfuse-embedding-no-usage-usagedetails-omitted",
         # proposal 0067 §11 embedding metrics: token.usage (input only) +
@@ -315,6 +320,7 @@ _SUPPORTED_FIXTURES = frozenset(
         "107-otel-rerank-span-attributes",
         "108-langfuse-rerank-observation",
         "138-langfuse-rerank-failure-observation",
+        "151-langfuse-rerank-failure-literal-error-fields",
         "141-otel-rerank-no-usage-attributes-omitted",
         "142-langfuse-rerank-no-usage-usagedetails-omitted",
         "109-rerank-metrics-token-and-duration",
@@ -417,39 +423,25 @@ _DEFERRED_FIXTURES: dict[str, str] = {
     # conformance fixture wiring rides the v0.17.0 fixture-wiring PR.
     # Proposal 0101 (spec v0.96.0) malformed usage counter -> not reported,
     # threaded through the span / metric / budget observability surfaces.
-    "144-otel-llm-span-omits-input-usage-on-null-counter": (
-        "Proposal 0101 null-counter observability; harness wiring rides the v0.17.0 fixture-wiring PR"
-    ),
-    "145-llm-metrics-no-input-token-observation-on-null-counter": (
-        "Proposal 0101 null-counter observability; harness wiring rides the v0.17.0 fixture-wiring PR"
-    ),
-    "146-token-budget-input-bound-not-evaluated-on-null-counter": (
-        "Proposal 0101 null-counter observability; harness wiring rides the v0.17.0 fixture-wiring PR"
-    ),
-    "147-otel-null-counter-reaches-no-span-histogram-or-budget": (
-        "Proposal 0101 null-counter observability; harness wiring rides the v0.17.0 fixture-wiring PR"
-    ),
-    "148-langfuse-generation-usage-omits-input-on-null-counter": (
-        "Proposal 0101 null-counter observability; harness wiring rides the v0.17.0 fixture-wiring PR"
-    ),
-    "149-malformed-wire-counter-nulled-through-mapping-to-event-and-span": (
-        "Proposal 0101 null-counter observability; harness wiring rides the v0.17.0 fixture-wiring PR"
-    ),
     # Proposal 0107 (spec v0.102.0) mock_embedding / mock_rerank raises
     # sub-directive -> literal error-field assertion.
     # The 0118 half of these two resolved at this pin (both cases moved to
     # disable_provider_payload=false, since asserting the message literally is
     # their purpose). What remains is the 0107 mock-raises harness wiring.
-    "150-langfuse-embedding-failure-literal-error-fields": (
-        "Proposal 0107 mock_embedding raises sub-directive not yet wired; rides the "
-        "remaining v0.17.0 fixture-wiring PR (observability 144-156)"
-    ),
-    "151-langfuse-rerank-failure-literal-error-fields": (
-        "Proposal 0107 mock_rerank raises sub-directive not yet wired; rides the "
-        "remaining v0.17.0 fixture-wiring PR (observability 144-156)"
-    ),
     # Spec v0.103.1 conformance coverage (0084 orphan-fallback arms + the
     # embedding failure-metrics counterpart).
+    # 0101 null-counter arms whose SIBLINGS (145 / 146 / 147 / 149) now run.
+    # These two need a driver rather than wiring, which is why they did not ride
+    # with the rest of the cluster.
+    "144-otel-llm-span-omits-input-usage-on-null-counter": (
+        "asserts `expected.span_tree` on an LLM span, and every span_tree driver in this file is "
+        "fixture-specific (038 / 132); needs a generic LLM span-tree driver, not a dispatch entry"
+    ),
+    "148-langfuse-generation-usage-omits-input-on-null-counter": (
+        "asserts `expected.langfuse_trace` on an LLM generation, and this runner has no LLM "
+        "Langfuse driver: the langfuse_trace fixtures live in the sibling runner, which has no "
+        "mock_llm usage plumbing"
+    ),
     "152-otel-parallel-branch-orphan-llm-fallback": (
         "Spec v0.103.1 orphan-fallback coverage; harness wiring rides the v0.17.0 fixture-wiring PR"
     ),
@@ -748,10 +740,12 @@ async def test_observability_fixture(fixture_path: Path) -> None:
         "064-llm-completion-event-active-prompt-populated",
         "065-llm-completion-event-active-prompt-null",
         "068-llm-completion-event-response-model-distinct-from-request",
+        "149-malformed-wire-counter-nulled-through-mapping-to-event-and-span",
     }:
         await _run_typed_event_cases(spec)
     elif fixture_id in {
         "072-llm-failure-event-mutual-exclusion-with-completion-event",
+        "149-malformed-wire-counter-nulled-through-mapping-to-event-and-span",
         "120-llm-failure-event-structured-output-truncation",
         "121-llm-failure-event-structured-output-schema-mismatch",
         "122-llm-failure-event-response-side-null-on-non-body-failure",
@@ -786,6 +780,8 @@ async def test_observability_fixture(fixture_path: Path) -> None:
         await _run_llm_payload_fixture(spec)
     elif fixture_id in {
         "088-llm-metrics-token-and-duration",
+        "145-llm-metrics-no-input-token-observation-on-null-counter",
+        "147-otel-null-counter-reaches-no-span-histogram-or-budget",
         "090-metrics-error-type-on-duration",
         "091-metrics-disabled-no-measurements",
         "125-metrics-token-usage-on-structured-output-failure",
@@ -795,6 +791,7 @@ async def test_observability_fixture(fixture_path: Path) -> None:
         await _run_structured_output_error_span_fixture(spec)
     elif fixture_id in {
         "126-token-budget-input-exceeded",
+        "146-token-budget-input-bound-not-evaluated-on-null-counter",
         "127-token-budget-total-exceeded",
         "128-token-budget-under-budget-no-warning",
         "129-token-budget-absent-unchanged",
@@ -827,6 +824,7 @@ async def test_observability_fixture(fixture_path: Path) -> None:
         "140-langfuse-embedding-no-usage-usagedetails-omitted",
         "089-embedding-metrics-token-and-duration",
         "143-embedding-metrics-no-usage-no-token-observation",
+        "150-langfuse-embedding-failure-literal-error-fields",
     }:
         await _run_embedding_fixture(spec)
     elif fixture_id in {
@@ -844,6 +842,7 @@ async def test_observability_fixture(fixture_path: Path) -> None:
         "141-otel-rerank-no-usage-attributes-omitted",
         "142-langfuse-rerank-no-usage-usagedetails-omitted",
         "109-rerank-metrics-token-and-duration",
+        "151-langfuse-rerank-failure-literal-error-fields",
     }:
         await _run_rerank_fixture(spec)
     elif fixture_id in {
@@ -4622,13 +4621,14 @@ async def _run_token_budget_case(case: Mapping[str, Any]) -> None:
     expected_metrics = cast("list[dict[str, Any]] | None", expected.get("metrics"))
     if expected_metrics is not None:
         _assert_metric_points(points, expected_metrics)
-    _assert_token_budget_invariants(case, points, collectors)
+    _assert_token_budget_invariants(case, points, collectors, spans)
 
 
 def _assert_token_budget_invariants(
     case: Mapping[str, Any],
     points: Sequence[tuple[str, float, int, dict[str, Any]]],
     collectors: Mapping[str, Any],
+    spans: Sequence[Any] = (),
 ) -> None:
     """Evaluate the token-budget named invariants (128/129/131) as absence
     predicates over the captured measurement set + the typed events.
@@ -4645,6 +4645,12 @@ def _assert_token_budget_invariants(
         "no_token_budget_instrument_observations_without_usage",
         "token_budget_populated_but_not_evaluated_without_usage",
         "exception_propagates_alongside_typed_event",
+        # Proposal 0101 null-counter arms (fixture 146).
+        "input_bound_not_evaluated_when_prompt_tokens_null",
+        "exceeded_span_signal_absent_not_false_when_only_bound_unevaluable",
+        "no_input_token_usage_observation_when_prompt_tokens_null",
+        "total_bound_evaluated_when_total_tokens_sound",
+        "no_input_kind_budget_observation_when_prompt_tokens_null",
     }
     unknown = set(invariants) - _known_invariants
     assert not unknown, f"unhandled token-budget invariant(s): {sorted(unknown)}"
@@ -4694,6 +4700,50 @@ def _assert_token_budget_invariants(
         assert not exceeded_points and not utilization_points, (
             "a no-usage failure MUST NOT evaluate the budget (no token-budget metric observation)"
         )
+    # ---- proposal 0101: a null prompt_tokens makes the INPUT bound unevaluable
+    # while leaving a sound total bound fully evaluated. Absence predicates,
+    # because the `metrics:` list shape asserts presence only.
+    _BUDGET_KIND = "openarmature.gen_ai.token_budget.kind"
+    _TOKEN_TYPE = "openarmature.gen_ai.token.type"
+    input_budget_points = [
+        p for p in exceeded_points + utilization_points if p[3].get(_BUDGET_KIND) == "input"
+    ]
+
+    if invariants.get("input_bound_not_evaluated_when_prompt_tokens_null") or invariants.get(
+        "no_input_kind_budget_observation_when_prompt_tokens_null"
+    ):
+        assert not input_budget_points, (
+            "a null prompt_tokens leaves the INPUT bound unevaluable, so it MUST record no "
+            f"token-budget observation of kind=input; got {input_budget_points}"
+        )
+    if invariants.get("total_bound_evaluated_when_total_tokens_sound"):
+        # The independence half. Without it the case above is satisfied by an
+        # implementation that skipped budget evaluation entirely.
+        total_points = [p for p in utilization_points if p[3].get(_BUDGET_KIND) == "total"]
+        assert total_points, (
+            "a sound total_tokens MUST still evaluate the total bound; got no kind=total "
+            f"utilization observation among {utilization_points}"
+        )
+    if invariants.get("no_input_token_usage_observation_when_prompt_tokens_null"):
+        input_usage = [
+            p
+            for p in points
+            if p[0] == "openarmature.gen_ai.client.token.usage" and p[3].get(_TOKEN_TYPE) == "input"
+        ]
+        assert not input_usage, (
+            f"a null prompt_tokens MUST record no input token.usage observation; got {input_usage}"
+        )
+    if invariants.get("exceeded_span_signal_absent_not_false_when_only_bound_unevaluable"):
+        # ABSENT, not present-and-false. A `False` would assert "evaluated, not
+        # breached", which is a different and wrong claim when nothing was
+        # evaluable at all.
+        attr = "openarmature.llm.token_budget.exceeded"
+        carrying = [s for s in spans if attr in dict(s.attributes or {})]
+        assert not carrying, (
+            f"with no evaluable bound the {attr} span attribute MUST be absent rather than false; "
+            f"present on {[(s.name, dict(s.attributes or {}).get(attr)) for s in carrying]}"
+        )
+
     if invariants.get("exception_propagates_alongside_typed_event"):
         # The runner's pytest.raises already asserts the exception propagated;
         # assert the typed failure event fired alongside it (both, not either).
@@ -5195,6 +5245,49 @@ async def _run_tool_case(case: Mapping[str, Any]) -> None:
 # appears, mirroring the tool path (_run_tool_case).
 
 
+def _raise_mock_provider_error(
+    spec_resp: Mapping[str, Any],
+    classify: Callable[[Any], Any],
+) -> None:
+    """Honour a ``raises`` sub-directive on a mock_embedding / mock_rerank entry."""
+    # Proposal 0107 (conformance-adapter §5.15), the retrieval analogue of the
+    # tool path's `mock_tool: {raises: {...}}`. Fixtures 137 / 138 can only assert
+    # error_type / error_message by FORMAT, because both are impl-derived: the
+    # class name comes from whichever exception the provider's own classifier
+    # picked, and the message from the vendor body. `raises` supplies literal
+    # values so 150 / 151 can assert them exactly.
+    #
+    # The category must still come from `status`. So rather than restate the
+    # status-to-category table here, which would silently drift from src, run the
+    # REAL classifier on a probe response of that status and subclass whatever it
+    # returns. `error_category` on the event reads `exc.category`, which the
+    # subclass inherits, while `error_type` reads `type(exc).__name__` and
+    # `error_message` reads `str(exc)`, which the rename and the message supply.
+    #
+    # Raised from inside the mock transport, which works because the exception is
+    # an LlmProviderError rather than an httpx.HTTPError: the provider's
+    # `except httpx.HTTPError` around the post does not catch it, so it reaches
+    # the `except LlmProviderError` that builds the failure event.
+    import json
+
+    import httpx
+
+    raises = spec_resp.get("raises")
+    if not isinstance(raises, Mapping):
+        return
+    raises_map = cast("Mapping[str, Any]", raises)
+    status = int(spec_resp.get("status", 500))
+    probe = httpx.Response(
+        status,
+        content=json.dumps(spec_resp.get("body") or {}).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+    )
+    classified = cast("Exception", classify(probe))
+    error_type = cast("str", raises_map.get("error_type") or type(classified).__name__)
+    renamed: type[Exception] = type(error_type, (type(classified),), {})
+    raise renamed(cast("str", raises_map.get("message", "")))
+
+
 def _embedding_model_from_first_response(case: Mapping[str, Any]) -> str | None:
     """Return the ``model`` on the first ``mock_embedding`` response body, so
     the provider binds to the model the fixture's expected event reports."""
@@ -5260,6 +5353,7 @@ def _build_embedding_graph(
 
     from openarmature.graph import END, GraphBuilder
     from openarmature.retrieval import OpenAIEmbeddingProvider
+    from openarmature.retrieval.providers.openai import _classify_embedding_http_error
 
     from .adapter import build_state_cls
 
@@ -5274,6 +5368,7 @@ def _build_embedding_graph(
         if not mock_responses:
             raise AssertionError("mock_embedding queue exhausted")
         spec_resp = mock_responses.pop(0)
+        _raise_mock_provider_error(spec_resp, _classify_embedding_http_error)
         body = cast("dict[str, Any]", spec_resp.get("body") or {})
         return httpx.Response(
             int(spec_resp.get("status", 200)),
@@ -5540,6 +5635,7 @@ def _build_rerank_graph(
 
     from openarmature.graph import END, GraphBuilder
     from openarmature.retrieval import CohereRerankProvider
+    from openarmature.retrieval.providers.cohere import _classify_cohere_http_error
 
     from .adapter import build_state_cls
 
@@ -5554,6 +5650,7 @@ def _build_rerank_graph(
         if not mock_responses:
             raise AssertionError("mock_rerank queue exhausted")
         spec_resp = mock_responses.pop(0)
+        _raise_mock_provider_error(spec_resp, _classify_cohere_http_error)
         body = cast("dict[str, Any]", spec_resp.get("body") or {})
         return httpx.Response(
             int(spec_resp.get("status", 200)),
