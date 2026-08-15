@@ -32,6 +32,7 @@ Per-fixture wiring notes live in
 from __future__ import annotations
 
 import copy
+import functools
 import re
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
@@ -194,6 +195,7 @@ _SUPPORTED_FIXTURES = frozenset(
         "065-llm-completion-event-active-prompt-null",
         "067-llm-completion-event-call-id-always-present-and-distinct",
         "068-llm-completion-event-response-model-distinct-from-request",
+        "144-otel-llm-span-omits-input-usage-on-null-counter",
         "149-malformed-wire-counter-nulled-through-mapping-to-event-and-span",
         "071-llm-failure-event-call-id-distinct-from-completion-event",
         "072-llm-failure-event-mutual-exclusion-with-completion-event",
@@ -229,7 +231,6 @@ _SUPPORTED_FIXTURES = frozenset(
         # §6.9 metric-capture primitive). 089 (embeddings) is deferred.
         "088-llm-metrics-token-and-duration",
         "145-llm-metrics-no-input-token-observation-on-null-counter",
-        "147-otel-null-counter-reaches-no-span-histogram-or-budget",
         "090-metrics-error-type-on-duration",
         "091-metrics-disabled-no-measurements",
         # proposal 0082: the OTel error span (124) renders the response-side
@@ -249,6 +250,9 @@ _SUPPORTED_FIXTURES = frozenset(
         # (130) runs in the dedicated test_observability_langfuse harness.
         "126-token-budget-input-exceeded",
         "146-token-budget-input-bound-not-evaluated-on-null-counter",
+        # Declares observers + span_tree as well as metrics; the metrics driver
+        # reads neither, so its span claims were dropped entirely.
+        "147-otel-null-counter-reaches-no-span-histogram-or-budget",
         "127-token-budget-total-exceeded",
         "128-token-budget-under-budget-no-warning",
         "129-token-budget-absent-unchanged",
@@ -427,9 +431,6 @@ _DEFERRED_FIXTURES: dict[str, str] = {
     # their purpose). What remains is the 0107 mock-raises harness wiring.
     # Spec v0.103.1 conformance coverage (0084 orphan-fallback arms + the
     # embedding failure-metrics counterpart).
-    # 0101 null-counter arms whose SIBLINGS (145 / 146 / 147 / 149) now run.
-    # These two need a driver rather than wiring, which is why they did not ride
-    # with the rest of the cluster.
     # Diagnosed against their sibling drivers rather than guessed: each reaches a
     # driver and fails on a concrete gap, not on "no driver".
     "119-otel-callable-branch-attempt-index-under-node-retry": (
@@ -442,10 +443,6 @@ _DEFERRED_FIXTURES: dict[str, str] = {
     ),
     "153-otel-mixed-nesting-orphan-llm-fallback": (
         "same driver gap as 152, one nesting level deeper (KeyError: 'leaf_sg')"
-    ),
-    "144-otel-llm-span-omits-input-usage-on-null-counter": (
-        "asserts `expected.span_tree` on an LLM span, and every span_tree driver in this file is "
-        "fixture-specific (038 / 132); needs a generic LLM span-tree driver, not a dispatch entry"
     ),
     "148-langfuse-generation-usage-omits-input-on-null-counter": (
         "asserts `expected.langfuse_trace` on an LLM generation, and this runner has no LLM "
@@ -657,6 +654,73 @@ def _reject_unsupported_capability_gate(fixture_id: str, spec: Mapping[str, Any]
         )
 
 
+# Which `expected` keys each OTel driver actually READS. Derived from the driver
+# bodies, not from fixture usage: this exists because 147 and 149 were wired into
+# drivers that never look at `span_tree`, so their span claims were dropped while
+# both counted as covered. A fixture routed to a driver that ignores one of its
+# directives now fails at wiring time instead of passing hollow.
+_DRIVER_EXPECTED_KEYS: dict[str, frozenset[str]] = {
+    "_run_typed_event_cases": frozenset({"observers", "invariants", "node_completed_event_carries_error"}),
+    "_run_metrics_fixture": frozenset({"metrics", "invariants"}),
+    "_run_embedding_fixture": frozenset(
+        {"span_tree", "metrics", "invariants", "observers", "langfuse_trace"}
+    ),
+    "_run_rerank_fixture": frozenset({"span_tree", "metrics", "invariants", "observers", "langfuse_trace"}),
+    "_run_token_budget_fixture": frozenset({"span_tree", "metrics", "invariants", "observers"}),
+    "_run_llm_payload_fixture": frozenset({"span_tree", "invariants", "observers"}),
+}
+
+
+@functools.cache
+def _driver_for_fixture() -> dict[str, str]:
+    """Map each fixture id to the driver the dispatch chain sends it to."""
+    # Parsed from THIS file's own dispatch chain rather than hand-maintained, so
+    # the map cannot drift from what actually runs. A hand-written copy is the
+    # allowlist-derived-from-usage mistake one level up.
+    import ast  # noqa: PLC0415
+    import inspect  # noqa: PLC0415
+
+    tree = ast.parse(inspect.getsource(test_observability_fixture))
+    out: dict[str, str] = {}
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.If):
+            continue
+        called = [
+            c.func.id
+            for c in ast.walk(ast.Module(body=node.body, type_ignores=[]))
+            if isinstance(c, ast.Call) and isinstance(c.func, ast.Name) and c.func.id.startswith("_run_")
+        ]
+        if not called:
+            continue
+        ids: list[str] = []
+        for cmp_node in ast.walk(node.test):
+            if isinstance(cmp_node, ast.Constant) and isinstance(cmp_node.value, str):
+                ids.append(cmp_node.value)
+        for fid in ids:
+            out.setdefault(fid, called[0])
+    return out
+
+
+def _assert_driver_reads_every_expected_key(fixture_id: str, spec: Mapping[str, Any]) -> None:
+    """Fail when a fixture declares an `expected` key its driver does not read."""
+    # Resolved lazily: the dispatch function it parses is defined below this point.
+    driver = _driver_for_fixture().get(fixture_id)
+    if driver is None:
+        return
+    handled = _DRIVER_EXPECTED_KEYS.get(driver)
+    if handled is None:
+        return
+    for case in cast("list[dict[str, Any]]", spec.get("cases") or []):
+        declared = set(cast("dict[str, Any]", case.get("expected") or {}))
+        unread = sorted(declared - handled)
+        assert not unread, (
+            f"{fixture_id}::{case.get('name')}: declares expected key(s) {unread} that "
+            f"{driver} does not read, so those assertions would be silently dropped while the "
+            f"fixture still counts as covered. Route it to a driver that reads them, or "
+            f"implement them and register the key in _DRIVER_EXPECTED_KEYS."
+        )
+
+
 @pytest.mark.parametrize("fixture_path", _fixture_paths(), ids=_fixture_id)
 async def test_observability_fixture(fixture_path: Path) -> None:
     fixture_id = fixture_path.stem
@@ -678,6 +742,8 @@ async def test_observability_fixture(fixture_path: Path) -> None:
     spec = _load(fixture_path)
     _reject_unsupported_capability_gate(fixture_id, spec)
     from .harness.capabilities import assert_case_asserts_something  # noqa: PLC0415
+
+    _assert_driver_reads_every_expected_key(fixture_id, spec)
 
     for _case in cast("list[dict[str, Any]]", spec.get("cases") or []):
         assert_case_asserts_something(
@@ -749,12 +815,10 @@ async def test_observability_fixture(fixture_path: Path) -> None:
         "064-llm-completion-event-active-prompt-populated",
         "065-llm-completion-event-active-prompt-null",
         "068-llm-completion-event-response-model-distinct-from-request",
-        "149-malformed-wire-counter-nulled-through-mapping-to-event-and-span",
     }:
         await _run_typed_event_cases(spec)
     elif fixture_id in {
         "072-llm-failure-event-mutual-exclusion-with-completion-event",
-        "149-malformed-wire-counter-nulled-through-mapping-to-event-and-span",
         "120-llm-failure-event-structured-output-truncation",
         "121-llm-failure-event-structured-output-schema-mismatch",
         "122-llm-failure-event-response-side-null-on-non-body-failure",
@@ -785,12 +849,16 @@ async def test_observability_fixture(fixture_path: Path) -> None:
         "085-llm-tool-call-request-attributes",
         "086-llm-tool-call-request-absent",
         "087-llm-tool-call-request-survives-payload-gating",
+        # 0101 null-counter span claims. This driver walks expected.span_tree
+        # including attributes_absent -- the half 149 silently dropped under the
+        # typed-event driver, and the driver 144 was wrongly deferred for lacking.
+        "144-otel-llm-span-omits-input-usage-on-null-counter",
+        "149-malformed-wire-counter-nulled-through-mapping-to-event-and-span",
     }:
         await _run_llm_payload_fixture(spec)
     elif fixture_id in {
         "088-llm-metrics-token-and-duration",
         "145-llm-metrics-no-input-token-observation-on-null-counter",
-        "147-otel-null-counter-reaches-no-span-histogram-or-budget",
         "090-metrics-error-type-on-duration",
         "091-metrics-disabled-no-measurements",
         "125-metrics-token-usage-on-structured-output-failure",
@@ -801,6 +869,9 @@ async def test_observability_fixture(fixture_path: Path) -> None:
     elif fixture_id in {
         "126-token-budget-input-exceeded",
         "146-token-budget-input-bound-not-evaluated-on-null-counter",
+        # Declares observers + span_tree as well as metrics; the metrics driver
+        # reads neither, so its span claims were dropped entirely.
+        "147-otel-null-counter-reaches-no-span-histogram-or-budget",
         "127-token-budget-total-exceeded",
         "128-token-budget-under-budget-no-warning",
         "129-token-budget-absent-unchanged",
@@ -4530,6 +4601,25 @@ async def _run_metrics_case(case: Mapping[str, Any]) -> None:
     _assert_metrics_invariants(case, points, exporter.get_finished_spans())
 
 
+# Names only the token-budget driver implements. Kept beside the metrics set so
+# each guard can validate against the UNION while implementing only its own
+# subset: fixture 147 legitimately declares names from both families.
+_TOKEN_BUDGET_ONLY_INVARIANTS = {
+    "no_token_budget_exceeded_observation_when_under_budget",
+    "utilization_records_under_budget",
+    "no_token_budget_instrument_observations_when_no_budget",
+    "token_budget_null_on_completion_event",
+    "no_token_budget_instrument_observations_without_usage",
+    "token_budget_populated_but_not_evaluated_without_usage",
+    "exception_propagates_alongside_typed_event",
+    # Proposal 0101 null-counter arms (fixture 146).
+    "input_bound_not_evaluated_when_prompt_tokens_null",
+    "exceeded_span_signal_absent_not_false_when_only_bound_unevaluable",
+    "no_input_token_usage_observation_when_prompt_tokens_null",
+    "total_bound_evaluated_when_total_tokens_sound",
+    "no_input_kind_budget_observation_when_prompt_tokens_null",
+}
+
 _METRICS_INVARIANTS = {
     # Proposal 0101 null-counter arms (fixtures 145 / 147).
     "no_input_token_usage_observation_when_prompt_tokens_null",
@@ -4568,10 +4658,21 @@ def _assert_metrics_invariants(
     # the fixtures pass while checking nothing but the positive rows. Mirrors the
     # token-budget driver's guard, whose absence here is what let that happen.
     invariants = cast("dict[str, Any]", case["expected"].get("invariants") or {})
-    unknown = set(invariants) - _METRICS_INVARIANTS
+    unknown = set(invariants) - _METRICS_INVARIANTS - _TOKEN_BUDGET_ONLY_INVARIANTS
     assert not unknown, f"unhandled metrics invariant(s): {sorted(unknown)}"
     if not invariants:
         return
+
+    # Positive anchor BEFORE any absence predicate. Every claim below is of the
+    # form "X is absent", which an empty span set satisfies trivially -- deleting
+    # the LLM span outright made 147 green. Assert the span exists first, so the
+    # absences are read off a run that actually happened.
+    if spans and any(k.startswith(("span_", "null_prompt_tokens_reaches")) for k in invariants):
+        llm_spans = [s for s in spans if s.name == "openarmature.llm.complete"]
+        assert llm_spans, (
+            f"no openarmature.llm.complete span was recorded, so the span-absence invariants "
+            f"below would pass vacuously; got {[s.name for s in spans]}"
+        )
 
     usage_points = [p for p in points if p[0] == "openarmature.gen_ai.client.token.usage"]
     input_usage = [p for p in usage_points if p[3].get("openarmature.gen_ai.token.type") == "input"]
@@ -4759,6 +4860,7 @@ async def _run_token_budget_case(case: Mapping[str, Any]) -> None:
     if expected_metrics is not None:
         _assert_metric_points(points, expected_metrics)
     _assert_token_budget_invariants(case, points, collectors, spans)
+    _assert_metrics_invariants(case, points, spans)
 
 
 def _assert_token_budget_invariants(
@@ -4774,22 +4876,12 @@ def _assert_token_budget_invariants(
     invariants = cast("dict[str, Any]", case["expected"].get("invariants") or {})
     # Fail loudly on a declared invariant this runner does not map, so a future
     # fixture's new invariant name cannot pass vacuously (harness-fidelity).
-    _known_invariants = {
-        "no_token_budget_exceeded_observation_when_under_budget",
-        "utilization_records_under_budget",
-        "no_token_budget_instrument_observations_when_no_budget",
-        "token_budget_null_on_completion_event",
-        "no_token_budget_instrument_observations_without_usage",
-        "token_budget_populated_but_not_evaluated_without_usage",
-        "exception_propagates_alongside_typed_event",
-        # Proposal 0101 null-counter arms (fixture 146).
-        "input_bound_not_evaluated_when_prompt_tokens_null",
-        "exceeded_span_signal_absent_not_false_when_only_bound_unevaluable",
-        "no_input_token_usage_observation_when_prompt_tokens_null",
-        "total_bound_evaluated_when_total_tokens_sound",
-        "no_input_kind_budget_observation_when_prompt_tokens_null",
-    }
-    unknown = set(invariants) - _known_invariants
+    #
+    # Validated against the UNION with the metrics family, because a fixture may
+    # legitimately declare names from both (147 does). Each guard still implements
+    # only its own subset; the union governs what is RECOGNISED, not what is
+    # checked, and `_run_token_budget_case` calls both.
+    unknown = set(invariants) - _METRICS_INVARIANTS - _TOKEN_BUDGET_ONLY_INVARIANTS
     assert not unknown, f"unhandled token-budget invariant(s): {sorted(unknown)}"
     exceeded_points = [p for p in points if p[0] == "openarmature.gen_ai.client.token_budget.exceeded"]
     utilization_points = [p for p in points if p[0] == "openarmature.gen_ai.client.token_budget.utilization"]
