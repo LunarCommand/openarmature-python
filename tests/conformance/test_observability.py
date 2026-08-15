@@ -299,6 +299,7 @@ _SUPPORTED_FIXTURES = frozenset(
         # operation.duration, operation="embeddings", recorded from the terminal
         # embedding event. 089 (usage) + 143 (no-usage: duration only).
         "089-embedding-metrics-token-and-duration",
+        "154-embedding-metrics-on-failure",
         "143-embedding-metrics-no-usage-no-token-observation",
         # v0.16.0 — proposal 0060 rerank observability (0060b). A calls_rerank
         # node awaits CohereRerankProvider.rerank() inside the node body; the
@@ -386,10 +387,6 @@ _DEFERRED_FIXTURES: dict[str, str] = {
     # attempt_index-under-node-retry coverage round-out -- mixes a graph-style
     # shape the cross-capability parser doesn't model (cf. 110) and has no
     # dedicated runner here yet; defer until the harness wires it.
-    "119-otel-callable-branch-attempt-index-under-node-retry": (
-        "0075 shipped v0.15.0; runner for this callable-branch-attempt-index-under-retry "
-        "case not yet wired -- harness gap, not unimplemented"
-    ),
     # Proposal 0082 (structured-output failure diagnostics, spec v0.77.0).
     # The event surface (120-122), the OTel error-span rendering (124) and the
     # §11 token-usage metric (125) run here; the Langfuse failed-Generation
@@ -433,6 +430,19 @@ _DEFERRED_FIXTURES: dict[str, str] = {
     # 0101 null-counter arms whose SIBLINGS (145 / 146 / 147 / 149) now run.
     # These two need a driver rather than wiring, which is why they did not ride
     # with the rest of the cluster.
+    # Diagnosed against their sibling drivers rather than guessed: each reaches a
+    # driver and fails on a concrete gap, not on "no driver".
+    "119-otel-callable-branch-attempt-index-under-node-retry": (
+        "reuses fixture 110's callable-branch driver, but drives a branch that RAISES under node "
+        "retry; that driver has no failure/retry path, so the branch exception escapes"
+    ),
+    "152-otel-parallel-branch-orphan-llm-fallback": (
+        "reuses fixture 133's orphan-fallback driver, which does not build the `subgraphs` block "
+        "152 adds (KeyError: 'subgraphs')"
+    ),
+    "153-otel-mixed-nesting-orphan-llm-fallback": (
+        "same driver gap as 152, one nesting level deeper (KeyError: 'leaf_sg')"
+    ),
     "144-otel-llm-span-omits-input-usage-on-null-counter": (
         "asserts `expected.span_tree` on an LLM span, and every span_tree driver in this file is "
         "fixture-specific (038 / 132); needs a generic LLM span-tree driver, not a dispatch entry"
@@ -441,15 +451,6 @@ _DEFERRED_FIXTURES: dict[str, str] = {
         "asserts `expected.langfuse_trace` on an LLM generation, and this runner has no LLM "
         "Langfuse driver: the langfuse_trace fixtures live in the sibling runner, which has no "
         "mock_llm usage plumbing"
-    ),
-    "152-otel-parallel-branch-orphan-llm-fallback": (
-        "Spec v0.103.1 orphan-fallback coverage; harness wiring rides the v0.17.0 fixture-wiring PR"
-    ),
-    "153-otel-mixed-nesting-orphan-llm-fallback": (
-        "Spec v0.103.1 orphan-fallback coverage; harness wiring rides the v0.17.0 fixture-wiring PR"
-    ),
-    "154-embedding-metrics-on-failure": (
-        "Spec v0.103.1 embedding failure-metrics coverage; harness wiring rides the v0.17.0 fixture-wiring PR"
     ),
     # Proposal 0109 (spec v0.104.0) token-budget failure-path parity.
     "155-langfuse-token-budget-exceeded-flag-on-failure": (
@@ -714,11 +715,15 @@ async def test_observability_fixture(fixture_path: Path) -> None:
         await _run_fixture_028(spec)
     elif fixture_id == "038-otel-parallel-branches-dispatch-span":
         await _run_fixture_038(spec)
-    elif fixture_id == "110-otel-callable-branch-span":
+    elif fixture_id in {
+        "110-otel-callable-branch-span",
+    }:
         await _run_fixture_110(spec)
     elif fixture_id == "132-otel-nested-fan-out-span-keying-and-llm-exact-match":
         await _run_fixture_132(spec)
-    elif fixture_id == "133-otel-nested-fan-out-orphan-llm-fallback":
+    elif fixture_id in {
+        "133-otel-nested-fan-out-orphan-llm-fallback",
+    }:
         await _run_fixture_133(spec)
     elif fixture_id in {
         "040-llm-cache-attribute-emission",
@@ -831,6 +836,7 @@ async def test_observability_fixture(fixture_path: Path) -> None:
         "139-otel-embedding-no-usage-input-tokens-omitted",
         "140-langfuse-embedding-no-usage-usagedetails-omitted",
         "089-embedding-metrics-token-and-duration",
+        "154-embedding-metrics-on-failure",
         "143-embedding-metrics-no-usage-no-token-observation",
         "150-langfuse-embedding-failure-literal-error-fields",
     }:
@@ -5427,11 +5433,21 @@ def _embedding_model_from_first_response(case: Mapping[str, Any]) -> str | None:
     """Return the ``model`` on the first ``mock_embedding`` response body, so
     the provider binds to the model the fixture's expected event reports."""
     responses = cast("list[dict[str, Any]] | None", case.get("mock_embedding")) or []
-    if not responses:
-        return None
-    body = cast("dict[str, Any] | None", responses[0].get("body")) or {}
-    model = body.get("model")
-    return model if isinstance(model, str) else None
+    body = cast("dict[str, Any] | None", responses[0].get("body")) if responses else None
+    model = (body or {}).get("model")
+    if isinstance(model, str):
+        return model
+    # A failure-path fixture (154) has no response body to carry a model, so bind
+    # to the one its expected metric dimensions report instead. Without this the
+    # provider binds to the harness default and every dimension match fails on a
+    # model name the fixture never mentions.
+    expected = cast("dict[str, Any]", case.get("expected") or {})
+    for point in cast("list[dict[str, Any]]", expected.get("metrics") or []):
+        dims = cast("dict[str, Any]", point.get("dimensions") or {})
+        declared = dims.get("gen_ai.request.model")
+        if isinstance(declared, str):
+            return declared
+    return None
 
 
 def _build_embedding_runtime_config(config_spec: Mapping[str, Any] | None) -> Any:
@@ -5668,6 +5684,9 @@ def _assert_embedding_metrics_invariants(
         "duration_recorded_when_usage_absent",
         "embedding_records_input_token_only",
         "no_output_token_observation_for_embedding",
+        # 154: the failure-path counterpart of 089 / 143.
+        "errored_embedding_records_duration_with_error_type",
+        "no_token_usage_observation_on_failure",
     }
     unknown = set(invariants) - _known
     assert not unknown, f"unhandled embedding-metrics invariant(s): {sorted(unknown)}"
@@ -5689,6 +5708,19 @@ def _assert_embedding_metrics_invariants(
     if invariants.get("no_output_token_observation_for_embedding"):
         assert not output_token_points, (
             f"embedding MUST record no output token observation; got {output_token_points}"
+        )
+    if invariants.get("errored_embedding_records_duration_with_error_type"):
+        # The §11 baseline survives the failure, carrying the §7 category. Both
+        # halves matter: a duration that records without error.type would lose
+        # the only dimension distinguishing a failed call from a slow one.
+        assert duration_points, "a failed embedding MUST still record operation.duration"
+        assert all(p[3].get("error.type") for p in duration_points), (
+            f"a failed embedding's duration MUST carry error.type; got {duration_points}"
+        )
+    if invariants.get("no_token_usage_observation_on_failure"):
+        assert not token_points, (
+            f"a failed embedding received no response, so it MUST record no token.usage "
+            f"observation; got {token_points}"
         )
 
 
