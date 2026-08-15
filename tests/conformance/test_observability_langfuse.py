@@ -52,6 +52,7 @@ from openarmature.prompts.context import with_active_prompt
 
 from .adapter import build_graph, build_state_cls
 from .harness.capabilities import (
+    assert_case_asserts_something,
     assert_some_case_ran,
     capability_skip_reason,
     report_recognized_skip,
@@ -558,6 +559,12 @@ class _MockPromptBackend:
 async def test_langfuse_fixture(fixture_path: Path) -> None:
     spec = _load(fixture_path)
     fixture_stem = fixture_path.stem
+    for _case in cast("list[dict[str, Any]]", spec.get("cases") or []):
+        assert_case_asserts_something(
+            fixture_stem,
+            cast("str", _case.get("name") or "<unnamed>"),
+            cast("Mapping[str, Any]", _case.get("expected") or {}),
+        )
     if fixture_stem in _ISOLATION_FIXTURES:
         cases_157 = cast("list[dict[str, Any]]", spec["cases"])
         excluded_157: dict[str, str] = {}

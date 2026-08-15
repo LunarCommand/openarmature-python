@@ -320,3 +320,45 @@ def test_every_gated_fixture_belongs_to_a_runner_that_implements_the_gate() -> N
         f"runner implements the gate. Wire it into their runner "
         f"(tests/conformance/harness/capabilities.py) before those fixtures are activated."
     )
+
+
+# -- invariants-only guard --------------------------------------------------
+
+
+def test_invariants_only_expected_block_is_rejected() -> None:
+    from .harness.capabilities import assert_case_asserts_something
+
+    with pytest.raises(AssertionError, match="only `invariants`"):
+        assert_case_asserts_something(
+            "999-synthetic",
+            "case_with_no_concrete_assertion",
+            {"invariants": {"some_absence_claim": True}},
+        )
+
+
+@pytest.mark.parametrize(
+    "expected",
+    [
+        {"span_tree": [], "invariants": {"x": True}},
+        {"metrics": [], "invariants": {"x": True}},
+        {"langfuse_trace": {}, "invariants": {"x": True}},
+        {"invariants": {}},
+        {},
+    ],
+)
+def test_a_case_with_any_concrete_directive_is_accepted(expected: dict[str, object]) -> None:
+    from .harness.capabilities import assert_case_asserts_something
+
+    assert_case_asserts_something("999-synthetic", "case", expected)
+
+
+def test_the_guard_is_pointed_at_the_real_corpus() -> None:
+    # Non-vacuity for the guard itself. The rejecting test above proves the
+    # PREDICATE works; this proves the corpus it is meant to police is actually
+    # reachable and non-empty, because a guard verified only against synthetic
+    # input is how a sweep ends up globbing an empty directory and reporting a
+    # clean result.
+    from .test_observability import _fixture_paths
+
+    paths = list(_fixture_paths())
+    assert len(paths) > 100, f"expected the observability corpus, found {len(paths)} fixtures"

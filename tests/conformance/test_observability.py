@@ -680,6 +680,14 @@ async def test_observability_fixture(fixture_path: Path) -> None:
 
     spec = _load(fixture_path)
     _reject_unsupported_capability_gate(fixture_id, spec)
+    from .harness.capabilities import assert_case_asserts_something  # noqa: PLC0415
+
+    for _case in cast("list[dict[str, Any]]", spec.get("cases") or []):
+        assert_case_asserts_something(
+            fixture_id,
+            cast("str", _case.get("name") or "<unnamed>"),
+            cast("Mapping[str, Any]", _case.get("expected") or {}),
+        )
     if fixture_id == "001-otel-basic-trace":
         await _run_fixture_001(spec)
     elif fixture_id == "002-otel-subgraph-hierarchy":
