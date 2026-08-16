@@ -196,7 +196,6 @@ _SUPPORTED_FIXTURES = frozenset(
         "067-llm-completion-event-call-id-always-present-and-distinct",
         "068-llm-completion-event-response-model-distinct-from-request",
         "144-otel-llm-span-omits-input-usage-on-null-counter",
-        "149-malformed-wire-counter-nulled-through-mapping-to-event-and-span",
         "071-llm-failure-event-call-id-distinct-from-completion-event",
         "072-llm-failure-event-mutual-exclusion-with-completion-event",
         # proposal 0082: the LlmFailedEvent response-side surface on a
@@ -433,6 +432,15 @@ _DEFERRED_FIXTURES: dict[str, str] = {
     # embedding failure-metrics counterpart).
     # Diagnosed against their sibling drivers rather than guessed: each reaches a
     # driver and fails on a concrete gap, not on "no driver".
+    "149-malformed-wire-counter-nulled-through-mapping-to-event-and-span": (
+        "declares BOTH expected.span_tree and expected.observers.contains_event, and no driver "
+        "serves both: _run_typed_event_cases reads observers only, _run_llm_payload_case reads "
+        "span_tree only, and _run_token_budget_case reads both but builds the graph from a mock "
+        "shape that does not reproduce 149's response model / response id, so its span-tree match "
+        "fails on attributes rather than on behaviour. Needs a driver threading 149's mock_llm "
+        "through a typed collector AND a span exporter; the event half is the fixture's stated "
+        "discriminator, so wiring it under a span-only driver drops the assertion it exists for"
+    ),
     "119-otel-callable-branch-attempt-index-under-node-retry": (
         "the conformance adapter never translates a fixture node's YAML `middleware:` block, so "
         "the retry is never installed and the transient failure is terminal: only attempt 0 runs "
@@ -672,7 +680,10 @@ _DRIVER_EXPECTED_KEYS: dict[str, frozenset[str]] = {
     ),
     "_run_rerank_fixture": frozenset({"span_tree", "metrics", "invariants", "observers", "langfuse_trace"}),
     "_run_token_budget_fixture": frozenset({"span_tree", "metrics", "invariants", "observers"}),
-    "_run_llm_payload_fixture": frozenset({"span_tree", "invariants", "observers"}),
+    # `invariants` is documentary here; `observers` is deliberately ABSENT because
+    # _run_llm_payload_case reads span_tree ONLY. Claiming observers is what let
+    # 149 be re-routed here with its contains_event half silently dropped.
+    "_run_llm_payload_fixture": frozenset({"span_tree", "invariants"}),
 }
 
 
@@ -714,8 +725,15 @@ def _assert_driver_reads_every_expected_key(fixture_id: str, spec: Mapping[str, 
         return
     handled = _DRIVER_EXPECTED_KEYS.get(driver)
     if handled is None:
+        # FAIL-OPEN, and deliberately narrow. Most drivers are unregistered, so
+        # this exempts the majority; registering one is what turns the guard on
+        # for its fixtures. Recorded here rather than left implicit because a
+        # guard that is dark for two thirds of the corpus must not read as
+        # blanket protection -- see the note in AGENTS.md.
         return
-    for case in cast("list[dict[str, Any]]", spec.get("cases") or []):
+    # `or [spec]`, not `or []`: a single-case fixture carries `expected` at the top
+    # level with no `cases` list, and `or []` made this guard a no-op for all seven.
+    for case in cast("list[dict[str, Any]]", spec.get("cases") or [spec]):
         declared = set(cast("dict[str, Any]", case.get("expected") or {}))
         unread = sorted(declared - handled)
         assert not unread, (
@@ -860,7 +878,6 @@ async def test_observability_fixture(fixture_path: Path) -> None:
         # including attributes_absent -- the half 149 silently dropped under the
         # typed-event driver, and the driver 144 was wrongly deferred for lacking.
         "144-otel-llm-span-omits-input-usage-on-null-counter",
-        "149-malformed-wire-counter-nulled-through-mapping-to-event-and-span",
     }:
         await _run_llm_payload_fixture(spec)
     elif fixture_id in {
