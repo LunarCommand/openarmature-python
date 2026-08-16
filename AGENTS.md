@@ -75,6 +75,32 @@ by convention.
   `SubgraphNode.run`, projection variants, frozen-state mutation, etc.
 - `tests/test_smoke.py` — version sync.
 
+### Activating a conformance fixture is not done when it passes
+
+A green conformance run is the **null result**, not evidence. A fixture
+wired into a driver that ignores half its `expected` block passes exactly
+like one that is fully asserted, so "it passes" distinguishes nothing.
+
+The acceptance criterion is therefore inverted: a fixture is wired when
+you have **broken the behaviour it covers and watched it go red**.
+
+- Mutate the src behaviour, not the test. Confirm the mutation actually
+  landed before trusting the result: if the anchor text occurs twice and
+  you changed one, a partial mutation reads exactly like a surviving one.
+- A fixture that passes the moment you add a dispatch entry, with no
+  harness work, is the highest-risk case, not the easiest win.
+- Diagnose by running, not by reading. A deferral reason reached by
+  reasoning about which driver "looks" suitable is routinely wrong; a
+  ten-second `await _run_x(_load(path))` settles it.
+- Prefer a structural guard over remembering any of this. The
+  `_DRIVER_EXPECTED_KEYS` check in `tests/conformance/test_observability.py`
+  makes "wired into a driver that drops a directive" impossible rather
+  than catchable, and caught a live error in the commit that added it.
+
+This is written down because the rule existed as guidance and was still
+missed repeatedly across one session: four fixtures were reported wired
+while asserting nothing, and three deferral reasons were wrong.
+
 ## Tooling
 
 - `uv` for everything. Don't use `pip` directly.
