@@ -561,7 +561,9 @@ class _MockPromptBackend:
 async def test_langfuse_fixture(fixture_path: Path) -> None:
     spec = _load(fixture_path)
     fixture_stem = fixture_path.stem
-    for _case in cast("list[dict[str, Any]]", spec.get("cases") or []):
+    # `or [spec]` because a single-case fixture puts `expected` at the top
+    # level with no `cases` list; `or []` skipped seven of them entirely.
+    for _case in cast("list[dict[str, Any]]", spec.get("cases") or [spec]):
         assert_case_asserts_something(
             fixture_stem,
             cast("str", _case.get("name") or "<unnamed>"),
@@ -2400,6 +2402,17 @@ def _assert_trace(
     *,
     expected_invariants: dict[str, Any],
 ) -> None:
+    if expected_invariants.get("no_warning_level_under_budget"):
+        # Implemented, unlike its neighbours, because it is UNBACKED: 155 pins its
+        # level concretely (`level: ERROR`) so its invariants are documentary, but
+        # 156's expected block declares no level at all, leaving this its only
+        # expression. A blanket guard here would be wrong -- it would demand
+        # implementation of the documentary majority.
+        offending = [o for o in trace.observations if str(getattr(o, "level", "") or "").upper() == "WARNING"]
+        assert not offending, (
+            f"an under-budget call MUST NOT render a WARNING-level observation; got "
+            f"{[(o.name, o.level) for o in offending]}"
+        )
     expected_id = expected.get("id")
     if expected_id is not None and not _is_placeholder(expected_id):
         # Fixtures 035/036: a LITERAL trace.id is the DERIVED Langfuse id; the

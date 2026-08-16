@@ -160,8 +160,10 @@ def assert_case_asserts_something(fixture_stem: str, case_name: str, expected: M
     # pinning. A case whose expected block is invariants-ONLY has no such backing,
     # so it asserts exactly nothing while reading like coverage.
     #
-    # Currently matches no fixture in the corpus, which is why it is a guard
-    # rather than a fix. It exists because the metrics driver reached that state
+    # Matches no ACTIVATED fixture. That is weaker than "no fixture": an
+    # invariants-only case does exist in the corpus and escapes only because it
+    # is skipped upstream, which makes this guard's placement relative to the
+    # skip chain load-bearing rather than incidental. It exists because the metrics driver reached that state
     # by a different route -- reading `metrics` but never `invariants`, on two
     # fixtures whose invariants were their only negative assertion -- and both
     # passed while checking nothing.

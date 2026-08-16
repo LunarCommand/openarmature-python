@@ -434,8 +434,11 @@ _DEFERRED_FIXTURES: dict[str, str] = {
     # Diagnosed against their sibling drivers rather than guessed: each reaches a
     # driver and fails on a concrete gap, not on "no driver".
     "119-otel-callable-branch-attempt-index-under-node-retry": (
-        "reuses fixture 110's callable-branch driver, but drives a branch that RAISES under node "
-        "retry; that driver has no failure/retry path, so the branch exception escapes"
+        "the conformance adapter never translates a fixture node's YAML `middleware:` block, so "
+        "the retry is never installed and the transient failure is terminal: only attempt 0 runs "
+        "and the branch exception escapes. The fix is YAML middleware parsing in adapter.py plus "
+        "threading per_node_mw into add_parallel_branches_node, NOT a failure path in the 110 "
+        "driver -- that driver is reached and would still see an unretried raise"
     ),
     "152-otel-parallel-branch-orphan-llm-fallback": (
         "reuses fixture 133's orphan-fallback driver, which does not build the `subgraphs` block "
@@ -445,9 +448,11 @@ _DEFERRED_FIXTURES: dict[str, str] = {
         "same driver gap as 152, one nesting level deeper (KeyError: 'leaf_sg')"
     ),
     "148-langfuse-generation-usage-omits-input-on-null-counter": (
-        "asserts `expected.langfuse_trace` on an LLM generation, and this runner has no LLM "
-        "Langfuse driver: the langfuse_trace fixtures live in the sibling runner, which has no "
-        "mock_llm usage plumbing"
+        "the sibling Langfuse runner DOES drive mock_llm generations asserting usage (023, 155, "
+        "156), so plumbing is not the gap. The gap is its `usage` comparator: it iterates the "
+        "EXPECTED keys, a subset match, so an OMITTED `input` key -- the whole claim -- cannot "
+        "be expressed. Wiring it needs an exact-map or usage_absent comparator first, or the "
+        "fixture passes against an impl emitting usage.input = null"
     ),
     # Proposal 0109 (spec v0.104.0) token-budget failure-path parity.
 }
@@ -745,7 +750,9 @@ async def test_observability_fixture(fixture_path: Path) -> None:
 
     _assert_driver_reads_every_expected_key(fixture_id, spec)
 
-    for _case in cast("list[dict[str, Any]]", spec.get("cases") or []):
+    # `or [spec]` because a single-case fixture puts `expected` at the top
+    # level with no `cases` list; `or []` skipped seven of them entirely.
+    for _case in cast("list[dict[str, Any]]", spec.get("cases") or [spec]):
         assert_case_asserts_something(
             fixture_id,
             cast("str", _case.get("name") or "<unnamed>"),
@@ -4726,13 +4733,19 @@ def _assert_metrics_invariants(
     duration_points = [p for p in points if p[0] == "openarmature.gen_ai.client.operation.duration"]
 
     if invariants.get("one_duration_observation_per_call"):
-        assert len(duration_points) == 1, (
+        # p[2] is the histogram's observation COUNT. Asserting only that one data
+        # point exists cannot fail the double-record regression this is named for:
+        # two observations aggregate into a single point with count 2.
+        assert len(duration_points) == 1 and duration_points[0][2] == 1, (
             f"expected exactly one operation.duration observation per call; got {duration_points}"
         )
     if invariants.get("two_token_usage_observations_input_and_output"):
-        assert len(input_usage) == 1 and len(output_usage) == 1, (
-            f"expected one input and one output token.usage observation; got {usage_points}"
-        )
+        assert (
+            len(input_usage) == 1
+            and len(output_usage) == 1
+            and input_usage[0][2] == 1
+            and output_usage[0][2] == 1
+        ), f"expected one input and one output token.usage observation; got {usage_points}"
     if invariants.get("errored_call_records_duration_with_error_type") or invariants.get(
         "duration_records_error_type_on_failure"
     ):

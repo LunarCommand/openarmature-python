@@ -352,13 +352,41 @@ def test_a_case_with_any_concrete_directive_is_accepted(expected: dict[str, obje
     assert_case_asserts_something("999-synthetic", "case", expected)
 
 
-def test_the_guard_is_pointed_at_the_real_corpus() -> None:
-    # Non-vacuity for the guard itself. The rejecting test above proves the
-    # PREDICATE works; this proves the corpus it is meant to police is actually
-    # reachable and non-empty, because a guard verified only against synthetic
-    # input is how a sweep ends up globbing an empty directory and reporting a
-    # clean result.
-    from .test_observability import _fixture_paths
+@pytest.mark.parametrize(
+    ("module_name", "runner_attr", "fixture_stem"),
+    [
+        # One per dispatch path, and one SINGLE-CASE fixture (022) because those
+        # put `expected` at the top level with no `cases` list -- the shape the
+        # first version of this wiring skipped entirely.
+        ("tests.conformance.test_observability", "test_observability_fixture", "001-otel-basic-trace"),
+        (
+            "tests.conformance.test_observability_langfuse",
+            "test_langfuse_fixture",
+            "022-langfuse-basic-trace",
+        ),
+    ],
+)
+@pytest.mark.asyncio
+async def test_the_guard_is_wired_into_each_runner(
+    monkeypatch: pytest.MonkeyPatch, module_name: str, runner_attr: str, fixture_stem: str
+) -> None:
+    # Non-vacuity for the WIRING, not the predicate. The rejecting test above
+    # already proves the predicate; this one failed to prove anything, because it
+    # only counted fixtures on disk and passed identically with both call sites
+    # deleted. Graft an invariants-only expected block onto a real fixture and
+    # push it through each runner's actual entry point.
+    import importlib
 
-    paths = list(_fixture_paths())
-    assert len(paths) > 100, f"expected the observability corpus, found {len(paths)} fixtures"
+    module = importlib.import_module(module_name)
+    path = next(p for p in module._fixture_paths() if p.stem == fixture_stem)  # noqa: SLF001
+    original_load = module._load  # noqa: SLF001
+
+    def _grafted(p: Any) -> Any:
+        spec = original_load(p)
+        target = spec["cases"][0] if spec.get("cases") else spec
+        target["expected"] = {"invariants": {"synthetic_unbacked_claim": True}}
+        return spec
+
+    monkeypatch.setattr(module, "_load", _grafted)
+    with pytest.raises(AssertionError, match="only `invariants`"):
+        await getattr(module, runner_attr)(path)
