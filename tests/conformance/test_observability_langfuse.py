@@ -2281,7 +2281,15 @@ def _runtime_config_from_spec(config_spec: dict[str, Any] | None) -> RuntimeConf
 # assertions; the rest (``distinct_trace_ids``,
 # ``correlation_id_consistent_across_traces``, etc.) stay in
 # ``_assert_multi_traces`` as cross-Trace checks.
-_PER_TRACE_INVARIANTS = frozenset({"trace_id_equals_invocation_id", "correlation_id_consistency"})
+#
+# Must list EVERY name ``_assert_trace`` reads: a name it checks but that is
+# missing here is silently discarded on the multi-trace path, so a fixture
+# declaring it there passes without the claim being evaluated.
+# ``test_harness_fidelity.py`` derives the read set from the function body and
+# fails on any omission -- ``no_warning_level_under_budget`` was one.
+_PER_TRACE_INVARIANTS = frozenset(
+    {"trace_id_equals_invocation_id", "correlation_id_consistency", "no_warning_level_under_budget"}
+)
 
 
 def _assert_multi_traces(
