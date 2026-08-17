@@ -35,6 +35,7 @@ import copy
 import functools
 import re
 from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Set as AbstractSet
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
@@ -4622,13 +4623,16 @@ async def _run_metrics_case(case: Mapping[str, Any]) -> None:
     points = _collect_metric_points(reader)
     expected_metrics = cast("list[dict[str, Any]]", case["expected"].get("metrics") or [])
     _assert_metric_points(points, expected_metrics)
+    # `_assert_metrics_invariants` is the ONLY guard on this path, so the
+    # token-budget family is deliberately not recognized here: a fixture routed
+    # to this driver that declares one must fail, not be silently dropped.
+    _assert_invariants_recognized(case, _METRICS_INVARIANTS, "metrics")
     _assert_metrics_invariants(case, points, exporter.get_finished_spans())
 
 
-# Names only the token-budget driver implements. Kept beside the metrics set so
-# each guard can validate against the UNION while implementing only its own
-# subset: fixture 147 legitimately declares names from both families.
-_TOKEN_BUDGET_ONLY_INVARIANTS = {
+# Names `_assert_token_budget_invariants` implements. Overlaps the metrics set by
+# one name that BOTH guards check, so this is not a disjoint "only" set.
+_TOKEN_BUDGET_INVARIANTS = {
     "no_token_budget_exceeded_observation_when_under_budget",
     "utilization_records_under_budget",
     "no_token_budget_instrument_observations_when_no_budget",
@@ -4669,6 +4673,49 @@ _METRICS_INVARIANTS = {
     "duration_value_not_asserted",
 }
 
+# Invariant names whose claim is "some attribute is absent from a SPAN". Each is
+# satisfied trivially by a run that produced no spans at all, so declaring one
+# obliges the positive anchor below. Enumerated rather than matched by prefix: a
+# `startswith` heuristic silently skipped the anchor for the two
+# `exceeded_span_signal_*` names, which are exactly this shape.
+_SPAN_DEPENDENT_INVARIANTS = {
+    "span_omits_both_input_usage_attributes",
+    "exceeded_span_signal_absent_not_false",
+    "exceeded_span_signal_absent_not_false_when_only_bound_unevaluable",
+    "null_prompt_tokens_reaches_no_span_histogram_or_budget_surface",
+}
+
+
+def _assert_invariants_recognized(
+    case: Mapping[str, Any],
+    recognized: AbstractSet[str],
+    label: str,
+) -> None:
+    """Fail loudly on a declared invariant name no guard on this driver's path
+    implements, so a fixture's new invariant cannot pass vacuously."""
+    # `recognized` is supplied by the RUNNER, not by an individual guard: it is
+    # the union over the guards that runner actually calls. Validating inside a
+    # guard against a wider union is what let a token-budget name declared on a
+    # metrics fixture read as recognized while nothing checked it.
+    invariants = cast("dict[str, Any]", case["expected"].get("invariants") or {})
+    unknown = set(invariants) - recognized
+    assert not unknown, f"unhandled {label} invariant(s): {sorted(unknown)}"
+
+
+def _assert_span_anchor(invariants: Mapping[str, Any], spans: Sequence[Any]) -> None:
+    """Assert the LLM span exists before any span-absence predicate reads it."""
+    # Every span-dependent claim is of the form "X is absent", which an empty
+    # span set satisfies trivially -- deleting the LLM span outright made 147
+    # green. Deliberately NOT gated on `spans` being non-empty: no spans at all
+    # is the very case this exists to catch.
+    if not (set(invariants) & _SPAN_DEPENDENT_INVARIANTS):
+        return
+    llm_spans = [s for s in spans if s.name == "openarmature.llm.complete"]
+    assert llm_spans, (
+        f"no openarmature.llm.complete span was recorded, so the span-absence invariants "
+        f"would pass vacuously; got {[s.name for s in spans]}"
+    )
+
 
 def _assert_metrics_invariants(
     case: Mapping[str, Any],
@@ -4682,21 +4729,9 @@ def _assert_metrics_invariants(
     # the fixtures pass while checking nothing but the positive rows. Mirrors the
     # token-budget driver's guard, whose absence here is what let that happen.
     invariants = cast("dict[str, Any]", case["expected"].get("invariants") or {})
-    unknown = set(invariants) - _METRICS_INVARIANTS - _TOKEN_BUDGET_ONLY_INVARIANTS
-    assert not unknown, f"unhandled metrics invariant(s): {sorted(unknown)}"
     if not invariants:
         return
-
-    # Positive anchor BEFORE any absence predicate. Every claim below is of the
-    # form "X is absent", which an empty span set satisfies trivially -- deleting
-    # the LLM span outright made 147 green. Assert the span exists first, so the
-    # absences are read off a run that actually happened.
-    if spans and any(k.startswith(("span_", "null_prompt_tokens_reaches")) for k in invariants):
-        llm_spans = [s for s in spans if s.name == "openarmature.llm.complete"]
-        assert llm_spans, (
-            f"no openarmature.llm.complete span was recorded, so the span-absence invariants "
-            f"below would pass vacuously; got {[s.name for s in spans]}"
-        )
+    _assert_span_anchor(invariants, spans)
 
     usage_points = [p for p in points if p[0] == "openarmature.gen_ai.client.token.usage"]
     input_usage = [p for p in usage_points if p[3].get("openarmature.gen_ai.token.type") == "input"]
@@ -4889,6 +4924,9 @@ async def _run_token_budget_case(case: Mapping[str, Any]) -> None:
     expected_metrics = cast("list[dict[str, Any]] | None", expected.get("metrics"))
     if expected_metrics is not None:
         _assert_metric_points(points, expected_metrics)
+    # Both guards run on this path, so the recognized set is their union: 147
+    # routes here and declares metrics-family names exclusively.
+    _assert_invariants_recognized(case, _METRICS_INVARIANTS | _TOKEN_BUDGET_INVARIANTS, "token-budget")
     _assert_token_budget_invariants(case, points, collectors, spans)
     _assert_metrics_invariants(case, points, spans)
 
@@ -4897,22 +4935,14 @@ def _assert_token_budget_invariants(
     case: Mapping[str, Any],
     points: Sequence[tuple[str, float, int, dict[str, Any]]],
     collectors: Mapping[str, Any],
-    spans: Sequence[Any] = (),
+    spans: Sequence[Any],
 ) -> None:
     """Evaluate the token-budget named invariants (128/129/131) as absence
     predicates over the captured measurement set + the typed events.
     The ``metrics:`` list shape asserts presence only, so these cover the
     "no observation recorded" claims the list cannot express."""
     invariants = cast("dict[str, Any]", case["expected"].get("invariants") or {})
-    # Fail loudly on a declared invariant this runner does not map, so a future
-    # fixture's new invariant name cannot pass vacuously (harness-fidelity).
-    #
-    # Validated against the UNION with the metrics family, because a fixture may
-    # legitimately declare names from both (147 does). Each guard still implements
-    # only its own subset; the union governs what is RECOGNISED, not what is
-    # checked, and `_run_token_budget_case` calls both.
-    unknown = set(invariants) - _METRICS_INVARIANTS - _TOKEN_BUDGET_ONLY_INVARIANTS
-    assert not unknown, f"unhandled token-budget invariant(s): {sorted(unknown)}"
+    _assert_span_anchor(invariants, spans)
     exceeded_points = [p for p in points if p[0] == "openarmature.gen_ai.client.token_budget.exceeded"]
     utilization_points = [p for p in points if p[0] == "openarmature.gen_ai.client.token_budget.utilization"]
 
