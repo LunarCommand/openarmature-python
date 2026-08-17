@@ -355,14 +355,27 @@ def test_a_case_with_any_concrete_directive_is_accepted(expected: dict[str, obje
 @pytest.mark.parametrize(
     ("module_name", "runner_attr", "fixture_stem"),
     [
-        # One per dispatch path, and one SINGLE-CASE fixture (022) because those
-        # put `expected` at the top level with no `cases` list -- the shape the
-        # first version of this wiring skipped entirely.
+        # Each dispatch path x each fixture SHAPE. A single-case fixture puts
+        # `expected` at the top level with no `cases` list -- the shape the first
+        # version of this wiring skipped entirely -- while a multi-case fixture
+        # exercises the `spec["cases"][0]` branch of the graft below. Naming only
+        # single-case fixtures left that branch unexecuted, so the two shapes are
+        # now covered explicitly rather than assumed from a fixture id.
         ("tests.conformance.test_observability", "test_observability_fixture", "001-otel-basic-trace"),
+        (
+            "tests.conformance.test_observability",
+            "test_observability_fixture",
+            "005-otel-llm-provider-span-nested",
+        ),
         (
             "tests.conformance.test_observability_langfuse",
             "test_langfuse_fixture",
             "022-langfuse-basic-trace",
+        ),
+        (
+            "tests.conformance.test_observability_langfuse",
+            "test_langfuse_fixture",
+            "023-langfuse-generation-rendering",
         ),
     ],
 )
@@ -380,6 +393,8 @@ async def test_the_guard_is_wired_into_each_runner(
     module = importlib.import_module(module_name)
     path = next(p for p in module._fixture_paths() if p.stem == fixture_stem)  # noqa: SLF001
     original_load = module._load  # noqa: SLF001
+    spec_shape = original_load(path)
+    multi_case = bool(spec_shape.get("cases"))
 
     def _grafted(p: Any) -> Any:
         spec = original_load(p)
@@ -388,5 +403,23 @@ async def test_the_guard_is_wired_into_each_runner(
         return spec
 
     monkeypatch.setattr(module, "_load", _grafted)
-    with pytest.raises(AssertionError, match="only `invariants`"):
-        await getattr(module, runner_attr)(path)
+    # Both runners `pytest.skip` for a fixture they do not currently drive, and
+    # `Skipped` derives from BaseException, so it sails through `pytest.raises`
+    # and turns this whole test into a silent skip. That is the exact failure
+    # this file exists to prevent, one level up: the day a named fixture leaves
+    # its runner's supported set, a skip must read as a wiring regression.
+    try:
+        with pytest.raises(AssertionError, match="only `invariants`"):
+            await getattr(module, runner_attr)(path)
+    except pytest.skip.Exception as exc:  # pragma: no cover - regression guard
+        pytest.fail(
+            f"{runner_attr} skipped {fixture_stem} ({exc}), so this test asserted nothing about "
+            f"the guard. Repoint it at a fixture that runner still drives."
+        )
+    # Non-vacuity on the parametrization itself: the two shapes must actually
+    # differ, or both rows exercise the same branch of the graft above.
+    multi_case_rows = {"005-otel-llm-provider-span-nested", "023-langfuse-generation-rendering"}
+    assert multi_case == (fixture_stem in multi_case_rows), (
+        f"{fixture_stem} no longer has the fixture shape this row was chosen for "
+        f"(multi_case={multi_case}); the single-case and multi-case branches are no longer both covered."
+    )
