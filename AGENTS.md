@@ -92,10 +92,14 @@ you have **broken the behaviour it covers and watched it go red**.
 - Diagnose by running, not by reading. A deferral reason reached by
   reasoning about which driver "looks" suitable is routinely wrong; a
   ten-second `await _run_x(_load(path))` settles it.
-- Prefer a structural guard over remembering any of this. The
-  `_DRIVER_EXPECTED_KEYS` check in `tests/conformance/test_observability.py`
-  makes "wired into a driver that drops a directive" impossible rather
-  than catchable, and caught a live error in the commit that added it.
+- Prefer a structural guard over remembering any of this, but check its
+  reach before trusting it. The `_DRIVER_EXPECTED_KEYS` check in
+  `tests/conformance/test_observability.py` catches "wired into a driver
+  that drops a directive" — it caught a live error in the commit that
+  added it — but only for the drivers registered in that map, which is a
+  minority of them. It is **fail-open**: a fixture routed to an
+  unregistered driver returns silently, so a green run there still means
+  nothing. Registering the driver is what turns the guard on.
 
 This is written down because the rule existed as guidance and was still
 missed repeatedly across one session: four fixtures were reported wired
