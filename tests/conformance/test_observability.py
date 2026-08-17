@@ -32,8 +32,10 @@ Per-fixture wiring notes live in
 from __future__ import annotations
 
 import copy
+import functools
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Set as AbstractSet
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
@@ -194,6 +196,7 @@ _SUPPORTED_FIXTURES = frozenset(
         "065-llm-completion-event-active-prompt-null",
         "067-llm-completion-event-call-id-always-present-and-distinct",
         "068-llm-completion-event-response-model-distinct-from-request",
+        "144-otel-llm-span-omits-input-usage-on-null-counter",
         "071-llm-failure-event-call-id-distinct-from-completion-event",
         "072-llm-failure-event-mutual-exclusion-with-completion-event",
         # proposal 0082: the LlmFailedEvent response-side surface on a
@@ -227,6 +230,7 @@ _SUPPORTED_FIXTURES = frozenset(
         # Captured via a private MeterProvider + InMemoryMetricReader (the
         # §6.9 metric-capture primitive). 089 (embeddings) is deferred.
         "088-llm-metrics-token-and-duration",
+        "145-llm-metrics-no-input-token-observation-on-null-counter",
         "090-metrics-error-type-on-duration",
         "091-metrics-disabled-no-measurements",
         # proposal 0082: the OTel error span (124) renders the response-side
@@ -245,6 +249,10 @@ _SUPPORTED_FIXTURES = frozenset(
         # NOT on a no-usage provider_unavailable failure. The Langfuse WARNING
         # (130) runs in the dedicated test_observability_langfuse harness.
         "126-token-budget-input-exceeded",
+        "146-token-budget-input-bound-not-evaluated-on-null-counter",
+        # Declares observers + span_tree as well as metrics; the metrics driver
+        # reads neither, so its span claims were dropped entirely.
+        "147-otel-null-counter-reaches-no-span-histogram-or-budget",
         "127-token-budget-total-exceeded",
         "128-token-budget-under-budget-no-warning",
         "129-token-budget-absent-unchanged",
@@ -288,12 +296,14 @@ _SUPPORTED_FIXTURES = frozenset(
         # harvested error message ABSENT with error_type retained, via the
         # metadata_absent directive that landed in #267.
         "137-langfuse-embedding-failure-observation",
+        "150-langfuse-embedding-failure-literal-error-fields",
         "139-otel-embedding-no-usage-input-tokens-omitted",
         "140-langfuse-embedding-no-usage-usagedetails-omitted",
         # proposal 0067 §11 embedding metrics: token.usage (input only) +
         # operation.duration, operation="embeddings", recorded from the terminal
         # embedding event. 089 (usage) + 143 (no-usage: duration only).
         "089-embedding-metrics-token-and-duration",
+        "154-embedding-metrics-on-failure",
         "143-embedding-metrics-no-usage-no-token-observation",
         # v0.16.0 — proposal 0060 rerank observability (0060b). A calls_rerank
         # node awaits CohereRerankProvider.rerank() inside the node body; the
@@ -315,6 +325,7 @@ _SUPPORTED_FIXTURES = frozenset(
         "107-otel-rerank-span-attributes",
         "108-langfuse-rerank-observation",
         "138-langfuse-rerank-failure-observation",
+        "151-langfuse-rerank-failure-literal-error-fields",
         "141-otel-rerank-no-usage-attributes-omitted",
         "142-langfuse-rerank-no-usage-usagedetails-omitted",
         "109-rerank-metrics-token-and-duration",
@@ -380,10 +391,6 @@ _DEFERRED_FIXTURES: dict[str, str] = {
     # attempt_index-under-node-retry coverage round-out -- mixes a graph-style
     # shape the cross-capability parser doesn't model (cf. 110) and has no
     # dedicated runner here yet; defer until the harness wires it.
-    "119-otel-callable-branch-attempt-index-under-node-retry": (
-        "0075 shipped v0.15.0; runner for this callable-branch-attempt-index-under-retry "
-        "case not yet wired -- harness gap, not unimplemented"
-    ),
     # Proposal 0082 (structured-output failure diagnostics, spec v0.77.0).
     # The event surface (120-122), the OTel error-span rendering (124) and the
     # §11 token-usage metric (125) run here; the Langfuse failed-Generation
@@ -417,55 +424,46 @@ _DEFERRED_FIXTURES: dict[str, str] = {
     # conformance fixture wiring rides the v0.17.0 fixture-wiring PR.
     # Proposal 0101 (spec v0.96.0) malformed usage counter -> not reported,
     # threaded through the span / metric / budget observability surfaces.
-    "144-otel-llm-span-omits-input-usage-on-null-counter": (
-        "Proposal 0101 null-counter observability; harness wiring rides the v0.17.0 fixture-wiring PR"
-    ),
-    "145-llm-metrics-no-input-token-observation-on-null-counter": (
-        "Proposal 0101 null-counter observability; harness wiring rides the v0.17.0 fixture-wiring PR"
-    ),
-    "146-token-budget-input-bound-not-evaluated-on-null-counter": (
-        "Proposal 0101 null-counter observability; harness wiring rides the v0.17.0 fixture-wiring PR"
-    ),
-    "147-otel-null-counter-reaches-no-span-histogram-or-budget": (
-        "Proposal 0101 null-counter observability; harness wiring rides the v0.17.0 fixture-wiring PR"
-    ),
-    "148-langfuse-generation-usage-omits-input-on-null-counter": (
-        "Proposal 0101 null-counter observability; harness wiring rides the v0.17.0 fixture-wiring PR"
-    ),
-    "149-malformed-wire-counter-nulled-through-mapping-to-event-and-span": (
-        "Proposal 0101 null-counter observability; harness wiring rides the v0.17.0 fixture-wiring PR"
-    ),
     # Proposal 0107 (spec v0.102.0) mock_embedding / mock_rerank raises
     # sub-directive -> literal error-field assertion.
     # The 0118 half of these two resolved at this pin (both cases moved to
     # disable_provider_payload=false, since asserting the message literally is
     # their purpose). What remains is the 0107 mock-raises harness wiring.
-    "150-langfuse-embedding-failure-literal-error-fields": (
-        "Proposal 0107 mock_embedding raises sub-directive not yet wired; rides the "
-        "remaining v0.17.0 fixture-wiring PR (observability 144-156)"
-    ),
-    "151-langfuse-rerank-failure-literal-error-fields": (
-        "Proposal 0107 mock_rerank raises sub-directive not yet wired; rides the "
-        "remaining v0.17.0 fixture-wiring PR (observability 144-156)"
-    ),
     # Spec v0.103.1 conformance coverage (0084 orphan-fallback arms + the
     # embedding failure-metrics counterpart).
+    # Diagnosed against their sibling drivers rather than guessed: each reaches a
+    # driver and fails on a concrete gap, not on "no driver".
+    "149-malformed-wire-counter-nulled-through-mapping-to-event-and-span": (
+        "declares BOTH expected.span_tree and expected.observers.contains_event, and no driver "
+        "serves both: _run_typed_event_cases reads observers only, _run_llm_payload_case reads "
+        "span_tree only, and _run_token_budget_case reads both but builds the graph from a mock "
+        "shape that does not reproduce 149's response model / response id, so its span-tree match "
+        "fails on attributes rather than on behaviour. Needs a driver threading 149's mock_llm "
+        "through a typed collector AND a span exporter; the event half is the fixture's stated "
+        "discriminator, so wiring it under a span-only driver drops the assertion it exists for"
+    ),
+    "119-otel-callable-branch-attempt-index-under-node-retry": (
+        "the conformance adapter never translates a fixture node's YAML `middleware:` block, so "
+        "the retry is never installed and the transient failure is terminal: only attempt 0 runs "
+        "and the branch exception escapes. The fix is YAML middleware parsing in adapter.py plus "
+        "threading per_node_mw into add_parallel_branches_node, NOT a failure path in the 110 "
+        "driver -- that driver is reached and would still see an unretried raise"
+    ),
     "152-otel-parallel-branch-orphan-llm-fallback": (
-        "Spec v0.103.1 orphan-fallback coverage; harness wiring rides the v0.17.0 fixture-wiring PR"
+        "reuses fixture 133's orphan-fallback driver, which does not build the `subgraphs` block "
+        "152 adds (KeyError: 'subgraphs')"
     ),
     "153-otel-mixed-nesting-orphan-llm-fallback": (
-        "Spec v0.103.1 orphan-fallback coverage; harness wiring rides the v0.17.0 fixture-wiring PR"
+        "same driver gap as 152, one nesting level deeper (KeyError: 'leaf_sg')"
     ),
-    "154-embedding-metrics-on-failure": (
-        "Spec v0.103.1 embedding failure-metrics coverage; harness wiring rides the v0.17.0 fixture-wiring PR"
+    "148-langfuse-generation-usage-omits-input-on-null-counter": (
+        "the sibling Langfuse runner DOES drive mock_llm generations asserting usage (023, 155, "
+        "156), so plumbing is not the gap. The gap is its `usage` comparator: it iterates the "
+        "EXPECTED keys, a subset match, so an OMITTED `input` key -- the whole claim -- cannot "
+        "be expressed. Wiring it needs an exact-map or usage_absent comparator first, or the "
+        "fixture passes against an impl emitting usage.input = null"
     ),
     # Proposal 0109 (spec v0.104.0) token-budget failure-path parity.
-    "155-langfuse-token-budget-exceeded-flag-on-failure": (
-        "Proposal 0109 token_budget_exceeded flag; harness wiring rides the v0.17.0 fixture-wiring PR"
-    ),
-    "156-langfuse-token-budget-under-budget-flag-false": (
-        "Proposal 0109 token_budget_exceeded flag; harness wiring rides the v0.17.0 fixture-wiring PR"
-    ),
 }
 
 
@@ -491,6 +489,8 @@ _LANGFUSE_HARNESS_FIXTURES: frozenset[str] = frozenset(
         "036-caller-invocation-id-non-uuid",
         "037-langfuse-trace-input-output",
         "059-implementation-attribution-langfuse",
+        "155-langfuse-token-budget-exceeded-flag-on-failure",
+        "156-langfuse-token-budget-under-budget-flag-false",
         # 134 -- proposal 0084 Langfuse parent resolution (nested exact-match +
         # orphan fallback). Driven by a dedicated hand-built runner in the
         # sibling harness; the generic topology path cannot model the
@@ -668,6 +668,83 @@ def _reject_unsupported_capability_gate(fixture_id: str, spec: Mapping[str, Any]
         )
 
 
+# Which `expected` keys each OTel driver actually READS. Derived from the driver
+# bodies, not from fixture usage: this exists because 147 and 149 were wired into
+# drivers that never look at `span_tree`, so their span claims were dropped while
+# both counted as covered. A fixture routed to a driver that ignores one of its
+# directives now fails at wiring time instead of passing hollow.
+_DRIVER_EXPECTED_KEYS: dict[str, frozenset[str]] = {
+    "_run_typed_event_cases": frozenset({"observers", "invariants", "node_completed_event_carries_error"}),
+    "_run_metrics_fixture": frozenset({"metrics", "invariants"}),
+    "_run_embedding_fixture": frozenset(
+        {"span_tree", "metrics", "invariants", "observers", "langfuse_trace"}
+    ),
+    "_run_rerank_fixture": frozenset({"span_tree", "metrics", "invariants", "observers", "langfuse_trace"}),
+    "_run_token_budget_fixture": frozenset({"span_tree", "metrics", "invariants", "observers"}),
+    # `invariants` is documentary here; `observers` is deliberately ABSENT because
+    # _run_llm_payload_case reads span_tree ONLY. Claiming observers is what let
+    # 149 be re-routed here with its contains_event half silently dropped.
+    "_run_llm_payload_fixture": frozenset({"span_tree", "invariants"}),
+}
+
+
+@functools.cache
+def _driver_for_fixture() -> dict[str, str]:
+    """Map each fixture id to the driver the dispatch chain sends it to."""
+    # Parsed from THIS file's own dispatch chain rather than hand-maintained, so
+    # the map cannot drift from what actually runs. A hand-written copy is the
+    # allowlist-derived-from-usage mistake one level up.
+    import ast  # noqa: PLC0415
+    import inspect  # noqa: PLC0415
+
+    tree = ast.parse(inspect.getsource(test_observability_fixture))
+    out: dict[str, str] = {}
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.If):
+            continue
+        called = [
+            c.func.id
+            for c in ast.walk(ast.Module(body=node.body, type_ignores=[]))
+            if isinstance(c, ast.Call) and isinstance(c.func, ast.Name) and c.func.id.startswith("_run_")
+        ]
+        if not called:
+            continue
+        ids: list[str] = []
+        for cmp_node in ast.walk(node.test):
+            if isinstance(cmp_node, ast.Constant) and isinstance(cmp_node.value, str):
+                ids.append(cmp_node.value)
+        for fid in ids:
+            out.setdefault(fid, called[0])
+    return out
+
+
+def _assert_driver_reads_every_expected_key(fixture_id: str, spec: Mapping[str, Any]) -> None:
+    """Fail when a fixture declares an `expected` key its driver does not read."""
+    # Resolved lazily: the dispatch function it parses is defined below this point.
+    driver = _driver_for_fixture().get(fixture_id)
+    if driver is None:
+        return
+    handled = _DRIVER_EXPECTED_KEYS.get(driver)
+    if handled is None:
+        # FAIL-OPEN, and deliberately narrow. Most drivers are unregistered, so
+        # this exempts the majority; registering one is what turns the guard on
+        # for its fixtures. Recorded here rather than left implicit because a
+        # guard that is dark for two thirds of the corpus must not read as
+        # blanket protection -- see the note in AGENTS.md.
+        return
+    # `or [spec]`, not `or []`: a single-case fixture carries `expected` at the top
+    # level with no `cases` list, and `or []` made this guard a no-op for all seven.
+    for case in cast("list[dict[str, Any]]", spec.get("cases") or [spec]):
+        declared = set(cast("dict[str, Any]", case.get("expected") or {}))
+        unread = sorted(declared - handled)
+        assert not unread, (
+            f"{fixture_id}::{case.get('name')}: declares expected key(s) {unread} that "
+            f"{driver} does not read, so those assertions would be silently dropped while the "
+            f"fixture still counts as covered. Route it to a driver that reads them, or "
+            f"implement them and register the key in _DRIVER_EXPECTED_KEYS."
+        )
+
+
 @pytest.mark.parametrize("fixture_path", _fixture_paths(), ids=_fixture_id)
 async def test_observability_fixture(fixture_path: Path) -> None:
     fixture_id = fixture_path.stem
@@ -688,6 +765,18 @@ async def test_observability_fixture(fixture_path: Path) -> None:
 
     spec = _load(fixture_path)
     _reject_unsupported_capability_gate(fixture_id, spec)
+    from .harness.capabilities import assert_case_asserts_something  # noqa: PLC0415
+
+    _assert_driver_reads_every_expected_key(fixture_id, spec)
+
+    # `or [spec]` because a single-case fixture puts `expected` at the top
+    # level with no `cases` list; `or []` skipped seven of them entirely.
+    for _case in cast("list[dict[str, Any]]", spec.get("cases") or [spec]):
+        assert_case_asserts_something(
+            fixture_id,
+            cast("str", _case.get("name") or "<unnamed>"),
+            cast("Mapping[str, Any]", _case.get("expected") or {}),
+        )
     if fixture_id == "001-otel-basic-trace":
         await _run_fixture_001(spec)
     elif fixture_id == "002-otel-subgraph-hierarchy":
@@ -714,11 +803,15 @@ async def test_observability_fixture(fixture_path: Path) -> None:
         await _run_fixture_028(spec)
     elif fixture_id == "038-otel-parallel-branches-dispatch-span":
         await _run_fixture_038(spec)
-    elif fixture_id == "110-otel-callable-branch-span":
+    elif fixture_id in {
+        "110-otel-callable-branch-span",
+    }:
         await _run_fixture_110(spec)
     elif fixture_id == "132-otel-nested-fan-out-span-keying-and-llm-exact-match":
         await _run_fixture_132(spec)
-    elif fixture_id == "133-otel-nested-fan-out-orphan-llm-fallback":
+    elif fixture_id in {
+        "133-otel-nested-fan-out-orphan-llm-fallback",
+    }:
         await _run_fixture_133(spec)
     elif fixture_id in {
         "040-llm-cache-attribute-emission",
@@ -782,10 +875,15 @@ async def test_observability_fixture(fixture_path: Path) -> None:
         "085-llm-tool-call-request-attributes",
         "086-llm-tool-call-request-absent",
         "087-llm-tool-call-request-survives-payload-gating",
+        # 0101 null-counter span claims. This driver walks expected.span_tree
+        # including attributes_absent -- the half 149 silently dropped under the
+        # typed-event driver, and the driver 144 was wrongly deferred for lacking.
+        "144-otel-llm-span-omits-input-usage-on-null-counter",
     }:
         await _run_llm_payload_fixture(spec)
     elif fixture_id in {
         "088-llm-metrics-token-and-duration",
+        "145-llm-metrics-no-input-token-observation-on-null-counter",
         "090-metrics-error-type-on-duration",
         "091-metrics-disabled-no-measurements",
         "125-metrics-token-usage-on-structured-output-failure",
@@ -795,6 +893,10 @@ async def test_observability_fixture(fixture_path: Path) -> None:
         await _run_structured_output_error_span_fixture(spec)
     elif fixture_id in {
         "126-token-budget-input-exceeded",
+        "146-token-budget-input-bound-not-evaluated-on-null-counter",
+        # Declares observers + span_tree as well as metrics; the metrics driver
+        # reads neither, so its span claims were dropped entirely.
+        "147-otel-null-counter-reaches-no-span-histogram-or-budget",
         "127-token-budget-total-exceeded",
         "128-token-budget-under-budget-no-warning",
         "129-token-budget-absent-unchanged",
@@ -826,7 +928,9 @@ async def test_observability_fixture(fixture_path: Path) -> None:
         "139-otel-embedding-no-usage-input-tokens-omitted",
         "140-langfuse-embedding-no-usage-usagedetails-omitted",
         "089-embedding-metrics-token-and-duration",
+        "154-embedding-metrics-on-failure",
         "143-embedding-metrics-no-usage-no-token-observation",
+        "150-langfuse-embedding-failure-literal-error-fields",
     }:
         await _run_embedding_fixture(spec)
     elif fixture_id in {
@@ -844,6 +948,7 @@ async def test_observability_fixture(fixture_path: Path) -> None:
         "141-otel-rerank-no-usage-attributes-omitted",
         "142-langfuse-rerank-no-usage-usagedetails-omitted",
         "109-rerank-metrics-token-and-duration",
+        "151-langfuse-rerank-failure-literal-error-fields",
     }:
         await _run_rerank_fixture(spec)
     elif fixture_id in {
@@ -4518,6 +4623,203 @@ async def _run_metrics_case(case: Mapping[str, Any]) -> None:
     points = _collect_metric_points(reader)
     expected_metrics = cast("list[dict[str, Any]]", case["expected"].get("metrics") or [])
     _assert_metric_points(points, expected_metrics)
+    # `_assert_metrics_invariants` is the ONLY guard on this path, so the
+    # token-budget family is deliberately not recognized here: a fixture routed
+    # to this driver that declares one must fail, not be silently dropped.
+    _assert_invariants_recognized(case, _METRICS_INVARIANTS, "metrics")
+    _assert_metrics_invariants(case, points, exporter.get_finished_spans())
+
+
+# Names `_assert_token_budget_invariants` implements. Overlaps the metrics set by
+# one name that BOTH guards check, so this is not a disjoint "only" set.
+_TOKEN_BUDGET_INVARIANTS = {
+    "no_token_budget_exceeded_observation_when_under_budget",
+    "utilization_records_under_budget",
+    "no_token_budget_instrument_observations_when_no_budget",
+    "token_budget_null_on_completion_event",
+    "no_token_budget_instrument_observations_without_usage",
+    "token_budget_populated_but_not_evaluated_without_usage",
+    "exception_propagates_alongside_typed_event",
+    # Proposal 0101 null-counter arms (fixture 146).
+    "input_bound_not_evaluated_when_prompt_tokens_null",
+    "exceeded_span_signal_absent_not_false_when_only_bound_unevaluable",
+    "no_input_token_usage_observation_when_prompt_tokens_null",
+    "total_bound_evaluated_when_total_tokens_sound",
+    "no_input_kind_budget_observation_when_prompt_tokens_null",
+}
+
+_METRICS_INVARIANTS = {
+    # Proposal 0101 null-counter arms (fixtures 145 / 147).
+    "no_input_token_usage_observation_when_prompt_tokens_null",
+    "output_token_usage_observation_recorded_when_completion_sound",
+    "null_prompt_tokens_reaches_no_span_histogram_or_budget_surface",
+    "span_omits_both_input_usage_attributes",
+    "no_input_token_usage_observation",
+    "no_token_budget_instrument_observation_for_unevaluable_input_bound",
+    "exceeded_span_signal_absent_not_false",
+    # Pre-existing metrics fixtures (088 / 090 / 091 / 125). These were being
+    # silently dropped too: the driver read no invariants at all, so adding the
+    # guard above surfaced them.
+    "one_duration_observation_per_call",
+    "two_token_usage_observations_input_and_output",
+    "errored_call_records_duration_with_error_type",
+    "no_token_usage_observation_on_failure",
+    "no_measurements_recorded_when_metrics_off",
+    "duration_records_error_type_on_failure",
+    "token_usage_recorded_on_structured_output_failure",
+    # Documentary: states that the duration VALUE is deliberately not asserted
+    # (it is wall-clock). Recognized so it cannot read as unhandled, but there is
+    # nothing to check.
+    "duration_value_not_asserted",
+}
+
+# Invariant names whose claim is "some attribute is absent from a SPAN". Each is
+# satisfied trivially by a run that produced no spans at all, so declaring one
+# obliges the positive anchor below. Enumerated rather than matched by prefix: a
+# `startswith` heuristic silently skipped the anchor for the two
+# `exceeded_span_signal_*` names, which are exactly this shape.
+_SPAN_DEPENDENT_INVARIANTS = {
+    "span_omits_both_input_usage_attributes",
+    "exceeded_span_signal_absent_not_false",
+    "exceeded_span_signal_absent_not_false_when_only_bound_unevaluable",
+    "null_prompt_tokens_reaches_no_span_histogram_or_budget_surface",
+}
+
+
+def _assert_invariants_recognized(
+    case: Mapping[str, Any],
+    recognized: AbstractSet[str],
+    label: str,
+) -> None:
+    """Fail loudly on a declared invariant name no guard on this driver's path
+    implements, so a fixture's new invariant cannot pass vacuously."""
+    # `recognized` is supplied by the RUNNER, not by an individual guard: it is
+    # the union over the guards that runner actually calls. Validating inside a
+    # guard against a wider union is what let a token-budget name declared on a
+    # metrics fixture read as recognized while nothing checked it.
+    invariants = cast("dict[str, Any]", case["expected"].get("invariants") or {})
+    unknown = set(invariants) - recognized
+    assert not unknown, f"unhandled {label} invariant(s): {sorted(unknown)}"
+
+
+def _assert_span_anchor(invariants: Mapping[str, Any], spans: Sequence[Any]) -> None:
+    """Assert the LLM span exists before any span-absence predicate reads it."""
+    # Every span-dependent claim is of the form "X is absent", which an empty
+    # span set satisfies trivially -- deleting the LLM span outright made 147
+    # green. Deliberately NOT gated on `spans` being non-empty: no spans at all
+    # is the very case this exists to catch.
+    if not (set(invariants) & _SPAN_DEPENDENT_INVARIANTS):
+        return
+    llm_spans = [s for s in spans if s.name == "openarmature.llm.complete"]
+    assert llm_spans, (
+        f"no openarmature.llm.complete span was recorded, so the span-absence invariants "
+        f"would pass vacuously; got {[s.name for s in spans]}"
+    )
+
+
+def _assert_metrics_invariants(
+    case: Mapping[str, Any],
+    points: Sequence[tuple[str, float, int, dict[str, Any]]],
+    spans: Sequence[Any],
+) -> None:
+    """Evaluate the named invariants on a metrics fixture."""
+    # These are ABSENCE predicates, which the `metrics:` list shape cannot
+    # express -- it asserts presence only. 145 and 147 say so in their own
+    # comments, so for those two the invariants ARE the assertion: without this
+    # the fixtures pass while checking nothing but the positive rows. Mirrors the
+    # token-budget driver's guard, whose absence here is what let that happen.
+    invariants = cast("dict[str, Any]", case["expected"].get("invariants") or {})
+    if not invariants:
+        return
+    _assert_span_anchor(invariants, spans)
+
+    usage_points = [p for p in points if p[0] == "openarmature.gen_ai.client.token.usage"]
+    input_usage = [p for p in usage_points if p[3].get("openarmature.gen_ai.token.type") == "input"]
+    output_usage = [p for p in usage_points if p[3].get("openarmature.gen_ai.token.type") == "output"]
+    budget_points = [
+        p
+        for p in points
+        if p[0]
+        in (
+            "openarmature.gen_ai.client.token_budget.exceeded",
+            "openarmature.gen_ai.client.token_budget.utilization",
+        )
+    ]
+    input_attrs = ("openarmature.gen_ai.usage.input_tokens", "gen_ai.usage.input_tokens")
+
+    def _spans_carrying(*names: str) -> list[tuple[str, str]]:
+        return [(s.name, n) for s in spans for n in names if n in dict(s.attributes or {})]
+
+    if invariants.get("no_input_token_usage_observation_when_prompt_tokens_null") or invariants.get(
+        "no_input_token_usage_observation"
+    ):
+        assert not input_usage, (
+            f"a null prompt_tokens MUST record no input token.usage observation; got {input_usage}"
+        )
+    if invariants.get("output_token_usage_observation_recorded_when_completion_sound"):
+        # The non-vacuity partner: without it the absence above is satisfied by
+        # an implementation that recorded no usage observations at all.
+        assert output_usage, (
+            f"a sound completion_tokens MUST still record an output token.usage "
+            f"observation; got only {usage_points}"
+        )
+    if invariants.get("span_omits_both_input_usage_attributes"):
+        carrying = _spans_carrying(*input_attrs)
+        assert not carrying, (
+            f"a null prompt_tokens MUST leave both input-usage span attributes absent; present as {carrying}"
+        )
+    if invariants.get("no_token_budget_instrument_observation_for_unevaluable_input_bound"):
+        input_budget = [
+            p for p in budget_points if p[3].get("openarmature.gen_ai.token_budget.kind") == "input"
+        ]
+        assert not input_budget, (
+            f"an unevaluable input bound MUST record no token-budget observation; got {input_budget}"
+        )
+    if invariants.get("exceeded_span_signal_absent_not_false"):
+        attr = "openarmature.llm.token_budget.exceeded"
+        carrying = _spans_carrying(attr)
+        assert not carrying, (
+            f"with no evaluable bound the {attr} span attribute MUST be absent rather than "
+            f"false; present on {carrying}"
+        )
+    duration_points = [p for p in points if p[0] == "openarmature.gen_ai.client.operation.duration"]
+
+    if invariants.get("one_duration_observation_per_call"):
+        # p[2] is the histogram's observation COUNT. Asserting only that one data
+        # point exists cannot fail the double-record regression this is named for:
+        # two observations aggregate into a single point with count 2.
+        assert len(duration_points) == 1 and duration_points[0][2] == 1, (
+            f"expected exactly one operation.duration observation per call; got {duration_points}"
+        )
+    if invariants.get("two_token_usage_observations_input_and_output"):
+        assert (
+            len(input_usage) == 1
+            and len(output_usage) == 1
+            and input_usage[0][2] == 1
+            and output_usage[0][2] == 1
+        ), f"expected one input and one output token.usage observation; got {usage_points}"
+    if invariants.get("errored_call_records_duration_with_error_type") or invariants.get(
+        "duration_records_error_type_on_failure"
+    ):
+        assert duration_points, "a failed call MUST still record operation.duration"
+        assert all(p[3].get("error.type") for p in duration_points), (
+            f"a failed call's duration observation MUST carry error.type; got {duration_points}"
+        )
+    if invariants.get("no_token_usage_observation_on_failure"):
+        assert not usage_points, (
+            f"a failure with no usage MUST record no token.usage observation; got {usage_points}"
+        )
+    if invariants.get("token_usage_recorded_on_structured_output_failure"):
+        # A structured-output failure DOES carry usage, so the counterpart above
+        # must not be over-applied to every failure.
+        assert usage_points, "a structured-output failure carries usage, so token.usage MUST still record"
+    if invariants.get("no_measurements_recorded_when_metrics_off"):
+        assert not points, f"metrics disabled MUST record no measurements at all; got {points}"
+    if invariants.get("null_prompt_tokens_reaches_no_span_histogram_or_budget_surface"):
+        # The umbrella claim: none of the three surfaces sees the null counter.
+        assert not input_usage, f"histogram surface: {input_usage}"
+        assert not _spans_carrying(*input_attrs), "span surface carries an input-usage attribute"
+        assert not budget_points, f"budget surface: {budget_points}"
 
 
 # ---------------------------------------------------------------------------
@@ -4622,32 +4924,25 @@ async def _run_token_budget_case(case: Mapping[str, Any]) -> None:
     expected_metrics = cast("list[dict[str, Any]] | None", expected.get("metrics"))
     if expected_metrics is not None:
         _assert_metric_points(points, expected_metrics)
-    _assert_token_budget_invariants(case, points, collectors)
+    # Both guards run on this path, so the recognized set is their union: 147
+    # routes here and declares metrics-family names exclusively.
+    _assert_invariants_recognized(case, _METRICS_INVARIANTS | _TOKEN_BUDGET_INVARIANTS, "token-budget")
+    _assert_token_budget_invariants(case, points, collectors, spans)
+    _assert_metrics_invariants(case, points, spans)
 
 
 def _assert_token_budget_invariants(
     case: Mapping[str, Any],
     points: Sequence[tuple[str, float, int, dict[str, Any]]],
     collectors: Mapping[str, Any],
+    spans: Sequence[Any],
 ) -> None:
     """Evaluate the token-budget named invariants (128/129/131) as absence
     predicates over the captured measurement set + the typed events.
     The ``metrics:`` list shape asserts presence only, so these cover the
     "no observation recorded" claims the list cannot express."""
     invariants = cast("dict[str, Any]", case["expected"].get("invariants") or {})
-    # Fail loudly on a declared invariant this runner does not map, so a future
-    # fixture's new invariant name cannot pass vacuously (harness-fidelity).
-    _known_invariants = {
-        "no_token_budget_exceeded_observation_when_under_budget",
-        "utilization_records_under_budget",
-        "no_token_budget_instrument_observations_when_no_budget",
-        "token_budget_null_on_completion_event",
-        "no_token_budget_instrument_observations_without_usage",
-        "token_budget_populated_but_not_evaluated_without_usage",
-        "exception_propagates_alongside_typed_event",
-    }
-    unknown = set(invariants) - _known_invariants
-    assert not unknown, f"unhandled token-budget invariant(s): {sorted(unknown)}"
+    _assert_span_anchor(invariants, spans)
     exceeded_points = [p for p in points if p[0] == "openarmature.gen_ai.client.token_budget.exceeded"]
     utilization_points = [p for p in points if p[0] == "openarmature.gen_ai.client.token_budget.utilization"]
 
@@ -4694,6 +4989,50 @@ def _assert_token_budget_invariants(
         assert not exceeded_points and not utilization_points, (
             "a no-usage failure MUST NOT evaluate the budget (no token-budget metric observation)"
         )
+    # ---- proposal 0101: a null prompt_tokens makes the INPUT bound unevaluable
+    # while leaving a sound total bound fully evaluated. Absence predicates,
+    # because the `metrics:` list shape asserts presence only.
+    _BUDGET_KIND = "openarmature.gen_ai.token_budget.kind"
+    _TOKEN_TYPE = "openarmature.gen_ai.token.type"
+    input_budget_points = [
+        p for p in exceeded_points + utilization_points if p[3].get(_BUDGET_KIND) == "input"
+    ]
+
+    if invariants.get("input_bound_not_evaluated_when_prompt_tokens_null") or invariants.get(
+        "no_input_kind_budget_observation_when_prompt_tokens_null"
+    ):
+        assert not input_budget_points, (
+            "a null prompt_tokens leaves the INPUT bound unevaluable, so it MUST record no "
+            f"token-budget observation of kind=input; got {input_budget_points}"
+        )
+    if invariants.get("total_bound_evaluated_when_total_tokens_sound"):
+        # The independence half. Without it the case above is satisfied by an
+        # implementation that skipped budget evaluation entirely.
+        total_points = [p for p in utilization_points if p[3].get(_BUDGET_KIND) == "total"]
+        assert total_points, (
+            "a sound total_tokens MUST still evaluate the total bound; got no kind=total "
+            f"utilization observation among {utilization_points}"
+        )
+    if invariants.get("no_input_token_usage_observation_when_prompt_tokens_null"):
+        input_usage = [
+            p
+            for p in points
+            if p[0] == "openarmature.gen_ai.client.token.usage" and p[3].get(_TOKEN_TYPE) == "input"
+        ]
+        assert not input_usage, (
+            f"a null prompt_tokens MUST record no input token.usage observation; got {input_usage}"
+        )
+    if invariants.get("exceeded_span_signal_absent_not_false_when_only_bound_unevaluable"):
+        # ABSENT, not present-and-false. A `False` would assert "evaluated, not
+        # breached", which is a different and wrong claim when nothing was
+        # evaluable at all.
+        attr = "openarmature.llm.token_budget.exceeded"
+        carrying = [s for s in spans if attr in dict(s.attributes or {})]
+        assert not carrying, (
+            f"with no evaluable bound the {attr} span attribute MUST be absent rather than false; "
+            f"present on {[(s.name, dict(s.attributes or {}).get(attr)) for s in carrying]}"
+        )
+
     if invariants.get("exception_propagates_alongside_typed_event"):
         # The runner's pytest.raises already asserts the exception propagated;
         # assert the typed failure event fired alongside it (both, not either).
@@ -5195,15 +5534,68 @@ async def _run_tool_case(case: Mapping[str, Any]) -> None:
 # appears, mirroring the tool path (_run_tool_case).
 
 
+def _raise_mock_provider_error(
+    spec_resp: Mapping[str, Any],
+    classify: Callable[[Any], Any],
+) -> None:
+    """Honour a ``raises`` sub-directive on a mock_embedding / mock_rerank entry."""
+    # Proposal 0107 (conformance-adapter §5.15), the retrieval analogue of the
+    # tool path's `mock_tool: {raises: {...}}`. Fixtures 137 / 138 can only assert
+    # error_type / error_message by FORMAT, because both are impl-derived: the
+    # class name comes from whichever exception the provider's own classifier
+    # picked, and the message from the vendor body. `raises` supplies literal
+    # values so 150 / 151 can assert them exactly.
+    #
+    # The category must still come from `status`. So rather than restate the
+    # status-to-category table here, which would silently drift from src, run the
+    # REAL classifier on a probe response of that status and subclass whatever it
+    # returns. `error_category` on the event reads `exc.category`, which the
+    # subclass inherits, while `error_type` reads `type(exc).__name__` and
+    # `error_message` reads `str(exc)`, which the rename and the message supply.
+    #
+    # Raised from inside the mock transport, which works because the exception is
+    # an LlmProviderError rather than an httpx.HTTPError: the provider's
+    # `except httpx.HTTPError` around the post does not catch it, so it reaches
+    # the `except LlmProviderError` that builds the failure event.
+    import json
+
+    import httpx
+
+    raises = spec_resp.get("raises")
+    if not isinstance(raises, Mapping):
+        return
+    raises_map = cast("Mapping[str, Any]", raises)
+    status = int(spec_resp.get("status", 500))
+    probe = httpx.Response(
+        status,
+        content=json.dumps(spec_resp.get("body") or {}).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+    )
+    classified = cast("Exception", classify(probe))
+    error_type = cast("str", raises_map.get("error_type") or type(classified).__name__)
+    renamed: type[Exception] = type(error_type, (type(classified),), {})
+    raise renamed(cast("str", raises_map.get("message", "")))
+
+
 def _embedding_model_from_first_response(case: Mapping[str, Any]) -> str | None:
     """Return the ``model`` on the first ``mock_embedding`` response body, so
     the provider binds to the model the fixture's expected event reports."""
     responses = cast("list[dict[str, Any]] | None", case.get("mock_embedding")) or []
-    if not responses:
-        return None
-    body = cast("dict[str, Any] | None", responses[0].get("body")) or {}
-    model = body.get("model")
-    return model if isinstance(model, str) else None
+    body = cast("dict[str, Any] | None", responses[0].get("body")) if responses else None
+    model = (body or {}).get("model")
+    if isinstance(model, str):
+        return model
+    # A failure-path fixture (154) has no response body to carry a model, so bind
+    # to the one its expected metric dimensions report instead. Without this the
+    # provider binds to the harness default and every dimension match fails on a
+    # model name the fixture never mentions.
+    expected = cast("dict[str, Any]", case.get("expected") or {})
+    for point in cast("list[dict[str, Any]]", expected.get("metrics") or []):
+        dims = cast("dict[str, Any]", point.get("dimensions") or {})
+        declared = dims.get("gen_ai.request.model")
+        if isinstance(declared, str):
+            return declared
+    return None
 
 
 def _build_embedding_runtime_config(config_spec: Mapping[str, Any] | None) -> Any:
@@ -5260,6 +5652,7 @@ def _build_embedding_graph(
 
     from openarmature.graph import END, GraphBuilder
     from openarmature.retrieval import OpenAIEmbeddingProvider
+    from openarmature.retrieval.providers.openai import _classify_embedding_http_error
 
     from .adapter import build_state_cls
 
@@ -5274,6 +5667,7 @@ def _build_embedding_graph(
         if not mock_responses:
             raise AssertionError("mock_embedding queue exhausted")
         spec_resp = mock_responses.pop(0)
+        _raise_mock_provider_error(spec_resp, _classify_embedding_http_error)
         body = cast("dict[str, Any]", spec_resp.get("body") or {})
         return httpx.Response(
             int(spec_resp.get("status", 200)),
@@ -5438,6 +5832,9 @@ def _assert_embedding_metrics_invariants(
         "duration_recorded_when_usage_absent",
         "embedding_records_input_token_only",
         "no_output_token_observation_for_embedding",
+        # 154: the failure-path counterpart of 089 / 143.
+        "errored_embedding_records_duration_with_error_type",
+        "no_token_usage_observation_on_failure",
     }
     unknown = set(invariants) - _known
     assert not unknown, f"unhandled embedding-metrics invariant(s): {sorted(unknown)}"
@@ -5459,6 +5856,19 @@ def _assert_embedding_metrics_invariants(
     if invariants.get("no_output_token_observation_for_embedding"):
         assert not output_token_points, (
             f"embedding MUST record no output token observation; got {output_token_points}"
+        )
+    if invariants.get("errored_embedding_records_duration_with_error_type"):
+        # The §11 baseline survives the failure, carrying the §7 category. Both
+        # halves matter: a duration that records without error.type would lose
+        # the only dimension distinguishing a failed call from a slow one.
+        assert duration_points, "a failed embedding MUST still record operation.duration"
+        assert all(p[3].get("error.type") for p in duration_points), (
+            f"a failed embedding's duration MUST carry error.type; got {duration_points}"
+        )
+    if invariants.get("no_token_usage_observation_on_failure"):
+        assert not token_points, (
+            f"a failed embedding received no response, so it MUST record no token.usage "
+            f"observation; got {token_points}"
         )
 
 
@@ -5540,6 +5950,7 @@ def _build_rerank_graph(
 
     from openarmature.graph import END, GraphBuilder
     from openarmature.retrieval import CohereRerankProvider
+    from openarmature.retrieval.providers.cohere import _classify_cohere_http_error
 
     from .adapter import build_state_cls
 
@@ -5554,6 +5965,7 @@ def _build_rerank_graph(
         if not mock_responses:
             raise AssertionError("mock_rerank queue exhausted")
         spec_resp = mock_responses.pop(0)
+        _raise_mock_provider_error(spec_resp, _classify_cohere_http_error)
         body = cast("dict[str, Any]", spec_resp.get("body") or {})
         return httpx.Response(
             int(spec_resp.get("status", 200)),

@@ -52,6 +52,7 @@ from openarmature.prompts.context import with_active_prompt
 
 from .adapter import build_graph, build_state_cls
 from .harness.capabilities import (
+    assert_case_asserts_something,
     assert_some_case_ran,
     capability_skip_reason,
     report_recognized_skip,
@@ -158,6 +159,8 @@ _LANGFUSE_FIXTURES = frozenset(
         # to metadata.token_budget.*. Drives the input-exceeded path via
         # renders_prompt + the prompt's token_budget block.
         "130-langfuse-token-budget-warning-level",
+        "155-langfuse-token-budget-exceeded-flag-on-failure",
+        "156-langfuse-token-budget-under-budget-flag-false",
         # 134 (proposal 0084): the Langfuse Generation parent resolves by the same
         # chain-aware §5.5 rule as the OTel span parent -- both the nested
         # exact-match (case 1, mirrors OTel 132) and the orphan fallback (case 2,
@@ -558,6 +561,14 @@ class _MockPromptBackend:
 async def test_langfuse_fixture(fixture_path: Path) -> None:
     spec = _load(fixture_path)
     fixture_stem = fixture_path.stem
+    # `or [spec]` because a single-case fixture puts `expected` at the top
+    # level with no `cases` list; `or []` skipped seven of them entirely.
+    for _case in cast("list[dict[str, Any]]", spec.get("cases") or [spec]):
+        assert_case_asserts_something(
+            fixture_stem,
+            cast("str", _case.get("name") or "<unnamed>"),
+            cast("Mapping[str, Any]", _case.get("expected") or {}),
+        )
     if fixture_stem in _ISOLATION_FIXTURES:
         cases_157 = cast("list[dict[str, Any]]", spec["cases"])
         excluded_157: dict[str, str] = {}
@@ -2270,7 +2281,15 @@ def _runtime_config_from_spec(config_spec: dict[str, Any] | None) -> RuntimeConf
 # assertions; the rest (``distinct_trace_ids``,
 # ``correlation_id_consistent_across_traces``, etc.) stay in
 # ``_assert_multi_traces`` as cross-Trace checks.
-_PER_TRACE_INVARIANTS = frozenset({"trace_id_equals_invocation_id", "correlation_id_consistency"})
+#
+# Must list EVERY name ``_assert_trace`` reads: a name it checks but that is
+# missing here is silently discarded on the multi-trace path, so a fixture
+# declaring it there passes without the claim being evaluated.
+# ``test_harness_fidelity.py`` derives the read set from the function body and
+# fails on any omission -- ``no_warning_level_under_budget`` was one.
+_PER_TRACE_INVARIANTS = frozenset(
+    {"trace_id_equals_invocation_id", "correlation_id_consistency", "no_warning_level_under_budget"}
+)
 
 
 def _assert_multi_traces(
@@ -2391,6 +2410,17 @@ def _assert_trace(
     *,
     expected_invariants: dict[str, Any],
 ) -> None:
+    if expected_invariants.get("no_warning_level_under_budget"):
+        # Implemented, unlike its neighbours, because it is UNBACKED: 155 pins its
+        # level concretely (`level: ERROR`) so its invariants are documentary, but
+        # 156's expected block declares no level at all, leaving this its only
+        # expression. A blanket guard here would be wrong -- it would demand
+        # implementation of the documentary majority.
+        offending = [o for o in trace.observations if str(getattr(o, "level", "") or "").upper() == "WARNING"]
+        assert not offending, (
+            f"an under-budget call MUST NOT render a WARNING-level observation; got "
+            f"{[(o.name, o.level) for o in offending]}"
+        )
     expected_id = expected.get("id")
     if expected_id is not None and not _is_placeholder(expected_id):
         # Fixtures 035/036: a LITERAL trace.id is the DERIVED Langfuse id; the

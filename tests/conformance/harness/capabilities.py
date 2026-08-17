@@ -149,3 +149,30 @@ __all__ = [
     "capability_skip_reason",
     "report_recognized_skip",
 ]
+
+
+def assert_case_asserts_something(fixture_stem: str, case_name: str, expected: Mapping[str, object]) -> None:
+    """Fail a case whose ``expected`` block carries nothing but ``invariants``."""
+    # Invariant blocks in this corpus are DOCUMENTARY: they restate in prose what
+    # a concrete directive (span_tree / langfuse_trace / metrics / event_count)
+    # already pins, and runners deliberately do not implement most of them. That
+    # convention is only safe while something concrete is present to do the
+    # pinning. A case whose expected block is invariants-ONLY has no such backing,
+    # so it asserts exactly nothing while reading like coverage.
+    #
+    # Matches no ACTIVATED fixture. That is weaker than "no fixture": an
+    # invariants-only case does exist in the corpus and escapes only because it
+    # is skipped upstream, which makes this guard's placement relative to the
+    # skip chain load-bearing rather than incidental. It exists because the metrics driver reached that state
+    # by a different route -- reading `metrics` but never `invariants`, on two
+    # fixtures whose invariants were their only negative assertion -- and both
+    # passed while checking nothing.
+    concrete = set(expected) - {"invariants"}
+    if concrete or not expected.get("invariants"):
+        return
+    raise AssertionError(
+        f"{fixture_stem}::{case_name}: `expected` declares only `invariants` and no concrete "
+        f"directive, so nothing is asserted unless the runner implements every one of them. "
+        f"Add a concrete assertion, or implement the invariants and register them in the "
+        f"driver's known-invariant set."
+    )
