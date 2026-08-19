@@ -6752,12 +6752,11 @@ async def _run_typed_event_with_span_case(case: Mapping[str, Any]) -> None:
     exporter = InMemorySpanExporter()
     observer = OTelObserver(span_processor=SimpleSpanProcessor(exporter))
     try:
-        # Deliberately NOT `_invoke_typed_fixture`: that helper removes the
-        # observer handles BEFORE `drain()`, so the invocation-completed event
-        # never reaches the observer and the root span is left open. It never
-        # mattered for the typed-event fixtures because none of them reads
-        # spans; here it dropped `openarmature.invocation` from the exporter
-        # entirely, leaving only the node and LLM spans.
+        # Shut the observer down BEFORE reading the exporter: that is what ends
+        # the `openarmature.invocation` root span, so asserting first sees only
+        # the node and LLM spans and the span_tree root lookup fails on harness
+        # ordering rather than on behaviour. Verified by moving it after the
+        # assertions, which fails with "invocation root span missing".
         try:
             final, _exc = await _invoke_typed_fixture(
                 case, collectors, graph, state_cls, extra_observer=observer
@@ -6787,8 +6786,10 @@ async def _run_typed_event_with_span_case(case: Mapping[str, Any]) -> None:
 
         _assert_invariants_recognized(case, _MALFORMED_COUNTER_INVARIANTS, "malformed-counter")
     finally:
+        # `observer.shutdown()` already ran in the inner finally above, on every
+        # path including the failure one; repeating it here would be a second
+        # shutdown of the same provider.
         await provider.aclose()
-        observer.shutdown()
 
 
 async def _run_typed_event_chain_cases(spec: Mapping[str, Any], *, expect_failure: bool = False) -> None:
