@@ -121,6 +121,24 @@ def _invariant_names_read_by(func: object, param: str) -> set[str]:
     return names
 
 
+def _assert_helpers_called_by(func: object, module: object) -> list[object]:
+    """Module-level `_assert_*` functions `func` calls directly."""
+    # One level, deliberately. Reading a guard's own body misses names it
+    # delegates to a helper, which is not hypothetical: moving 148's two
+    # invariants into `_assert_generation_usage_omission` made the check below
+    # blind to them the moment it was written. Deeper recursion is the
+    # transitive-derivation problem tracked separately; one level covers the
+    # delegate-to-a-sibling shape that actually occurs here.
+    tree = ast.parse(inspect.getsource(func))  # pyright: ignore[reportArgumentType]
+    found: list[object] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+            helper = getattr(module, node.func.id, None)
+            if node.func.id.startswith("_assert_") and callable(helper) and helper not in found:
+                found.append(helper)
+    return found
+
+
 def _span_dependent_invariants_in(func: object) -> set[str]:
     """Invariant names whose `if invariants.get(...)` body reads the span set."""
     tree = ast.parse(inspect.getsource(func))  # pyright: ignore[reportArgumentType]
@@ -194,10 +212,22 @@ def test_per_trace_invariants_covers_everything_assert_trace_reads() -> None:
     # `_PER_TRACE_INVARIANTS` before delegating. A name `_assert_trace` checks
     # but that is absent from the set is therefore dropped on that path, and the
     # fixture declaring it still passes.
-    read = _invariant_names_read_by(langfuse_runner._assert_trace, "expected_invariants")  # noqa: SLF001
-    assert read, "parsed no invariant lookups out of _assert_trace, so this compared nothing"
+    entry = langfuse_runner._assert_trace  # noqa: SLF001
+    helpers = _assert_helpers_called_by(entry, langfuse_runner)
+    # Non-vacuity on the callee walk: `_assert_trace` delegates today, so
+    # finding none means the walk broke and the check silently narrowed back to
+    # the entry point's own body.
+    assert helpers, "found no _assert_* helpers called by _assert_trace; the callee walk is broken"
+    read: set[str] = set()
+    for func in [entry, *helpers]:
+        read |= _invariant_names_read_by(func, "expected_invariants")
+    assert read, "parsed no invariant lookups out of the per-trace guards, so this compared nothing"
     missing = sorted(read - set(langfuse_runner._PER_TRACE_INVARIANTS))  # noqa: SLF001
     assert not missing, (
-        f"`_assert_trace` checks {missing}, but `_PER_TRACE_INVARIANTS` omits them, so the "
+        f"the per-trace guards check {missing}, but `_PER_TRACE_INVARIANTS` omits them, so the "
         f"multi-trace runner discards those claims silently."
     )
+    # Stale names are the other direction: a set entry nothing reads means the
+    # multi-trace path forwards a claim no guard evaluates.
+    stale = sorted(set(langfuse_runner._PER_TRACE_INVARIANTS) - read)  # noqa: SLF001
+    assert not stale, f"`_PER_TRACE_INVARIANTS` names invariants no per-trace guard reads: {stale}"
