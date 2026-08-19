@@ -456,13 +456,6 @@ _DEFERRED_FIXTURES: dict[str, str] = {
     "153-otel-mixed-nesting-orphan-llm-fallback": (
         "same driver gap as 152, one nesting level deeper (KeyError: 'leaf_sg')"
     ),
-    "148-langfuse-generation-usage-omits-input-on-null-counter": (
-        "the sibling Langfuse runner DOES drive mock_llm generations asserting usage (023, 155, "
-        "156), so plumbing is not the gap. The gap is its `usage` comparator: it iterates the "
-        "EXPECTED keys, a subset match, so an OMITTED `input` key -- the whole claim -- cannot "
-        "be expressed. Wiring it needs an exact-map or usage_absent comparator first, or the "
-        "fixture passes against an impl emitting usage.input = null"
-    ),
     # Proposal 0109 (spec v0.104.0) token-budget failure-path parity.
 }
 
@@ -491,6 +484,11 @@ _LANGFUSE_HARNESS_FIXTURES: frozenset[str] = frozenset(
         "059-implementation-attribution-langfuse",
         "155-langfuse-token-budget-exceeded-flag-on-failure",
         "156-langfuse-token-budget-under-budget-flag-false",
+        # 148 (proposal 0101): the Generation's fixed `usage` record omits a
+        # counter the provider did not report. The `usage` comparator is a
+        # subset match, so the OMISSION -- the whole claim -- is carried by the
+        # case's two invariants rather than by the langfuse_trace block.
+        "148-langfuse-generation-usage-omits-input-on-null-counter",
         # 134 -- proposal 0084 Langfuse parent resolution (nested exact-match +
         # orphan fallback). Driven by a dedicated hand-built runner in the
         # sibling harness; the generic topology path cannot model the
