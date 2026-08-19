@@ -161,6 +161,13 @@ _LANGFUSE_FIXTURES = frozenset(
         "130-langfuse-token-budget-warning-level",
         "155-langfuse-token-budget-exceeded-flag-on-failure",
         "156-langfuse-token-budget-under-budget-flag-false",
+        # 148 (proposal 0101): the Generation's FIXED `usage` record omits a
+        # counter the provider did not report, unlike the Embedding's open
+        # `usageDetails` map (140) where absence is naturally expressible. The
+        # `usage` comparator here iterates the EXPECTED keys, so declining to
+        # declare `input` asserts nothing; the case's two invariants carry the
+        # omission claim, and both are implemented in `_assert_trace`.
+        "148-langfuse-generation-usage-omits-input-on-null-counter",
         # 134 (proposal 0084): the Langfuse Generation parent resolves by the same
         # chain-aware §5.5 rule as the OTel span parent -- both the nested
         # exact-match (case 1, mirrors OTel 132) and the orphan fallback (case 2,
@@ -2288,7 +2295,13 @@ def _runtime_config_from_spec(config_spec: dict[str, Any] | None) -> RuntimeConf
 # ``test_harness_fidelity.py`` derives the read set from the function body and
 # fails on any omission -- ``no_warning_level_under_budget`` was one.
 _PER_TRACE_INVARIANTS = frozenset(
-    {"trace_id_equals_invocation_id", "correlation_id_consistency", "no_warning_level_under_budget"}
+    {
+        "trace_id_equals_invocation_id",
+        "correlation_id_consistency",
+        "no_warning_level_under_budget",
+        "generation_usage_input_omitted_when_prompt_tokens_null",
+        "generation_usage_output_and_total_present_when_sound",
+    }
 )
 
 
@@ -2404,6 +2417,51 @@ def _assert_multi_traces(
                         )
 
 
+def _assert_generation_usage_omission(trace: LangfuseTrace, expected_invariants: dict[str, Any]) -> None:
+    """Fixture 148: a counter the provider did not report is OMITTED from the
+    Generation's fixed `usage` record, while the sound counters stay present."""
+    # These two are the whole of 148's claim. The `langfuse_trace` block cannot
+    # carry it: `usage` is compared by iterating the EXPECTED keys, so a key the
+    # fixture declines to declare is never looked at, and an implementation
+    # emitting `input: null` passes the block unchanged.
+    #
+    # `None` is how omission is spelled on this side of the boundary. The
+    # in-memory double models `usage` as a dataclass, where every field exists
+    # and an unreported counter reads as None; the SDK adapter builds the wire
+    # `usage_details` dict by skipping exactly the None fields
+    # (langfuse/adapter.py), so None here is the faithful proxy for key-absence
+    # there. Asserting `"input" not in ...` would be checking the double's
+    # dataclass shape rather than the mapping under test.
+    omitted = expected_invariants.get("generation_usage_input_omitted_when_prompt_tokens_null")
+    present = expected_invariants.get("generation_usage_output_and_total_present_when_sound")
+    if not omitted and not present:
+        return
+    generations = [o for o in trace.observations if o.type == "generation"]
+    # Positive anchor: every claim below reads a Generation, and no Generation
+    # at all would satisfy the omission half trivially.
+    assert generations, (
+        f"no Generation observation was recorded, so the usage claims below would pass "
+        f"vacuously; got {[(o.name, o.type) for o in trace.observations]}"
+    )
+    if omitted:
+        carrying = [
+            (g.name, g.usage) for g in generations if g.usage is not None and g.usage.input is not None
+        ]
+        assert not carrying, (
+            f"an unreported prompt_tokens MUST be omitted from generation.usage rather than "
+            f"rendered as null or zero; present on {carrying}"
+        )
+    if present:
+        # The non-vacuity partner: without it the omission above is satisfied by
+        # an implementation that emitted no usage record at all.
+        for gen in generations:
+            assert gen.usage is not None, f"generation {gen.name!r} carries no usage record at all"
+            assert gen.usage.output is not None and gen.usage.total is not None, (
+                f"generation {gen.name!r} MUST still carry the sound counters; got "
+                f"output={gen.usage.output!r} total={gen.usage.total!r}"
+            )
+
+
 def _assert_trace(
     trace: LangfuseTrace,
     expected: dict[str, Any],
@@ -2421,6 +2479,7 @@ def _assert_trace(
             f"an under-budget call MUST NOT render a WARNING-level observation; got "
             f"{[(o.name, o.level) for o in offending]}"
         )
+    _assert_generation_usage_omission(trace, expected_invariants)
     expected_id = expected.get("id")
     if expected_id is not None and not _is_placeholder(expected_id):
         # Fixtures 035/036: a LITERAL trace.id is the DERIVED Langfuse id; the
