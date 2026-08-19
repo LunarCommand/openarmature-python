@@ -2632,6 +2632,19 @@ async def _run_fixture_038_case(case: Mapping[str, Any]) -> None:
             )
 
 
+def _attr_equal(actual: Any, expected: Any) -> bool:
+    """Compare a span attribute against a fixture's expected value."""
+    # OTel stores a sequence attribute as a TUPLE, while YAML parses the
+    # fixture's `[...]` into a LIST, and `['stop'] == ('stop',)` is False. A
+    # plain `==` therefore rejects every sequence-valued attribute, which read
+    # as "the implementation emitted the wrong value" rather than as a harness
+    # gap: 149 is the first fixture to assert `gen_ai.response.finish_reasons`
+    # through this matcher, so nothing surfaced it before.
+    if isinstance(expected, list) and isinstance(actual, tuple):
+        return list(cast("tuple[Any, ...]", actual)) == cast("list[Any]", expected)
+    return bool(actual == expected)
+
+
 def _assert_span_tree_matches(
     all_spans: Sequence[Any], actual_roots: Sequence[Any], expected_nodes: Sequence[Mapping[str, Any]]
 ) -> None:
@@ -2650,7 +2663,7 @@ def _assert_span_tree_matches(
 
         def _matches(span: Any, eattrs: dict[str, Any] = expected_attrs) -> bool:
             attrs = dict(span.attributes or {})
-            return all(attrs.get(k) == v for k, v in eattrs.items())
+            return all(_attr_equal(attrs.get(k), v) for k, v in eattrs.items())
 
         matching = [c for c in candidates if _matches(c)]
         assert len(matching) >= 1, (
