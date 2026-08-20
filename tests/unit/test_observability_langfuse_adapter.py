@@ -22,6 +22,7 @@ verification.
 from __future__ import annotations
 
 import os
+from types import SimpleNamespace
 from typing import Annotated, Any
 
 import pytest
@@ -36,6 +37,7 @@ from openarmature.observability.langfuse import (  # noqa: E402
     LangfuseClient,
     LangfuseObserver,
     LangfuseSDKAdapter,
+    LangfuseUsage,
 )
 
 
@@ -403,3 +405,45 @@ async def test_adapter_against_real_langfuse_cloud() -> None:
     # The trace_id in the dashboard is the 32-char hex form (no dashes)
     # of OA's UUID4 invocation_id; strip dashes from any logged
     # correlation_id / invocation_id to find it.
+
+
+@pytest.mark.parametrize(
+    ("usage", "expected"),
+    [
+        # 0101: a counter the provider did not report is OMITTED from the wire
+        # record, not rendered as null or zero.
+        (LangfuseUsage(input=None, output=5, total=15), {"output": 5, "total": 15}),
+        (LangfuseUsage(input=7, output=5, total=15), {"input": 7, "output": 5, "total": 15}),
+        (LangfuseUsage(input=0, output=5, total=15), {"input": 0, "output": 5, "total": 15}),
+    ],
+)
+def test_generation_usage_details_omit_unreported_counters(
+    monkeypatch: pytest.MonkeyPatch,
+    usage: LangfuseUsage,
+    expected: dict[str, int],
+) -> None:
+    # The conformance fixture for this claim (148) asserts `usage.input is None`
+    # on the in-memory double, where omission and a rendered null are the SAME
+    # state. This is the other side of that proxy: the adapter is what turns the
+    # record into the wire `usage_details` map, and until this existed the guard
+    # there could be neutralised at all four sites with the whole suite green.
+    #
+    # The zero row is the reason `if usage.input is not None` cannot become a
+    # truthiness check: a genuinely reported 0 MUST still render.
+    adapter = LangfuseSDKAdapter(_dummy_client())
+    captured: dict[str, Any] = {}
+
+    def _capture(**kwargs: Any) -> Any:
+        captured.update(kwargs)
+
+        def _noop(**_kwargs: Any) -> None:
+            return None
+
+        return SimpleNamespace(id="obs-1", update=_noop, end=_noop)
+
+    monkeypatch.setattr(adapter, "_start_observation", _capture)
+    adapter.generation(trace_id="tr-1", name="openarmature.llm.complete", usage=usage)
+
+    assert captured["usage_details"] == expected, (
+        f"usage_details must carry exactly the reported counters; got {captured.get('usage_details')!r}"
+    )
