@@ -166,7 +166,8 @@ _LANGFUSE_FIXTURES = frozenset(
         # `usageDetails` map (140) where absence is naturally expressible. The
         # `usage` comparator here iterates the EXPECTED keys, so declining to
         # declare `input` asserts nothing; the case's two invariants carry the
-        # omission claim, and both are implemented in `_assert_trace`.
+        # omission claim, and both are implemented in
+        # `_assert_generation_usage_omission`, which `_assert_trace` calls.
         "148-langfuse-generation-usage-omits-input-on-null-counter",
         # 134 (proposal 0084): the Langfuse Generation parent resolves by the same
         # chain-aware §5.5 rule as the OTel span parent -- both the nested
@@ -2289,11 +2290,14 @@ def _runtime_config_from_spec(config_spec: dict[str, Any] | None) -> RuntimeConf
 # ``correlation_id_consistent_across_traces``, etc.) stay in
 # ``_assert_multi_traces`` as cross-Trace checks.
 #
-# Must list EVERY name ``_assert_trace`` reads: a name it checks but that is
-# missing here is silently discarded on the multi-trace path, so a fixture
-# declaring it there passes without the claim being evaluated.
-# ``test_harness_fidelity.py`` derives the read set from the function body and
-# fails on any omission -- ``no_warning_level_under_budget`` was one.
+# Must list EVERY name ``_assert_trace`` OR A HELPER IT DELEGATES TO reads: a
+# name checked but missing here is silently discarded on the multi-trace path,
+# so a fixture declaring it there passes without the claim being evaluated.
+# The converse also binds: every name here must be EVALUATED by one of those
+# guards, or listed in ``test_harness_fidelity._DOCUMENTARY_PER_TRACE_INVARIANTS``
+# with its reason, so a guard gutted to ``if name: pass`` cannot read as live.
+# ``test_harness_fidelity.py`` derives both sets by walking those bodies and
+# fails either way -- ``no_warning_level_under_budget`` was a missing one.
 _PER_TRACE_INVARIANTS = frozenset(
     {
         "trace_id_equals_invocation_id",
@@ -2444,9 +2448,18 @@ def _assert_generation_usage_omission(trace: LangfuseTrace, expected_invariants:
         f"vacuously; got {[(o.name, o.type) for o in trace.observations]}"
     )
     if omitted:
-        carrying = [
-            (g.name, g.usage) for g in generations if g.usage is not None and g.usage.input is not None
-        ]
+        # Self-anchoring: skipping a Generation whose `usage` is None would make
+        # this satisfied by an implementation emitting no usage record at all.
+        # The `present` arm below rules that out too, but only when the fixture
+        # happens to declare BOTH names, and declaration lives in the spec repo.
+        carrying: list[tuple[str | None, Any]] = []
+        for gen in generations:
+            assert gen.usage is not None, (
+                f"generation {gen.name!r} carries no usage record at all, so the omission "
+                f"claim would pass vacuously"
+            )
+            if gen.usage.input is not None:
+                carrying.append((gen.name, gen.usage))
         assert not carrying, (
             f"an unreported prompt_tokens MUST be omitted from generation.usage rather than "
             f"rendered as null or zero; present on {carrying}"

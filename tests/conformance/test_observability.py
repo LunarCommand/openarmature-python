@@ -676,7 +676,7 @@ _DRIVER_EXPECTED_KEYS: dict[str, frozenset[str]] = {
     ),
     "_run_rerank_fixture": frozenset({"span_tree", "metrics", "invariants", "observers", "langfuse_trace"}),
     "_run_token_budget_fixture": frozenset({"span_tree", "metrics", "invariants", "observers"}),
-    # 149's driver: the only one reading the typed-event and span halves together.
+    # 149's driver: reads the typed-event and span halves off one invocation.
     "_run_typed_event_with_span_cases": frozenset({"span_tree", "observers", "invariants"}),
     # `invariants` is documentary here; `observers` is deliberately ABSENT because
     # _run_llm_payload_case reads span_tree ONLY. Claiming observers is what let
@@ -901,7 +901,7 @@ async def test_observability_fixture(fixture_path: Path) -> None:
     }:
         await _run_token_budget_fixture(spec)
     elif fixture_id == "149-malformed-wire-counter-nulled-through-mapping-to-event-and-span":
-        # The only fixture asserting the typed event AND the span from one run.
+        # Needs the request model bound independently of the mock; see the driver.
         await _run_typed_event_with_span_cases(spec)
     elif fixture_id in {
         "092-tool-call-event-dispatch",
@@ -4524,10 +4524,12 @@ def _check_payload_span_tree(
             # ``attributes:`` block — exact match per key.
             for k, v in cast("dict[str, Any]", entry.get("attributes") or {}).items():
                 actual: Any = attrs.get(k)
-                # OTel attribute arrays come back as tuples; normalize.
-                if isinstance(v, list) and isinstance(actual, tuple):
-                    actual = list(cast("tuple[Any, ...]", actual))
-                assert actual == v, f"span {name!r} attribute {k!r} mismatch: expected {v!r}, got {actual!r}"
+                # Shared with the span-tree walker: one fixture directive
+                # (`attributes:`) is consumed by two comparators in this file,
+                # so a fix to attribute matching must not have two landing sites.
+                assert _attr_equal(actual, v), (
+                    f"span {name!r} attribute {k!r} mismatch: expected {v!r}, got {actual!r}"
+                )
             # ``attributes_absent:`` list of names that MUST NOT appear.
             absent = entry.get("attributes_absent")
             if absent:
@@ -6296,16 +6298,18 @@ def _build_simple_llm_graph(
     # §5.5.7 -- 068 needs this to differ from the provider-returned
     # response_model), else the model the first mock response reports
     # (050-056 path), else a default.
-    # An explicit `model` from the caller wins over the mock fallback. Fixtures
-    # that assert `gen_ai.request.model` and `gen_ai.response.model` DIFFER (144,
-    # 149) declare no `calls_llm.model`, so the mock fallback below would bind
-    # the request model to the response model and collapse the distinction the
-    # fixture exists to draw. `_run_llm_payload_case`, which drives 144, resolves
-    # this by hardcoding "test-model"; this parameter is that same convention
-    # made available to the other drivers rather than duplicated again.
+    # A caller-supplied `model` sits BELOW the fixture's own declaration and above
+    # the mock fallback. Fixtures asserting that `gen_ai.request.model` and
+    # `gen_ai.response.model` DIFFER (144, 149) declare no `calls_llm.model`, so
+    # the mock fallback would bind the request model to the response model and
+    # collapse the distinction they exist to draw; `_run_llm_payload_case`, which
+    # drives 144, resolves that by hardcoding "test-model", and this parameter is
+    # the same convention made reusable. It must NOT outrank `calls_llm.model`:
+    # a driver's blanket default would then silently replace a request model a
+    # case declared, and any case not pinning the model attribute stays green.
     bound_model = (
-        model
-        or cast("str | None", calls_llm_spec.get("model"))
+        cast("str | None", calls_llm_spec.get("model"))
+        or model
         or _mock_model_from_first_response(case)
         or "test-model"
     )
@@ -6698,14 +6702,15 @@ async def _run_typed_event_cases(spec: Mapping[str, Any], *, expect_failure: boo
 # instead of nulling it fails `contains_event`; emitting the input-usage span
 # attribute anyway fails `attributes_absent`. Both directives are live.
 #
-# ONE name is a negative control here, and is recorded as such rather than left
-# looking verified: `event_usage_is_present_record_of_nulls_not_null_record`
-# cannot be violated by this implementation at all, because `Response.usage` is
-# typed `Usage` rather than `Usage | None` (llm/response.py). A null usage record
-# is unrepresentable, so pydantic rejects the mutation before any assertion runs.
-# The fixture argues the nested `usage:` mapping discriminates a present record
-# of nulls from a null record, which is true and useful for an implementation
-# whose usage field is nullable; it just cannot fail for ours.
+# `event_usage_is_present_record_of_nulls_not_null_record` is live like the rest.
+# It was briefly recorded here as an unfalsifiable negative control, on the
+# grounds that `Response.usage` is typed `Usage` rather than `Usage | None`. That
+# reasoned about the wrong layer: the invariant and the fixture's contains_event
+# block are about the EVENT, and `LlmCompletionEvent.usage` IS nullable
+# (graph/events.py). Setting `usage=None` where the event is built
+# (llm/providers/openai.py) is accepted and fails 149's contains_event, so the
+# nested `usage:` mapping does discriminate a present record of nulls from a
+# null record, exactly as the fixture argues.
 _MALFORMED_COUNTER_INVARIANTS = {
     # Case 1: one malformed wire counter ("abc").
     "malformed_wire_prompt_tokens_nulled_before_event_and_span",
@@ -6721,13 +6726,20 @@ _MALFORMED_COUNTER_INVARIANTS = {
 async def _run_typed_event_with_span_cases(spec: Mapping[str, Any]) -> None:
     """Fixture 149: cases asserting the SAME null-counter claim on the typed
     event AND the OTel span, from one invocation."""
-    # 149 declares `observers.contains_event` and `span_tree` together, and no
-    # other driver serves both: the typed-event driver reads observers only, the
-    # LLM-payload driver reads span_tree only. Routing it to either silently
-    # drops half the fixture, which is what the earlier deferral recorded and
-    # what an attempted re-route then repeated in the other direction. The whole
-    # point of the fixture is that the nulling happens BEFORE the fan-out to both
-    # surfaces, so both must be read off one run.
+    # 149 declares `observers.contains_event` and `span_tree` together, and the
+    # nulling it pins happens BEFORE the fan-out to both, so both must come off
+    # ONE invocation. The typed-event driver reads observers only and the
+    # LLM-payload driver reads span_tree only, so routing 149 to either silently
+    # drops the other half, which an attempted re-route did in each direction.
+    #
+    # `_run_token_budget_fixture` DOES read both, so this is not "no driver
+    # serves both". What stops it is mechanical, and worth recording because the
+    # next 0101-family fixture gets triaged against it: it binds the request
+    # model from the mock response, so 149's `gen_ai.request.model: test-model`
+    # cannot match a `test-model-2026-07-15` response, and it validates
+    # invariants against the metrics / token-budget families, which reject 149's
+    # six names. Confirmed by running 149 through it -- it reaches the span-tree
+    # match and fails on the model attribute.
     for case in cast("list[dict[str, Any]]", spec["cases"]):
         case_name = cast("str", case["name"])
         try:
@@ -6751,45 +6763,45 @@ async def _run_typed_event_with_span_case(case: Mapping[str, Any]) -> None:
     )
     exporter = InMemorySpanExporter()
     observer = OTelObserver(span_processor=SimpleSpanProcessor(exporter))
+    # Teardown BEFORE the assertions, matching `_run_token_budget_case`: the
+    # shutdown ends the `openarmature.invocation` root span, so reading the
+    # exporter first sees only the node and LLM spans and the span_tree root
+    # lookup fails on harness ordering rather than on behaviour. Verified by
+    # moving it after, which fails with "invocation root span missing".
     try:
-        # Shut the observer down BEFORE reading the exporter: that is what ends
-        # the `openarmature.invocation` root span, so asserting first sees only
-        # the node and LLM spans and the span_tree root lookup fails on harness
-        # ordering rather than on behaviour. Verified by moving it after the
-        # assertions, which fails with "invocation root span missing".
-        try:
-            final, _exc = await _invoke_typed_fixture(
-                case, collectors, graph, state_cls, extra_observer=observer
-            )
-        finally:
-            observer.shutdown()
-        assert final is not None, "expected a non-None final state on success path"
-
-        expected = cast("dict[str, Any]", case.get("expected") or {})
-        observer_expectations = cast("dict[str, Any]", expected.get("observers") or {})
-        for name, expectations in observer_expectations.items():
-            collector = collectors.get(name)
-            if collector is None:
-                raise AssertionError(f"fixture references unknown observer {name!r}")
-            _assert_observer_expectations(name, collector, cast("dict[str, Any]", expectations))
-
-        spans = exporter.get_finished_spans()
-        expected_tree = cast("list[dict[str, Any]] | None", expected.get("span_tree"))
-        if expected_tree is not None:
-            inv_root = next(
-                (s for s in spans if s.name == "openarmature.invocation" and cast("Any", s.parent) is None),
-                None,
-            )
-            assert inv_root is not None, f"invocation root span missing; got {[s.name for s in spans]}"
-            _assert_span_tree_matches(spans, [inv_root], expected_tree)
-            _assert_error_span_extras(spans, expected_tree)
-
-        _assert_invariants_recognized(case, _MALFORMED_COUNTER_INVARIANTS, "malformed-counter")
+        final, exc = await _invoke_typed_fixture(case, collectors, graph, state_cls, extra_observer=observer)
     finally:
-        # `observer.shutdown()` already ran in the inner finally above, on every
-        # path including the failure one; repeating it here would be a second
-        # shutdown of the same provider.
         await provider.aclose()
+        observer.shutdown()
+
+    # `_invoke_typed_fixture` CAPTURES a NodeException rather than raising, so
+    # surface it: an implementation that raises on a malformed counter instead
+    # of nulling it is one of the two behaviours 149 discriminates, and
+    # reporting that as a bare state assertion drops the cause.
+    assert final is not None, (
+        f"expected a non-None final state on the success path; the invocation raised {exc!r}"
+    )
+
+    expected = cast("dict[str, Any]", case.get("expected") or {})
+    observer_expectations = cast("dict[str, Any]", expected.get("observers") or {})
+    for name, expectations in observer_expectations.items():
+        collector = collectors.get(name)
+        if collector is None:
+            raise AssertionError(f"fixture references unknown observer {name!r}")
+        _assert_observer_expectations(name, collector, cast("dict[str, Any]", expectations))
+
+    spans = exporter.get_finished_spans()
+    expected_tree = cast("list[dict[str, Any]] | None", expected.get("span_tree"))
+    if expected_tree is not None:
+        inv_root = next(
+            (s for s in spans if s.name == "openarmature.invocation" and cast("Any", s.parent) is None),
+            None,
+        )
+        assert inv_root is not None, f"invocation root span missing; got {[s.name for s in spans]}"
+        _assert_span_tree_matches(spans, [inv_root], expected_tree)
+        _assert_error_span_extras(spans, expected_tree)
+
+    _assert_invariants_recognized(case, _MALFORMED_COUNTER_INVARIANTS, "malformed-counter")
 
 
 async def _run_typed_event_chain_cases(spec: Mapping[str, Any], *, expect_failure: bool = False) -> None:
