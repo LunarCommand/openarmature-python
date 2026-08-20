@@ -5228,3 +5228,65 @@ async def test_tool_span_serializes_non_json_result_via_str_fallback() -> None:
     attrs = dict(span.attributes or {})
     assert "openarmature.tool.call.result" in attrs
     assert "OPAQUE-RESULT" in attrs["openarmature.tool.call.result"]
+
+
+# --- per-branch dispatch key normalization (proposal 0084 lineage keys) -------
+
+
+def _branch_key_impls() -> list[tuple[str, Any]]:
+    """Both copies of the lineage key builder, so drift between them fails."""
+    from openarmature.observability.otel.observer import _branch_dispatch_key as otel_key
+
+    impls: list[tuple[str, Any]] = [("otel", otel_key)]
+    langfuse = pytest.importorskip("openarmature.observability.langfuse.observer")
+    impls.append(("langfuse", langfuse._branch_dispatch_key))  # noqa: SLF001
+    return impls
+
+
+@pytest.mark.parametrize(("label", "key"), _branch_key_impls())
+def test_branch_dispatch_key_pads_chains_shallower_than_the_prefix(label: str, key: Any) -> None:
+    # An orphan provider call issued from branch middleware carries EMPTY
+    # lineage chains, while the dispatch span was registered from an inner node
+    # event whose chains are padded to the namespace depth. Both denote "no
+    # enclosing fan-out at that depth", so they MUST produce the same key; when
+    # they did not, the lookup missed and the orphan span fell through to the
+    # invocation root (conformance fixture 152).
+    prefix = ("dispatcher",)
+    registered = key(prefix, (None,), (), "branch_a")
+    from_orphan = key(prefix, (), (), "branch_a")
+    assert from_orphan == registered, f"{label}: shallow chains must normalize to the registered key"
+
+
+@pytest.mark.parametrize(("label", "key"), _branch_key_impls())
+def test_branch_dispatch_key_still_discriminates_real_lineages(label: str, key: Any) -> None:
+    # The padding must not collapse genuinely different enclosing lineages: a pb
+    # node inside outer fan-out instance 0 and the same node inside instance 1
+    # are different dispatch spans and must not share a key.
+    prefix = ("outer", "dispatcher")
+    assert key(prefix, (0, None), (), "b") != key(prefix, (1, None), (), "b"), (
+        f"{label}: distinct enclosing fan-out instances must not collide"
+    )
+    assert key(prefix, (None, None), ("x",), "b") != key(prefix, (None, None), ("y",), "b"), (
+        f"{label}: distinct enclosing branch chains must not collide"
+    )
+    assert key(prefix, (None, None), (), "a") != key(prefix, (None, None), (), "b"), (
+        f"{label}: distinct branch names must not collide"
+    )
+
+
+def test_branch_dispatch_key_copies_agree() -> None:
+    # The two implementations are duplicated by design (one per backend) and
+    # their docstrings say each mirrors the other. Nothing enforced that, so the
+    # padding defect existed in both and was fixed in both by hand.
+    impls = _branch_key_impls()
+    assert len(impls) == 2, "expected both backends' key builders to be importable"
+    cases = [
+        (("dispatcher",), (), (), "a"),
+        (("dispatcher",), (None,), (), "a"),
+        (("outer", "dispatcher"), (0,), (), "a"),
+        (("outer", "dispatcher"), (0, 1), ("x",), "a"),
+        ((), (), (), "a"),
+    ]
+    for args in cases:
+        results = {label: key(*args) for label, key in impls}
+        assert len(set(results.values())) == 1, f"key builders disagree on {args}: {results}"
