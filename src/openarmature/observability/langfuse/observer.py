@@ -195,7 +195,9 @@ def _branch_dispatch_key(
     pb node) so a pb nested inside an outer fan-out instance doesn't collide
     across outer instances."""
     n = len(prefix)
-    return (prefix, tuple(fan_out_index_chain[:n]), tuple(branch_name_chain[: n - 1]), branch_name)
+    fan_out = tuple(fan_out_index_chain[:n]) + (None,) * max(0, n - len(fan_out_index_chain))
+    branches = tuple(branch_name_chain[: n - 1]) + (None,) * max(0, (n - 1) - len(branch_name_chain))
+    return (prefix, fan_out, branches, branch_name)
 
 
 def _empty_str_frozenset() -> frozenset[str]:
