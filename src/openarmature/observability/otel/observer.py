@@ -393,7 +393,17 @@ def _branch_dispatch_key(
     across outer instances. Mirrors the LangfuseObserver helper of the same
     name."""
     n = len(prefix)
-    return (prefix, tuple(fan_out_index_chain[:n]), tuple(branch_name_chain[: n - 1]), branch_name)
+    # Chains are normalized to the prefix DEPTH in both directions: truncated
+    # when longer, padded with None when shorter. Truncating alone was a defect.
+    # A caller whose lineage is shallower than the prefix -- an orphan provider
+    # call issued from branch middleware carries empty chains -- built
+    # `(prefix, (), (), branch)` while the span had been registered under
+    # `(prefix, (None,), (), branch)`. Those denote the same lineage, "no
+    # enclosing fan-out at that depth", and differed only as tuple keys, so the
+    # lookup missed and the orphan fell through to the invocation root.
+    fan_out = tuple(fan_out_index_chain[:n]) + (None,) * max(0, n - len(fan_out_index_chain))
+    branches = tuple(branch_name_chain[: n - 1]) + (None,) * max(0, (n - 1) - len(branch_name_chain))
+    return (prefix, fan_out, branches, branch_name)
 
 
 # Sorted object keys, no insignificant whitespace, UTF-8 output (per
@@ -1047,7 +1057,20 @@ class OTelObserver:
             and event.parallel_branches_config is None
             and event.namespace in inv_state.parallel_branches_parent_node_name
         ):
-            branch_key = event.namespace + (event.branch_name,)
+            # Keyed the same way `_open_parallel_branches_branch_dispatch_span`
+            # STORES it, and the same way the Langfuse observer's equivalent
+            # guard already did. A legacy `namespace + (branch_name,)` tuple was
+            # compared against a dict keyed by the 4-tuple, so it never matched:
+            # `_open_started_span` runs twice for a callable-branch started event
+            # (once from the engine task's `prepare_sync`, once from the async
+            # `__call__`), and the second open overwrote the first in the dict.
+            # The overwritten span was never ended and never exported, so a log
+            # record emitted from the branch body carried a span id absent from
+            # the trace. The span TREE looked correct, which is why no fixture
+            # catches it.
+            branch_key = _branch_dispatch_key(
+                event.namespace, event.fan_out_index_chain, event.branch_name_chain, event.branch_name
+            )
             if branch_key not in inv_state.parallel_branches_branch_spans:
                 self._open_parallel_branches_branch_dispatch_span(
                     inv_state, correlation_id, event.namespace, event

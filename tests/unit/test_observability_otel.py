@@ -5228,3 +5228,160 @@ async def test_tool_span_serializes_non_json_result_via_str_fallback() -> None:
     attrs = dict(span.attributes or {})
     assert "openarmature.tool.call.result" in attrs
     assert "OPAQUE-RESULT" in attrs["openarmature.tool.call.result"]
+
+
+# --- per-branch dispatch key normalization (proposal 0084 lineage keys) -------
+
+
+# Both copies of the lineage key builder, parametrized by MODULE NAME rather than
+# by imported function. Calling `pytest.importorskip` while building the
+# parametrize argument runs it at module import, and its skip is module-scoped:
+# without the langfuse extra the whole ~5,300-line OTel module would collapse to
+# a single skip, taking ~95 unrelated tests with it. Importing inside the test
+# body keeps the skip to the tests that actually need the extra.
+_BRANCH_KEY_MODULES = [
+    ("otel", "openarmature.observability.otel.observer"),
+    ("langfuse", "openarmature.observability.langfuse.observer"),
+]
+
+
+def _branch_key(module_name: str) -> Any:
+    module = pytest.importorskip(module_name)
+    return module._branch_dispatch_key  # noqa: SLF001
+
+
+@pytest.mark.parametrize(("label", "module_name"), _BRANCH_KEY_MODULES)
+def test_branch_dispatch_key_pads_chains_shallower_than_the_prefix(label: str, module_name: str) -> None:
+    key = _branch_key(module_name)
+    # An orphan provider call issued from branch middleware carries EMPTY
+    # lineage chains, while the dispatch span was registered from an inner node
+    # event whose chains are padded to the namespace depth. Both denote "no
+    # enclosing fan-out at that depth", so they MUST produce the same key; when
+    # they did not, the lookup missed and the orphan span fell through to the
+    # invocation root (conformance fixture 152).
+    prefix = ("dispatcher",)
+    registered = key(prefix, (None,), (), "branch_a")
+    from_orphan = key(prefix, (), (), "branch_a")
+    assert from_orphan == registered, f"{label}: shallow chains must normalize to the registered key"
+
+
+@pytest.mark.parametrize(("label", "module_name"), _BRANCH_KEY_MODULES)
+def test_branch_dispatch_key_pads_branch_chain_shallower_than_the_prefix(
+    label: str, module_name: str
+) -> None:
+    key = _branch_key(module_name)
+    # The branch-name half of the same normalization, which the fan-out test
+    # above does not reach: it uses a depth-1 prefix, where the branch slice is
+    # `chain[:0]` and is empty whether padded or not. A depth-2 prefix slices
+    # `chain[:1]`, so a caller whose branch chain is shorter than `n - 1` builds
+    # an unpadded key while the span was registered with a padded one.
+    #
+    # Without this, deleting the `branches` padding line from BOTH copies leaves
+    # the entire suite green; deleting it from one is caught only incidentally,
+    # by the agreement test noticing the copies diverged.
+    prefix = ("outer", "dispatcher")
+    registered = key(prefix, (None, None), (None,), "branch_a")
+    from_orphan = key(prefix, (None, None), (), "branch_a")
+    assert from_orphan == registered, (
+        f"{label}: a branch chain shallower than the prefix must normalize to the registered key"
+    )
+
+
+@pytest.mark.parametrize(("label", "module_name"), _BRANCH_KEY_MODULES)
+def test_branch_dispatch_key_still_discriminates_real_lineages(label: str, module_name: str) -> None:
+    key = _branch_key(module_name)
+    # The padding must not collapse genuinely different enclosing lineages: a pb
+    # node inside outer fan-out instance 0 and the same node inside instance 1
+    # are different dispatch spans and must not share a key.
+    prefix = ("outer", "dispatcher")
+    assert key(prefix, (0, None), (), "b") != key(prefix, (1, None), (), "b"), (
+        f"{label}: distinct enclosing fan-out instances must not collide"
+    )
+    assert key(prefix, (None, None), ("x",), "b") != key(prefix, (None, None), ("y",), "b"), (
+        f"{label}: distinct enclosing branch chains must not collide"
+    )
+    assert key(prefix, (None, None), (), "a") != key(prefix, (None, None), (), "b"), (
+        f"{label}: distinct branch names must not collide"
+    )
+
+
+def test_branch_dispatch_key_copies_agree() -> None:
+    # The two implementations are duplicated by design (one per backend) and
+    # their docstrings say each mirrors the other. Nothing enforced that, so the
+    # padding defect existed in both and was fixed in both by hand.
+    impls = [(label, _branch_key(name)) for label, name in _BRANCH_KEY_MODULES]
+    assert len(impls) == 2, "expected both backends' key builders to be importable"
+    cases = [
+        (("dispatcher",), (), (), "a"),
+        (("dispatcher",), (None,), (), "a"),
+        (("outer", "dispatcher"), (0,), (), "a"),
+        (("outer", "dispatcher"), (0, 1), ("x",), "a"),
+        ((), (), (), "a"),
+    ]
+    for args in cases:
+        results = {label: key(*args) for label, key in impls}
+        assert len(set(results.values())) == 1, f"key builders disagree on {args}: {results}"
+
+
+async def test_callable_branch_dispatch_span_is_opened_once() -> None:
+    # `_open_started_span` runs TWICE for a callable-branch started event: once
+    # from the engine task's `prepare_sync`, once from the async `__call__`. The
+    # dedup guard compared a legacy `namespace + (branch_name,)` tuple against a
+    # dict keyed by the 4-tuple `_BranchDispatchKey`, so it never matched and a
+    # second span was opened, overwriting the first. The overwritten span was
+    # never ended and never exported.
+    #
+    # The exported span TREE is identical either way, which is why no
+    # conformance fixture catches this. What differs is the span published into
+    # the branch body as the active span: under the defect it is the orphaned
+    # copy, so a log record emitted from the branch carries a span id that
+    # appears nowhere in the trace. This asserts on the dispatch-span registry
+    # rather than the tree, since the registry is where the overwrite happens.
+    from openarmature.graph.parallel_branches import BranchSpec
+    from openarmature.observability.otel.observer import _branch_dispatch_key
+
+    class _S(State):
+        n: int = 0
+
+    async def _ca(_s: Any) -> dict[str, Any]:
+        return {}
+
+    async def _cb(_s: Any) -> dict[str, Any]:
+        return {}
+
+    opened: list[Any] = []
+    exporter = InMemorySpanExporter()
+    observer = OTelObserver(span_processor=SimpleSpanProcessor(exporter))
+    original = observer._open_parallel_branches_branch_dispatch_span  # noqa: SLF001
+
+    def _spy(*args: Any, **kwargs: Any) -> Any:
+        event = cast("Any", args[-1] if args else kwargs.get("event"))
+        assert event is not None, "spy received no event to key on"
+        opened.append(
+            _branch_dispatch_key(
+                event.namespace,
+                event.fan_out_index_chain,
+                event.branch_name_chain,
+                event.branch_name,
+            )
+        )
+        return original(*args, **kwargs)
+
+    observer._open_parallel_branches_branch_dispatch_span = _spy  # type: ignore[method-assign]  # noqa: SLF001
+
+    graph = (
+        GraphBuilder(_S)
+        .add_parallel_branches_node("pb", branches={"ca": BranchSpec(call=_ca), "cb": BranchSpec(call=_cb)})
+        .add_edge("pb", END)
+        .set_entry("pb")
+        .compile()
+    )
+    graph.attach_observer(observer)
+    await graph.invoke(_S())
+    await graph.drain()
+    observer.shutdown()
+
+    assert len(opened) == len(set(opened)), (
+        f"each callable branch's dispatch span MUST be opened once; opened {opened}"
+    )
+    assert len(opened) == 2, f"expected one dispatch span per callable branch; opened {opened}"

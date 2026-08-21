@@ -446,12 +446,29 @@ _DEFERRED_FIXTURES: dict[str, str] = {
         "threading per_node_mw into add_parallel_branches_node, NOT a failure path in the 110 "
         "driver -- that driver is reached and would still see an unretried raise"
     ),
+    # Both were wired and then UN-wired: a driver exists in the PR history that
+    # makes them pass, and the passing was not worth having. The orphan provider
+    # call is enqueued before the branch's first inner node, so whether the
+    # per-branch dispatch span is registered when the observer resolves the
+    # parent depends on nothing yielding to the event loop in between. Inserting
+    # a single `await asyncio.sleep(0)` in the wrapper -- ordinary for real
+    # middleware -- moves 152's orphan to the invocation root and 153's to the
+    # `work` branch dispatch span, the parent 153 explicitly forbids. Measured,
+    # not reasoned. A green run would have certified a lucky interleaving.
+    #
+    # The lineage-key defect these exposed IS fixed (`_branch_dispatch_key` now
+    # normalizes chains shallower than the prefix, in both observers). That fix
+    # is necessary and not sufficient. Activating these needs the orphan parent
+    # resolved deterministically -- deferring the decision until the enclosing
+    # wrapper span is known -- which is an observer change, not a harness one.
     "152-otel-parallel-branch-orphan-llm-fallback": (
-        "reuses fixture 133's orphan-fallback driver, which does not build the `subgraphs` block "
-        "152 adds (KeyError: 'subgraphs')"
+        "orphan parent resolution is drain-schedule dependent; one `await asyncio.sleep(0)` in the "
+        "wrapper parents the orphan under the invocation root instead of the branch dispatch span. "
+        "Needs deterministic resolution in the observer, not a harness change"
     ),
     "153-otel-mixed-nesting-orphan-llm-fallback": (
-        "same driver gap as 152, one nesting level deeper (KeyError: 'leaf_sg')"
+        "same race as 152: under a yielding wrapper the orphan parents under the `work` branch "
+        "dispatch span, which this fixture's own invariant forbids"
     ),
     # Proposal 0109 (spec v0.104.0) token-budget failure-path parity.
 }
