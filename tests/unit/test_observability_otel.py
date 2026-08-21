@@ -5266,6 +5266,28 @@ def test_branch_dispatch_key_pads_chains_shallower_than_the_prefix(label: str, m
 
 
 @pytest.mark.parametrize(("label", "module_name"), _BRANCH_KEY_MODULES)
+def test_branch_dispatch_key_pads_branch_chain_shallower_than_the_prefix(
+    label: str, module_name: str
+) -> None:
+    key = _branch_key(module_name)
+    # The branch-name half of the same normalization, which the fan-out test
+    # above does not reach: it uses a depth-1 prefix, where the branch slice is
+    # `chain[:0]` and is empty whether padded or not. A depth-2 prefix slices
+    # `chain[:1]`, so a caller whose branch chain is shorter than `n - 1` builds
+    # an unpadded key while the span was registered with a padded one.
+    #
+    # Without this, deleting the `branches` padding line from BOTH copies leaves
+    # the entire suite green; deleting it from one is caught only incidentally,
+    # by the agreement test noticing the copies diverged.
+    prefix = ("outer", "dispatcher")
+    registered = key(prefix, (None, None), (None,), "branch_a")
+    from_orphan = key(prefix, (None, None), (), "branch_a")
+    assert from_orphan == registered, (
+        f"{label}: a branch chain shallower than the prefix must normalize to the registered key"
+    )
+
+
+@pytest.mark.parametrize(("label", "module_name"), _BRANCH_KEY_MODULES)
 def test_branch_dispatch_key_still_discriminates_real_lineages(label: str, module_name: str) -> None:
     key = _branch_key(module_name)
     # The padding must not collapse genuinely different enclosing lineages: a pb
