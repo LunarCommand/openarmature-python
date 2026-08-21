@@ -6849,7 +6849,12 @@ def _is_instance_dispatch(span: Any) -> bool:
     return _INSTANCE_DISPATCH_ATTR in dict(span.attributes or {})
 
 
-def _assert_orphan_fallback_invariants(case: Mapping[str, Any], spans: Sequence[Any]) -> None:
+def _assert_orphan_fallback_invariants(
+    case: Mapping[str, Any],
+    spans: Sequence[Any],
+    subgraph_specs: Mapping[str, Any],
+    mock_bodies: Mapping[str, dict[str, Any]],
+) -> None:
     """Evaluate 152 / 153's orphan-parenting claims over the captured spans."""
     invariants = cast("dict[str, Any]", case["expected"].get("invariants") or {})
     if not invariants:
@@ -6922,7 +6927,7 @@ def _assert_orphan_fallback_invariants(case: Mapping[str, Any], spans: Sequence[
             for llm in llm_spans
             if _parent_of(llm) is not None
         }
-        expected_routing = _expected_branch_routing(case)
+        expected_routing = _expected_branch_routing(case, subgraph_specs, mock_bodies)
         assert routed == expected_routing, (
             f"each branch's own orphan MUST land under that branch; expected {expected_routing}, got {routed}"
         )
@@ -7041,12 +7046,21 @@ def _wrapper_bearing_node(subgraph_spec: Mapping[str, Any]) -> tuple[str, dict[s
     return None
 
 
-def _expected_branch_routing(case: Mapping[str, Any]) -> dict[str, str]:
+def _expected_branch_routing(
+    case: Mapping[str, Any],
+    subgraphs: Mapping[str, Any],
+    bodies: Mapping[str, dict[str, Any]],
+) -> dict[str, str]:
     """Map each branch name to the response id its own orphan call must return."""
     # Derived from the fixture, not hardcoded: the branch's subgraph declares the
-    # wrapper's request content, and the mock response whose echoed content
-    # matches is the one that branch must receive.
-    subgraphs = cast("dict[str, Any]", case.get("subgraphs") or {})
+    # wrapper's request content, and `bodies` says which response that content
+    # must receive.
+    #
+    # `subgraphs` is the MERGED map passed in, not re-read from the case. Reading
+    # `case["subgraphs"]` saw only the case-level form, so the same fixture with
+    # its declarations hoisted to the document level -- 153's shape -- produced
+    # an empty routing map and a spurious failure. This and the compile step now
+    # work from one derivation.
     branches: dict[str, Any] = {}
     for node_spec in cast("dict[str, Any]", case["nodes"]).values():
         pb = cast("dict[str, Any] | None", cast("dict[str, Any]", node_spec).get("parallel_branches"))
@@ -7060,10 +7074,9 @@ def _expected_branch_routing(case: Mapping[str, Any]) -> dict[str, str]:
         if found is None:
             continue
         content = _wrapper_request_content(found[1])
-        for mock in cast("list[dict[str, Any]]", case.get("mock_llm") or []):
-            body = cast("dict[str, Any]", mock["body"])
-            if _mock_matches_content(body, content):
-                routing[branch_name] = cast("str", body["id"])
+        body = bodies.get(content)
+        if body is not None:
+            routing[branch_name] = cast("str", body["id"])
     return routing
 
 
@@ -7072,13 +7085,35 @@ def _wrapper_request_content(wrapper_spec: Mapping[str, Any]) -> str:
     return next((m["content"] for m in messages if m.get("role") == "user"), "guardrail check")
 
 
-def _mock_matches_content(body: Mapping[str, Any], content: str) -> bool:
-    """Whether this canned response is the one for a request carrying `content`."""
-    # 152's two responses differ only by id, and their `id` encodes the branch
-    # ("cc-152-a" for "guardrail a"). Match on that suffix so the routing is
-    # derived from the fixture rather than from queue order, which is
-    # nondeterministic under concurrent branches.
-    return cast("str", body.get("id", "")).endswith(content.rsplit(" ", 1)[-1])
+def _mock_bodies_by_request_content(
+    case: Mapping[str, Any], subgraph_specs: Mapping[str, Any]
+) -> dict[str, dict[str, Any]]:
+    """Map each wrapper's declared request content to the response it must get."""
+    # An explicit pairing, built once, rather than a per-request substring guess.
+    # The previous heuristic matched a response id's suffix against the last word
+    # of the request content: it worked for 152, whose ids encode the branch
+    # ("cc-152-a" for "guardrail a"), and matched NOTHING for 153 ("guardrail
+    # check" against "cc-153"), where every request silently fell through to a
+    # `mocks[0]` fallback. The fixture passed on the fallback, so the routing was
+    # dead code there.
+    #
+    # Paired by declaration order, which is the only association the fixtures
+    # express: wrapper-bearing subgraphs in the order their consumers declare
+    # them, against `mock_llm` in file order. The count assertion is what keeps
+    # that honest -- a fixture whose counts disagree fails here rather than
+    # borrowing someone else's response.
+    contents: list[str] = []
+    for sg_spec in subgraph_specs.values():
+        found = _wrapper_bearing_node(cast("Mapping[str, Any]", sg_spec))
+        if found is not None:
+            contents.append(_wrapper_request_content(found[1]))
+    mocks = cast("list[dict[str, Any]]", case.get("mock_llm") or [])
+    assert len(contents) == len(mocks), (
+        f"cannot pair wrapper requests with canned responses: {len(contents)} wrapper(s) "
+        f"{contents} against {len(mocks)} mock_llm entr(ies). Declaration order is the only "
+        f"association these fixtures express, so the counts must agree."
+    )
+    return {content: cast("dict[str, Any]", m["body"]) for content, m in zip(contents, mocks, strict=True)}
 
 
 async def _run_orphan_fallback_fixture(spec: Mapping[str, Any]) -> None:
@@ -7100,26 +7135,27 @@ async def _run_orphan_fallback_case(case: Mapping[str, Any], spec: Mapping[str, 
 
     from .adapter import build_graph  # noqa: PLC0415
 
-    mocks = list(cast("list[dict[str, Any]]", case.get("mock_llm") or []))
+    subgraph_specs = _merged_subgraph_specs(case, spec)
+    mock_bodies = _mock_bodies_by_request_content(case, subgraph_specs)
 
     def _handler(request: httpx.Request) -> httpx.Response:
         # Routed by REQUEST CONTENT, not FIFO. Under concurrent branches the
         # queue order is nondeterministic, so a FIFO mock cannot support the
-        # routing invariant: whichever branch called first would get the first
-        # id regardless of which one it was.
+        # routing invariant: whichever branch called first would take the first
+        # id regardless of which branch it was. There is deliberately NO
+        # fallback: a request whose content is not in the map fails here rather
+        # than borrowing another branch's response, which is what let 153's
+        # routing be dead while the fixture stayed green.
         payload = cast("dict[str, Any]", json.loads(request.content.decode()))
         sent = " ".join(
             str(cast("dict[str, Any]", m).get("content", ""))
             for m in cast("list[Any]", payload.get("messages") or [])
         )
-        for mock in mocks:
-            body = cast("dict[str, Any]", mock["body"])
-            if any(_mock_matches_content(body, word) for word in sent.split()):
-                return httpx.Response(
-                    200, content=json.dumps(body).encode(), headers={"Content-Type": "application/json"}
-                )
-        assert mocks, "mock_llm queue exhausted"
-        body = cast("dict[str, Any]", mocks[0]["body"])
+        body = mock_bodies.get(sent.strip())
+        assert body is not None, (
+            f"no canned response declared for request content {sent.strip()!r}; "
+            f"the fixture declares {sorted(mock_bodies)}"
+        )
         return httpx.Response(
             200, content=json.dumps(body).encode(), headers={"Content-Type": "application/json"}
         )
@@ -7155,7 +7191,6 @@ async def _run_orphan_fallback_case(case: Mapping[str, Any], spec: Mapping[str, 
         # fan-out target takes INSTANCE middleware, a parallel branch takes
         # BRANCH middleware. Not node middleware on the guard, which runs
         # entirely inside the node span in both phases.
-        subgraph_specs = _merged_subgraph_specs(case, spec)
         instance_mw: dict[str, dict[str, list[Any]]] = {}
         branch_mw: dict[str, dict[str, list[Any]]] = {}
         # Parallel-branches hosts live in the case AND in subgraphs, so a
@@ -7251,7 +7286,7 @@ async def _run_orphan_fallback_case(case: Mapping[str, Any], spec: Mapping[str, 
         _assert_span_tree_matches(spans, [inv_root], expected_tree)
 
     _assert_invariants_recognized(case, _ORPHAN_FALLBACK_INVARIANTS, "orphan-fallback")
-    _assert_orphan_fallback_invariants(case, spans)
+    _assert_orphan_fallback_invariants(case, spans, subgraph_specs, mock_bodies)
 
 
 # Span-tree entry keys read ONLY by the two walkers this driver skips.

@@ -21,6 +21,7 @@ These tests fill the gaps the conformance harness defers:
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from pathlib import Path
 
@@ -5385,3 +5386,95 @@ async def test_callable_branch_dispatch_span_is_opened_once() -> None:
         f"each callable branch's dispatch span MUST be opened once; opened {opened}"
     )
     assert len(opened) == 2, f"expected one dispatch span per callable branch; opened {opened}"
+
+
+async def test_orphan_parent_survives_populate_caller_metadata_off() -> None:
+    # The dispatch-span openers apply caller metadata unconditionally.
+    # `NodeEvent` guarantees a mapping there, but the provider and tool events
+    # type it `| None` and default to None, which the OpenAI provider sets
+    # whenever `populate_caller_metadata=False`. Before the normalization, the
+    # opener raised, the graph observer swallowed it into a warning, the dispatch
+    # span was never created, and the orphan parented on the wrong span.
+    #
+    # Asserting on WARNINGS as well as the parent: the failure was silent, so a
+    # test that only checked the parent would have caught this one but not the
+    # next thing the openers learn to raise on.
+    import json
+    import warnings
+
+    import httpx
+
+    from openarmature.graph.parallel_branches import BranchSpec
+    from openarmature.llm import OpenAIProvider, UserMessage
+
+    body = {
+        "id": "cc",
+        "object": "chat.completion",
+        "model": "m",
+        "choices": [{"index": 0, "message": {"role": "assistant", "content": "ok"}, "finish_reason": "stop"}],
+        "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+    }
+
+    class _Outer(State):
+        n: int = 0
+
+    class _Branch(State):
+        n: int = 0
+
+    provider = OpenAIProvider(
+        base_url="http://mock-llm.test",
+        model="m",
+        api_key="t",
+        transport=httpx.MockTransport(
+            lambda _r: httpx.Response(
+                200, content=json.dumps(body).encode(), headers={"Content-Type": "application/json"}
+            )
+        ),
+        populate_caller_metadata=False,
+    )
+
+    async def _guard(_s: Any) -> dict[str, Any]:
+        return {}
+
+    branch = (
+        GraphBuilder(_Branch).add_node("guard", _guard).add_edge("guard", END).set_entry("guard").compile()
+    )
+
+    async def _wrapper(state: Any, next_call: Any) -> Any:
+        await provider.complete([UserMessage(content="g")])
+        # Yield, so the dispatch span cannot be relied on to exist already.
+        await asyncio.sleep(0)
+        return await next_call(state)
+
+    exporter = InMemorySpanExporter()
+    observer = OTelObserver(span_processor=SimpleSpanProcessor(exporter))
+    graph = (
+        GraphBuilder(_Outer)
+        .add_parallel_branches_node("pb", branches={"a": BranchSpec(subgraph=branch, middleware=(_wrapper,))})
+        .add_edge("pb", END)
+        .set_entry("pb")
+        .compile()
+    )
+    graph.attach_observer(observer)
+    try:
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            await graph.invoke(_Outer())
+            await graph.drain()
+    finally:
+        observer.shutdown()
+        await provider.aclose()
+
+    observer_warnings = [w for w in caught if "observer raised" in str(w.message)]
+    assert not observer_warnings, (
+        f"the observer swallowed an exception into a warning: {[str(w.message) for w in observer_warnings]}"
+    )
+    spans = cast("list[Any]", list(exporter.get_finished_spans()))
+    by_id = {s.context.span_id: s for s in spans}
+    llm = next((s for s in spans if s.name == "openarmature.llm.complete"), None)
+    assert llm is not None, f"no provider span recorded; got {[s.name for s in spans]}"
+    parent = by_id.get(llm.parent.span_id) if llm.parent is not None else None
+    assert parent is not None and parent.name == "a", (
+        f"the orphan MUST parent under the branch dispatch span even with caller metadata off; "
+        f"got {parent.name if parent else None!r}"
+    )

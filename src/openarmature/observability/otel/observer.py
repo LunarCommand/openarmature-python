@@ -270,7 +270,7 @@ def _read_implementation_version() -> str:
     return __version__
 
 
-def _apply_caller_metadata(attrs: dict[str, Any], metadata: Mapping[str, Any]) -> None:
+def _apply_caller_metadata(attrs: dict[str, Any], metadata: Mapping[str, Any] | None) -> None:
     """Merge caller-supplied invocation metadata into a span's
     attribute dict as ``openarmature.user.<key>`` entries.
 
@@ -283,6 +283,15 @@ def _apply_caller_metadata(attrs: dict[str, Any], metadata: Mapping[str, Any]) -
     caller_invocation_metadata field for LLM events; both are
     dispatch-time snapshots.
     """
+    # None-tolerant. `NodeEvent` guarantees a mapping, but the provider and tool
+    # events type this `| None` and default to None, which the OpenAI provider
+    # sets whenever `populate_caller_metadata=False`. Those events now reach the
+    # dispatch-span openers via on-demand synthesis, and raising here is
+    # invisible: the graph observer swallows it into a warning, the dispatch span
+    # is never created, and the orphan parents on the wrong span -- the exact
+    # defect that synthesis exists to remove, reintroduced by a flag.
+    if not metadata:
+        return
     for key, value in metadata.items():
         attrs[f"openarmature.user.{key}"] = value
 
@@ -2598,7 +2607,16 @@ class OTelObserver:
                 and prefix[-1] not in self.detached_fan_outs
                 and prefix in inv_state.fan_out_parent_node_name
             ):
-                self._open_fan_out_instance_dispatch_span(inv_state, correlation_id, prefix, event)
+                instance_key = _dispatch_key(prefix, event.fan_out_index_chain, event.branch_name_chain)
+                open_instance = inv_state.fan_out_instance_spans.get(instance_key)
+                if open_instance is None:
+                    self._open_fan_out_instance_dispatch_span(inv_state, correlation_id, prefix, event)
+                else:
+                    # Already synthesized, possibly from a provider event, which
+                    # carries the lineage but not the subgraph identities. Same
+                    # backfill as the branch arm below; both dispatch span kinds
+                    # set this attribute the same way, so both need it.
+                    _backfill_subgraph_identity(open_instance, event, len(prefix))
                 continue
             # Per proposal 0044 (v0.36.0): parallel-branches per-branch
             # dispatch synthesis.  Triggered by an inner-branch event
