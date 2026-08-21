@@ -270,7 +270,7 @@ def _read_implementation_version() -> str:
     return __version__
 
 
-def _apply_caller_metadata(attrs: dict[str, Any], metadata: Mapping[str, Any]) -> None:
+def _apply_caller_metadata(attrs: dict[str, Any], metadata: Mapping[str, Any] | None) -> None:
     """Merge caller-supplied invocation metadata into a span's
     attribute dict as ``openarmature.user.<key>`` entries.
 
@@ -283,6 +283,15 @@ def _apply_caller_metadata(attrs: dict[str, Any], metadata: Mapping[str, Any]) -
     caller_invocation_metadata field for LLM events; both are
     dispatch-time snapshots.
     """
+    # None-tolerant. `NodeEvent` guarantees a mapping, but the provider and tool
+    # events type this `| None` and default to None, which the OpenAI provider
+    # sets whenever `populate_caller_metadata=False`. Those events now reach the
+    # dispatch-span openers via on-demand synthesis, and raising here is
+    # invisible: the graph observer swallows it into a warning, the dispatch span
+    # is never created, and the orphan parents on the wrong span -- the exact
+    # defect that synthesis exists to remove, reintroduced by a flag.
+    if not metadata:
+        return
     for key, value in metadata.items():
         attrs[f"openarmature.user.{key}"] = value
 
@@ -298,12 +307,30 @@ def _subgraph_identity_at(event: NodeEvent, depth: int) -> str:
     """
     # Spec observability §5.3 (coord thread
     # clarify-subgraph-name-semantics).
+    # `getattr`, because a dispatch span may now be synthesized from a provider
+    # or tool event, which carries the lineage fields but not the identities.
+    # The empty-string fallback below is that case; `_backfill_subgraph_identity`
+    # fills it in from the first node event, so the attribute does not depend on
+    # which event happened to trigger synthesis.
+    identities = cast("tuple[str | None, ...]", getattr(event, "subgraph_identities", ()))
     idx = depth - 1
-    if 0 <= idx < len(event.subgraph_identities):
-        identity = event.subgraph_identities[idx]
+    if 0 <= idx < len(identities):
+        identity = identities[idx]
         if identity is not None:
             return identity
     return ""
+
+
+def _backfill_subgraph_identity(open_span: Any, event: NodeEvent, depth: int) -> None:
+    """Set ``openarmature.subgraph.name`` on an already-open dispatch span."""
+    # Dispatch spans can now be synthesized by a provider or tool event, which
+    # carries the lineage chains but no `subgraph_identities`, so the attribute
+    # would otherwise read empty whenever a wrapper-issued call happened to
+    # arrive first. That is the same class of schedule-dependence the on-demand
+    # synthesis exists to remove, one attribute down.
+    identity = _subgraph_identity_at(event, depth)
+    if identity:
+        open_span.span.set_attribute("openarmature.subgraph.name", identity)
 
 
 def _empty_str_frozenset() -> frozenset[str]:
@@ -1630,6 +1657,7 @@ class OTelObserver:
         parent_ctx = self._resolve_llm_parent(
             inv_state,
             invocation_id,
+            event=event,
             calling_namespace_prefix=event.namespace,
             calling_attempt_index=event.attempt_index,
             calling_fan_out_index=event.fan_out_index,
@@ -1857,6 +1885,7 @@ class OTelObserver:
         parent_ctx = self._resolve_llm_parent(
             inv_state,
             invocation_id,
+            event=event,
             calling_namespace_prefix=event.namespace,
             calling_attempt_index=event.attempt_index,
             calling_fan_out_index=event.fan_out_index,
@@ -2006,6 +2035,7 @@ class OTelObserver:
         parent_ctx = self._resolve_llm_parent(
             inv_state,
             invocation_id,
+            event=event,
             calling_namespace_prefix=event.namespace,
             calling_attempt_index=event.attempt_index,
             calling_fan_out_index=event.fan_out_index,
@@ -2118,6 +2148,7 @@ class OTelObserver:
         parent_ctx = self._resolve_llm_parent(
             inv_state,
             invocation_id,
+            event=event,
             calling_namespace_prefix=event.namespace,
             calling_attempt_index=event.attempt_index,
             calling_fan_out_index=event.fan_out_index,
@@ -2231,6 +2262,7 @@ class OTelObserver:
         parent_ctx = self._resolve_llm_parent(
             inv_state,
             invocation_id,
+            event=event,
             calling_namespace_prefix=event.namespace,
             calling_attempt_index=event.attempt_index,
             calling_fan_out_index=event.fan_out_index,
@@ -2268,6 +2300,7 @@ class OTelObserver:
         inv_state: _InvState,
         invocation_id: str,
         *,
+        event: Any = None,
         calling_namespace_prefix: tuple[str, ...],
         calling_attempt_index: int,
         calling_fan_out_index: int | None,
@@ -2306,6 +2339,14 @@ class OTelObserver:
         #    call and an in-body call on the same lineage resolve to the same
         #    enclosing parent; it subsumes the former per-instance / subgraph /
         #    invocation / empty-context fallbacks.
+        # ORPHAN PATH ONLY: the calling node's span is not open, so this is a
+        # call from a wrapper. Materialize any dispatch span the calling lineage
+        # sits inside before walking for it, so the answer does not depend on
+        # whether the wrapper's first inner node has drained yet.
+        if event is not None:
+            self._synthesize_call_site_wrapper_spans(
+                inv_state, cast("str | None", getattr(event, "correlation_id", None)), event
+            )
         return self._resolve_enclosing_wrapper_context(
             inv_state,
             invocation_id,
@@ -2566,7 +2607,16 @@ class OTelObserver:
                 and prefix[-1] not in self.detached_fan_outs
                 and prefix in inv_state.fan_out_parent_node_name
             ):
-                self._open_fan_out_instance_dispatch_span(inv_state, correlation_id, prefix, event)
+                instance_key = _dispatch_key(prefix, event.fan_out_index_chain, event.branch_name_chain)
+                open_instance = inv_state.fan_out_instance_spans.get(instance_key)
+                if open_instance is None:
+                    self._open_fan_out_instance_dispatch_span(inv_state, correlation_id, prefix, event)
+                else:
+                    # Already synthesized, possibly from a provider event, which
+                    # carries the lineage but not the subgraph identities. Same
+                    # backfill as the branch arm below; both dispatch span kinds
+                    # set this attribute the same way, so both need it.
+                    _backfill_subgraph_identity(open_instance, event, len(prefix))
                 continue
             # Per proposal 0044 (v0.36.0): parallel-branches per-branch
             # dispatch synthesis.  Triggered by an inner-branch event
@@ -2589,10 +2639,17 @@ class OTelObserver:
                 branch_key = _branch_dispatch_key(
                     prefix, event.fan_out_index_chain, event.branch_name_chain, event.branch_name
                 )
-                if branch_key not in inv_state.parallel_branches_branch_spans:
+                open_branch = inv_state.parallel_branches_branch_spans.get(branch_key)
+                if open_branch is None:
                     self._open_parallel_branches_branch_dispatch_span(
                         inv_state, correlation_id, prefix, event
                     )
+                else:
+                    # Already synthesized, possibly from a provider event, which
+                    # carries the lineage but not the subgraph identities. Fill
+                    # the identity in from this node event so the attribute does
+                    # not depend on which event triggered synthesis.
+                    _backfill_subgraph_identity(open_branch, event, len(prefix))
                 continue
             # If ``prefix`` names a parallel-branches or fan-out NODE
             # (detected by an entry in the respective parent_node_name
@@ -2879,6 +2936,59 @@ class OTelObserver:
         )
         inv_state.detached_roots[instance_key] = _OpenSpan(span=instance_root)
         inv_state.fan_out_instance_root_prefixes.add(instance_key)
+
+    def _synthesize_call_site_wrapper_spans(
+        self,
+        inv_state: _InvState,
+        correlation_id: str | None,
+        event: Any,
+    ) -> None:
+        """Open any dispatch span the CALLING lineage sits inside that has not
+        been synthesized yet."""
+        # Spec observability §5.5 (Lineage-resolved parent), as ruled in the
+        # release-v0.17.0 coord thread: the parent is resolved STRUCTURALLY. A
+        # call issued from branch or instance middleware is inside that branch or
+        # instance, so its nearest enclosing wrapper is that dispatch span,
+        # whether or not the observer has materialized it yet.
+        #
+        # Without this, the parent depended on drain scheduling. Dispatch spans
+        # are synthesized from inner NODE events, and a wrapper-issued provider
+        # call is enqueued BEFORE the wrapper's first inner node starts. Whether
+        # the span existed at resolution time came down to whether anything
+        # yielded to the event loop in between: one `await asyncio.sleep(0)` in
+        # user middleware moved the span from its branch to the invocation root.
+        # §10 covers parentage, so that was non-conforming rather than untidy.
+        #
+        # Two differences from `_sync_subgraph_spans`, which does this for node
+        # events. It walks PROPER ancestors (`range(1, len(namespace))`), but a
+        # call from branch middleware sits AT the parallel-branches namespace, so
+        # its branch's prefix IS the full namespace and that walk never reaches
+        # it. And this opens dispatch spans only: no subgraph wrappers, no
+        # detached roots, and nothing is closed, since a provider event is not a
+        # position change.
+        namespace = cast("tuple[str, ...]", event.namespace)
+        fan_out_index_chain = cast("tuple[int | None, ...]", event.fan_out_index_chain)
+        branch_name_chain = cast("tuple[str | None, ...]", event.branch_name_chain)
+        branch_name = cast("str | None", event.branch_name)
+        for depth in range(1, len(namespace) + 1):
+            prefix = namespace[:depth]
+            fi_axis = fan_out_index_chain[depth - 1] if depth - 1 < len(fan_out_index_chain) else None
+            if (
+                fi_axis is not None
+                and prefix[-1] not in self.detached_fan_outs
+                and prefix in inv_state.fan_out_parent_node_name
+                and _dispatch_key(prefix, fan_out_index_chain, branch_name_chain)
+                not in inv_state.fan_out_instance_spans
+            ):
+                self._open_fan_out_instance_dispatch_span(inv_state, correlation_id, prefix, event)
+            if (
+                branch_name is not None
+                and prefix in inv_state.parallel_branches_parent_node_name
+                and branch_name in inv_state.parallel_branches_branch_names.get(prefix, frozenset())
+                and _branch_dispatch_key(prefix, fan_out_index_chain, branch_name_chain, branch_name)
+                not in inv_state.parallel_branches_branch_spans
+            ):
+                self._open_parallel_branches_branch_dispatch_span(inv_state, correlation_id, prefix, event)
 
     def _open_fan_out_instance_dispatch_span(
         self,
