@@ -79,7 +79,7 @@ import logging
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Any, cast
+from typing import Any, Protocol, cast
 
 from opentelemetry import context as otel_context
 from opentelemetry import metrics as otel_metrics
@@ -270,6 +270,42 @@ def _read_implementation_version() -> str:
     return __version__
 
 
+class _LineageEvent(Protocol):
+    """The lineage an event must carry to place a span in the trace tree."""
+
+    # Typed as a Protocol rather than `Any` because `Any` is exactly what let a
+    # `FailureIsolatedEvent` reach an opener annotated `event: NodeEvent`, where
+    # it raised on a field it does not declare. Structural, not a union of the
+    # eight concrete kinds: what synthesis needs is these six fields, and a new
+    # event kind that carries them should work without editing a list here.
+    #
+    # The three fields that vary -- `caller_invocation_metadata`,
+    # `correlation_id`, `subgraph_identities` -- are deliberately ABSENT from
+    # this Protocol and read defensively at each use, because `FailureIsolatedEvent`
+    # declares none of them and a Protocol cannot express "may be absent".
+    @property
+    def namespace(self) -> tuple[str, ...]: ...
+    @property
+    def attempt_index(self) -> int: ...
+    @property
+    def fan_out_index(self) -> int | None: ...
+    @property
+    def branch_name(self) -> str | None: ...
+    @property
+    def fan_out_index_chain(self) -> tuple[int | None, ...]: ...
+    @property
+    def branch_name_chain(self) -> tuple[str | None, ...]: ...
+
+
+def _event_caller_metadata(event: object) -> Mapping[str, Any] | None:
+    """Caller metadata from any event kind, absent field included."""
+    # Three spellings of "no metadata" reach here: a mapping, None, and the
+    # attribute not existing at all. The last is `FailureIsolatedEvent`, and
+    # missing it is what dropped the `openarmature.failure_isolated` marker span
+    # behind a swallowed AttributeError.
+    return cast("Mapping[str, Any] | None", getattr(event, "caller_invocation_metadata", None))
+
+
 def _apply_caller_metadata(attrs: dict[str, Any], metadata: Mapping[str, Any] | None) -> None:
     """Merge caller-supplied invocation metadata into a span's
     attribute dict as ``openarmature.user.<key>`` entries.
@@ -296,7 +332,7 @@ def _apply_caller_metadata(attrs: dict[str, Any], metadata: Mapping[str, Any] | 
         attrs[f"openarmature.user.{key}"] = value
 
 
-def _subgraph_identity_at(event: NodeEvent, depth: int) -> str:
+def _subgraph_identity_at(event: object, depth: int) -> str:
     """Return the compiled-subgraph identity for the wrapper at the
     given 1-based namespace depth, or the empty string when no
     identity is tracked at that depth.
@@ -321,7 +357,39 @@ def _subgraph_identity_at(event: NodeEvent, depth: int) -> str:
     return ""
 
 
-def _backfill_subgraph_identity(open_span: Any, event: NodeEvent, depth: int) -> None:
+def _stored_lineage(
+    event: _LineageEvent, chain_len: int, *, own_branch: str | None = None
+) -> tuple[tuple[int | None, ...], tuple[str | None, ...]]:
+    """The lineage chains an `_OpenSpan` records, normalized to `chain_len`."""
+    # Truncated when longer, PADDED with None when shorter -- the same
+    # normalization `_branch_dispatch_key` already does for the lookup key, for
+    # the same reason. A wrapper-issued event runs in the enclosing node's own
+    # ContextVar scope, so its chains are one entry short of what an inner node
+    # event carries. Storing the short chain made `_span_chain_on_path` treat the
+    # span as an ancestor of every sibling, because it returns True
+    # unconditionally for a zero-length stored chain -- so caller metadata set
+    # inside one branch was written onto its SIBLING's dispatch span, across the
+    # boundary that function's own docstring says must not be crossed.
+    fan_out = tuple(event.fan_out_index_chain[:chain_len]) + (None,) * max(
+        0, chain_len - len(event.fan_out_index_chain)
+    )
+    if own_branch is None:
+        branches = tuple(event.branch_name_chain[:chain_len]) + (None,) * max(
+            0, chain_len - len(event.branch_name_chain)
+        )
+        return fan_out, branches
+    # A per-branch dispatch span records its OWN branch as the last entry. A
+    # wrapper-issued event carries that name only on the scalar `branch_name`
+    # (it never extended the chain), so padding alone would store None there and
+    # exclude the branch's own augmenter from its own dispatch span -- the
+    # opposite over-correction to the sibling leak, and just as wrong.
+    enclosing = tuple(event.branch_name_chain[: chain_len - 1]) + (None,) * max(
+        0, (chain_len - 1) - len(event.branch_name_chain)
+    )
+    return fan_out, enclosing + (own_branch,)
+
+
+def _backfill_subgraph_identity(open_span: Any, event: object, depth: int) -> None:
     """Set ``openarmature.subgraph.name`` on an already-open dispatch span."""
     # Dispatch spans can now be synthesized by a provider or tool event, which
     # carries the lineage chains but no `subgraph_identities`, so the attribute
@@ -2300,7 +2368,7 @@ class OTelObserver:
         inv_state: _InvState,
         invocation_id: str,
         *,
-        event: Any = None,
+        event: _LineageEvent | None = None,
         calling_namespace_prefix: tuple[str, ...],
         calling_attempt_index: int,
         calling_fan_out_index: int | None,
@@ -2344,9 +2412,7 @@ class OTelObserver:
         # sits inside before walking for it, so the answer does not depend on
         # whether the wrapper's first inner node has drained yet.
         if event is not None:
-            self._synthesize_call_site_wrapper_spans(
-                inv_state, cast("str | None", getattr(event, "correlation_id", None)), event
-            )
+            self._synthesize_call_site_wrapper_spans(inv_state, event)
         return self._resolve_enclosing_wrapper_context(
             inv_state,
             invocation_id,
@@ -2566,12 +2632,20 @@ class OTelObserver:
             # fan-out node span at ``prefix`` is already open too, so we don't
             # open a new subgraph span. Runs at any depth (nested fan-out /
             # subgraph wrapper / branch).
-            if (
-                fi_axis is not None
-                and _dispatch_key(prefix, event.fan_out_index_chain, event.branch_name_chain)
-                in inv_state.fan_out_instance_spans
-            ):
-                continue
+            if fi_axis is not None:
+                already = inv_state.fan_out_instance_spans.get(
+                    _dispatch_key(prefix, event.fan_out_index_chain, event.branch_name_chain)
+                )
+                if already is not None:
+                    # Backfill HERE, on the path that actually runs. The arm
+                    # further down recomputes this same key under the same
+                    # guard, so it could only ever see None and its `else` was
+                    # unreachable. A provider event carries no subgraph
+                    # identities, so a span it synthesized would keep the empty
+                    # string it opened with -- making the attribute depend on
+                    # whether a wrapper-issued call happened to arrive first.
+                    _backfill_subgraph_identity(already, event, len(prefix))
+                    continue
             # If this prefix's first segment is configured as a
             # detached subgraph, mint a fresh trace.
             # Detached subgraph wrapper at any depth: ``detached_subgraphs``
@@ -2607,16 +2681,8 @@ class OTelObserver:
                 and prefix[-1] not in self.detached_fan_outs
                 and prefix in inv_state.fan_out_parent_node_name
             ):
-                instance_key = _dispatch_key(prefix, event.fan_out_index_chain, event.branch_name_chain)
-                open_instance = inv_state.fan_out_instance_spans.get(instance_key)
-                if open_instance is None:
-                    self._open_fan_out_instance_dispatch_span(inv_state, correlation_id, prefix, event)
-                else:
-                    # Already synthesized, possibly from a provider event, which
-                    # carries the lineage but not the subgraph identities. Same
-                    # backfill as the branch arm below; both dispatch span kinds
-                    # set this attribute the same way, so both need it.
-                    _backfill_subgraph_identity(open_instance, event, len(prefix))
+                # Unconditional open: the already-open case returned above.
+                self._open_fan_out_instance_dispatch_span(inv_state, correlation_id, prefix, event)
                 continue
             # Per proposal 0044 (v0.36.0): parallel-branches per-branch
             # dispatch synthesis.  Triggered by an inner-branch event
@@ -2940,8 +3006,7 @@ class OTelObserver:
     def _synthesize_call_site_wrapper_spans(
         self,
         inv_state: _InvState,
-        correlation_id: str | None,
-        event: Any,
+        event: _LineageEvent,
     ) -> None:
         """Open any dispatch span the CALLING lineage sits inside that has not
         been synthesized yet."""
@@ -2966,10 +3031,19 @@ class OTelObserver:
         # it. And this opens dispatch spans only: no subgraph wrappers, no
         # detached roots, and nothing is closed, since a provider event is not a
         # position change.
-        namespace = cast("tuple[str, ...]", event.namespace)
-        fan_out_index_chain = cast("tuple[int | None, ...]", event.fan_out_index_chain)
-        branch_name_chain = cast("tuple[str | None, ...]", event.branch_name_chain)
-        branch_name = cast("str | None", event.branch_name)
+        # Correlation comes from the invocation, not the event. Reading it off
+        # the event silently omitted `openarmature.correlation_id` for any kind
+        # that does not declare the field (`FailureIsolatedEvent`), and nothing
+        # backfills it. `_open_started_span` reads it the same way.
+        from openarmature.observability.correlation import (  # noqa: PLC0415
+            current_correlation_id,
+        )
+
+        correlation_id = current_correlation_id()
+        namespace = event.namespace
+        fan_out_index_chain = event.fan_out_index_chain
+        branch_name_chain = event.branch_name_chain
+        branch_name = event.branch_name
         for depth in range(1, len(namespace) + 1):
             prefix = namespace[:depth]
             fi_axis = fan_out_index_chain[depth - 1] if depth - 1 < len(fan_out_index_chain) else None
@@ -2995,7 +3069,7 @@ class OTelObserver:
         inv_state: _InvState,
         correlation_id: str | None,
         prefix: tuple[str, ...],
-        event: NodeEvent,
+        event: _LineageEvent,
     ) -> None:
         """Per-instance dispatch span for a non-detached fan-out.
         Mirror of ``_open_detached_fan_out_instance_root`` but lives in
@@ -3040,7 +3114,7 @@ class OTelObserver:
         }
         if correlation_id is not None:
             attrs["openarmature.correlation_id"] = correlation_id
-        _apply_caller_metadata(attrs, event.caller_invocation_metadata)
+        _apply_caller_metadata(attrs, _event_caller_metadata(event))
         instance_span = self._tracer.start_span(
             name=prefix[-1],
             context=cast("Any", parent_ctx),
@@ -3052,10 +3126,11 @@ class OTelObserver:
         # Its chain is the slice of the inner event's chain up to and including
         # this boundary's own position.
         instance_key = _dispatch_key(prefix, event.fan_out_index_chain, event.branch_name_chain)
+        _stored_fan_out, _stored_branches = _stored_lineage(event, chain_len)
         inv_state.fan_out_instance_spans[instance_key] = _OpenSpan(
             span=instance_span,
-            fan_out_index_chain=event.fan_out_index_chain[:chain_len],
-            branch_name_chain=event.branch_name_chain[:chain_len],
+            fan_out_index_chain=_stored_fan_out,
+            branch_name_chain=_stored_branches,
         )
 
     def _close_fan_out_instance_dispatch_span(self, inv_state: _InvState, key: _DispatchKey) -> None:
@@ -3071,7 +3146,7 @@ class OTelObserver:
         inv_state: _InvState,
         correlation_id: str | None,
         prefix: tuple[str, ...],
-        event: NodeEvent,
+        event: _LineageEvent,
     ) -> None:
         """Per-branch dispatch span for a parallel-branches NODE.
         Mirror of ``_open_fan_out_instance_dispatch_span``.
@@ -3115,7 +3190,7 @@ class OTelObserver:
         }
         if correlation_id is not None:
             attrs["openarmature.correlation_id"] = correlation_id
-        _apply_caller_metadata(attrs, event.caller_invocation_metadata)
+        _apply_caller_metadata(attrs, _event_caller_metadata(event))
         branch_span = self._tracer.start_span(
             name=branch_name,
             context=cast("Any", parent_ctx),
@@ -3128,10 +3203,11 @@ class OTelObserver:
         branch_key = _branch_dispatch_key(
             prefix, event.fan_out_index_chain, event.branch_name_chain, branch_name
         )
+        _stored_fan_out, _stored_branches = _stored_lineage(event, chain_len, own_branch=branch_name)
         inv_state.parallel_branches_branch_spans[branch_key] = _OpenSpan(
             span=branch_span,
-            fan_out_index_chain=event.fan_out_index_chain[:chain_len],
-            branch_name_chain=event.branch_name_chain[:chain_len],
+            fan_out_index_chain=_stored_fan_out,
+            branch_name_chain=_stored_branches,
         )
 
     def _close_parallel_branches_branch_dispatch_span(
@@ -3180,7 +3256,7 @@ class OTelObserver:
         open_span.span.end()
 
     def _find_fan_out_node_span(
-        self, inv_state: _InvState, prefix: tuple[str, ...], event: NodeEvent
+        self, inv_state: _InvState, prefix: tuple[str, ...], event: _LineageEvent
     ) -> _OpenSpan | None:
         """Find the currently-open fan-out / pb NODE span at ``prefix`` on the
         given event's ENCLOSING lineage. When the NODE is itself nested inside
