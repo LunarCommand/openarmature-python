@@ -5841,3 +5841,137 @@ async def test_failure_isolated_marker_survives_orphan_path_synthesis() -> None:
     assert "openarmature.failure_isolated" in names, (
         f"the failure-isolated marker span MUST survive orphan-path synthesis; got {names}"
     )
+
+
+# --- caller-metadata targeting across every lineage shape --------------------
+#
+# This matrix exists because three consecutive fixes in this area each corrected
+# one lineage shape and broke another, with the suite green each time. A branch's
+# identity lives in `branch_name_chain` when the branch descends (subgraph) and
+# only on the scalar `branch_name` when it does not (callable branch, or branch
+# middleware running in the parallel-branches node's own scope). Any change to
+# how those are compared must be checked against all of them, not against the
+# one that prompted it.
+#
+# The rule for every shape is the same: the augmenting context's own dispatch
+# span receives its metadata, and no sibling's does.
+
+
+def _dispatch_span_user_attrs(exporter: Any) -> dict[str, set[str]]:
+    out: dict[str, set[str]] = {}
+    for span in list(exporter.get_finished_spans()):
+        attrs = dict(span.attributes or {})
+        is_branch = "openarmature.parallel_branches.parent_node_name" in attrs
+        is_instance = "openarmature.fan_out.parent_node_name" in attrs
+        if not (is_branch or is_instance):
+            continue
+        key = span.name if is_branch else f"{span.name}#{attrs.get('openarmature.node.fan_out_index')}"
+        out[key] = {k.rsplit(".", 1)[-1] for k in attrs if k.startswith("openarmature.user.")}
+    return out
+
+
+async def _run_and_collect(graph: Any, initial: Any) -> dict[str, set[str]]:
+    exporter = InMemorySpanExporter()
+    observer = OTelObserver(span_processor=SimpleSpanProcessor(exporter))
+    graph.attach_observer(observer)
+    try:
+        await graph.invoke(initial)
+        await graph.drain()
+    finally:
+        observer.shutdown()
+    return _dispatch_span_user_attrs(exporter)
+
+
+async def test_metadata_reaches_only_its_own_subgraph_branch() -> None:
+    from openarmature.graph.parallel_branches import BranchSpec
+    from openarmature.observability.metadata import set_invocation_metadata
+
+    class _S(State):
+        n: int = 0
+
+    class _Sub(State):
+        n: int = 0
+
+    async def _plain(_s: Any) -> dict[str, Any]:
+        return {}
+
+    async def _tag(_s: Any) -> dict[str, Any]:
+        set_invocation_metadata(from_b="yes")
+        return {}
+
+    def _sub(body: Any) -> Any:
+        return GraphBuilder(_Sub).add_node("guard", body).add_edge("guard", END).set_entry("guard").compile()
+
+    graph = (
+        GraphBuilder(_S)
+        .add_parallel_branches_node(
+            "pb", branches={"a": BranchSpec(subgraph=_sub(_plain)), "b": BranchSpec(subgraph=_sub(_tag))}
+        )
+        .add_edge("pb", END)
+        .set_entry("pb")
+        .compile()
+    )
+    assert await _run_and_collect(graph, _S()) == {"a": set(), "b": {"from_b"}}
+
+
+async def test_metadata_reaches_only_its_own_callable_branch() -> None:
+    # A callable branch never descends, so its augmenter's chain is SHORTER than
+    # its dispatch span's position. Comparing raw chains let every branch's
+    # metadata reach every sibling; normalizing only the stored side made each
+    # branch lose its own. Both were green on the subgraph shape above.
+    from openarmature.graph.parallel_branches import BranchSpec
+    from openarmature.observability.metadata import set_invocation_metadata
+
+    class _S(State):
+        n: int = 0
+
+    async def _ca(_s: Any) -> dict[str, Any]:
+        set_invocation_metadata(from_a="yes")
+        return {}
+
+    async def _cb(_s: Any) -> dict[str, Any]:
+        set_invocation_metadata(from_b="yes")
+        return {}
+
+    graph = (
+        GraphBuilder(_S)
+        .add_parallel_branches_node("pb", branches={"a": BranchSpec(call=_ca), "b": BranchSpec(call=_cb)})
+        .add_edge("pb", END)
+        .set_entry("pb")
+        .compile()
+    )
+    assert await _run_and_collect(graph, _S()) == {"a": {"from_a"}, "b": {"from_b"}}
+
+
+async def test_metadata_reaches_only_its_own_fan_out_instance() -> None:
+    from openarmature.observability.metadata import set_invocation_metadata
+
+    class _S(State):
+        seeds: list[int] = [0, 1]
+        out: list[int] = []
+
+    class _Leaf(State):
+        seed: int = 0
+        marker: int = 0
+
+    async def _guard(state: Any) -> dict[str, Any]:
+        if state.seed == 1:
+            set_invocation_metadata(from_i1="yes")
+        return {"marker": 1}
+
+    leaf = GraphBuilder(_Leaf).add_node("guard", _guard).add_edge("guard", END).set_entry("guard").compile()
+    graph = (
+        GraphBuilder(_S)
+        .add_fan_out_node(
+            "fo",
+            subgraph=leaf,
+            items_field="seeds",
+            item_field="seed",
+            collect_field="marker",
+            target_field="out",
+        )
+        .add_edge("fo", END)
+        .set_entry("fo")
+        .compile()
+    )
+    assert await _run_and_collect(graph, _S()) == {"fo#0": set(), "fo#1": {"from_i1"}}

@@ -1431,12 +1431,31 @@ class OTelObserver:
             if _span_chain_on_path(open_span, aug_fi_chain, aug_bn_chain):
                 targets.append(open_span.span)
 
-        # Per-branch dispatch spans: same lineage match as fan-out above.
+        # Per-branch dispatch spans: same lineage match as fan-out above, but
+        # BOTH sides are normalized to the span's depth first.
+        #
+        # A branch's identity lives in two different places depending on shape.
+        # A subgraph branch descends, so an augmenter inside it carries the name
+        # in `branch_name_chain`. A CALLABLE branch never descends and branch
+        # middleware runs in the pb node's own scope, so the name is only on the
+        # scalar `branch_name` and the chain is shorter than the span's.
+        # Comparing the raw chains therefore fails in one shape or the other:
+        # normalizing only the STORED side made a callable branch's own metadata
+        # stop reaching its own dispatch span, and not normalizing at all let it
+        # reach every sibling's.
         for key, open_span in inv_state.parallel_branches_branch_spans.items():
             anchor_ns = key[0]
             if not (is_strict_prefix(anchor_ns, aug_ns) or anchor_ns == aug_ns):
                 continue
-            if _span_chain_on_path(open_span, aug_fi_chain, aug_bn_chain):
+            depth = len(anchor_ns)
+            fi_chain = tuple(aug_fi_chain[:depth]) + (None,) * max(0, depth - len(aug_fi_chain))
+            bn_chain = tuple(aug_bn_chain[:depth])
+            if len(bn_chain) < depth:
+                # The augmenter's chain does not reach this branch's position, so
+                # its own branch identity is the scalar. Anything else at that
+                # position means the augmenter is somewhere else entirely.
+                bn_chain = bn_chain + (None,) * (depth - 1 - len(bn_chain)) + (event.branch_name,)
+            if _span_chain_on_path(open_span, fi_chain, bn_chain):
                 targets.append(open_span.span)
 
         # Open NODE spans: same context (aug's own attempt span), or
