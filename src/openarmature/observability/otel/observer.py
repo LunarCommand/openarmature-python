@@ -117,7 +117,7 @@ from openarmature.graph.events import (
     ToolCallFailedEvent,
 )
 from openarmature.graph.observer import ObserverEvent
-from openarmature.observability.lineage import is_strict_prefix
+from openarmature.observability.lineage import is_outermost_serial, is_strict_prefix
 from openarmature.observability.llm_event import _token_budget_evaluations, serialize_tool_calls
 
 # §7 (proposal 0083): the vendor-neutral token-budget WARNING log surface.
@@ -1402,7 +1402,7 @@ class OTelObserver:
         # parallel-branches do.  Mirrors fixture 034 and matches the
         # 0045 §3.4 statement that "existing single-level fixtures
         # remain unchanged."
-        outermost_serial = all(fi is None for fi in aug_fi_chain) and all(bn is None for bn in aug_bn_chain)
+        outermost_serial = is_outermost_serial(event)
         if outermost_serial:
             inv_open = self._invocation_span.get(invocation_id)
             if inv_open is not None:

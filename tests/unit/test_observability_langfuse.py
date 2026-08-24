@@ -503,6 +503,45 @@ async def test_metadata_augmentation_updates_trace_and_node_for_outermost() -> N
     assert ask_obs.metadata.get("request_id") == "req-xyz"
 
 
+async def test_metadata_augmentation_in_a_callable_branch_stays_off_the_trace() -> None:
+    # The parallel-branches counterpart of the fan-out test below, for the shape
+    # that has no chain to read.  A callable branch never descends, so its
+    # augmenter's branch_name_chain is empty and a chain-only outermost-serial
+    # test reads it as pure-serial -- which put BOTH branches' keys on the Trace,
+    # the exact sibling leak §3.4's shared-parent boundary forbids.
+    from openarmature.graph.parallel_branches import BranchSpec
+    from openarmature.observability.metadata import set_invocation_metadata
+
+    class _S(State):
+        n: int = 0
+
+    async def _ca(_s: _S) -> dict[str, Any]:
+        set_invocation_metadata(from_a="yes")
+        return {}
+
+    async def _cb(_s: _S) -> dict[str, Any]:
+        set_invocation_metadata(from_b="yes")
+        return {}
+
+    graph = (
+        GraphBuilder(_S)
+        .add_parallel_branches_node("pb", branches={"a": BranchSpec(call=_ca), "b": BranchSpec(call=_cb)})
+        .add_edge("pb", END)
+        .set_entry("pb")
+        .compile()
+    )
+    graph, client, observer = _attach(graph)
+    try:
+        await graph.invoke(_S())
+        await graph.drain()
+    finally:
+        observer.shutdown()
+
+    trace = next(iter(client.traces.values()))
+    leaked = {k for k in trace.metadata if k in {"from_a", "from_b"}}
+    assert leaked == set(), f"callable-branch augmentation leaked onto Trace metadata: {sorted(leaked)}"
+
+
 async def test_metadata_augmentation_in_fan_out_isolates_per_instance() -> None:
     # Fixture 029-shaped: each fan-out instance augments metadata with
     # its own product_id. The Trace MUST NOT carry any product_id

@@ -5890,7 +5890,28 @@ def _dispatch_span_user_attrs(exporter: Any) -> dict[str, set[str]]:
     return out
 
 
-async def _run_and_collect(graph: Any, initial: Any) -> dict[str, set[str]]:
+def _shared_parent_user_attrs(exporter: Any) -> dict[str, set[str]]:
+    # The spans §3.4 classifies as shared parents, identified by attributes that
+    # only their own kind carries -- never by name, since an instance dispatch
+    # span reuses its fan-out node's name.  A dispatcher NODE span carries the
+    # cardinality attribute (`item_count` / `branch_count`); its dispatch spans
+    # carry `parent_node_name` instead.  The invocation span is the only one
+    # with `invocation_id` and no node name.
+    out: dict[str, set[str]] = {}
+    for span in list(exporter.get_finished_spans()):
+        attrs = dict(span.attributes or {})
+        user = {k.rsplit(".", 1)[-1] for k in attrs if k.startswith("openarmature.user.")}
+        if "openarmature.invocation_id" in attrs and "openarmature.node.name" not in attrs:
+            out["invocation"] = user
+        elif (
+            "openarmature.fan_out.item_count" in attrs
+            or "openarmature.parallel_branches.branch_count" in attrs
+        ):
+            out[f"node:{attrs.get('openarmature.node.name')}"] = user
+    return out
+
+
+async def _run_and_collect_both(graph: Any, initial: Any) -> tuple[dict[str, set[str]], dict[str, set[str]]]:
     exporter = InMemorySpanExporter()
     observer = OTelObserver(span_processor=SimpleSpanProcessor(exporter))
     graph.attach_observer(observer)
@@ -5899,10 +5920,39 @@ async def _run_and_collect(graph: Any, initial: Any) -> dict[str, set[str]]:
         await graph.drain()
     finally:
         observer.shutdown()
-    return _dispatch_span_user_attrs(exporter)
+    return _dispatch_span_user_attrs(exporter), _shared_parent_user_attrs(exporter)
 
 
-async def test_metadata_reaches_only_its_own_subgraph_branch() -> None:
+async def _run_and_collect(graph: Any, initial: Any) -> dict[str, set[str]]:
+    dispatch, _shared = await _run_and_collect_both(graph, initial)
+    return dispatch
+
+
+async def _pb_callable_graph() -> Any:
+    from openarmature.graph.parallel_branches import BranchSpec
+    from openarmature.observability.metadata import set_invocation_metadata
+
+    class _S(State):
+        n: int = 0
+
+    async def _ca(_s: Any) -> dict[str, Any]:
+        set_invocation_metadata(from_a="yes")
+        return {}
+
+    async def _cb(_s: Any) -> dict[str, Any]:
+        set_invocation_metadata(from_b="yes")
+        return {}
+
+    return (
+        GraphBuilder(_S)
+        .add_parallel_branches_node("pb", branches={"a": BranchSpec(call=_ca), "b": BranchSpec(call=_cb)})
+        .add_edge("pb", END)
+        .set_entry("pb")
+        .compile()
+    ), _S()
+
+
+async def _pb_subgraph_graph() -> Any:
     from openarmature.graph.parallel_branches import BranchSpec
     from openarmature.observability.metadata import set_invocation_metadata
 
@@ -5922,7 +5972,7 @@ async def test_metadata_reaches_only_its_own_subgraph_branch() -> None:
     def _sub(body: Any) -> Any:
         return GraphBuilder(_Sub).add_node("guard", body).add_edge("guard", END).set_entry("guard").compile()
 
-    graph = (
+    return (
         GraphBuilder(_S)
         .add_parallel_branches_node(
             "pb", branches={"a": BranchSpec(subgraph=_sub(_plain)), "b": BranchSpec(subgraph=_sub(_tag))}
@@ -5930,40 +5980,10 @@ async def test_metadata_reaches_only_its_own_subgraph_branch() -> None:
         .add_edge("pb", END)
         .set_entry("pb")
         .compile()
-    )
-    assert await _run_and_collect(graph, _S()) == {"a": set(), "b": {"from_b"}}
+    ), _S()
 
 
-async def test_metadata_reaches_only_its_own_callable_branch() -> None:
-    # A callable branch never descends, so its augmenter's chain is SHORTER than
-    # its dispatch span's position. Comparing raw chains let every branch's
-    # metadata reach every sibling; normalizing only the stored side made each
-    # branch lose its own. Both were green on the subgraph shape above.
-    from openarmature.graph.parallel_branches import BranchSpec
-    from openarmature.observability.metadata import set_invocation_metadata
-
-    class _S(State):
-        n: int = 0
-
-    async def _ca(_s: Any) -> dict[str, Any]:
-        set_invocation_metadata(from_a="yes")
-        return {}
-
-    async def _cb(_s: Any) -> dict[str, Any]:
-        set_invocation_metadata(from_b="yes")
-        return {}
-
-    graph = (
-        GraphBuilder(_S)
-        .add_parallel_branches_node("pb", branches={"a": BranchSpec(call=_ca), "b": BranchSpec(call=_cb)})
-        .add_edge("pb", END)
-        .set_entry("pb")
-        .compile()
-    )
-    assert await _run_and_collect(graph, _S()) == {"a": {"from_a"}, "b": {"from_b"}}
-
-
-async def test_metadata_reaches_only_its_own_fan_out_instance() -> None:
+async def _fan_out_graph() -> Any:
     from openarmature.observability.metadata import set_invocation_metadata
 
     class _S(State):
@@ -5980,7 +6000,7 @@ async def test_metadata_reaches_only_its_own_fan_out_instance() -> None:
         return {"marker": 1}
 
     leaf = GraphBuilder(_Leaf).add_node("guard", _guard).add_edge("guard", END).set_entry("guard").compile()
-    graph = (
+    return (
         GraphBuilder(_S)
         .add_fan_out_node(
             "fo",
@@ -5993,5 +6013,113 @@ async def test_metadata_reaches_only_its_own_fan_out_instance() -> None:
         .add_edge("fo", END)
         .set_entry("fo")
         .compile()
+    ), _S()
+
+
+# Each shape's own dispatch span receives its metadata, and no sibling's does.
+# The three graphs are shared with the shared-parent tests below, so a shape is
+# described once and both halves of §3.4 are asserted against the same run.
+
+
+async def test_metadata_reaches_only_its_own_subgraph_branch() -> None:
+    graph, initial = await _pb_subgraph_graph()
+    assert await _run_and_collect(graph, initial) == {"a": set(), "b": {"from_b"}}
+
+
+async def test_metadata_reaches_only_its_own_callable_branch() -> None:
+    # A callable branch never descends, so its augmenter's chain is SHORTER than
+    # its dispatch span's position. Comparing raw chains let every branch's
+    # metadata reach every sibling; normalizing only the stored side made each
+    # branch lose its own. Both were green on the subgraph shape above.
+    graph, initial = await _pb_callable_graph()
+    assert await _run_and_collect(graph, initial) == {"a": {"from_a"}, "b": {"from_b"}}
+
+
+async def test_metadata_reaches_only_its_own_fan_out_instance() -> None:
+    graph, initial = await _fan_out_graph()
+    assert await _run_and_collect(graph, initial) == {"fo#0": set(), "fo#1": {"from_i1"}}
+
+
+# The matrix above reads dispatch spans only, so it is blind to the other half of
+# §3.4: a shared parent MUST NOT be updated at all.  Nothing asserted that half
+# for a span the matrix filters out, which is how the callable-branch leak onto
+# the invocation span survived.  ``test_metadata_augmentation_updates_outermost_
+# open_spans`` above already pins the opposite direction on the invocation span's
+# own attributes; the positive test here states it over the same shared-parent
+# view the negative one uses, so the pair reads as one claim.
+
+
+@pytest.mark.parametrize(
+    ("shape", "dispatcher"),
+    [("callable_branch", "node:pb"), ("subgraph_branch", "node:pb"), ("fan_out_instance", "node:fo")],
+)
+async def test_metadata_from_inside_a_dispatch_never_reaches_a_shared_parent(
+    shape: str, dispatcher: str
+) -> None:
+    # §3.4: the invocation span is a shared parent "only when at least one
+    # fan-out or parallel-branches dispatch is on the augmenter's call-stack
+    # path", and every one of these three shapes has one.  The callable-branch
+    # row is the one that regressed: a callable branch never descends, so its
+    # augmenter's branch_name_chain is empty and a chain-only outermost-serial
+    # test read it as pure-serial.
+    builder = {
+        "callable_branch": _pb_callable_graph,
+        "subgraph_branch": _pb_subgraph_graph,
+        "fan_out_instance": _fan_out_graph,
+    }[shape]
+    graph, initial = await builder()
+    _dispatch, shared = await _run_and_collect_both(graph, initial)
+    assert shared == {"invocation": set(), dispatcher: set()}
+
+
+async def test_a_node_after_a_dispatch_still_reaches_the_invocation_span() -> None:
+    # The false-negative guard on the predicate above.  It now reads the scalar
+    # `branch_name` / `fan_out_index`, so if either outlived its dispatch, a
+    # downstream SERIAL node would be wrongly treated as still inside a branch
+    # and would stop reaching the invocation span.  It does not: the scalar is
+    # scoped to the dispatch.  Pinned because that scoping is what licenses
+    # reading the scalar at all.
+    from openarmature.graph.parallel_branches import BranchSpec
+    from openarmature.observability.metadata import set_invocation_metadata
+
+    class _S(State):
+        n: int = 0
+
+    async def _ca(_s: Any) -> dict[str, Any]:
+        set_invocation_metadata(from_a="yes")
+        return {}
+
+    async def _after(_s: Any) -> dict[str, Any]:
+        set_invocation_metadata(from_after="yes")
+        return {}
+
+    graph = (
+        GraphBuilder(_S)
+        .add_parallel_branches_node("pb", branches={"a": BranchSpec(call=_ca)})
+        .add_node("after", _after)
+        .add_edge("pb", "after")
+        .add_edge("after", END)
+        .set_entry("pb")
+        .compile()
     )
-    assert await _run_and_collect(graph, _S()) == {"fo#0": set(), "fo#1": {"from_i1"}}
+    _dispatch, shared = await _run_and_collect_both(graph, _S())
+    # The branch's own key stays off it; the later serial node's reaches it.
+    assert shared["invocation"] == {"from_after"}
+
+
+async def test_outermost_serial_metadata_does_reach_the_invocation_span() -> None:
+    # The opposite direction, so the negative test above cannot be "satisfied"
+    # by never writing the invocation span at all.  No dispatch on the path, so
+    # §3.4's rule 2 applies and the invocation span updates in place.
+    from openarmature.observability.metadata import set_invocation_metadata
+
+    class _S(State):
+        n: int = 0
+
+    async def _body(_s: Any) -> dict[str, Any]:
+        set_invocation_metadata(from_serial="yes")
+        return {}
+
+    graph = GraphBuilder(_S).add_node("solo", _body).add_edge("solo", END).set_entry("solo").compile()
+    _dispatch, shared = await _run_and_collect_both(graph, _S())
+    assert shared == {"invocation": {"from_serial"}}
