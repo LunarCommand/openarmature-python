@@ -263,6 +263,12 @@ _SUPPORTED_FIXTURES = frozenset(
         # an impl sourcing the event from `raw` surfaces the wire value there --
         # so it needs a driver reading both surfaces off one invocation.
         "149-malformed-wire-counter-nulled-through-mapping-to-event-and-span",
+        # 152 / 153 (proposal 0084): where a provider span emitted from a
+        # WRAPPER lands when the calling node's span is not open. Their driver
+        # yields inside the wrapper on purpose; passing without that yield was
+        # the schedule-dependence, not the fix.
+        "152-otel-parallel-branch-orphan-llm-fallback",
+        "153-otel-mixed-nesting-orphan-llm-fallback",
         # v0.69.0 — proposal 0063 (tool-execution observability). A
         # calls_tool node enters the with_tool_call scope; the typed
         # ToolCallEvent / ToolCallFailedEvent drive the OTel tool span +
@@ -445,30 +451,6 @@ _DEFERRED_FIXTURES: dict[str, str] = {
         "and the branch exception escapes. The fix is YAML middleware parsing in adapter.py plus "
         "threading per_node_mw into add_parallel_branches_node, NOT a failure path in the 110 "
         "driver -- that driver is reached and would still see an unretried raise"
-    ),
-    # Both were wired and then UN-wired: a driver exists in the PR history that
-    # makes them pass, and the passing was not worth having. The orphan provider
-    # call is enqueued before the branch's first inner node, so whether the
-    # per-branch dispatch span is registered when the observer resolves the
-    # parent depends on nothing yielding to the event loop in between. Inserting
-    # a single `await asyncio.sleep(0)` in the wrapper -- ordinary for real
-    # middleware -- moves 152's orphan to the invocation root and 153's to the
-    # `work` branch dispatch span, the parent 153 explicitly forbids. Measured,
-    # not reasoned. A green run would have certified a lucky interleaving.
-    #
-    # The lineage-key defect these exposed IS fixed (`_branch_dispatch_key` now
-    # normalizes chains shallower than the prefix, in both observers). That fix
-    # is necessary and not sufficient. Activating these needs the orphan parent
-    # resolved deterministically -- deferring the decision until the enclosing
-    # wrapper span is known -- which is an observer change, not a harness one.
-    "152-otel-parallel-branch-orphan-llm-fallback": (
-        "orphan parent resolution is drain-schedule dependent; one `await asyncio.sleep(0)` in the "
-        "wrapper parents the orphan under the invocation root instead of the branch dispatch span. "
-        "Needs deterministic resolution in the observer, not a harness change"
-    ),
-    "153-otel-mixed-nesting-orphan-llm-fallback": (
-        "same race as 152: under a yielding wrapper the orphan parents under the `work` branch "
-        "dispatch span, which this fixture's own invariant forbids"
     ),
     # Proposal 0109 (spec v0.104.0) token-budget failure-path parity.
 }
@@ -695,6 +677,9 @@ _DRIVER_EXPECTED_KEYS: dict[str, frozenset[str]] = {
     "_run_token_budget_fixture": frozenset({"span_tree", "metrics", "invariants", "observers"}),
     # 149's driver: reads the typed-event and span halves off one invocation.
     "_run_typed_event_with_span_cases": frozenset({"span_tree", "observers", "invariants"}),
+    # 152 / 153's driver: span shape plus the absence, count and ordering claims
+    # the tree cannot express.
+    "_run_orphan_fallback_fixture": frozenset({"span_tree", "invariants"}),
     # `invariants` is documentary here; `observers` is deliberately ABSENT because
     # _run_llm_payload_case reads span_tree ONLY. Claiming observers is what let
     # 149 be re-routed here with its contains_event half silently dropped.
@@ -917,6 +902,11 @@ async def test_observability_fixture(fixture_path: Path) -> None:
         "131-token-budget-on-structured-output-failure",
     }:
         await _run_token_budget_fixture(spec)
+    elif fixture_id in {
+        "152-otel-parallel-branch-orphan-llm-fallback",
+        "153-otel-mixed-nesting-orphan-llm-fallback",
+    }:
+        await _run_orphan_fallback_fixture(spec)
     elif fixture_id == "149-malformed-wire-counter-nulled-through-mapping-to-event-and-span":
         # Needs the request model bound independently of the mock; see the driver.
         await _run_typed_event_with_span_cases(spec)
@@ -6819,6 +6809,515 @@ async def _run_typed_event_with_span_case(case: Mapping[str, Any]) -> None:
         _assert_error_span_extras(spans, expected_tree)
 
     _assert_invariants_recognized(case, _MALFORMED_COUNTER_INVARIANTS, "malformed-counter")
+
+
+# Fixture 152 / 153 invariant names. Split by whether the case's `span_tree`
+# already pins the claim, which is the test for documentary here.
+#
+# `_assert_span_tree_matches` matches each EXPECTED child against the actual
+# children and does not reject extras, so it pins "X appears under Y" but NOT
+# "nothing else appears under Y", and no count or ordering. That is why the
+# absence, count and ordering claims below are implemented rather than recorded
+# as documentary: the tree cannot express them.
+_ORPHAN_FALLBACK_INVARIANTS = {
+    "orphan_llm_span_parents_under_branch_dispatch_span",
+    "orphan_llm_span_parents_under_innermost_fan_out_instance",
+    "orphan_llm_span_sibling_of_guard_node_span",
+    "orphan_llm_span_routed_to_correct_branch_by_name",
+    "orphan_llm_span_not_under_dispatcher_node_or_invocation",
+    "orphan_llm_span_not_under_work_branch_dispatch_span",
+    "orphan_llm_span_not_under_node_or_invocation",
+    "dispatch_spans_close_in_declaration_order",
+    "llm_provider_span_count",
+}
+
+_LLM_SPAN = "openarmature.llm.complete"
+_BRANCH_NAME_ATTR = "openarmature.node.branch_name"
+# Attributes only a SYNTHESIZED dispatch span carries. Node spans inside a
+# branch also carry `openarmature.node.branch_name`, and a fan-out instance
+# dispatch span reuses its fan-out node's NAME, so neither name nor branch_name
+# distinguishes a dispatch span from a node span. These do.
+_BRANCH_DISPATCH_ATTR = "openarmature.parallel_branches.parent_node_name"
+_INSTANCE_DISPATCH_ATTR = "openarmature.fan_out.parent_node_name"
+
+
+def _is_branch_dispatch(span: Any) -> bool:
+    return _BRANCH_DISPATCH_ATTR in dict(span.attributes or {})
+
+
+def _is_instance_dispatch(span: Any) -> bool:
+    return _INSTANCE_DISPATCH_ATTR in dict(span.attributes or {})
+
+
+def _assert_orphan_fallback_invariants(
+    case: Mapping[str, Any],
+    spans: Sequence[Any],
+    subgraph_specs: Mapping[str, Any],
+    mock_bodies: Mapping[str, dict[str, Any]],
+) -> None:
+    """Evaluate 152 / 153's orphan-parenting claims over the captured spans."""
+    invariants = cast("dict[str, Any]", case["expected"].get("invariants") or {})
+    if not invariants:
+        return
+
+    by_id = {s.context.span_id: s for s in spans}
+
+    def _parent_of(span: Any) -> Any:
+        parent = span.parent
+        return by_id.get(parent.span_id) if parent is not None else None
+
+    llm_spans = [s for s in spans if s.name == _LLM_SPAN]
+    # Positive anchor before any absence or parent claim: with no provider span
+    # recorded, every "the orphan is not under X" claim holds trivially and
+    # every "its parent is Y" claim is vacuous over an empty list.
+    assert llm_spans, (
+        f"no {_LLM_SPAN} span was recorded, so the orphan-parenting claims would pass "
+        f"vacuously; got {sorted({s.name for s in spans})}"
+    )
+
+    expected_count = invariants.get("llm_provider_span_count")
+    if expected_count is not None:
+        assert len(llm_spans) == expected_count, (
+            f"expected exactly {expected_count} {_LLM_SPAN} span(s); got {len(llm_spans)}"
+        )
+
+    if invariants.get("orphan_llm_span_parents_under_branch_dispatch_span"):
+        for llm in llm_spans:
+            parent = _parent_of(llm)
+            assert parent is not None and _is_branch_dispatch(parent), (
+                f"the orphan {_LLM_SPAN} MUST parent under a per-branch DISPATCH span (one carrying "
+                f"{_BRANCH_DISPATCH_ATTR}); its parent is {parent.name if parent else None!r} with "
+                f"{sorted(dict(parent.attributes or {})) if parent else []}"
+            )
+
+    if invariants.get("orphan_llm_span_parents_under_innermost_fan_out_instance"):
+        for llm in llm_spans:
+            parent = _parent_of(llm)
+            assert parent is not None and _is_instance_dispatch(parent), (
+                f"the orphan {_LLM_SPAN} MUST parent under the innermost fan-out INSTANCE dispatch "
+                f"span (one carrying {_INSTANCE_DISPATCH_ATTR}); its parent is "
+                f"{parent.name if parent else None!r} with "
+                f"{sorted(dict(parent.attributes or {})) if parent else []}"
+            )
+
+    if invariants.get("orphan_llm_span_sibling_of_guard_node_span"):
+        # The guard node span opens only AFTER the pre-phase wrapper call, so it
+        # cannot be the orphan's parent; it must be its SIBLING.
+        guards = [s for s in spans if s.name == "guard"]
+        assert guards, f"no `guard` node span was recorded; got {sorted({s.name for s in spans})}"
+        guard_parents = {g.parent.span_id for g in guards if g.parent is not None}
+        for llm in llm_spans:
+            parent = _parent_of(llm)
+            assert parent is not None and parent.context.span_id in guard_parents, (
+                f"the orphan {_LLM_SPAN} MUST be a SIBLING of the guard node span (same parent), "
+                f"not a child of it; orphan parent={parent.name if parent else None!r}"
+            )
+
+    if invariants.get("orphan_llm_span_routed_to_correct_branch_by_name"):
+        # Each branch's OWN orphan lands under that branch. Counting one per
+        # branch does not express this: a full swap satisfies it exactly as well
+        # as correct routing, and the span_tree cannot see it either because the
+        # two orphan spans are name- and attribute-identical in the declared
+        # tree. The mock routes each branch's distinct request content to a
+        # distinct response id, so the id on the span identifies its issuer.
+        routed = {
+            dict(_parent_of(llm).attributes or {}).get(_BRANCH_NAME_ATTR): dict(llm.attributes or {}).get(
+                "gen_ai.response.id"
+            )
+            for llm in llm_spans
+            if _parent_of(llm) is not None
+        }
+        expected_routing = _expected_branch_routing(case, subgraph_specs, mock_bodies)
+        assert routed == expected_routing, (
+            f"each branch's own orphan MUST land under that branch; expected {expected_routing}, got {routed}"
+        )
+
+    for absence_key, forbidden in (
+        ("orphan_llm_span_not_under_dispatcher_node_or_invocation", None),
+        ("orphan_llm_span_not_under_node_or_invocation", None),
+        ("orphan_llm_span_not_under_work_branch_dispatch_span", "work"),
+    ):
+        if not invariants.get(absence_key):
+            continue
+        for llm in llm_spans:
+            parent = _parent_of(llm)
+            assert parent is not None, f"the orphan {_LLM_SPAN} has no parent span at all"
+            attrs = dict(parent.attributes or {})
+            if forbidden is not None:
+                # The `work` BRANCH dispatch span specifically: a fan-out sits
+                # between it and the orphan, so parenting there means the
+                # fallback stopped one level too high.
+                assert not (_is_branch_dispatch(parent) and attrs.get(_BRANCH_NAME_ATTR) == forbidden), (
+                    f"the orphan {_LLM_SPAN} MUST NOT parent under the {forbidden!r} branch "
+                    f"dispatch span; a fan-out instance sits between them"
+                )
+            else:
+                assert parent.name != "openarmature.invocation", (
+                    f"the orphan {_LLM_SPAN} MUST NOT parent under the invocation root"
+                )
+                # A NODE span is one that is NOT a synthesized dispatch span.
+                # Matching on name alone would misfire in both directions: an
+                # instance dispatch span reuses its fan-out node's name, and node
+                # names inside subgraphs are absent from `case["nodes"]`.
+                assert _is_branch_dispatch(parent) or _is_instance_dispatch(parent), (
+                    f"the orphan {_LLM_SPAN} MUST NOT parent under a NODE span; its parent is "
+                    f"{parent.name!r} carrying {sorted(attrs)}"
+                )
+
+    order = cast("list[str] | None", invariants.get("dispatch_spans_close_in_declaration_order"))
+    if order is not None:
+        # Not expressible in `span_tree` at all: it is about END TIMES, not shape.
+        # Compared pairwise rather than by sorting, matching the existing
+        # implementation of this invariant name elsewhere in this file; sorting
+        # turns a tie into a stable-sort coin flip that reads as a pass.
+        dispatch = {
+            cast("str", dict(s.attributes or {}).get(_BRANCH_NAME_ATTR)): s
+            for s in spans
+            if _is_branch_dispatch(s)
+        }
+        missing = [name for name in order if name not in dispatch]
+        assert not missing, (
+            f"expected one branch dispatch span per declared branch {order}; missing {missing}, "
+            f"got {sorted(dispatch)}"
+        )
+        for earlier, later in zip(order, order[1:], strict=False):
+            assert dispatch[earlier].end_time <= dispatch[later].end_time, (
+                f"branch dispatch spans MUST close in declaration order {order}; {earlier!r} closed "
+                f"at {dispatch[earlier].end_time} after {later!r} at {dispatch[later].end_time}"
+            )
+
+
+# ---------------------------------------------------------------------------
+# Fixtures 152 / 153 — orphan LLM span parent resolution (proposal 0084, §5.5)
+# ---------------------------------------------------------------------------
+#
+# Both assert where a provider span lands when it is issued from a WRAPPER
+# rather than the node body, so the calling node's span is not open and the span
+# falls back to the nearest enclosing wrapper. 152's is the per-branch DISPATCH
+# span; 153 nests a fan-out between them so its is the innermost INSTANCE span.
+#
+# THE WRAPPER YIELDS ON PURPOSE. Both fixtures passed before the observer
+# resolved this structurally, but only because nothing yielded to the event loop
+# between the provider call and the next node start: dispatch spans are
+# synthesized from inner node events, so a single `await asyncio.sleep(0)` moved
+# 152's orphan to the invocation root and 153's to the `work` branch dispatch
+# span. Passing without a yield was the defect wearing a green run. The yield is
+# the assertion.
+
+
+def _merged_subgraph_specs(case: Mapping[str, Any], spec: Mapping[str, Any]) -> dict[str, Any]:
+    """Subgraph declarations, from either level the corpus uses."""
+    # conformance-adapter §5.4 documents `subgraphs:` as a FIXTURE TOP-LEVEL
+    # block and 153 puts it there, while 152 uses the case-level form that
+    # eighteen fixtures across four capabilities use and none of which also
+    # carries a top-level block. Spec has confirmed the case-level form is
+    # sanctioned and that §5.4 is what needs correcting, so accept both.
+    merged: dict[str, Any] = {}
+    for source in (spec, case):
+        merged.update(cast("dict[str, Any]", source.get("subgraphs") or {}))
+    return merged
+
+
+def _subgraph_refs(node_spec: Mapping[str, Any]) -> set[str]:
+    """Every subgraph a node spec references, by any of the three spellings."""
+    # Kept in one place so fan-out, plain-subgraph and parallel-branches
+    # references cannot drift apart. Missing the parallel-branches spelling made
+    # a host subgraph compile before its branch targets and die on a bare
+    # KeyError from the builder, which reads as a missing declaration.
+    refs: set[str] = set()
+    fan_out = cast("dict[str, Any]", node_spec.get("fan_out") or {})
+    if isinstance(fan_out.get("subgraph"), str):
+        refs.add(cast("str", fan_out["subgraph"]))
+    if isinstance(node_spec.get("subgraph"), str):
+        refs.add(cast("str", node_spec["subgraph"]))
+    pb = cast("dict[str, Any]", node_spec.get("parallel_branches") or {})
+    branches = cast("dict[str, Any]", pb.get("branches") or {})
+    for branch_cfg in branches.values():
+        if isinstance(cast("dict[str, Any]", branch_cfg).get("subgraph"), str):
+            refs.add(cast("str", cast("dict[str, Any]", branch_cfg)["subgraph"]))
+    return refs
+
+
+def _wrapper_bearing_node(subgraph_spec: Mapping[str, Any]) -> tuple[str, dict[str, Any]] | None:
+    for node_name, node_spec in cast("dict[str, Any]", subgraph_spec.get("nodes") or {}).items():
+        wrapper = cast("dict[str, Any] | None", node_spec.get("calls_llm_from_wrapper"))
+        if wrapper is not None:
+            return node_name, wrapper
+    return None
+
+
+def _expected_branch_routing(
+    case: Mapping[str, Any],
+    subgraphs: Mapping[str, Any],
+    bodies: Mapping[str, dict[str, Any]],
+) -> dict[str, str]:
+    """Map each branch name to the response id its own orphan call must return."""
+    # Derived from the fixture, not hardcoded: the branch's subgraph declares the
+    # wrapper's request content, and `bodies` says which response that content
+    # must receive.
+    #
+    # `subgraphs` is the MERGED map passed in, not re-read from the case. Reading
+    # `case["subgraphs"]` saw only the case-level form, so the same fixture with
+    # its declarations hoisted to the document level -- 153's shape -- produced
+    # an empty routing map and a spurious failure. This and the compile step now
+    # work from one derivation.
+    branches: dict[str, Any] = {}
+    for node_spec in cast("dict[str, Any]", case["nodes"]).values():
+        pb = cast("dict[str, Any] | None", cast("dict[str, Any]", node_spec).get("parallel_branches"))
+        if pb is not None:
+            branches = cast("dict[str, Any]", pb.get("branches") or {})
+            break
+    routing: dict[str, str] = {}
+    for branch_name, branch_cfg in branches.items():
+        sub = cast("dict[str, Any]", subgraphs.get(cast("str", branch_cfg.get("subgraph")) or "") or {})
+        found = _wrapper_bearing_node(sub)
+        if found is None:
+            continue
+        content = _wrapper_request_content(found[1])
+        body = bodies.get(content)
+        if body is not None:
+            routing[branch_name] = cast("str", body["id"])
+    return routing
+
+
+def _wrapper_request_content(wrapper_spec: Mapping[str, Any]) -> str:
+    messages = cast("list[dict[str, str]]", wrapper_spec.get("messages") or [])
+    return next((m["content"] for m in messages if m.get("role") == "user"), "guardrail check")
+
+
+def _mock_bodies_by_request_content(
+    case: Mapping[str, Any], subgraph_specs: Mapping[str, Any]
+) -> dict[str, dict[str, Any]]:
+    """Map each wrapper's declared request content to the response it must get."""
+    # An explicit pairing, built once, rather than a per-request substring guess.
+    # The previous heuristic matched a response id's suffix against the last word
+    # of the request content: it worked for 152, whose ids encode the branch
+    # ("cc-152-a" for "guardrail a"), and matched NOTHING for 153 ("guardrail
+    # check" against "cc-153"), where every request silently fell through to a
+    # `mocks[0]` fallback. The fixture passed on the fallback, so the routing was
+    # dead code there.
+    #
+    # Paired by declaration order, which is the only association the fixtures
+    # express: wrapper-bearing subgraphs in the order their consumers declare
+    # them, against `mock_llm` in file order. The count assertion is what keeps
+    # that honest -- a fixture whose counts disagree fails here rather than
+    # borrowing someone else's response.
+    contents: list[str] = []
+    for sg_spec in subgraph_specs.values():
+        found = _wrapper_bearing_node(cast("Mapping[str, Any]", sg_spec))
+        if found is not None:
+            contents.append(_wrapper_request_content(found[1]))
+    mocks = cast("list[dict[str, Any]]", case.get("mock_llm") or [])
+    assert len(contents) == len(mocks), (
+        f"cannot pair wrapper requests with canned responses: {len(contents)} wrapper(s) "
+        f"{contents} against {len(mocks)} mock_llm entr(ies). Declaration order is the only "
+        f"association these fixtures express, so the counts must agree."
+    )
+    return {content: cast("dict[str, Any]", m["body"]) for content, m in zip(contents, mocks, strict=True)}
+
+
+async def _run_orphan_fallback_fixture(spec: Mapping[str, Any]) -> None:
+    for case in cast("list[dict[str, Any]]", spec["cases"]):
+        case_name = cast("str", case["name"])
+        try:
+            await _run_orphan_fallback_case(case, spec)
+        except AssertionError as e:
+            raise AssertionError(f"case {case_name!r}: {e}") from e
+
+
+async def _run_orphan_fallback_case(case: Mapping[str, Any], spec: Mapping[str, Any]) -> None:
+    import asyncio  # noqa: PLC0415
+    import json  # noqa: PLC0415
+
+    import httpx  # noqa: PLC0415
+
+    from openarmature.llm import OpenAIProvider, UserMessage  # noqa: PLC0415
+
+    from .adapter import build_graph  # noqa: PLC0415
+
+    subgraph_specs = _merged_subgraph_specs(case, spec)
+    mock_bodies = _mock_bodies_by_request_content(case, subgraph_specs)
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        # Routed by REQUEST CONTENT, not FIFO. Under concurrent branches the
+        # queue order is nondeterministic, so a FIFO mock cannot support the
+        # routing invariant: whichever branch called first would take the first
+        # id regardless of which branch it was. There is deliberately NO
+        # fallback: a request whose content is not in the map fails here rather
+        # than borrowing another branch's response, which is what let 153's
+        # routing be dead while the fixture stayed green.
+        payload = cast("dict[str, Any]", json.loads(request.content.decode()))
+        sent = " ".join(
+            str(cast("dict[str, Any]", m).get("content", ""))
+            for m in cast("list[Any]", payload.get("messages") or [])
+        )
+        body = mock_bodies.get(sent.strip())
+        assert body is not None, (
+            f"no canned response declared for request content {sent.strip()!r}; "
+            f"the fixture declares {sorted(mock_bodies)}"
+        )
+        return httpx.Response(
+            200, content=json.dumps(body).encode(), headers={"Content-Type": "application/json"}
+        )
+
+    provider = OpenAIProvider(
+        base_url="http://mock-llm.test",
+        model="test-model",
+        api_key="test",
+        transport=httpx.MockTransport(_handler),
+    )
+    observer, exporter = _build_observer()
+    try:
+
+        def _make_orphan_mw(wrapper_spec: Mapping[str, Any]) -> Any:
+            messages = (UserMessage(content=_wrapper_request_content(wrapper_spec)),)
+            phase = cast("str", wrapper_spec.get("phase", "pre"))
+
+            async def _mw(state: Any, next_call: Any) -> Any:
+                if phase == "pre":
+                    await provider.complete(list(messages))
+                    # See the note above the driver: the yield is the assertion.
+                    await asyncio.sleep(0)
+                    return await next_call(state)
+                result = await next_call(state)
+                await provider.complete(list(messages))
+                await asyncio.sleep(0)
+                return result
+
+            return _mw
+
+        # ---- Attach each orphan wrapper to whatever ENCLOSES its subgraph,
+        # which is what the fixtures mean by "the nearest enclosing wrapper": a
+        # fan-out target takes INSTANCE middleware, a parallel branch takes
+        # BRANCH middleware. Not node middleware on the guard, which runs
+        # entirely inside the node span in both phases.
+        instance_mw: dict[str, dict[str, list[Any]]] = {}
+        branch_mw: dict[str, dict[str, list[Any]]] = {}
+        # Parallel-branches hosts live in the case AND in subgraphs, so a
+        # wrapper-bearing subgraph used as a branch of a nested pb node is found
+        # too; looking only at `case["nodes"]` tripped a misleading assertion.
+        host_nodes: list[tuple[str | None, str, dict[str, Any]]] = []
+        for name, ns in cast("dict[str, Any]", case.get("nodes") or {}).items():
+            host_nodes.append((None, name, cast("dict[str, Any]", ns)))
+        for sg_name, sg in subgraph_specs.items():
+            sg_nodes = cast("dict[str, Any]", cast("dict[str, Any]", sg).get("nodes") or {})
+            for name, ns in sg_nodes.items():
+                host_nodes.append((sg_name, name, cast("dict[str, Any]", ns)))
+        for sg_name, sg_spec in subgraph_specs.items():
+            found = _wrapper_bearing_node(cast("Mapping[str, Any]", sg_spec))
+            if found is None:
+                continue
+            _node_name, wrapper_spec = found
+            mw = _make_orphan_mw(wrapper_spec)
+            attached = False
+            for host_sg, host_node, host_spec in host_nodes:
+                fan_out = cast("dict[str, Any]", host_spec.get("fan_out") or {})
+                if fan_out.get("subgraph") == sg_name:
+                    assert host_sg is not None, (
+                        f"fan-out node {host_node!r} targeting {sg_name!r} sits at the case level, "
+                        f"where this driver has no instance-middleware seam"
+                    )
+                    instance_mw.setdefault(host_sg, {}).setdefault(host_node, []).append(mw)
+                    attached = True
+                host_pb = cast("dict[str, Any]", host_spec.get("parallel_branches") or {})
+                branches = cast("dict[str, Any]", host_pb.get("branches") or {})
+                for branch_name, branch_cfg in branches.items():
+                    if cast("dict[str, Any]", branch_cfg).get("subgraph") == sg_name:
+                        assert host_sg is None, (
+                            f"parallel-branches node {host_node!r} is nested inside subgraph "
+                            f"{host_sg!r}; this driver attaches branch middleware at the case level only"
+                        )
+                        branch_mw.setdefault(host_node, {}).setdefault(branch_name, []).append(mw)
+                        attached = True
+            assert attached, (
+                f"subgraph {sg_name!r} declares `calls_llm_from_wrapper` but is neither a fan-out "
+                f"target nor a parallel branch, so it has no enclosing wrapper to orphan against"
+            )
+
+        # ---- Compile subgraphs innermost-first, so one referencing another sees
+        # it already compiled.
+        compiled: dict[str, Any] = {}
+        remaining = dict(subgraph_specs)
+        while remaining:
+            progressed = False
+            for sg_name, sg_spec in list(remaining.items()):
+                nodes = cast("dict[str, Any]", cast("dict[str, Any]", sg_spec).get("nodes") or {})
+                needed: set[str] = set()
+                for node_spec in nodes.values():
+                    needed |= _subgraph_refs(cast("Mapping[str, Any]", node_spec))
+                if not needed <= set(compiled):
+                    continue
+                built_sg = build_graph(
+                    cast("Mapping[str, Any]", sg_spec),
+                    subgraphs=dict(compiled),
+                    trace=[],
+                    model_name=f"Sub_{sg_name}",
+                    fan_out_instance_middleware=instance_mw.get(sg_name, {}),
+                )
+                compiled[sg_name] = built_sg.builder.compile()
+                del remaining[sg_name]
+                progressed = True
+            assert progressed, (
+                f"subgraph dependency cycle or missing declaration among {sorted(remaining)}; "
+                f"compiled so far: {sorted(compiled)}"
+            )
+
+        built = build_graph(case, subgraphs=compiled, trace=[], parallel_branches_branch_middleware=branch_mw)
+        graph = built.builder.compile()
+        graph.attach_observer(observer)
+        await graph.invoke(built.initial_state(cast("dict[str, Any]", case.get("initial_state") or {})))
+        await graph.drain()
+    finally:
+        await provider.aclose()
+        observer.shutdown()
+
+    spans = exporter.get_finished_spans()
+    expected = cast("dict[str, Any]", case["expected"])
+    expected_tree = cast("list[dict[str, Any]] | None", expected.get("span_tree"))
+    if expected_tree is not None:
+        inv_root = next((s for s in spans if s.name == "openarmature.invocation" and s.parent is None), None)
+        assert inv_root is not None, f"invocation root span missing; got {[s.name for s in spans]}"
+        # NOT `_assert_error_span_extras` or `_check_payload_span_tree`: both
+        # assume unique span names, which 153 breaks (`inner_fan_out` names both
+        # the node span and its instance spans). Skipping them is only safe
+        # while neither fixture declares a key one of them solely reads, so
+        # assert that rather than leaving it to hold by luck.
+        _assert_no_skipped_span_tree_keys(expected_tree)
+        _assert_span_tree_matches(spans, [inv_root], expected_tree)
+
+    _assert_invariants_recognized(case, _ORPHAN_FALLBACK_INVARIANTS, "orphan-fallback")
+    _assert_orphan_fallback_invariants(case, spans, subgraph_specs, mock_bodies)
+
+
+# Span-tree entry keys read ONLY by the two walkers this driver skips.
+_SKIPPED_SPAN_TREE_KEYS = frozenset(
+    {
+        "attributes_absent",
+        "status_description",
+        "exception_recorded",
+        "input_parses_as_messages",
+        "attribute_truncated",
+        "attribute_does_not_contain",
+        "output_parses_as_object",
+    }
+)
+
+
+def _assert_no_skipped_span_tree_keys(expected_tree: Sequence[Mapping[str, Any]]) -> None:
+    """Fail if an entry declares a key whose only reader this driver skips."""
+
+    def _walk(entries: Sequence[Mapping[str, Any]], path: str) -> None:
+        for entry in entries:
+            here = f"{path}/{cast('str', entry.get('name') or '<unnamed>')}"
+            declared = sorted(_SKIPPED_SPAN_TREE_KEYS & set(entry))
+            assert not declared, (
+                f"{here} declares {declared}, which only a span-tree walker this driver skips would "
+                f"read, so the claim would run nowhere. Teach the walker name+attribute "
+                f"disambiguation before this fixture can carry those keys."
+            )
+            _walk(cast("Sequence[Mapping[str, Any]]", entry.get("children") or []), here)
+
+    _walk(expected_tree, "")
 
 
 async def _run_typed_event_chain_cases(spec: Mapping[str, Any], *, expect_failure: bool = False) -> None:

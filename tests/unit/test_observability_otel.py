@@ -21,6 +21,7 @@ These tests fill the gaps the conformance harness defers:
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from pathlib import Path
 
@@ -5385,3 +5386,740 @@ async def test_callable_branch_dispatch_span_is_opened_once() -> None:
         f"each callable branch's dispatch span MUST be opened once; opened {opened}"
     )
     assert len(opened) == 2, f"expected one dispatch span per callable branch; opened {opened}"
+
+
+async def test_orphan_parent_survives_populate_caller_metadata_off() -> None:
+    # The dispatch-span openers apply caller metadata unconditionally.
+    # `NodeEvent` guarantees a mapping there, but the provider and tool events
+    # type it `| None` and default to None, which the OpenAI provider sets
+    # whenever `populate_caller_metadata=False`. Before the normalization, the
+    # opener raised, the graph observer swallowed it into a warning, the dispatch
+    # span was never created, and the orphan parented on the wrong span.
+    #
+    # Asserting on WARNINGS as well as the parent: the failure was silent, so a
+    # test that only checked the parent would have caught this one but not the
+    # next thing the openers learn to raise on.
+    import json
+    import warnings
+
+    import httpx
+
+    from openarmature.graph.parallel_branches import BranchSpec
+    from openarmature.llm import OpenAIProvider, UserMessage
+
+    body = {
+        "id": "cc",
+        "object": "chat.completion",
+        "model": "m",
+        "choices": [{"index": 0, "message": {"role": "assistant", "content": "ok"}, "finish_reason": "stop"}],
+        "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+    }
+
+    class _Outer(State):
+        n: int = 0
+
+    class _Branch(State):
+        n: int = 0
+
+    provider = OpenAIProvider(
+        base_url="http://mock-llm.test",
+        model="m",
+        api_key="t",
+        transport=httpx.MockTransport(
+            lambda _r: httpx.Response(
+                200, content=json.dumps(body).encode(), headers={"Content-Type": "application/json"}
+            )
+        ),
+        populate_caller_metadata=False,
+    )
+
+    async def _guard(_s: Any) -> dict[str, Any]:
+        return {}
+
+    branch = (
+        GraphBuilder(_Branch).add_node("guard", _guard).add_edge("guard", END).set_entry("guard").compile()
+    )
+
+    async def _wrapper(state: Any, next_call: Any) -> Any:
+        await provider.complete([UserMessage(content="g")])
+        # Yield, so the dispatch span cannot be relied on to exist already.
+        await asyncio.sleep(0)
+        return await next_call(state)
+
+    exporter = InMemorySpanExporter()
+    observer = OTelObserver(span_processor=SimpleSpanProcessor(exporter))
+    graph = (
+        GraphBuilder(_Outer)
+        .add_parallel_branches_node("pb", branches={"a": BranchSpec(subgraph=branch, middleware=(_wrapper,))})
+        .add_edge("pb", END)
+        .set_entry("pb")
+        .compile()
+    )
+    graph.attach_observer(observer)
+    try:
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            await graph.invoke(_Outer())
+            await graph.drain()
+    finally:
+        observer.shutdown()
+        await provider.aclose()
+
+    observer_warnings = [w for w in caught if "observer raised" in str(w.message)]
+    assert not observer_warnings, (
+        f"the observer swallowed an exception into a warning: {[str(w.message) for w in observer_warnings]}"
+    )
+    spans = cast("list[Any]", list(exporter.get_finished_spans()))
+    by_id = {s.context.span_id: s for s in spans}
+    llm = next((s for s in spans if s.name == "openarmature.llm.complete"), None)
+    assert llm is not None, f"no provider span recorded; got {[s.name for s in spans]}"
+    parent = by_id.get(llm.parent.span_id) if llm.parent is not None else None
+    assert parent is not None and parent.name == "a", (
+        f"the orphan MUST parent under the branch dispatch span even with caller metadata off; "
+        f"got {parent.name if parent else None!r}"
+    )
+
+
+# --- orphan-path synthesis: every event kind that can reach it ---------------
+
+
+def _handler_event_types() -> list[str]:
+    """Event type names annotated on every handler that threads `event=` into
+    `_resolve_llm_parent`."""
+    # Derived from the source rather than hand-listed, so a NEW handler that
+    # opts into synthesis is covered the day it is written. Hand-listing is what
+    # failed before: `FailureIsolatedEvent` was threaded in without anyone
+    # asking which event kinds actually arrive at the dispatch-span openers, and
+    # it declares neither `caller_invocation_metadata` nor `correlation_id`.
+    import inspect
+    import re
+
+    from openarmature.observability.otel import observer as observer_module
+
+    source = inspect.getsource(observer_module.OTelObserver)
+    found: list[str] = []
+    for match in re.finditer(r"def (_handle_\w+)\(self, event: ([^)]+)\)", source):
+        body_start = match.end()
+        body_end = source.find("\n    def ", body_start)
+        if "event=event," not in source[body_start:body_end]:
+            continue
+        found.extend(part.strip() for part in match.group(2).split("|"))
+    return sorted(set(found))
+
+
+def test_every_synthesising_event_kind_carries_the_lineage_protocol() -> None:
+    # `_LineageEvent` is what `_resolve_llm_parent` now declares. If a handler
+    # threads an event kind that does not structurally satisfy it, synthesis
+    # either crashes in an opener or silently mis-places the span.
+    import dataclasses
+
+    from openarmature.graph import events as graph_events
+
+    required = {
+        "namespace",
+        "attempt_index",
+        "fan_out_index",
+        "branch_name",
+        "fan_out_index_chain",
+        "branch_name_chain",
+    }
+    kinds = _handler_event_types()
+    assert kinds, "parsed no handlers threading `event=`; the source scan is broken"
+    for name in kinds:
+        cls = getattr(graph_events, name, None)
+        assert cls is not None and dataclasses.is_dataclass(cls), f"{name} is not a known event dataclass"
+        fields = {f.name for f in dataclasses.fields(cls)}
+        missing = sorted(required - fields)
+        assert not missing, f"{name} reaches orphan-path synthesis but lacks {missing}"
+
+
+def test_dispatch_span_openers_tolerate_every_optional_field_being_absent() -> None:
+    # The three fields that VARY across event kinds are read defensively rather
+    # than declared on the Protocol, because a Protocol cannot express "may be
+    # absent". This drives the openers with an event carrying the lineage and
+    # nothing else, which is `FailureIsolatedEvent`'s shape taken to its limit.
+    #
+    # The failure this pins was silent: the opener raised, the graph observer
+    # swallowed it into a warning, the dispatch span was never created, and the
+    # orphan parented on the wrong span.
+    from openarmature.observability.otel.observer import (
+        _apply_caller_metadata,
+        _event_caller_metadata,
+        _subgraph_identity_at,
+    )
+
+    class _LineageOnly:
+        namespace = ("pb",)
+        attempt_index = 0
+        fan_out_index = None
+        branch_name = "a"
+        fan_out_index_chain: tuple[int | None, ...] = ()
+        branch_name_chain: tuple[str | None, ...] = ()
+
+    bare = _LineageOnly()
+    assert _event_caller_metadata(bare) is None
+    attrs: dict[str, Any] = {}
+    _apply_caller_metadata(attrs, _event_caller_metadata(bare))
+    assert attrs == {}, f"an absent metadata field must contribute nothing; got {attrs}"
+    assert _subgraph_identity_at(bare, 1) == ""
+
+
+async def test_wrapper_issued_call_does_not_leak_metadata_to_a_sibling_branch() -> None:
+    # A dispatch span synthesized from a wrapper-issued event stored its lineage
+    # chains one entry shorter than the node-event path stores them, because
+    # branch middleware runs in the parallel-branches node's own ContextVar
+    # scope. `_span_chain_on_path` returns True unconditionally for a zero-length
+    # stored chain, so every sibling branch's dispatch span looked like an
+    # ancestor and caller metadata crossed the boundary its docstring forbids.
+    #
+    # Both directions are asserted: the sibling must NOT receive it, and the
+    # augmenting branch's own dispatch span MUST still receive it. Padding the
+    # chain without recording the branch's own name fixes the leak by breaking
+    # the second half.
+    import json
+
+    import httpx
+
+    from openarmature.graph.parallel_branches import BranchSpec
+    from openarmature.llm import OpenAIProvider, UserMessage
+    from openarmature.observability.metadata import set_invocation_metadata
+
+    body = {
+        "id": "cc",
+        "object": "chat.completion",
+        "model": "m",
+        "choices": [{"index": 0, "message": {"role": "assistant", "content": "ok"}, "finish_reason": "stop"}],
+        "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+    }
+
+    class _Outer(State):
+        n: int = 0
+
+    class _Branch(State):
+        n: int = 0
+
+    provider = OpenAIProvider(
+        base_url="http://mock-llm.test",
+        model="m",
+        api_key="t",
+        transport=httpx.MockTransport(
+            lambda _r: httpx.Response(
+                200, content=json.dumps(body).encode(), headers={"Content-Type": "application/json"}
+            )
+        ),
+    )
+
+    async def _plain(_s: Any) -> dict[str, Any]:
+        return {}
+
+    async def _tagger(_s: Any) -> dict[str, Any]:
+        set_invocation_metadata(from_b="yes")
+        return {}
+
+    def _branch_graph(body_fn: Any) -> Any:
+        return (
+            GraphBuilder(_Branch)
+            .add_node("guard", body_fn)
+            .add_edge("guard", END)
+            .set_entry("guard")
+            .compile()
+        )
+
+    def _wrapper() -> Any:
+        async def _mw(state: Any, next_call: Any) -> Any:
+            await provider.complete([UserMessage(content="g")])
+            await asyncio.sleep(0)
+            return await next_call(state)
+
+        return _mw
+
+    exporter = InMemorySpanExporter()
+    observer = OTelObserver(span_processor=SimpleSpanProcessor(exporter))
+    graph = (
+        GraphBuilder(_Outer)
+        .add_parallel_branches_node(
+            "pb",
+            branches={
+                "a": BranchSpec(subgraph=_branch_graph(_plain), middleware=(_wrapper(),)),
+                "b": BranchSpec(subgraph=_branch_graph(_tagger), middleware=(_wrapper(),)),
+            },
+        )
+        .add_edge("pb", END)
+        .set_entry("pb")
+        .compile()
+    )
+    graph.attach_observer(observer)
+    try:
+        await graph.invoke(_Outer())
+        await graph.drain()
+    finally:
+        observer.shutdown()
+        await provider.aclose()
+
+    user_attrs: dict[str, dict[str, Any]] = {}
+    for span in cast("list[Any]", list(exporter.get_finished_spans())):
+        attrs = dict(span.attributes or {})
+        if "openarmature.parallel_branches.parent_node_name" in attrs:
+            user_attrs[span.name] = {k: v for k, v in attrs.items() if k.startswith("openarmature.user.")}
+
+    assert user_attrs.get("a") == {}, (
+        f"branch 'a' did not augment, so its dispatch span MUST carry no caller metadata; "
+        f"got {user_attrs.get('a')}"
+    )
+    assert user_attrs.get("b") == {"openarmature.user.from_b": "yes"}, (
+        f"branch 'b' augmented, so its OWN dispatch span MUST carry it; got {user_attrs.get('b')}"
+    )
+
+
+@pytest.mark.parametrize("yield_in_wrapper", [False, True])
+async def test_instance_dispatch_span_keeps_its_subgraph_identity(yield_in_wrapper: bool) -> None:
+    # A fan-out instance dispatch span synthesized from a wrapper-issued provider
+    # event opened with an empty `openarmature.subgraph.name`, because provider
+    # events carry lineage but no subgraph identities, and the backfill meant to
+    # repair it was unreachable: it sat behind an earlier `continue` guarded on
+    # the identical key.
+    #
+    # Parametrized on the yield BOTH ways on purpose. The defect was not that the
+    # attribute was wrong, it was that it depended on whether the wrapper yielded
+    # to the event loop -- the same schedule-dependence the orphan-parent work
+    # exists to remove, one attribute over.
+    import json
+
+    import httpx
+
+    from openarmature.llm import OpenAIProvider, UserMessage
+
+    body = {
+        "id": "cc",
+        "object": "chat.completion",
+        "model": "m",
+        "choices": [{"index": 0, "message": {"role": "assistant", "content": "ok"}, "finish_reason": "stop"}],
+        "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+    }
+
+    class _Outer(State):
+        seeds: list[int] = [0]
+        out: list[int] = []
+
+    class _Leaf(State):
+        seed: int = 0
+        marker: int = 0
+
+    provider = OpenAIProvider(
+        base_url="http://mock-llm.test",
+        model="m",
+        api_key="t",
+        transport=httpx.MockTransport(
+            lambda _r: httpx.Response(
+                200, content=json.dumps(body).encode(), headers={"Content-Type": "application/json"}
+            )
+        ),
+    )
+
+    async def _guard(_s: Any) -> dict[str, Any]:
+        return {"marker": 1}
+
+    leaf = GraphBuilder(_Leaf).add_node("guard", _guard).add_edge("guard", END).set_entry("guard").compile()
+
+    async def _mw(state: Any, next_call: Any) -> Any:
+        await provider.complete([UserMessage(content="g")])
+        if yield_in_wrapper:
+            await asyncio.sleep(0)
+        return await next_call(state)
+
+    exporter = InMemorySpanExporter()
+    observer = OTelObserver(span_processor=SimpleSpanProcessor(exporter))
+    graph = (
+        GraphBuilder(_Outer)
+        .add_fan_out_node(
+            "fo",
+            subgraph=leaf,
+            items_field="seeds",
+            item_field="seed",
+            collect_field="marker",
+            target_field="out",
+            instance_middleware=[_mw],
+            subgraph_identity="leaf_identity",
+        )
+        .add_edge("fo", END)
+        .set_entry("fo")
+        .compile()
+    )
+    graph.attach_observer(observer)
+    try:
+        await graph.invoke(_Outer())
+        await graph.drain()
+    finally:
+        observer.shutdown()
+        await provider.aclose()
+
+    instance = next(
+        (
+            s
+            for s in cast("list[Any]", list(exporter.get_finished_spans()))
+            if "openarmature.fan_out.parent_node_name" in dict(s.attributes or {})
+        ),
+        None,
+    )
+    assert instance is not None, "no fan-out instance dispatch span was recorded"
+    identity = dict(instance.attributes or {}).get("openarmature.subgraph.name")
+    assert identity == "leaf_identity", (
+        f"the instance dispatch span MUST carry its declared subgraph identity regardless of "
+        f"whether the wrapper yielded; got {identity!r} with yield={yield_in_wrapper}"
+    )
+
+
+async def test_failure_isolated_marker_survives_orphan_path_synthesis() -> None:
+    # `_handle_failure_isolated` threads its event into `_resolve_llm_parent`,
+    # and its docstring says the calling span is already closed -- so this event
+    # ALWAYS takes the orphan path and always reaches the dispatch-span openers.
+    # `FailureIsolatedEvent` declares neither `caller_invocation_metadata` nor
+    # `correlation_id`, so an opener reading the field directly raised, the graph
+    # observer swallowed it into a warning, and the marker span vanished.
+    #
+    # End-to-end on purpose. Unit-testing the metadata helpers in isolation does
+    # NOT pin this: reverting the openers' defensive read leaves those green,
+    # because they never go through an opener.
+    import warnings
+
+    from openarmature.graph import FailureIsolationMiddleware
+    from openarmature.graph.parallel_branches import BranchSpec
+
+    class _Outer(State):
+        result: list[Any] = []
+
+    class _Branch(State):
+        result: list[Any] = []
+
+    async def _guard(_s: Any) -> dict[str, Any]:
+        return {}
+
+    branch = (
+        GraphBuilder(_Branch).add_node("guard", _guard).add_edge("guard", END).set_entry("guard").compile()
+    )
+
+    async def _raiser(_state: Any, _next_call: Any) -> Any:
+        # Raises BEFORE next_call, so no inner node ever starts and the branch
+        # dispatch span is not open when the isolated event resolves.
+        raise RuntimeError("boom")
+
+    exporter = InMemorySpanExporter()
+    observer = OTelObserver(span_processor=SimpleSpanProcessor(exporter))
+    graph = (
+        GraphBuilder(_Outer)
+        .add_parallel_branches_node(
+            "pb",
+            branches={
+                "a": BranchSpec(
+                    subgraph=branch,
+                    middleware=(
+                        FailureIsolationMiddleware(degraded_update={"result": []}, event_name="iso"),
+                        _raiser,
+                    ),
+                ),
+                "b": BranchSpec(subgraph=branch),
+            },
+        )
+        .add_edge("pb", END)
+        .set_entry("pb")
+        .compile()
+    )
+    graph.attach_observer(observer)
+    try:
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            await graph.invoke(_Outer())
+            await graph.drain()
+    finally:
+        observer.shutdown()
+
+    swallowed = [w for w in caught if "observer raised" in str(w.message)]
+    assert not swallowed, (
+        f"the observer swallowed an exception into a warning: {[str(w.message) for w in swallowed]}"
+    )
+    spans = cast("list[Any]", list(exporter.get_finished_spans()))
+    names = sorted(s.name for s in spans)
+    assert "openarmature.failure_isolated" in names, (
+        f"the failure-isolated marker span MUST survive orphan-path synthesis; got {names}"
+    )
+
+    # A dispatch span synthesized on this path MUST still carry the §5.6
+    # cross-cutting correlation id. `FailureIsolatedEvent` does not declare a
+    # `correlation_id` field, so sourcing it from the EVENT leaves the span
+    # without one -- silently, since nothing else about the trace changes. That
+    # is why it comes from the invocation instead.
+    #
+    # Branch 'a' is the synthesized one: its middleware raised before any inner
+    # node started, so no node event ever created its dispatch span.
+    synthesized = [
+        s
+        for s in spans
+        if "openarmature.parallel_branches.parent_node_name" in dict(s.attributes or {}) and s.name == "a"
+    ]
+    assert synthesized, f"branch 'a' dispatch span missing; got {names}"
+    correlation = dict(synthesized[0].attributes or {}).get("openarmature.correlation_id")
+    assert correlation, (
+        f"an orphan-synthesized dispatch span MUST carry openarmature.correlation_id; got {correlation!r}"
+    )
+
+
+# --- caller-metadata targeting across every lineage shape --------------------
+#
+# This matrix exists because three consecutive fixes in this area each corrected
+# one lineage shape and broke another, with the suite green each time. A branch's
+# identity lives in `branch_name_chain` when the branch descends (subgraph) and
+# only on the scalar `branch_name` when it does not (callable branch, or branch
+# middleware running in the parallel-branches node's own scope). Any change to
+# how those are compared must be checked against all of them, not against the
+# one that prompted it.
+#
+# The rule for every shape is the same: the augmenting context's own dispatch
+# span receives its metadata, and no sibling's does.
+
+
+def _dispatch_span_user_attrs(exporter: Any) -> dict[str, set[str]]:
+    out: dict[str, set[str]] = {}
+    for span in list(exporter.get_finished_spans()):
+        attrs = dict(span.attributes or {})
+        is_branch = "openarmature.parallel_branches.parent_node_name" in attrs
+        is_instance = "openarmature.fan_out.parent_node_name" in attrs
+        if not (is_branch or is_instance):
+            continue
+        key = span.name if is_branch else f"{span.name}#{attrs.get('openarmature.node.fan_out_index')}"
+        out[key] = {k.rsplit(".", 1)[-1] for k in attrs if k.startswith("openarmature.user.")}
+    return out
+
+
+def _shared_parent_user_attrs(exporter: Any) -> dict[str, set[str]]:
+    # The spans §3.4 classifies as shared parents, identified by attributes that
+    # only their own kind carries -- never by name, since an instance dispatch
+    # span reuses its fan-out node's name.  A dispatcher NODE span carries the
+    # cardinality attribute (`item_count` / `branch_count`); its dispatch spans
+    # carry `parent_node_name` instead.  The invocation span is the only one
+    # with `invocation_id` and no node name.
+    out: dict[str, set[str]] = {}
+    for span in list(exporter.get_finished_spans()):
+        attrs = dict(span.attributes or {})
+        user = {k.rsplit(".", 1)[-1] for k in attrs if k.startswith("openarmature.user.")}
+        if "openarmature.invocation_id" in attrs and "openarmature.node.name" not in attrs:
+            out["invocation"] = user
+        elif (
+            "openarmature.fan_out.item_count" in attrs
+            or "openarmature.parallel_branches.branch_count" in attrs
+        ):
+            out[f"node:{attrs.get('openarmature.node.name')}"] = user
+    return out
+
+
+async def _run_and_collect_both(graph: Any, initial: Any) -> tuple[dict[str, set[str]], dict[str, set[str]]]:
+    exporter = InMemorySpanExporter()
+    observer = OTelObserver(span_processor=SimpleSpanProcessor(exporter))
+    graph.attach_observer(observer)
+    try:
+        await graph.invoke(initial)
+        await graph.drain()
+    finally:
+        observer.shutdown()
+    return _dispatch_span_user_attrs(exporter), _shared_parent_user_attrs(exporter)
+
+
+async def _run_and_collect(graph: Any, initial: Any) -> dict[str, set[str]]:
+    dispatch, _shared = await _run_and_collect_both(graph, initial)
+    return dispatch
+
+
+async def _pb_callable_graph() -> Any:
+    from openarmature.graph.parallel_branches import BranchSpec
+    from openarmature.observability.metadata import set_invocation_metadata
+
+    class _S(State):
+        n: int = 0
+
+    async def _ca(_s: Any) -> dict[str, Any]:
+        set_invocation_metadata(from_a="yes")
+        return {}
+
+    async def _cb(_s: Any) -> dict[str, Any]:
+        set_invocation_metadata(from_b="yes")
+        return {}
+
+    return (
+        GraphBuilder(_S)
+        .add_parallel_branches_node("pb", branches={"a": BranchSpec(call=_ca), "b": BranchSpec(call=_cb)})
+        .add_edge("pb", END)
+        .set_entry("pb")
+        .compile()
+    ), _S()
+
+
+async def _pb_subgraph_graph() -> Any:
+    from openarmature.graph.parallel_branches import BranchSpec
+    from openarmature.observability.metadata import set_invocation_metadata
+
+    class _S(State):
+        n: int = 0
+
+    class _Sub(State):
+        n: int = 0
+
+    async def _plain(_s: Any) -> dict[str, Any]:
+        return {}
+
+    async def _tag(_s: Any) -> dict[str, Any]:
+        set_invocation_metadata(from_b="yes")
+        return {}
+
+    def _sub(body: Any) -> Any:
+        return GraphBuilder(_Sub).add_node("guard", body).add_edge("guard", END).set_entry("guard").compile()
+
+    return (
+        GraphBuilder(_S)
+        .add_parallel_branches_node(
+            "pb", branches={"a": BranchSpec(subgraph=_sub(_plain)), "b": BranchSpec(subgraph=_sub(_tag))}
+        )
+        .add_edge("pb", END)
+        .set_entry("pb")
+        .compile()
+    ), _S()
+
+
+async def _fan_out_graph() -> Any:
+    from openarmature.observability.metadata import set_invocation_metadata
+
+    class _S(State):
+        seeds: list[int] = [0, 1]
+        out: list[int] = []
+
+    class _Leaf(State):
+        seed: int = 0
+        marker: int = 0
+
+    async def _guard(state: Any) -> dict[str, Any]:
+        if state.seed == 1:
+            set_invocation_metadata(from_i1="yes")
+        return {"marker": 1}
+
+    leaf = GraphBuilder(_Leaf).add_node("guard", _guard).add_edge("guard", END).set_entry("guard").compile()
+    return (
+        GraphBuilder(_S)
+        .add_fan_out_node(
+            "fo",
+            subgraph=leaf,
+            items_field="seeds",
+            item_field="seed",
+            collect_field="marker",
+            target_field="out",
+        )
+        .add_edge("fo", END)
+        .set_entry("fo")
+        .compile()
+    ), _S()
+
+
+# Each shape's own dispatch span receives its metadata, and no sibling's does.
+# The three graphs are shared with the shared-parent tests below, so a shape is
+# described once and both halves of §3.4 are asserted against the same run.
+
+
+async def test_metadata_reaches_only_its_own_subgraph_branch() -> None:
+    graph, initial = await _pb_subgraph_graph()
+    assert await _run_and_collect(graph, initial) == {"a": set(), "b": {"from_b"}}
+
+
+async def test_metadata_reaches_only_its_own_callable_branch() -> None:
+    # A callable branch never descends, so its augmenter's chain is SHORTER than
+    # its dispatch span's position. Comparing raw chains let every branch's
+    # metadata reach every sibling; normalizing only the stored side made each
+    # branch lose its own. Both were green on the subgraph shape above.
+    graph, initial = await _pb_callable_graph()
+    assert await _run_and_collect(graph, initial) == {"a": {"from_a"}, "b": {"from_b"}}
+
+
+async def test_metadata_reaches_only_its_own_fan_out_instance() -> None:
+    graph, initial = await _fan_out_graph()
+    assert await _run_and_collect(graph, initial) == {"fo#0": set(), "fo#1": {"from_i1"}}
+
+
+# The matrix above reads dispatch spans only, so it is blind to the other half of
+# §3.4: a shared parent MUST NOT be updated at all.  Nothing asserted that half
+# for a span the matrix filters out, which is how the callable-branch leak onto
+# the invocation span survived.  ``test_metadata_augmentation_updates_outermost_
+# open_spans`` above already pins the opposite direction on the invocation span's
+# own attributes; the positive test here states it over the same shared-parent
+# view the negative one uses, so the pair reads as one claim.
+
+
+@pytest.mark.parametrize(
+    ("shape", "dispatcher"),
+    [("callable_branch", "node:pb"), ("subgraph_branch", "node:pb"), ("fan_out_instance", "node:fo")],
+)
+async def test_metadata_from_inside_a_dispatch_never_reaches_a_shared_parent(
+    shape: str, dispatcher: str
+) -> None:
+    # §3.4: the invocation span is a shared parent "only when at least one
+    # fan-out or parallel-branches dispatch is on the augmenter's call-stack
+    # path", and every one of these three shapes has one.  The callable-branch
+    # row is the one that regressed: a callable branch never descends, so its
+    # augmenter's branch_name_chain is empty and a chain-only outermost-serial
+    # test read it as pure-serial.
+    builder = {
+        "callable_branch": _pb_callable_graph,
+        "subgraph_branch": _pb_subgraph_graph,
+        "fan_out_instance": _fan_out_graph,
+    }[shape]
+    graph, initial = await builder()
+    _dispatch, shared = await _run_and_collect_both(graph, initial)
+    assert shared == {"invocation": set(), dispatcher: set()}
+
+
+async def test_a_node_after_a_dispatch_still_reaches_the_invocation_span() -> None:
+    # The false-negative guard on the predicate above.  It now reads the scalar
+    # `branch_name` / `fan_out_index`, so if either outlived its dispatch, a
+    # downstream SERIAL node would be wrongly treated as still inside a branch
+    # and would stop reaching the invocation span.  It does not: the scalar is
+    # scoped to the dispatch.  Pinned because that scoping is what licenses
+    # reading the scalar at all.
+    from openarmature.graph.parallel_branches import BranchSpec
+    from openarmature.observability.metadata import set_invocation_metadata
+
+    class _S(State):
+        n: int = 0
+
+    async def _ca(_s: Any) -> dict[str, Any]:
+        set_invocation_metadata(from_a="yes")
+        return {}
+
+    async def _after(_s: Any) -> dict[str, Any]:
+        set_invocation_metadata(from_after="yes")
+        return {}
+
+    graph = (
+        GraphBuilder(_S)
+        .add_parallel_branches_node("pb", branches={"a": BranchSpec(call=_ca)})
+        .add_node("after", _after)
+        .add_edge("pb", "after")
+        .add_edge("after", END)
+        .set_entry("pb")
+        .compile()
+    )
+    _dispatch, shared = await _run_and_collect_both(graph, _S())
+    # The branch's own key stays off it; the later serial node's reaches it.
+    assert shared["invocation"] == {"from_after"}
+
+
+async def test_outermost_serial_metadata_does_reach_the_invocation_span() -> None:
+    # The opposite direction, so the negative test above cannot be "satisfied"
+    # by never writing the invocation span at all.  No dispatch on the path, so
+    # §3.4's rule 2 applies and the invocation span updates in place.
+    from openarmature.observability.metadata import set_invocation_metadata
+
+    class _S(State):
+        n: int = 0
+
+    async def _body(_s: Any) -> dict[str, Any]:
+        set_invocation_metadata(from_serial="yes")
+        return {}
+
+    graph = GraphBuilder(_S).add_node("solo", _body).add_edge("solo", END).set_entry("solo").compile()
+    _dispatch, shared = await _run_and_collect_both(graph, _S())
+    assert shared == {"invocation": {"from_serial"}}

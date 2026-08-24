@@ -49,7 +49,7 @@ from openarmature.graph.events import (
     ToolCallFailedEvent,
 )
 from openarmature.graph.observer import ObserverEvent
-from openarmature.observability.lineage import is_strict_prefix
+from openarmature.observability.lineage import is_outermost_serial, is_strict_prefix
 from openarmature.observability.llm_event import _token_budget_evaluations
 
 from .client import (
@@ -869,7 +869,7 @@ class LangfuseObserver:
         # branch on its call-stack path).  Per §3.4 the Trace is a
         # shared parent inside any dispatch boundary — siblings would
         # leak — so only the no-dispatch-on-path case writes.
-        outermost_serial = all(fi is None for fi in aug_fi_chain) and all(bn is None for bn in aug_bn_chain)
+        outermost_serial = is_outermost_serial(event)
         if outermost_serial:
             self.client.update_trace(id=invocation_id, metadata=metadata_delta)
 
