@@ -5837,9 +5837,29 @@ async def test_failure_isolated_marker_survives_orphan_path_synthesis() -> None:
     assert not swallowed, (
         f"the observer swallowed an exception into a warning: {[str(w.message) for w in swallowed]}"
     )
-    names = sorted(s.name for s in cast("list[Any]", list(exporter.get_finished_spans())))
+    spans = cast("list[Any]", list(exporter.get_finished_spans()))
+    names = sorted(s.name for s in spans)
     assert "openarmature.failure_isolated" in names, (
         f"the failure-isolated marker span MUST survive orphan-path synthesis; got {names}"
+    )
+
+    # A dispatch span synthesized on this path MUST still carry the §5.6
+    # cross-cutting correlation id. `FailureIsolatedEvent` does not declare a
+    # `correlation_id` field, so sourcing it from the EVENT leaves the span
+    # without one -- silently, since nothing else about the trace changes. That
+    # is why it comes from the invocation instead.
+    #
+    # Branch 'a' is the synthesized one: its middleware raised before any inner
+    # node started, so no node event ever created its dispatch span.
+    synthesized = [
+        s
+        for s in spans
+        if "openarmature.parallel_branches.parent_node_name" in dict(s.attributes or {}) and s.name == "a"
+    ]
+    assert synthesized, f"branch 'a' dispatch span missing; got {names}"
+    correlation = dict(synthesized[0].attributes or {}).get("openarmature.correlation_id")
+    assert correlation, (
+        f"an orphan-synthesized dispatch span MUST carry openarmature.correlation_id; got {correlation!r}"
     )
 
 
