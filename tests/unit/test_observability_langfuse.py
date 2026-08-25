@@ -503,6 +503,68 @@ async def test_metadata_augmentation_updates_trace_and_node_for_outermost() -> N
     assert ask_obs.metadata.get("request_id") == "req-xyz"
 
 
+async def test_a_when_skipped_branch_gets_no_observation_when_a_nested_branch_reuses_its_name() -> None:
+    # The Langfuse counterpart of the OTel test of the same shape.  Both
+    # observers share one `branch_dispatch_key` now, but they walk their own
+    # open-observation / open-span stores, so the end-to-end path is not shared
+    # and a key-level test alone does not reach it here.
+    #
+    # pipeline-utilities 11.10: a `when`-skipped branch is not dispatched and
+    # emits no span.  Resolving the OUTER pb from an event inside the inner pb
+    # built the outer key from the INNERMOST branch name, so an inner branch
+    # reusing an outer branch's name opened a dispatch observation for the
+    # skipped outer branch.
+    from openarmature.graph.parallel_branches import BranchSpec
+
+    class _S(State):
+        n: int = 0
+
+    class _Sub(State):
+        n: int = 0
+
+    async def _noop(_s: Any) -> dict[str, Any]:
+        return {}
+
+    inner = (
+        GraphBuilder(_Sub)
+        .add_parallel_branches_node("i", branches={"x": BranchSpec(call=_noop)})
+        .add_edge("i", END)
+        .set_entry("i")
+        .compile()
+    )
+    graph = (
+        GraphBuilder(_S)
+        .add_parallel_branches_node(
+            "o",
+            branches={
+                "x": BranchSpec(call=_noop, when=lambda _s: False),
+                "y": BranchSpec(subgraph=inner),
+            },
+        )
+        .add_edge("o", END)
+        .set_entry("o")
+        .compile()
+    )
+    graph, client, observer = _attach(graph)
+    try:
+        await graph.invoke(_S())
+        await graph.drain()
+    finally:
+        observer.shutdown()
+
+    trace = next(iter(client.traces.values()))
+    dispatch = sorted(
+        (obs.name, obs.metadata["parallel_branches_parent_node_name"])
+        for obs in trace.observations
+        if "parallel_branches_parent_node_name" in (obs.metadata or {})
+    )
+    # Non-vacuity first: the dispatched branch MUST be present, or the absence
+    # assertion below is satisfied by an empty list. It was, on the first draft
+    # of this test, because the metadata key is prefixed here and not in OTel.
+    assert ("y", "o") in dispatch, f"expected the dispatched outer branch, got {dispatch}"
+    assert ("x", "o") not in dispatch, f"`when`-skipped branch acquired a dispatch observation: {dispatch}"
+
+
 async def test_metadata_augmentation_in_a_callable_branch_stays_off_the_trace() -> None:
     # The parallel-branches counterpart of the fan-out test below, for the shape
     # that has no chain to read.  A callable branch never descends, so its

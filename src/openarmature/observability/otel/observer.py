@@ -117,7 +117,22 @@ from openarmature.graph.events import (
     ToolCallFailedEvent,
 )
 from openarmature.graph.observer import ObserverEvent
-from openarmature.observability.lineage import is_outermost_serial, is_strict_prefix
+from openarmature.observability.lineage import (
+    BranchDispatchKey as _BranchDispatchKey,
+)
+from openarmature.observability.lineage import (
+    DispatchKey as _DispatchKey,
+)
+from openarmature.observability.lineage import (
+    branch_dispatch_key as _branch_dispatch_key,
+)
+from openarmature.observability.lineage import (
+    dispatch_key as _dispatch_key,
+)
+from openarmature.observability.lineage import (
+    is_outermost_serial,
+    is_strict_prefix,
+)
 from openarmature.observability.llm_event import _token_budget_evaluations, serialize_tool_calls
 
 # §7 (proposal 0083): the vendor-neutral token-budget WARNING log surface.
@@ -159,14 +174,6 @@ logger = logging.getLogger("openarmature.observability")
 _StackKey = tuple[
     tuple[str, ...], int, int | None, str | None, tuple[int | None, ...], tuple[str | None, ...]
 ]
-
-# Lineage-aware dispatch keys (proposal 0045): the fan-out / pb NODE namespace
-# prefix plus the fan-out instance index / branch name chain slices along the
-# path to it. _BranchDispatchKey carries the explicit branch name (a callable
-# branch sets it without extending the chain) instead of a trailing chain entry.
-# Mirrors the LangfuseObserver aliases.
-_DispatchKey = tuple[tuple[str, ...], tuple[int | None, ...], tuple[str | None, ...]]
-_BranchDispatchKey = tuple[tuple[str, ...], tuple[int | None, ...], tuple[str | None, ...], str]
 
 
 # §5.5.5 truncation marker. The leading character is U+2026 HORIZONTAL
@@ -454,51 +461,6 @@ def _span_chain_on_path(
         if span_bn[i] != aug_bn_chain[i]:
             return False
     return True
-
-
-def _dispatch_key(
-    prefix: tuple[str, ...],
-    fan_out_index_chain: tuple[int | None, ...],
-    branch_name_chain: tuple[str | None, ...],
-) -> _DispatchKey:
-    """Lineage-aware identity key for a fan-out instance / per-branch dispatch
-    span at namespace ``prefix``. Encodes the fan-out/pb NODE namespace plus the
-    full chain of fan-out instance indices / branch names along the path to it
-    (sliced to ``len(prefix)``). Two dispatches at the same namespace but in
-    different enclosing fan-out instances / branches get distinct keys, so a
-    fan-out / pb nested inside an outer fan-out instance no longer collides
-    across outer instances. Mirrors the LangfuseObserver helper of the same
-    name."""
-    n = len(prefix)
-    return (prefix, tuple(fan_out_index_chain[:n]), tuple(branch_name_chain[:n]))
-
-
-def _branch_dispatch_key(
-    prefix: tuple[str, ...],
-    fan_out_index_chain: tuple[int | None, ...],
-    branch_name_chain: tuple[str | None, ...],
-    branch_name: str,
-) -> _BranchDispatchKey:
-    """Lineage-aware identity key for a per-branch dispatch span at namespace
-    ``prefix``. The branch IDENTITY comes from ``branch_name`` explicitly (not
-    ``branch_name_chain[-1]``): a callable branch carries its name on the event
-    but never extends ``branch_name_chain`` (no subgraph descent). The key still
-    carries the ENCLOSING fan-out instance / branch chain (positions above this
-    pb node) so a pb nested inside an outer fan-out instance doesn't collide
-    across outer instances. Mirrors the LangfuseObserver helper of the same
-    name."""
-    n = len(prefix)
-    # Chains are normalized to the prefix DEPTH in both directions: truncated
-    # when longer, padded with None when shorter. Truncating alone was a defect.
-    # A caller whose lineage is shallower than the prefix -- an orphan provider
-    # call issued from branch middleware carries empty chains -- built
-    # `(prefix, (), (), branch)` while the span had been registered under
-    # `(prefix, (None,), (), branch)`. Those denote the same lineage, "no
-    # enclosing fan-out at that depth", and differed only as tuple keys, so the
-    # lookup missed and the orphan fell through to the invocation root.
-    fan_out = tuple(fan_out_index_chain[:n]) + (None,) * max(0, n - len(fan_out_index_chain))
-    branches = tuple(branch_name_chain[: n - 1]) + (None,) * max(0, (n - 1) - len(branch_name_chain))
-    return (prefix, fan_out, branches, branch_name)
 
 
 # Sorted object keys, no insignificant whitespace, UTF-8 output (per
@@ -2639,8 +2601,10 @@ class OTelObserver:
                 continue
             # The fan-out instance axis at THIS depth -- the chain entry for the
             # dispatch boundary into prefix -- NOT the innermost event.fan_out_index
-            # (which differs for an OUTER fan-out in a nested stack). Branches use
-            # event.branch_name directly (callable branches don't extend the chain).
+            # (which differs for an OUTER fan-out in a nested stack). The branch
+            # membership GATE below still tests event.branch_name, but the KEY
+            # resolves the branch by its own depth in branch_name_chain and only
+            # falls back to the scalar where the chain does not reach.
             fi_axis = (
                 event.fan_out_index_chain[depth - 1] if depth - 1 < len(event.fan_out_index_chain) else None
             )
