@@ -159,10 +159,12 @@ def dispatch_key(
     # parent's, which is why the branch helper needs the explicit fallback.
     #
     # NOTE this truncates where `branch_dispatch_key` pads.  That is safe only
-    # because every lookup is gated on a non-None fan-out axis at this depth
-    # (otel 2533 / 2624 / 3041, langfuse 1248 / 1323), which implies the chain
-    # already reaches `n`.  An ungated lookup with a short chain would build a
-    # short tuple and miss the padded registration key, which is exactly the
-    # orphan-lookup miss fixture 152 exists for.
+    # because every lookup is gated on the fan-out axis at the lookup depth:
+    # each call site computes `fi_axis` as the chain entry for that depth and
+    # skips the lookup when it is None, which implies the chain already reaches
+    # `n`.  Grep `fi_axis` for the sites -- line numbers were tried here and
+    # went stale within the same commit that wrote them.  An ungated lookup with
+    # a short chain would build a short tuple and miss the padded registration
+    # key, which is the orphan-lookup miss fixture 152 exists for.
     n = len(prefix)
     return (prefix, tuple(fan_out_index_chain[:n]), tuple(branch_name_chain[:n]))
