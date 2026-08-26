@@ -53,7 +53,7 @@ from .errors import (
     NodeException,
 )
 from .middleware import ChainCall, Middleware, compose_chain
-from .observer import _FanOutExecutionState, _FanOutInstanceState
+from .observer import _FanOutExecutionState, _FanOutInstanceState, fan_out_progress_key
 from .state import State
 
 if TYPE_CHECKING:
@@ -209,17 +209,35 @@ class FanOutNode[ParentT: State, ChildT: State]:
         # ``context.fan_out_progress_state``; first-run constructs a
         # fresh one with all instances ``not_started``.
         #
-        # The key carries the ENCLOSING fan-out instance lineage (the non-None
-        # fan_out_index chain), not just the namespace + node name. A fan-out
-        # nested inside an outer fan-out instance has the same namespace for every
-        # outer instance, so without the lineage the shared dict collides across
-        # concurrent outer instances and the second instance rolls forward the
-        # first's "completed" results (silently wrong results). Subgraph / branch
-        # nesting and top-level fan-outs contribute no fan-out index, so the
-        # lineage is empty there -- matching the resume restore (which defaults it
-        # to empty), so top-level / subgraph-nested resume is unaffected.
-        enclosing_fan_out_lineage = tuple(i for i in context.fan_out_index_chain if i is not None)
-        key = (context.namespace_prefix, self.name, enclosing_fan_out_lineage)
+        # The key carries the ENCLOSING CONCURRENCY lineage, not just the
+        # namespace + node name, on BOTH axes that can put two live executions of
+        # the same fan-out node at the same namespace.
+        #
+        # A fan-out nested inside an outer fan-out instance has the same namespace
+        # for every outer instance. A fan-out nested inside a parallel BRANCH has
+        # the same namespace for every branch, because branch names do not enter
+        # the namespace at all. Either way, without the lineage the shared dict
+        # collides across concurrent enclosing contexts and the second execution
+        # finds the first's instances already ``completed`` and rolls its results
+        # forward -- returning results it never computed.
+        #
+        # The branch axis was missing, and its absence was not visible: a branch
+        # descent contributes only None entries to fan_out_index_chain, which the
+        # fan-out comprehension filters out, so both branches built an identical
+        # key. The branch also emitted no inner node events, so no observer could
+        # see the work had not happened. It is schedule-dependent -- a single
+        # ``await`` in the leaf body hides it -- which is why a regression test
+        # here must not yield in the leaf.
+        #
+        # Top-level fan-outs contribute neither axis, so both lineages are empty
+        # there, matching the resume restore (which defaults both to empty) and
+        # leaving top-level resume unaffected.
+        key = fan_out_progress_key(
+            context.namespace_prefix,
+            self.name,
+            context.fan_out_index_chain,
+            context.branch_name_chain,
+        )
         exec_state = context.fan_out_progress_state.get(key)
         if exec_state is None:
             exec_state = _FanOutExecutionState(
@@ -251,6 +269,20 @@ class FanOutNode[ParentT: State, ChildT: State]:
             # run fallback is defensive only — the count-drift path can
             # only fire on resume since fan_out_progress_state is empty
             # on a fresh first run.
+            #
+            # That claim was FALSE for sibling parallel branches until the
+            # branch axis joined the key: two branches whose subgraphs held a
+            # same-named fan-out over different item counts collided on a FRESH
+            # run, and the second branch raised here with a message about a
+            # checkpoint record that did not exist. Adding the branch axis is
+            # what makes the sentence above true.
+            #
+            # The other side of that: a branch-nested fan-out's restored entry
+            # now carries an empty branch lineage and can never be found by a
+            # re-entering execution, so this MUST raise is unreachable for that
+            # shape and a genuine count drift there resumes by re-running rather
+            # than by raising. That is the §10.11 no-mis-skip floor, and closing
+            # it needs a branch lineage on the record itself.
             raise CheckpointRecordInvalid(
                 context.resume_invocation or context.invocation_id,
                 f"fan_out {self.name!r} at namespace {context.namespace_prefix!r}: "

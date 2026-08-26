@@ -989,3 +989,360 @@ def test_compile_error_extra_outputs_references_undeclared_subgraph_field() -> N
             target_field="results",
             extra_outputs={"results": "no_such_subgraph_field"},  # subgraph side undeclared
         )
+
+
+async def test_sibling_branches_do_not_share_fan_out_state() -> None:
+    # Two parallel branches, each a subgraph containing a fan-out node with the
+    # SAME node name. Branch names never enter the namespace, and a branch
+    # descent contributes only None entries to `fan_out_index_chain` -- which the
+    # fan-out lineage comprehension filters out -- so before the branch axis
+    # existed both branches built an identical execution-state key. The second
+    # branch found the first's instances already `completed` and rolled its
+    # results forward, returning results it never computed.
+    #
+    # This test is BEHAVIOURAL and therefore schedule-dependent. Read the
+    # companion test below,
+    # `test_sibling_branches_register_under_distinct_keys`, as the load-bearing
+    # one: it asserts the invariant directly and no interleaving can disarm it.
+    #
+    # Properties this test needs, and the honest limit of them:
+    #
+    # 1. DISTINGUISHABLE per-branch seeds. With identical seeds both branches
+    #    produce the same answer and the assertions hold against the defect.
+    # 2. NO SUSPENSION POINT between the two branches' registrations. The leaf
+    #    body having no `await` is necessary but NOT sufficient: most of that
+    #    window is engine code this test does not own, so an await added in
+    #    `_step_fan_out_node`, a dispatch hook, or an observer await disarms it
+    #    from outside. Measured: revert the branch axis AND add one
+    #    `await asyncio.sleep(0)` to the leaf and all three assertions below
+    #    pass while the two branches still share one execution-state entry.
+    #
+    # The execution log is asserted as well as the outputs: the failure mode is
+    # that bodies never run, and matching outputs alone cannot see that.
+    from openarmature.graph.parallel_branches import BranchSpec
+
+    executed: list[int] = []
+
+    class _Top(State):
+        out_a: list[int] = []
+        out_b: list[int] = []
+
+    class _BranchA(State):
+        seeds: list[int] = [0, 1]
+        out: list[int] = []
+
+    class _BranchB(State):
+        seeds: list[int] = [7, 8]
+        out: list[int] = []
+
+    class _Leaf(State):
+        seed: int = 0
+        marker: int = 0
+
+    async def _leaf(s: _Leaf) -> dict[str, Any]:
+        executed.append(s.seed)
+        return {"marker": s.seed + 100}
+
+    def _branch_graph(state_cls: type[State]) -> CompiledGraph[Any]:
+        leaf = GraphBuilder(_Leaf).add_node("g", _leaf).add_edge("g", END).set_entry("g").compile()
+        return (
+            GraphBuilder(state_cls)
+            .add_fan_out_node(
+                "fo",
+                subgraph=leaf,
+                items_field="seeds",
+                item_field="seed",
+                collect_field="marker",
+                target_field="out",
+            )
+            .add_edge("fo", END)
+            .set_entry("fo")
+            .compile()
+        )
+
+    graph = (
+        GraphBuilder(_Top)
+        .add_parallel_branches_node(
+            "pb",
+            branches={
+                "a": BranchSpec(subgraph=_branch_graph(_BranchA), outputs={"out_a": "out"}),
+                "b": BranchSpec(subgraph=_branch_graph(_BranchB), outputs={"out_b": "out"}),
+            },
+        )
+        .add_edge("pb", END)
+        .set_entry("pb")
+        .compile()
+    )
+    final = await graph.invoke(_Top())
+
+    assert sorted(executed) == [0, 1, 7, 8], (
+        f"every branch's item bodies must run; got {sorted(executed)}. "
+        "A short log means one branch rolled the other's results forward."
+    )
+    assert final.out_a == [100, 101]
+    assert final.out_b == [107, 108]
+
+
+async def test_branch_nested_fan_out_progress_is_popped_after_it_completes() -> None:
+    # The cleanup `pop` in the step runner must build the SAME key the fan-out
+    # registered under, on both lineage axes. It passes a default, so a key that
+    # does not match silently no-ops: the entry survives and is carried into
+    # every later save in the invocation as stale progress.
+    #
+    # A branch-nested fan-out is the case that exposes a missing branch axis,
+    # since the registration key carries a non-empty branch lineage and a cleanup
+    # key built without one cannot match it.
+    from openarmature.checkpoint import InMemoryCheckpointer
+    from openarmature.graph.parallel_branches import BranchSpec
+
+    class _Top(State):
+        out: list[int] = []
+        done: bool = False
+
+    class _Branch(State):
+        seeds: list[int] = [0, 1]
+        out: list[int] = []
+
+    class _Leaf(State):
+        seed: int = 0
+        marker: int = 0
+
+    async def _leaf(s: _Leaf) -> dict[str, Any]:
+        return {"marker": s.seed + 1}
+
+    async def _after(_s: _Top) -> dict[str, Any]:
+        return {"done": True}
+
+    leaf = GraphBuilder(_Leaf).add_node("g", _leaf).add_edge("g", END).set_entry("g").compile()
+    branch = (
+        GraphBuilder(_Branch)
+        .add_fan_out_node(
+            "fo",
+            subgraph=leaf,
+            items_field="seeds",
+            item_field="seed",
+            collect_field="marker",
+            target_field="out",
+        )
+        .add_edge("fo", END)
+        .set_entry("fo")
+        .compile()
+    )
+    cp = InMemoryCheckpointer()
+    builder = (
+        GraphBuilder(_Top)
+        .add_parallel_branches_node("pb", branches={"a": BranchSpec(subgraph=branch, outputs={"out": "out"})})
+        .add_node("after", _after)
+        .add_edge("pb", "after")
+        .add_edge("after", END)
+        .set_entry("pb")
+    )
+    builder.with_checkpointer(cp)
+    await builder.compile().invoke(_Top())
+
+    # The LAST record is written after the fan-out has finished and been popped,
+    # so it must carry no fan-out progress at all.
+    records = list(cp._records.values()) if hasattr(cp, "_records") else []
+    assert records, "expected the checkpointer to have saved at least one record"
+    last = records[-1]
+    assert last.fan_out_progress == (), (
+        f"stale fan-out progress survived into a later save: {last.fan_out_progress}. "
+        "The cleanup key no longer matches the registration key."
+    )
+
+
+def test_sibling_branches_register_under_distinct_keys() -> None:
+    # The schedule-independent counterpart to the behavioural test above, and
+    # the one to trust. It asserts the invariant at the key builder rather than
+    # through a race, so no interleaving anywhere in the engine can disarm it.
+    #
+    # Two contexts differing ONLY in which branch they descended into must
+    # produce different execution-state keys. They share a namespace, because a
+    # branch name never enters it -- only the parallel-branches node name does.
+    from openarmature.graph.observer import _InvocationContext, _QueuedItem
+
+    queue: asyncio.Queue[_QueuedItem | None] = asyncio.Queue()
+    root = _InvocationContext(queue=queue, graph_attached=(), invocation_scoped=())
+
+    class _S(State):
+        pass
+
+    parent = _S()
+    in_a = root.descend_into_parallel_branch("pb", parent, (), branch_name="a")
+    in_b = root.descend_into_parallel_branch("pb", parent, (), branch_name="b")
+
+    assert in_a.namespace_prefix == in_b.namespace_prefix, (
+        "precondition: branch names do not enter the namespace, so the two "
+        "branches must share it -- that is why the key needs the branch axis"
+    )
+
+    def _key(ctx: Any, node_name: str) -> tuple[Any, ...]:
+        # The identity `FanOutNode.run` registers under.
+        return (
+            ctx.namespace_prefix,
+            node_name,
+            tuple(i for i in ctx.fan_out_index_chain if i is not None),
+            tuple(b for b in ctx.branch_name_chain if b is not None),
+        )
+
+    assert _key(in_a, "fo") != _key(in_b, "fo"), (
+        f"sibling branches must not share a fan-out execution-state key; got {_key(in_a, 'fo')} for both"
+    )
+    # And the branch axis is what separates them, not something incidental.
+    assert _key(in_a, "fo")[:3] == _key(in_b, "fo")[:3]
+
+
+async def test_sibling_branches_with_unequal_item_counts_do_not_raise() -> None:
+    # The defect's OTHER observable spelling. With equal item counts it returns
+    # silently wrong results; with UNEQUAL counts the second branch finds an
+    # entry whose `instance_count` differs from its own resolved count and
+    # raises `CheckpointRecordInvalid` -- on a fresh invocation with no
+    # checkpointer attached, complaining about a record that does not exist.
+    #
+    # Measured before the fix:
+    #   ParallelBranchesBranchFailed: branch 'b' raised CheckpointRecordInvalid:
+    #   ... saved instance_count=2 does not match resolved instance_count=3 on resume
+    #
+    # It also means `FanOutNode.run`'s comment that the count-drift path can only
+    # fire on resume, since the progress dict is empty on a fresh first run, was
+    # false for the branch axis until this fix made it true.
+    from openarmature.graph.parallel_branches import BranchSpec
+
+    executed: list[int] = []
+
+    class _Top(State):
+        oa: list[int] = []
+        ob: list[int] = []
+
+    class _A(State):
+        seeds: list[int] = [0, 1]
+        out: list[int] = []
+
+    class _B(State):
+        seeds: list[int] = [7, 8, 9]
+        out: list[int] = []
+
+    class _Leaf(State):
+        seed: int = 0
+        marker: int = 0
+
+    async def _leaf(s: _Leaf) -> dict[str, Any]:
+        executed.append(s.seed)
+        return {"marker": s.seed + 100}
+
+    def _sub(cls: type[State]) -> CompiledGraph[Any]:
+        leaf = GraphBuilder(_Leaf).add_node("g", _leaf).add_edge("g", END).set_entry("g").compile()
+        return (
+            GraphBuilder(cls)
+            .add_fan_out_node(
+                "fo",
+                subgraph=leaf,
+                items_field="seeds",
+                item_field="seed",
+                collect_field="marker",
+                target_field="out",
+            )
+            .add_edge("fo", END)
+            .set_entry("fo")
+            .compile()
+        )
+
+    graph = (
+        GraphBuilder(_Top)
+        .add_parallel_branches_node(
+            "pb",
+            branches={
+                "a": BranchSpec(subgraph=_sub(_A), outputs={"oa": "out"}),
+                "b": BranchSpec(subgraph=_sub(_B), outputs={"ob": "out"}),
+            },
+        )
+        .add_edge("pb", END)
+        .set_entry("pb")
+        .compile()
+    )
+    final = await graph.invoke(_Top())
+
+    assert sorted(executed) == [0, 1, 7, 8, 9]
+    assert final.oa == [100, 101]
+    assert final.ob == [107, 108, 109]
+
+
+def test_instance_lookup_finds_a_fan_out_across_an_intervening_branch() -> None:
+    # A node inside a parallel branch, inside a fan-out instance, must still
+    # resolve the ENCLOSING fan-out's per-instance state.
+    #
+    # Both lineage chains slice to the same depth, because every descent grows
+    # `namespace_prefix`, `fan_out_index_chain` and `branch_name_chain` by
+    # exactly one entry. Taking the branch chain unsliced leaked the branch
+    # entry into a key built for an OUTER fan-out, so the lookup missed and
+    # `completed_inner_positions` silently lost a position.
+    #
+    # Pinned at the function rather than through a run: branch descent sets
+    # `checkpointer=None`, so nothing reaches this from inside a branch today.
+    # The key must be right regardless of a policy in another module.
+    from openarmature.graph.compiled import _find_innermost_fan_out_instance_state
+    from openarmature.graph.observer import (
+        _FanOutExecutionState,
+        _FanOutInstanceState,
+        _InvocationContext,
+        _QueuedItem,
+    )
+
+    queue: asyncio.Queue[_QueuedItem | None] = asyncio.Queue()
+    tracked = _FanOutInstanceState(state="completed", result=7)
+    # What `FanOutNode.run` registers for fan-out "F" at the top level.
+    registered = _FanOutExecutionState(
+        fan_out_node_name="F",
+        namespace=(),
+        instance_count=2,
+        instances=[_FanOutInstanceState(), tracked],
+    )
+    ctx = _InvocationContext(
+        queue=queue,
+        graph_attached=(),
+        invocation_scoped=(),
+        # Inside F's instance 1, then into parallel-branches node "pb", branch "a".
+        namespace_prefix=("F", "pb"),
+        fan_out_index_chain=(1, None),
+        branch_name_chain=(None, "a"),
+        fan_out_index=1,
+        # F registers from the ROOT context, so both enclosing lineages are
+        # empty; the instance index lives on the descendant's context, not on
+        # the fan-out node's own registration key.
+        fan_out_progress_state={((), "F", (), ()): registered},
+    )
+
+    assert _find_innermost_fan_out_instance_state(ctx) is tracked, (
+        "the enclosing fan-out's instance state must resolve through an "
+        "intervening branch descent; a leaked branch entry makes the key miss"
+    )
+
+
+def test_registration_and_cleanup_build_the_same_progress_key() -> None:
+    # The registration in `FanOutNode.run` and the cleanup `pop` in the step
+    # runner take their inputs from the SAME context and must agree exactly.
+    # They disagreed silently: `pop` passes a default, so a divergence no-ops
+    # and leaves stale `completed` progress in the shared dict with no signal.
+    #
+    # Both now call `fan_out_progress_key`, so the only way to diverge is to
+    # stop calling it. This asserts the two sites resolve to that one builder,
+    # which is what a hand-rolled copy at either site would break.
+    import inspect
+
+    from openarmature.graph import compiled as compiled_mod
+    from openarmature.graph import fan_out as fan_out_mod
+    from openarmature.graph.observer import fan_out_progress_key
+
+    assert fan_out_mod.fan_out_progress_key is fan_out_progress_key
+    assert compiled_mod.fan_out_progress_key is fan_out_progress_key
+
+    # And no site rebuilds the identity by hand alongside calling it. The
+    # filtering of None chain entries belongs in the builder only; a second
+    # spelling is how the two drifted before.
+    hand_rolled = "if i is not None"
+    for mod in (fan_out_mod, compiled_mod):
+        src = inspect.getsource(mod)
+        assert f"context.fan_out_index_chain {hand_rolled}" not in src, (
+            f"{mod.__name__} filters a lineage chain by hand; build the key "
+            "through `fan_out_progress_key` so the three sites cannot drift"
+        )

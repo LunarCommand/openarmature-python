@@ -33,6 +33,19 @@ their contribution into the fan-out accumulator in the prior run;
 completed instances skip and their contributions roll forward to the
 fan-in step.
 
+One shape is currently exempt. A fan-out nested inside a
+[parallel-branches](parallel-branches.md) branch re-runs every instance
+on resume rather than skipping completed ones. The record identifies a
+fan-out by its namespace, node name, and enclosing fan-out-instance
+lineage, and a parallel branch contributes to none of those, so two
+sibling branches running the same fan-out node are indistinguishable on
+the record. Rather than risk applying one branch's completed instances
+to the other, the engine treats the saved entry as unmatched and
+re-runs, which is correctness-preserving. Resume is still correct for
+this shape; it just saves no work. Lifting the exemption needs a branch
+lineage on the record itself, which is a format change under
+discussion.
+
 ## Saves are synchronous-by-contract
 
 The engine **awaits** every `Checkpointer.save` before continuing to
