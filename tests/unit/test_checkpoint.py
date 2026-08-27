@@ -293,8 +293,16 @@ def test_restore_fan_out_progress_keys_by_persisted_lineage() -> None:
         ),
     )
     restored = _restore_fan_out_progress_state([lineaged, legacy])
-    assert (("outer_process",), "inner_process", (1,)) in restored
-    assert (("outer_process",), "inner_process", ()) in restored
+    # The key's fourth element is the enclosing BRANCH lineage. The record has no
+    # field to source it from, so it always restores empty; a branch-nested
+    # fan-out re-enters with a non-empty branch lineage and so never matches,
+    # taking the same re-run floor a legacy unlineaged record takes.
+    assert (("outer_process",), "inner_process", (1,), ()) in restored
+    assert (("outer_process",), "inner_process", (), ()) in restored
+    # The two entries stay distinct: a lineage-bearing record must not collapse
+    # onto the legacy one, or the legacy entry's skips would be applied to a
+    # re-entry the record never described.
+    assert len(restored) == 2
 
 
 async def test_sqlite_durability_across_reopen(tmp_path: Path) -> None:
@@ -1072,3 +1080,52 @@ async def test_resume_preserves_correlation_id_and_mints_new_invocation_id() -> 
     assert resumed_correlation_id == "my-correlation", (
         "resume MUST preserve the original correlation_id per §10.4 step 3"
     )
+
+
+def test_branch_nested_fan_out_progress_is_not_projected_onto_the_record() -> None:
+    # `FanOutProgress` has no branch field, and pipeline-utilities §10.11 keys
+    # the record by `(namespace, fan_out_node_name, enclosing_fan_out_lineage)`.
+    # Sibling branches share all three, so projecting them would put two
+    # entries on the record under one key, with different per-instance contents
+    # and conflicting `instance_count`s.
+    #
+    # `_restore_fan_out_progress_state` is `out[key] = ...`, so such a record
+    # silently loses one entry on load. Skipping them at the projection also
+    # stops an entry no live execution can key to from being restored, never
+    # matched, never popped by the branch-bearing cleanup key, and re-projected
+    # onto every later save for the rest of the invocation.
+    from openarmature.graph.compiled import _project_fan_out_progress, _restore_fan_out_progress_state
+    from openarmature.graph.observer import _FanOutExecutionState, _FanOutInstanceState
+
+    def _exec(count: int, first: int) -> _FanOutExecutionState:
+        return _FanOutExecutionState(
+            fan_out_node_name="fo",
+            namespace=("pb",),
+            instance_count=count,
+            instances=[_FanOutInstanceState(state="completed", result=first)]
+            + [_FanOutInstanceState() for _ in range(count - 1)],
+        )
+
+    top_level = _FanOutExecutionState(
+        fan_out_node_name="F",
+        namespace=(),
+        instance_count=1,
+        instances=[_FanOutInstanceState(state="completed", result=1)],
+    )
+    state = {
+        (("pb",), "fo", (), ("a",)): _exec(2, 100),
+        (("pb",), "fo", (), ("b",)): _exec(3, 107),
+        ((), "F", (), ()): top_level,
+    }
+
+    projected = _project_fan_out_progress(state)
+    keys = [
+        (p.namespace, p.fan_out_node_name, tuple(e.fan_out_index for e in p.enclosing_fan_out_lineage))
+        for p in projected
+    ]
+    assert len(keys) == len(set(keys)), f"record carries duplicate spec-level keys: {keys}"
+    # The branch-nested pair is absent; the top-level fan-out still projects, so
+    # the skip is scoped to the branch axis and does not disable the field.
+    assert keys == [((), "F", ())], keys
+    # And nothing is silently lost on the way back.
+    assert len(_restore_fan_out_progress_state(projected)) == len(projected)

@@ -427,15 +427,50 @@ class _FanOutInstanceState:
 class _FanOutExecutionState:
     """Mutable per-fan-out execution state. One entry per in-flight
     fan-out node in the invocation; lives on
-    ``_InvocationContext.fan_out_progress_state`` keyed by
-    ``(namespace, fan_out_node_name)``. The namespace component
-    disambiguates same-named fan-outs in different subgraph descents.
+    ``_InvocationContext.fan_out_progress_state`` under the identity
+    built by :func:`fan_out_progress_key`, which separates concurrent
+    executions of the same fan-out node by their enclosing fan-out
+    instance and parallel branch as well as by namespace.
     """
 
     fan_out_node_name: str
     namespace: tuple[str, ...]
     instance_count: int
     instances: list[_FanOutInstanceState]
+
+
+# The identity of one live execution of a fan-out node: its namespace and
+# node name, plus the enclosing fan-out-instance and branch lineages that
+# separate concurrent executions sharing that namespace.
+_FanOutProgressKey = tuple[tuple[str, ...], str, tuple[int, ...], tuple[str, ...]]
+
+
+def fan_out_progress_key(
+    namespace: tuple[str, ...],
+    node_name: str,
+    fan_out_index_chain: tuple[int | None, ...],
+    branch_name_chain: tuple[str | None, ...],
+) -> _FanOutProgressKey:
+    """Build the execution-state identity for one live fan-out execution."""
+    # Every site that registers, looks up, or cleans up an entry MUST build the
+    # key the same way, and three sites do it: `FanOutNode.run` registers, the
+    # step runner pops, and the instance lookup reads. They take their chains
+    # from the same context and differ only in which node name and depth they
+    # mean, so the only real failure mode is the expressions drifting apart.
+    #
+    # That drift is silent. The cleanup pop passes a default, so a key that
+    # stops matching the registration no-ops and leaves stale `completed`
+    # progress in the shared dict with no signal at all. One definition is what
+    # makes the divergence impossible rather than merely detectable.
+    #
+    # Callers that mean an OUTER depth slice their chains before calling; the
+    # filtering of None entries belongs here so it cannot be spelled two ways.
+    return (
+        namespace,
+        node_name,
+        tuple(i for i in fan_out_index_chain if i is not None),
+        tuple(b for b in branch_name_chain if b is not None),
+    )
 
 
 @dataclass
@@ -529,19 +564,20 @@ class _InvocationContext:
     # descents at the same depth project as usual. Shared mutable dict
     # propagates across descents.
     pending_resume_states: dict[int, Any] = field(default_factory=dict[int, Any])
-    # Per spec §10.11: mutable per-fan-out progress tracking. Keyed by
-    # ``(namespace, fan_out_node_name)`` — disambiguates same-named
-    # fan-outs in different subgraph descents. ``FanOutNode`` populates
+    # Per spec §10.11: mutable per-fan-out progress tracking, keyed as
+    # described on the field below. ``FanOutNode`` populates
     # entries before descending into instances; updates state as
     # instances progress; the entry stays in the dict for the duration
     # of the fan-out so concurrent saves see consistent sibling state.
     # ``_maybe_save_checkpoint`` projects this into the frozen
     # ``FanOutProgress`` shape on the saved CheckpointRecord.
-    # Keyed by (namespace, fan_out_node_name, enclosing_fan_out_instance_lineage)
-    # -- the lineage (non-None outer fan_out_index chain) disambiguates a fan-out
-    # nested inside an outer fan-out instance across concurrent outer instances.
-    fan_out_progress_state: dict[tuple[tuple[str, ...], str, tuple[int, ...]], _FanOutExecutionState] = field(
-        default_factory=dict[tuple[tuple[str, ...], str, tuple[int, ...]], _FanOutExecutionState]
+    # Keyed by the identity ``fan_out_progress_key`` builds, which separates a
+    # fan-out nested inside an outer fan-out instance, and one nested inside a
+    # parallel branch, across concurrent enclosing contexts. Branch names never
+    # enter the namespace, so without the branch axis sibling branches collide
+    # outright.
+    fan_out_progress_state: dict[_FanOutProgressKey, _FanOutExecutionState] = field(
+        default_factory=dict[_FanOutProgressKey, _FanOutExecutionState]
     )
     # Per spec §6 Drain (proposal 0010): shared mutable counters that
     # the worker reads at drain-cancel time to report undelivered events
@@ -974,6 +1010,8 @@ __all__ = [
     "_DRAIN_SENTINEL",
     "_DrainCounters",
     "_FanOutExecutionState",
+    "_FanOutProgressKey",
+    "fan_out_progress_key",
     "_FanOutInstanceState",
     "_InvocationContext",
     "_QueuedItem",

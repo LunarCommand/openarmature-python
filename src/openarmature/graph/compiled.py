@@ -118,9 +118,11 @@ from .observer import (
     _dispatch,
     _FanOutExecutionState,
     _FanOutInstanceState,
+    _FanOutProgressKey,
     _InvocationContext,
     _QueuedItem,
     deliver_loop,
+    fan_out_progress_key,
 )
 from .reducers import Reducer
 from .state import State
@@ -285,9 +287,11 @@ def _no_op_finalize(_edge_error: RuntimeGraphError | None) -> None:
 
 
 # Helpers for the proposal 0009 per-instance fan-out resume contract.
-# The shared mutable ``fan_out_progress_state`` dict on
-# _InvocationContext is keyed by ``(namespace, fan_out_node_name)``;
-# these helpers locate / project / mutate it consistently.
+# The shared mutable ``fan_out_progress_state`` dict on _InvocationContext is
+# keyed by the identity ``observer.fan_out_progress_key`` builds; these helpers
+# locate / project / mutate it consistently. Build the key through that function
+# rather than restating its shape here: several copies of the shape drifted out
+# of date, and a stale one reads as a justification for the wrong key.
 
 
 def _find_innermost_fan_out_instance_state(
@@ -316,13 +320,37 @@ def _find_innermost_fan_out_instance_state(
     # fan-out's full key is (namespace_before_fan_out, fan_out_name)
     # where namespace_before_fan_out + (fan_out_name,) == prefix.
     for split in range(len(prefix), 0, -1):
-        # The fan-out at prefix[:split] registered its tracking entry keyed by
-        # its ENCLOSING fan-out instance lineage (the non-None fan_out_index chain
-        # up to its own level, prefix depth split-1). Reconstruct it from the
-        # current chain so a fan-out nested inside an outer instance routes to the
-        # right outer instance's entry.
-        lineage = tuple(i for i in context.fan_out_index_chain[: split - 1] if i is not None)
-        key = (prefix[: split - 1], prefix[split - 1], lineage)
+        # The fan-out at prefix[:split] registered under its ENCLOSING lineage at
+        # its own level, prefix depth split-1. Reconstruct that depth from the
+        # current chains so a fan-out nested inside an outer instance routes to
+        # the right outer instance's entry.
+        #
+        # Same builder the registration uses, and BOTH axes slice to
+        # the same depth.  Every descent grows all three of `namespace_prefix`,
+        # `fan_out_index_chain` and `branch_name_chain` by exactly one entry, so
+        # index i of either chain corresponds to `namespace_prefix[i]`.  A branch
+        # descent is no exception: `descend_into_parallel_branch` appends the
+        # parallel-branches NODE name to the namespace in the same call it
+        # appends the branch name to the chain.  (The BRANCH name never enters
+        # the namespace; the node name does.  Conflating those two is what an
+        # earlier version of this comment did, to justify leaving the branch
+        # chain unsliced.)
+        #
+        # Unsliced was reachable-wrong rather than harmless: with a branch
+        # descent at or below the candidate fan-out's depth, the key carried
+        # branch entries the registration key did not, so the lookup missed and
+        # `completed_inner_positions` silently lost a position.  It does not fire
+        # today only because branch descent runs with `checkpointer=None`
+        # (observer.py), which makes `_maybe_save_checkpoint` early-return, so
+        # nothing calls this from inside a branch.  That is a policy in another
+        # module, not a property of this key -- slice correctly and the
+        # correctness stops depending on it.
+        key = fan_out_progress_key(
+            prefix[: split - 1],
+            prefix[split - 1],
+            context.fan_out_index_chain[: split - 1],
+            context.branch_name_chain[: split - 1],
+        )
         if key in state_dict:
             exec_state = state_dict[key]
             idx = context.fan_out_index
@@ -332,7 +360,7 @@ def _find_innermost_fan_out_instance_state(
 
 
 def _project_fan_out_progress(
-    state_dict: Mapping[tuple[tuple[str, ...], str, tuple[int, ...]], _FanOutExecutionState],
+    state_dict: Mapping[_FanOutProgressKey, _FanOutExecutionState],
 ) -> tuple[FanOutProgress, ...]:
     """Project the engine-internal mutable per-fan-out state into the
     frozen :class:`FanOutProgress` shape on a saved record.
@@ -344,9 +372,10 @@ def _project_fan_out_progress(
     calls it once per save regardless of which fan-out's inner node
     fired the event.
 
-    Deterministic ordering: sort by (namespace, fan_out_node_name).
-    Two saves carrying the same logical state then serialize
-    byte-identically, which matters for backends that hash records.
+    Deterministic ordering: entries sort by the full progress key
+    (see :func:`fan_out_progress_key`), so two saves carrying the same
+    logical state serialize byte-identically, which matters for
+    backends that hash records.
     """
     out: list[FanOutProgress] = []
     # The key's third element is the enclosing fan-out instance lineage (the flat
@@ -361,7 +390,25 @@ def _project_fan_out_progress(
     # the safe floor (§10.11 no-mis-skip), not the correct-skip a lineage-bearing
     # record achieves. Sorting includes the lineage so those same-namespace entries
     # still order deterministically (preserving the byte-identical-record guarantee).
-    for (namespace, name, _lineage), exec_state in sorted(state_dict.items()):
+    for (namespace, name, _fan_out_lineage, branch_lineage), exec_state in sorted(state_dict.items()):
+        # A branch-nested fan-out is NOT projected. `FanOutProgress` has no
+        # branch field and the spec keys the record by
+        # `(namespace, fan_out_node_name, enclosing_fan_out_lineage)`
+        # (pipeline-utilities §10.11), so sibling branches -- which share all
+        # three -- would emit entries indistinguishable on the record's own key.
+        # `_restore_fan_out_progress_state` is `out[key] = ...`, so restoring
+        # such a record silently keeps whichever sorted last and discards the
+        # rest.
+        #
+        # Emitting them buys nothing: restore always rebuilds the branch
+        # component as empty, so a branch-nested re-entry never positively
+        # matches one of these entries and re-runs regardless. Skipping keeps
+        # the record's key invariant intact and prevents an entry no live
+        # execution can ever key to from being restored, never matched, never
+        # popped by the branch-bearing cleanup key, and then re-projected onto
+        # every later save for the rest of the invocation.
+        if branch_lineage:
+            continue
         instances = tuple(
             FanOutInstanceProgress(
                 state=inst.state,
@@ -384,7 +431,7 @@ def _project_fan_out_progress(
 
 def _restore_fan_out_progress_state(
     saved: Sequence[FanOutProgress],
-) -> dict[tuple[tuple[str, ...], str, tuple[int, ...]], _FanOutExecutionState]:
+) -> dict[_FanOutProgressKey, _FanOutExecutionState]:
     """Inverse projection of :func:`_project_fan_out_progress`. On resume
     the loaded record's frozen ``fan_out_progress`` tuple gets unpacked
     into the mutable per-fan-out tracking dict that ``FanOutNode``
@@ -405,7 +452,7 @@ def _restore_fan_out_progress_state(
     the engine's canonical error-record shape, and a heuristic would
     misclassify them.
     """
-    out: dict[tuple[tuple[str, ...], str, tuple[int, ...]], _FanOutExecutionState] = {}
+    out: dict[_FanOutProgressKey, _FanOutExecutionState] = {}
     for fp in saved:
         instances: list[_FanOutInstanceState] = []
         for inst in fp.instances:
@@ -438,7 +485,17 @@ def _restore_fan_out_progress_state(
         # crash record) is a tracked follow-up; until then a real nested-fan-out
         # crash resumes at the safe re-run floor -- see _project_fan_out_progress.
         lineage = tuple(e.fan_out_index for e in fp.enclosing_fan_out_lineage)
-        key = (fp.namespace, fp.fan_out_node_name, lineage)
+        # The branch axis has no field on the record to source it from, so it
+        # restores empty. A branch-nested fan-out re-enters with a NON-empty
+        # branch lineage and therefore never positively matches a saved entry:
+        # it re-runs from scratch instead of applying a sibling branch's skips.
+        # That is the same safe floor the fan-out axis already takes for a
+        # legacy unlineaged record, and it is the correctness-preserving side of
+        # the trade -- before the branch axis existed, both branches keyed
+        # identically and a resume COULD apply one branch's completed instances
+        # to the other. Emitting the branch lineage onto the record would be a
+        # record-format change and is deliberately not done here.
+        key = (fp.namespace, fp.fan_out_node_name, lineage, ())
         out[key] = _FanOutExecutionState(
             fan_out_node_name=fp.fan_out_node_name,
             namespace=fp.namespace,
@@ -2026,12 +2083,16 @@ class CompiledGraph[StateT: State]:
         # stale fan-out progress and a retry middleware on the fan-out
         # node sees a fresh tracked state on the second attempt.
         # Match the lineage-aware key FanOutNode.run registers (namespace, node
-        # name, enclosing fan-out instance lineage) so a nested fan-out's cleanup
-        # pops its own outer-instance entry, not a sibling's.
-        fan_out_progress_key = (
+        # name, enclosing fan-out instance lineage, enclosing branch lineage) so a
+        # nested fan-out's cleanup pops its OWN entry, not a sibling's. Both axes
+        # are required: the pop below passes a default, so a key that does not
+        # match the registration silently no-ops and leaves the entry to be
+        # carried into later saves as stale progress.
+        progress_key = fan_out_progress_key(
             context.namespace_prefix,
             current,
-            tuple(i for i in context.fan_out_index_chain if i is not None),
+            context.fan_out_index_chain,
+            context.branch_name_chain,
         )
         try:
             try:
@@ -2111,7 +2172,16 @@ class CompiledGraph[StateT: State]:
 
             return _StepResult(state=merged_outer, finalize_completed=finalize_completed)
         finally:
-            context.fan_out_progress_state.pop(fan_out_progress_key, None)
+            # The default is load-bearing for two LEGITIMATE misses: a fan-out
+            # over an empty list returns before registering, and a middleware
+            # short-circuit never reaches registration. It cannot distinguish
+            # those from a keying divergence between here and the registration,
+            # which is a defect that would leave stale `completed` progress in
+            # the shared dict with no signal. If a third caller ever needs to
+            # tell them apart, have `FanOutNode.run` record the key it actually
+            # registered on the `_FanOutExecutionState` and pop by that recorded
+            # identity, so a divergence cannot silently orphan an entry.
+            context.fan_out_progress_state.pop(progress_key, None)
 
     async def _step_parallel_branches_node(
         self,
