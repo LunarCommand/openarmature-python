@@ -287,9 +287,11 @@ def _no_op_finalize(_edge_error: RuntimeGraphError | None) -> None:
 
 
 # Helpers for the proposal 0009 per-instance fan-out resume contract.
-# The shared mutable ``fan_out_progress_state`` dict on
-# _InvocationContext is keyed by ``(namespace, fan_out_node_name)``;
-# these helpers locate / project / mutate it consistently.
+# The shared mutable ``fan_out_progress_state`` dict on _InvocationContext is
+# keyed by the identity ``observer.fan_out_progress_key`` builds; these helpers
+# locate / project / mutate it consistently. Build the key through that function
+# rather than restating its shape here: several copies of the shape drifted out
+# of date, and a stale one reads as a justification for the wrong key.
 
 
 def _find_innermost_fan_out_instance_state(
@@ -370,9 +372,10 @@ def _project_fan_out_progress(
     calls it once per save regardless of which fan-out's inner node
     fired the event.
 
-    Deterministic ordering: sort by (namespace, fan_out_node_name).
-    Two saves carrying the same logical state then serialize
-    byte-identically, which matters for backends that hash records.
+    Deterministic ordering: entries sort by the full progress key
+    (see :func:`fan_out_progress_key`), so two saves carrying the same
+    logical state serialize byte-identically, which matters for
+    backends that hash records.
     """
     out: list[FanOutProgress] = []
     # The key's third element is the enclosing fan-out instance lineage (the flat

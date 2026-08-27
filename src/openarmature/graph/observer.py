@@ -427,9 +427,10 @@ class _FanOutInstanceState:
 class _FanOutExecutionState:
     """Mutable per-fan-out execution state. One entry per in-flight
     fan-out node in the invocation; lives on
-    ``_InvocationContext.fan_out_progress_state`` keyed by
-    ``(namespace, fan_out_node_name)``. The namespace component
-    disambiguates same-named fan-outs in different subgraph descents.
+    ``_InvocationContext.fan_out_progress_state`` under the identity
+    built by :func:`fan_out_progress_key`, which separates concurrent
+    executions of the same fan-out node by their enclosing fan-out
+    instance and parallel branch as well as by namespace.
     """
 
     fan_out_node_name: str
@@ -570,11 +571,11 @@ class _InvocationContext:
     # of the fan-out so concurrent saves see consistent sibling state.
     # ``_maybe_save_checkpoint`` projects this into the frozen
     # ``FanOutProgress`` shape on the saved CheckpointRecord.
-    # Keyed by (namespace, fan_out_node_name, enclosing_fan_out_instance_lineage,
-    # enclosing_branch_lineage) -- the two lineages disambiguate a fan-out nested
-    # inside an outer fan-out instance, and one nested inside a parallel branch,
-    # across concurrent enclosing contexts. Branch names never enter the
-    # namespace, so without the branch axis sibling branches collide outright.
+    # Keyed by the identity ``fan_out_progress_key`` builds, which separates a
+    # fan-out nested inside an outer fan-out instance, and one nested inside a
+    # parallel branch, across concurrent enclosing contexts. Branch names never
+    # enter the namespace, so without the branch axis sibling branches collide
+    # outright.
     fan_out_progress_state: dict[_FanOutProgressKey, _FanOutExecutionState] = field(
         default_factory=dict[_FanOutProgressKey, _FanOutExecutionState]
     )

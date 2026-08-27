@@ -1083,25 +1083,31 @@ async def test_sibling_branches_do_not_share_fan_out_state() -> None:
     assert final.out_b == [107, 108]
 
 
-async def test_branch_nested_fan_out_progress_is_popped_after_it_completes() -> None:
+async def test_fan_out_progress_is_popped_after_it_completes() -> None:
     # The cleanup `pop` in the step runner must build the SAME key the fan-out
-    # registered under, on both lineage axes. It passes a default, so a key that
-    # does not match silently no-ops: the entry survives and is carried into
-    # every later save in the invocation as stale progress.
+    # registered under. It passes a default, so a key that does not match
+    # silently no-ops: the entry survives and is carried into every later save
+    # in the invocation as stale progress.
     #
-    # A branch-nested fan-out is the case that exposes a missing branch axis,
-    # since the registration key carries a non-empty branch lineage and a cleanup
-    # key built without one cannot match it.
+    # This uses a TOP-LEVEL fan-out deliberately. An earlier version nested it
+    # in a parallel branch, to exercise the branch component of the key -- and
+    # a later change in this same branch, which stops projecting branch-nested
+    # entries onto the record at all, made that version vacuous: the record was
+    # empty whether or not the pop worked. It was mutation-verified before that
+    # change and not re-verified after, which is exactly how a live test dies
+    # quietly. Only a fan-out whose progress actually reaches the record can
+    # observe the pop through the record.
+    #
+    # The branch component of the cleanup key is covered structurally instead,
+    # by `test_registration_and_cleanup_build_the_same_progress_key`: all three
+    # sites build the key through one shared builder, so they cannot disagree
+    # on any component.
     from openarmature.checkpoint import InMemoryCheckpointer
-    from openarmature.graph.parallel_branches import BranchSpec
 
     class _Top(State):
-        out: list[int] = []
-        done: bool = False
-
-    class _Branch(State):
         seeds: list[int] = [0, 1]
         out: list[int] = []
+        done: bool = False
 
     class _Leaf(State):
         seed: int = 0
@@ -1114,8 +1120,9 @@ async def test_branch_nested_fan_out_progress_is_popped_after_it_completes() -> 
         return {"done": True}
 
     leaf = GraphBuilder(_Leaf).add_node("g", _leaf).add_edge("g", END).set_entry("g").compile()
-    branch = (
-        GraphBuilder(_Branch)
+    cp = InMemoryCheckpointer()
+    builder = (
+        GraphBuilder(_Top)
         .add_fan_out_node(
             "fo",
             subgraph=leaf,
@@ -1124,27 +1131,26 @@ async def test_branch_nested_fan_out_progress_is_popped_after_it_completes() -> 
             collect_field="marker",
             target_field="out",
         )
-        .add_edge("fo", END)
-        .set_entry("fo")
-        .compile()
-    )
-    cp = InMemoryCheckpointer()
-    builder = (
-        GraphBuilder(_Top)
-        .add_parallel_branches_node("pb", branches={"a": BranchSpec(subgraph=branch, outputs={"out": "out"})})
         .add_node("after", _after)
-        .add_edge("pb", "after")
+        .add_edge("fo", "after")
         .add_edge("after", END)
-        .set_entry("pb")
+        .set_entry("fo")
     )
     builder.with_checkpointer(cp)
     await builder.compile().invoke(_Top())
 
-    # The LAST record is written after the fan-out has finished and been popped,
-    # so it must carry no fan-out progress at all.
-    records = list(cp._records.values()) if hasattr(cp, "_records") else []
-    assert records, "expected the checkpointer to have saved at least one record"
-    last = records[-1]
+    # Public API only. `list()` carries no `fan_out_progress` (a
+    # `CheckpointSummary` holds the id, correlation id, timestamp and node
+    # count), so it supplies the id and `load()` supplies the record. There is
+    # deliberately no `hasattr` guard: a change to the checkpointer surface
+    # should break this at the call, not quietly empty the list and leave the
+    # behavioural assertion below unreached.
+    summaries = list(await cp.list())
+    assert summaries, "expected the checkpointer to have saved at least one record"
+    last = await cp.load(summaries[-1].invocation_id)
+    assert last is not None
+    # The last record is written by `after`, long after the fan-out completed
+    # and its entry was popped, so it must carry no fan-out progress at all.
     assert last.fan_out_progress == (), (
         f"stale fan-out progress survived into a later save: {last.fan_out_progress}. "
         "The cleanup key no longer matches the registration key."
