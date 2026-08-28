@@ -6097,3 +6097,386 @@ async def test_outermost_serial_metadata_does_reach_the_invocation_span() -> Non
     graph = GraphBuilder(_S).add_node("solo", _body).add_edge("solo", END).set_entry("solo").compile()
     _dispatch, shared = await _run_and_collect_both(graph, _S())
     assert shared == {"invocation": {"from_serial"}}
+
+
+def _trace_id_of(span: ReadableSpan) -> int:
+    """The span's trace id. ``get_span_context()`` is Optional on the base
+    protocol; a finished SDK span always has one."""
+    return cast("Any", span.get_span_context()).trace_id
+
+
+async def test_orphan_inside_a_detached_fan_out_lands_in_the_detached_trace() -> None:
+    # `_synthesize_call_site_wrapper_spans` mirrored only the two NON-detached
+    # arms of `_sync_subgraph_spans`. For a fan-out in `detached_fan_outs` the
+    # orphan's home was therefore still decided by drain scheduling, and diverged
+    # in TRACE ID rather than only in parent, which is a larger divergence than
+    # the one that function exists to close.
+    #
+    # The wrapper here short-circuits: it issues its call and returns without
+    # calling `next_`, so no inner node event ever arrives and nothing backfills.
+    # Every pre-existing test lets the inner node run, which is why none of them
+    # could see this.
+    from openarmature.graph.events import ToolCallEvent
+    from openarmature.observability.correlation import (
+        current_branch_name_chain,
+        current_correlation_id,
+        current_dispatch,
+        current_fan_out_index,
+        current_fan_out_index_chain,
+        current_invocation_id,
+        current_namespace_prefix,
+    )
+    from openarmature.observability.metadata import current_invocation_metadata
+
+    class _Top(State):
+        items: list[int] = [0]
+        results: list[int] = []
+
+    class _Leaf(State):
+        item: int = 0
+        result: int = 0
+
+    async def _inner(s: _Leaf) -> dict[str, Any]:
+        return {"result": s.item + 1}
+
+    async def _wrapper(_state: Any, _next: Any) -> dict[str, Any]:
+        ns = current_namespace_prefix() or ()
+        dispatch = current_dispatch()
+        if dispatch is not None:
+            dispatch(
+                ToolCallEvent(
+                    invocation_id=current_invocation_id() or "",
+                    correlation_id=current_correlation_id(),
+                    node_name="probe",
+                    namespace=ns + ("probe",),
+                    attempt_index=0,
+                    fan_out_index=current_fan_out_index(),
+                    branch_name=None,
+                    call_id="c1",
+                    tool_name="probe",
+                    tool_call_id="t1",
+                    arguments={},
+                    result="r",
+                    latency_ms=1.0,
+                    fan_out_index_chain=current_fan_out_index_chain(),
+                    branch_name_chain=current_branch_name_chain(),
+                    caller_invocation_metadata=current_invocation_metadata(),
+                )
+            )
+        return {"result": -1}
+
+    leaf = GraphBuilder(_Leaf).add_node("g", _inner).add_edge("g", END).set_entry("g").compile()
+    graph = (
+        GraphBuilder(_Top)
+        .add_fan_out_node(
+            "fo",
+            subgraph=leaf,
+            items_field="items",
+            item_field="item",
+            collect_field="result",
+            target_field="results",
+            instance_middleware=(_wrapper,),
+        )
+        .add_edge("fo", END)
+        .set_entry("fo")
+        .compile()
+    )
+    exporter = InMemorySpanExporter()
+    observer = OTelObserver(
+        span_processor=SimpleSpanProcessor(exporter),
+        detached_fan_outs=frozenset({"fo"}),
+    )
+    graph.attach_observer(observer)
+    try:
+        await graph.invoke(_Top())
+        await graph.drain()
+    finally:
+        observer.shutdown()
+
+    spans = list(exporter.get_finished_spans())
+    tool = [s for s in spans if s.name == "openarmature.tool.call"]
+    assert len(tool) == 1, [s.name for s in spans]
+    roots = [s for s in spans if s.name == "openarmature.invocation"]
+    # A detached fan-out mints one invocation span per instance, plus the
+    # parent's own.
+    assert len(roots) >= 2, [s.name for s in spans]
+
+    # Identify the parent trace STRUCTURALLY, by the fan-out NODE span, which is
+    # the only one carrying `openarmature.node.namespace` (the detached instance
+    # root carries `fan_out.parent_node_name` instead). An earlier version of
+    # this test took `min(trace_id)` over the roots as a stand-in for "the
+    # parent", which is arbitrary because trace ids are random: it passed or
+    # failed by luck, roughly half the time.
+    node_spans = [s for s in spans if "openarmature.node.namespace" in dict(s.attributes or {})]
+    assert node_spans, "expected the fan-out NODE span to identify the parent trace"
+    parent_trace = _trace_id_of(node_spans[0])
+
+    # The orphan must sit in the DETACHED trace, not the parent's: before the
+    # detached arms were mirrored its trace id depended on whether the instance
+    # root had drained yet.
+    assert _trace_id_of(tool[0]) != parent_trace, (
+        "orphan issued inside a detached fan-out instance stayed in the parent trace"
+    )
+    # And positively: it shares the detached instance root's trace.
+    detached_roots = [
+        s
+        for s in spans
+        if "openarmature.fan_out.parent_node_name" in dict(s.attributes or {})
+        and _trace_id_of(s) != parent_trace
+    ]
+    assert detached_roots, "expected a detached instance root outside the parent trace"
+    assert _trace_id_of(tool[0]) == _trace_id_of(detached_roots[0])
+
+
+async def test_orphan_synthesis_recovers_a_declared_subgraph_identity() -> None:
+    # A fan-out declares `subgraph_identity="leaf_identity"`. Its instance
+    # middleware issues a call and returns without calling `next_`, so no inner
+    # node event ever arrives and the backfill never runs.
+    #
+    # The identity used to reach an observer ONLY through an inner node event's
+    # `subgraph_identities`, so this shape produced `openarmature.subgraph.name=''`
+    # with nothing able to repair it: `FanOutEventConfig` did not carry it, and
+    # the fan-out NODE's own event carries `subgraph_identities == ()`.
+    #
+    # It now rides `FanOutEventConfig` as an optional fifth key, cached off the
+    # node's started event, which always precedes its instances. graph-engine §6
+    # requires all four of its keys to be present and does not close the set, so
+    # the addition is permitted rather than a spec change.
+    from openarmature.graph.events import ToolCallEvent
+    from openarmature.observability.correlation import (
+        current_branch_name_chain,
+        current_correlation_id,
+        current_dispatch,
+        current_fan_out_index,
+        current_fan_out_index_chain,
+        current_invocation_id,
+        current_namespace_prefix,
+    )
+    from openarmature.observability.metadata import (
+        current_invocation_metadata,
+        set_invocation_metadata,
+    )
+
+    class _Top(State):
+        items: list[int] = [0]
+        results: list[int] = []
+
+    class _Leaf(State):
+        item: int = 0
+        result: int = 0
+
+    async def _inner(s: _Leaf) -> dict[str, Any]:
+        return {"result": s.item + 1}
+
+    async def _wrapper(_state: Any, _next: Any) -> dict[str, Any]:
+        set_invocation_metadata(from_wrapper="yes")
+        ns = current_namespace_prefix() or ()
+        dispatch = current_dispatch()
+        if dispatch is not None:
+            dispatch(
+                ToolCallEvent(
+                    invocation_id=current_invocation_id() or "",
+                    correlation_id=current_correlation_id(),
+                    node_name="probe",
+                    namespace=ns + ("probe",),
+                    attempt_index=0,
+                    fan_out_index=current_fan_out_index(),
+                    branch_name=None,
+                    call_id="c1",
+                    tool_name="probe",
+                    tool_call_id="t1",
+                    arguments={},
+                    result="r",
+                    latency_ms=1.0,
+                    fan_out_index_chain=current_fan_out_index_chain(),
+                    branch_name_chain=current_branch_name_chain(),
+                    caller_invocation_metadata=current_invocation_metadata(),
+                )
+            )
+        return {"result": -1}
+
+    leaf = GraphBuilder(_Leaf).add_node("g", _inner).add_edge("g", END).set_entry("g").compile()
+    graph = (
+        GraphBuilder(_Top)
+        .add_fan_out_node(
+            "fo",
+            subgraph=leaf,
+            items_field="items",
+            item_field="item",
+            collect_field="result",
+            target_field="results",
+            subgraph_identity="leaf_identity",
+            instance_middleware=(_wrapper,),
+        )
+        .add_edge("fo", END)
+        .set_entry("fo")
+        .compile()
+    )
+    exporter = InMemorySpanExporter()
+    observer = OTelObserver(span_processor=SimpleSpanProcessor(exporter))
+    graph.attach_observer(observer)
+    try:
+        await graph.invoke(_Top())
+        await graph.drain()
+    finally:
+        observer.shutdown()
+
+    dispatch_spans = [
+        s
+        for s in exporter.get_finished_spans()
+        if "openarmature.fan_out.parent_node_name" in dict(s.attributes or {})
+    ]
+    assert dispatch_spans, "expected the orphan path to synthesize an instance dispatch span"
+    # Non-vacuity: the caller metadata DOES arrive, because the tool event
+    # declares and carries it. Only the identity is missing, which is what
+    # separates this from a general "nothing reaches the span" failure.
+    attrs = dict(dispatch_spans[0].attributes or {})
+    assert attrs.get("openarmature.user.from_wrapper") == "yes", (
+        "non-vacuity: the tool event declares and carries caller metadata, so it "
+        "MUST reach the span. Only the subgraph identity is missing here, which "
+        "is what makes this a specific gap rather than 'nothing reaches it'."
+    )
+    assert attrs.get("openarmature.subgraph.name") == "leaf_identity", (
+        f"the declared identity must reach the span even when no inner node "
+        f"event ever arrives, got {attrs.get('openarmature.subgraph.name')!r}"
+    )
+
+
+async def test_a_failure_isolated_first_dispatch_span_carries_caller_metadata() -> None:
+    # When a wrapper sets metadata and then raises WITHOUT issuing a provider
+    # call first, `FailureIsolatedEvent` is the only event that can synthesize
+    # the dispatch span. It used to declare no `caller_invocation_metadata` at
+    # all, so the span carried no `openarmature.user.*` with nothing able to
+    # repair it.
+    #
+    # Reading the metadata live in the observer instead would be unsound, which
+    # is why the field had to move onto the event. The synthesis path already
+    # sources `correlation_id` live from the invocation, so "do the same for
+    # metadata" looks right: `correlation_id` is invocation-scoped, one value per
+    # run, while caller metadata is per-async-context with copy-on-write per
+    # §3.4, and every caller of this path is an async `_handle_*` on the serial
+    # delivery queue rather than in the engine task. A live read there sees the
+    # queue's context. The middleware populates the field in the engine task,
+    # which is the only place it is correct.
+    #
+    # In the ordinary ordering this never bit: the wrapper's provider call
+    # arrives first and carries the metadata itself.
+    from openarmature.graph import FailureIsolationMiddleware
+    from openarmature.observability.metadata import set_invocation_metadata
+
+    class _Top(State):
+        items: list[int] = [0]
+        results: list[int] = []
+
+    class _Leaf(State):
+        item: int = 0
+        result: int = 0
+
+    async def _inner(s: _Leaf) -> dict[str, Any]:
+        return {"result": s.item + 1}
+
+    async def _raiser(_state: Any, _next: Any) -> dict[str, Any]:
+        set_invocation_metadata(from_wrapper="yes")
+        raise RuntimeError("boom")
+
+    leaf = GraphBuilder(_Leaf).add_node("g", _inner).add_edge("g", END).set_entry("g").compile()
+    graph = (
+        GraphBuilder(_Top)
+        .add_fan_out_node(
+            "fo",
+            subgraph=leaf,
+            items_field="items",
+            item_field="item",
+            collect_field="result",
+            target_field="results",
+            instance_middleware=(
+                FailureIsolationMiddleware(degraded_update=lambda _s: {"result": -1}, event_name="degraded"),
+                _raiser,
+            ),
+        )
+        .add_edge("fo", END)
+        .set_entry("fo")
+        .compile()
+    )
+    exporter = InMemorySpanExporter()
+    observer = OTelObserver(span_processor=SimpleSpanProcessor(exporter))
+    graph.attach_observer(observer)
+    try:
+        await graph.invoke(_Top())
+        await graph.drain()
+    finally:
+        observer.shutdown()
+
+    spans = list(exporter.get_finished_spans())
+    # Non-vacuity: the shape really did run, isolate the failure, and synthesize
+    # a dispatch span. Without these the absence assertion below would hold in a
+    # run where nothing happened at all.
+    assert any(s.name == "openarmature.failure_isolated" for s in spans), [s.name for s in spans]
+    dispatch_spans = [s for s in spans if "openarmature.fan_out.parent_node_name" in dict(s.attributes or {})]
+    assert dispatch_spans, "expected the orphan path to synthesize an instance dispatch span"
+
+    attrs = dict(dispatch_spans[0].attributes or {})
+    assert attrs.get("openarmature.user.from_wrapper") == "yes", (
+        "the wrapper's metadata must reach the dispatch span even when a "
+        "FailureIsolatedEvent is the only event that can synthesize it"
+    )
+    # §5.6: the cross-cutting set goes on EVERY span in the invocation, so the
+    # marker span carries it too. It could not before the event did.
+    marker = next(s for s in spans if s.name == "openarmature.failure_isolated")
+    assert dict(marker.attributes or {}).get("openarmature.user.from_wrapper") == "yes"
+
+
+def test_detached_openers_accept_an_event_without_caller_metadata() -> None:
+    # Mirroring the detached arms into the orphan-synthesis path widened both
+    # detached openers from `NodeEvent` to `_LineageEvent`. That Protocol does
+    # not declare `caller_invocation_metadata`, so the openers must tolerate a
+    # conforming event that lacks it; reading the field directly raises
+    # `AttributeError`, which loses the whole span rather than one attribute.
+    #
+    # Tested against a minimal stub rather than a concrete event class on
+    # purpose. `FailureIsolatedEvent` was the kind that lacked the field, and it
+    # now carries it, so pinning to a concrete class would make this test quietly
+    # stop exercising the defensive read the moment the last such class gained
+    # one. The Protocol is the contract, so the stub is what should be asserted.
+    from dataclasses import dataclass as _dc
+
+    from openarmature.observability.otel.observer import _InvState
+
+    @_dc(frozen=True)
+    class _LineageOnly:
+        """Satisfies `_LineageEvent` and nothing more."""
+
+        namespace: tuple[str, ...] = ("fo", "g")
+        attempt_index: int = 0
+        fan_out_index: int | None = 0
+        branch_name: str | None = None
+        fan_out_index_chain: tuple[int | None, ...] = (0, None)
+        branch_name_chain: tuple[str | None, ...] = (None, None)
+
+    event = _LineageOnly()
+    assert not hasattr(event, "caller_invocation_metadata"), (
+        "precondition: the stub must NOT declare the field, or this is not exercising the defensive read"
+    )
+
+    exporter = InMemorySpanExporter()
+    observer = OTelObserver(
+        span_processor=SimpleSpanProcessor(exporter),
+        detached_fan_outs=frozenset({"fo"}),
+        detached_subgraphs=frozenset({"sub"}),
+    )
+    try:
+        inv_state = _InvState()
+        observer._open_detached_fan_out_instance_root(  # noqa: SLF001
+            inv_state, "inv-1", "corr-1", ("fo",), cast("Any", event)
+        )
+        observer._open_detached_subgraph_root(  # noqa: SLF001
+            inv_state, "inv-1", "corr-1", ("sub",), cast("Any", event)
+        )
+    finally:
+        observer.shutdown()
+
+    # Both opened rather than raising. The spans are still open here, so they are
+    # observed through the state they registered rather than through the
+    # exporter, which only sees finished spans.
+    assert ("fo", "0") in inv_state.detached_roots, sorted(inv_state.detached_roots)
+    assert ("sub",) in inv_state.detached_roots, sorted(inv_state.detached_roots)

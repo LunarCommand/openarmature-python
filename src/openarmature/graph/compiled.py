@@ -1882,6 +1882,7 @@ class CompiledGraph[StateT: State]:
                 concurrency=concurrency_resolved,
                 error_policy=node.config.error_policy,
                 parent_node_name=current,
+                subgraph_identity=node.config.subgraph_identity,
             )
         except NodeException as resolution_error:
             self._dispatch_started(

@@ -568,6 +568,10 @@ class _InvState:
     # ``openarmature.fan_out.parent_node_name`` even though the inner
     # event itself doesn't carry ``fan_out_config``.
     fan_out_parent_node_name: dict[tuple[str, ...], str] = field(default_factory=dict[tuple[str, ...], str])
+    # Declared subgraph identity per fan-out NODE namespace, cached off the
+    # node's own started event so a synthesized per-instance span can carry it
+    # without an inner node event to read it from.
+    fan_out_subgraph_identity: dict[tuple[str, ...], str] = field(default_factory=dict[tuple[str, ...], str])
     # Per proposal 0044 (observability §5.7, v0.36.0): synthesize
     # per-branch dispatch spans nested between the parallel-branches
     # node span and the inner-branch spans (mirroring fan-out's
@@ -1079,6 +1083,14 @@ class OTelObserver:
         # branch, the NODE's own event carries the OUTER axis values.
         if event.fan_out_config is not None:
             inv_state.fan_out_parent_node_name[event.namespace] = event.fan_out_config.parent_node_name
+            # The declared subgraph identity, cached from the same event for the
+            # same reason. A per-instance span synthesized from a provider or
+            # tool event has no `subgraph_identities` to read, and when the
+            # instance middleware short-circuits no inner node event ever arrives
+            # to backfill it. The fan-out NODE's own started event always precedes
+            # its instances, so this is populated before any instance span opens.
+            if event.fan_out_config.subgraph_identity is not None:
+                inv_state.fan_out_subgraph_identity[event.namespace] = event.fan_out_config.subgraph_identity
 
         # Per proposal 0044 (v0.36.0): mirror cache for the parallel-
         # branches NODE.  Same logic as the fan-out cache: rely on
@@ -2330,6 +2342,10 @@ class OTelObserver:
         cid = current_correlation_id()
         if cid is not None:
             attrs["openarmature.correlation_id"] = cid
+        # §5.6: the cross-cutting set goes on EVERY span emitted during the
+        # invocation, and this marker is one. It carried none until the event
+        # gained the field, because there was nothing to read.
+        _apply_caller_metadata(attrs, _event_caller_metadata(event))
         span = self._tracer.start_span(
             name="openarmature.failure_isolated",
             context=cast("Any", parent_ctx),
@@ -2393,7 +2409,7 @@ class OTelObserver:
         # sits inside before walking for it, so the answer does not depend on
         # whether the wrapper's first inner node has drained yet.
         if event is not None:
-            self._synthesize_call_site_wrapper_spans(inv_state, event)
+            self._synthesize_call_site_wrapper_spans(inv_state, invocation_id, event)
         return self._resolve_enclosing_wrapper_context(
             inv_state,
             invocation_id,
@@ -2785,7 +2801,7 @@ class OTelObserver:
         invocation_id: str,
         correlation_id: str | None,
         prefix: tuple[str, ...],
-        event: NodeEvent,
+        event: _LineageEvent,
     ) -> dict[str, Any]:
         # Proposal 0061 §5.1 attribute set for a detached invocation
         # span. Mirrors ``_open_invocation_span`` but carries the SAME
@@ -2808,7 +2824,7 @@ class OTelObserver:
         }
         if correlation_id is not None:
             attrs["openarmature.correlation_id"] = correlation_id
-        _apply_caller_metadata(attrs, event.caller_invocation_metadata)
+        _apply_caller_metadata(attrs, _event_caller_metadata(event))
         return attrs
 
     def _open_detached_subgraph_root(
@@ -2817,7 +2833,7 @@ class OTelObserver:
         invocation_id: str,
         correlation_id: str | None,
         prefix: tuple[str, ...],
-        event: NodeEvent,
+        event: _LineageEvent,
     ) -> None:
         """Mint a fresh trace for a detached subgraph entry. The
         detached root span lives in the new trace; the parent trace's
@@ -2861,7 +2877,7 @@ class OTelObserver:
         }
         if correlation_id is not None:
             attrs_parent["openarmature.correlation_id"] = correlation_id
-        _apply_caller_metadata(attrs_parent, event.caller_invocation_metadata)
+        _apply_caller_metadata(attrs_parent, _event_caller_metadata(event))
         parent_dispatch = self._tracer.start_span(
             name=prefix[-1],
             context=cast("Any", parent_ctx_for_dispatch),
@@ -2917,7 +2933,7 @@ class OTelObserver:
         invocation_id: str,
         correlation_id: str | None,
         prefix: tuple[str, ...],
-        event: NodeEvent,
+        event: _LineageEvent,
     ) -> None:
         """Per-instance detached root for a configured-detached
         fan-out. Each instance gets its own trace_id; the fan-out
@@ -2951,7 +2967,18 @@ class OTelObserver:
         # the instance subgraph's entry node), with the fan-out instance
         # span nested under it. Keyed by prefix + (str(fan_out_index),)
         # so per-instance roots stay distinct.
-        instance_key = prefix + (str(event.fan_out_index),)
+        # The dispatch's OWN instance index is the chain entry at this depth, not
+        # event.fan_out_index (the innermost index of the synthesizing event) --
+        # they differ when this is an OUTER fan-out in a nested stack. Mirrors
+        # the non-detached opener; it mattered here only once a wrapper-issued
+        # event could reach this path.
+        chain_len = len(prefix)
+        fan_out_index = (
+            event.fan_out_index_chain[chain_len - 1]
+            if chain_len - 1 < len(event.fan_out_index_chain)
+            else event.fan_out_index
+        )
+        instance_key = prefix + (str(fan_out_index),)
         detached_parent_ctx = otel_trace.set_span_in_context(
             NonRecordingSpan(detached_sc), otel_context.Context()
         )
@@ -2972,11 +2999,11 @@ class OTelObserver:
         attrs: dict[str, Any] = {
             "openarmature.node.name": prefix[-1],
             "openarmature.fan_out.parent_node_name": prefix[-1],
-            "openarmature.node.fan_out_index": event.fan_out_index,
+            "openarmature.node.fan_out_index": fan_out_index,
         }
         if correlation_id is not None:
             attrs["openarmature.correlation_id"] = correlation_id
-        _apply_caller_metadata(attrs, event.caller_invocation_metadata)
+        _apply_caller_metadata(attrs, _event_caller_metadata(event))
         instance_root = self._tracer.start_span(
             name=prefix[-1],
             context=cast("Any", set_span_in_context(detached_invocation)),
@@ -2989,6 +3016,7 @@ class OTelObserver:
     def _synthesize_call_site_wrapper_spans(
         self,
         inv_state: _InvState,
+        invocation_id: str,
         event: _LineageEvent,
     ) -> None:
         """Open any dispatch span the CALLING lineage sits inside that has not
@@ -3030,6 +3058,41 @@ class OTelObserver:
         for depth in range(1, len(namespace) + 1):
             prefix = namespace[:depth]
             fi_axis = fan_out_index_chain[depth - 1] if depth - 1 < len(fan_out_index_chain) else None
+            # The two DETACHED arms, mirroring `_sync_subgraph_spans`. Without
+            # them an orphan issued from inside a detached wrapper still had its
+            # parent decided by drain scheduling, and diverged in TRACE ID rather
+            # than only in parent -- a larger divergence than the one this
+            # function exists to close.
+            #
+            # `continue` after each, as the node path does: a detached wrapper
+            # owns the whole depth, so the non-detached arms below must not also
+            # fire for it.
+            # Mirrored only at STRICT-ancestor depths. A detached trace's
+            # invocation span carries `openarmature.graph.entry_node`, read as
+            # `event.namespace[len(prefix)]`, which requires the prefix to be
+            # strictly shorter than the namespace. The node path satisfies that
+            # by construction; this walk deliberately does not, because a call
+            # from a wrapper's own middleware sits AT the dispatch namespace.
+            #
+            # At that depth the carve-out is deliberate rather than a gap: the
+            # middleware issued its call before any node entered the detached
+            # subgraph, so there is no entry node to name. Minting a detached
+            # trace with an invented entry node would be worse than leaving the
+            # call in the parent trace. Same shape as the subgraph-identity
+            # question in #279 and raised with spec alongside it; if they rule an
+            # entry node is not required, drop this guard and both arms fire at
+            # every depth.
+            if depth < len(namespace):
+                if prefix[-1] in self.detached_subgraphs and prefix not in inv_state.detached_roots:
+                    self._open_detached_subgraph_root(inv_state, invocation_id, correlation_id, prefix, event)
+                    continue
+                if fi_axis is not None and prefix[-1] in self.detached_fan_outs:
+                    instance_key = prefix + (str(fi_axis),)
+                    if instance_key not in inv_state.detached_roots:
+                        self._open_detached_fan_out_instance_root(
+                            inv_state, invocation_id, correlation_id, prefix, event
+                        )
+                    continue
             if (
                 fi_axis is not None
                 and prefix[-1] not in self.detached_fan_outs
@@ -3093,7 +3156,15 @@ class OTelObserver:
             "openarmature.node.name": prefix[-1],
             "openarmature.fan_out.parent_node_name": parent_node_name,
             "openarmature.node.fan_out_index": fan_out_index,
-            "openarmature.subgraph.name": _subgraph_identity_at(event, len(prefix)),
+            # The event's own identities first; they are authoritative and
+            # per-depth. An event carrying none (a provider or tool event, or any
+            # kind without the field) falls back to the identity the fan-out NODE
+            # declared, cached from its started event. Without that fallback a
+            # short-circuiting instance middleware produced an empty name with
+            # nothing able to repair it, since the backfill needs an inner node
+            # event that never arrives.
+            "openarmature.subgraph.name": _subgraph_identity_at(event, len(prefix))
+            or inv_state.fan_out_subgraph_identity.get(prefix, ""),
         }
         if correlation_id is not None:
             attrs["openarmature.correlation_id"] = correlation_id
