@@ -176,7 +176,7 @@ def _empty_str_frozenset() -> frozenset[str]:
     return frozenset()
 
 
-def _apply_caller_metadata(metadata: dict[str, Any], caller_metadata: Mapping[str, Any]) -> None:
+def _apply_caller_metadata(metadata: dict[str, Any], caller_metadata: Mapping[str, Any] | None) -> None:
     """Merge caller-supplied invocation metadata into a Trace's or
     Observation's metadata bag at top level.
 
@@ -193,6 +193,12 @@ def _apply_caller_metadata(metadata: dict[str, Any], caller_metadata: Mapping[st
     prefixed keys. Per-Langfuse-backend collision rejection is queued
     as a follow-up.
     """
+    # None-tolerant, matching the OTel helper. An event kind whose
+    # `caller_invocation_metadata` is optional (FailureIsolatedEvent) reaches
+    # this with None when the caller set no metadata; the two observers should
+    # not differ on whether that is the caller's problem.
+    if not caller_metadata:
+        return
     # Spec observability §8.4.1 / §8.4.2 (proposal 0034): top-level
     # placement of caller-supplied metadata on the Trace / Observation.
     for key, value in caller_metadata.items():
@@ -958,6 +964,12 @@ class LangfuseObserver:
         correlation_id = current_correlation_id()
         if correlation_id is not None:
             metadata["correlation_id"] = correlation_id
+        # §5.6: the cross-cutting caller set goes on EVERY observation in the
+        # invocation, and this marker is one. It carried none until
+        # `FailureIsolatedEvent` gained the field, because there was nothing to
+        # read; omitting it now would leave the two observers disagreeing about
+        # the same marker, which is worse than both lacking it.
+        _apply_caller_metadata(metadata, event.caller_invocation_metadata)
         handle = self.client.span(
             trace_id=inv_state.trace_id,
             name="openarmature.failure_isolated",

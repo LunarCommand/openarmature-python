@@ -273,7 +273,8 @@ Like `RetryMiddleware`, it catches `Exception` only; `BaseException`
 On a catch, the middleware dispatches a `FailureIsolatedEvent` onto the
 observer stream. It is a distinct event variant, not a node event: it
 carries the `event_name`, the wrapped node's lineage identity, the input
-and degraded states, and a `CaughtException` record. That record holds a
+and degraded states, a snapshot of any caller-supplied invocation
+metadata, and a `CaughtException` record. That record holds a
 derived `category` (when the cause has one) and `message` for simple
 consumers, plus a `chain` of cause links (`CauseLink`) from the caught
 exception down to the originating raise, with graph-engine carrier
