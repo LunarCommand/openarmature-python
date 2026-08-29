@@ -39,6 +39,7 @@ from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import (
     InMemorySpanExporter,
 )
+from opentelemetry.trace import SpanContext
 
 from openarmature.checkpoint import InMemoryCheckpointer
 from openarmature.graph import (
@@ -6355,6 +6356,18 @@ async def test_sibling_branches_do_not_share_a_fan_out_subgraph_identity() -> No
     )
 
 
+def _span_ctx(span: ReadableSpan) -> SpanContext:
+    """The span's context.
+
+    Optional on the base type; a finished SDK span always has one. Asserting
+    says so and checks it, where a cast would only silence the type checker.
+    Matches the `assert s.context is not None` idiom used elsewhere in this file.
+    """
+    ctx = span.context
+    assert ctx is not None, f"finished span {span.name!r} carries no SpanContext"
+    return ctx
+
+
 async def test_detached_fan_out_instance_opens_one_root_per_instance() -> None:
     # `_sync_subgraph_spans` guards its detached fan-out arm with
     # `if prefix in inv_state.detached_roots`, the BARE prefix, while
@@ -6437,7 +6450,7 @@ async def test_detached_fan_out_instance_opens_one_root_per_instance() -> None:
     # `NonRecordingSpan` that exists only to carry the new trace id and is never
     # exported by design, with the fan-out node span holding a Link to it
     # instead. Including it would flag that design rather than a defect.
-    exported = {cast("Any", s.get_span_context()).span_id for s in spans}
+    exported = {_span_ctx(s).span_id for s in spans}
     dangling = sorted(
         s.name
         for s in spans
@@ -6447,9 +6460,9 @@ async def test_detached_fan_out_instance_opens_one_root_per_instance() -> None:
 
     # One instance means one detached trace: its inner nodes belong together, and
     # there is no third trace holding an abandoned root's leftovers.
-    trace_of = {s.name: cast("Any", s.get_span_context()).trace_id for s in spans}
+    trace_of = {s.name: _span_ctx(s).trace_id for s in spans}
     assert trace_of["a"] == trace_of["b"], (
         "the two inner nodes of one fan-out instance landed in different traces"
     )
-    trace_count = len({cast("Any", s.get_span_context()).trace_id for s in spans})
+    trace_count = len({_span_ctx(s).trace_id for s in spans})
     assert trace_count == 2, f"expected the parent trace plus one detached instance trace, got {trace_count}"
