@@ -1182,7 +1182,7 @@ class FailureIsolatedEvent:
     # repair it. Reading the metadata live in the observer instead is unsound --
     # it is per-async-context per observability §3.4, and observers resolve on
     # the serial delivery queue rather than in the engine task.
-    caller_invocation_metadata: Mapping[str, Any] | None = None
+    caller_invocation_metadata: Mapping[str, AttributeValue] | None = None
 
 
 # Spec: realizes graph-engine §6 tool-execution observer events

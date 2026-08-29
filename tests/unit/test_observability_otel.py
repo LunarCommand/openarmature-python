@@ -6113,20 +6113,8 @@ async def test_orphan_synthesis_recovers_a_declared_subgraph_identity() -> None:
     # node's started event, which always precedes its instances. graph-engine §6
     # requires all four of its keys to be present and does not close the set, so
     # the addition is permitted rather than a spec change.
-    from openarmature.graph.events import ToolCallEvent
-    from openarmature.observability.correlation import (
-        current_branch_name_chain,
-        current_correlation_id,
-        current_dispatch,
-        current_fan_out_index,
-        current_fan_out_index_chain,
-        current_invocation_id,
-        current_namespace_prefix,
-    )
-    from openarmature.observability.metadata import (
-        current_invocation_metadata,
-        set_invocation_metadata,
-    )
+    from openarmature.observability.metadata import set_invocation_metadata
+    from openarmature.observability.tool_call import with_tool_call
 
     class _Top(State):
         items: list[int] = [0]
@@ -6141,29 +6129,8 @@ async def test_orphan_synthesis_recovers_a_declared_subgraph_identity() -> None:
 
     async def _wrapper(_state: Any, _next: Any) -> dict[str, Any]:
         set_invocation_metadata(from_wrapper="yes")
-        ns = current_namespace_prefix() or ()
-        dispatch = current_dispatch()
-        if dispatch is not None:
-            dispatch(
-                ToolCallEvent(
-                    invocation_id=current_invocation_id() or "",
-                    correlation_id=current_correlation_id(),
-                    node_name="probe",
-                    namespace=ns + ("probe",),
-                    attempt_index=0,
-                    fan_out_index=current_fan_out_index(),
-                    branch_name=None,
-                    call_id="c1",
-                    tool_name="probe",
-                    tool_call_id="t1",
-                    arguments={},
-                    result="r",
-                    latency_ms=1.0,
-                    fan_out_index_chain=current_fan_out_index_chain(),
-                    branch_name_chain=current_branch_name_chain(),
-                    caller_invocation_metadata=current_invocation_metadata(),
-                )
-            )
+        with with_tool_call(tool_name="probe", arguments={}) as rec:
+            rec.set_result("r")
         return {"result": -1}
 
     leaf = GraphBuilder(_Leaf).add_node("g", _inner).add_edge("g", END).set_entry("g").compile()
@@ -6305,17 +6272,8 @@ async def test_sibling_branches_do_not_share_a_fan_out_subgraph_identity() -> No
     # declared identity and every instance span in both branches read the
     # survivor. Same collision shape as the execution-state key in #282.
     from openarmature.graph import CompiledGraph
-    from openarmature.graph.events import ToolCallEvent
     from openarmature.graph.parallel_branches import BranchSpec
-    from openarmature.observability.correlation import (
-        current_branch_name_chain,
-        current_correlation_id,
-        current_dispatch,
-        current_fan_out_index,
-        current_fan_out_index_chain,
-        current_invocation_id,
-        current_namespace_prefix,
-    )
+    from openarmature.observability.tool_call import with_tool_call
 
     class _Top(State):
         a: list[int] = []
@@ -6338,28 +6296,8 @@ async def test_sibling_branches_do_not_share_a_fan_out_subgraph_identity() -> No
         # from the cache rather than from the event's own `subgraph_identities`,
         # which the `or` in the opener would otherwise satisfy first. Without
         # this the test never reaches the cache and passes against the collision.
-        ns = current_namespace_prefix() or ()
-        dispatch = current_dispatch()
-        if dispatch is not None:
-            dispatch(
-                ToolCallEvent(
-                    invocation_id=current_invocation_id() or "",
-                    correlation_id=current_correlation_id(),
-                    node_name="probe",
-                    namespace=ns + ("probe",),
-                    attempt_index=0,
-                    fan_out_index=current_fan_out_index(),
-                    branch_name=None,
-                    call_id="c1",
-                    tool_name="probe",
-                    tool_call_id="t1",
-                    arguments={},
-                    result="r",
-                    latency_ms=1.0,
-                    fan_out_index_chain=current_fan_out_index_chain(),
-                    branch_name_chain=current_branch_name_chain(),
-                )
-            )
+        with with_tool_call(tool_name="probe", arguments={}) as rec:
+            rec.set_result("r")
         return {"marker": -1}
 
     def _sub(identity: str) -> CompiledGraph[Any]:
