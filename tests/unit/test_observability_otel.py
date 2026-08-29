@@ -6353,3 +6353,103 @@ async def test_sibling_branches_do_not_share_a_fan_out_subgraph_identity() -> No
     assert identities == ["identity_a", "identity_b"], (
         f"each branch's fan-out must keep its OWN declared identity, got {identities}"
     )
+
+
+async def test_detached_fan_out_instance_opens_one_root_per_instance() -> None:
+    # `_sync_subgraph_spans` guards its detached fan-out arm with
+    # `if prefix in inv_state.detached_roots`, the BARE prefix, while
+    # `_open_detached_fan_out_instance_root` stores under
+    # `prefix + (str(fan_out_index),)`. The guard therefore never matches, and
+    # the arm fires once per INNER NODE EVENT rather than once per instance.
+    #
+    # With a single-node instance subgraph it is invisible: one event, one open.
+    # Two nodes is enough to see it, which is an ordinary graph rather than an
+    # exotic one. The second open replaces the first in both dicts, so the first
+    # root and its detached invocation span are never ended and never exported,
+    # and the inner nodes end up in different traces with the first pointing at
+    # a parent that does not exist.
+    #
+    # Measured before the fix: 3 traces instead of 2, node `a` alone in its own
+    # trace, and two spans carrying a parent span id that was never exported.
+    #
+    # Asserted through the exported spans rather than by counting calls, so the
+    # test states the trace-shape guarantee a consumer actually depends on
+    # rather than an implementation detail.
+    class _Top(State):
+        items: list[int] = [0]
+        out: list[int] = []
+
+    class _Leaf(State):
+        item: int = 0
+        result: int = 0
+
+    async def _one(s: _Leaf) -> dict[str, Any]:
+        return {"result": s.item + 1}
+
+    async def _two(s: _Leaf) -> dict[str, Any]:
+        return {"result": s.result + 1}
+
+    leaf = (
+        GraphBuilder(_Leaf)
+        .add_node("a", _one)
+        .add_node("b", _two)
+        .add_edge("a", "b")
+        .add_edge("b", END)
+        .set_entry("a")
+        .compile()
+    )
+    graph = (
+        GraphBuilder(_Top)
+        .add_fan_out_node(
+            "fo",
+            subgraph=leaf,
+            items_field="items",
+            item_field="item",
+            collect_field="result",
+            target_field="out",
+        )
+        .add_edge("fo", END)
+        .set_entry("fo")
+        .compile()
+    )
+    exporter = InMemorySpanExporter()
+    observer = OTelObserver(
+        span_processor=SimpleSpanProcessor(exporter),
+        detached_fan_outs=frozenset({"fo"}),
+    )
+    graph.attach_observer(observer)
+    try:
+        await graph.invoke(_Top())
+        await graph.drain()
+    finally:
+        observer.shutdown()
+
+    spans = list(exporter.get_finished_spans())
+    by_name = {s.name for s in spans}
+    # Non-vacuity: the shape really ran and really detached.
+    assert {"a", "b"} <= by_name, sorted(by_name)
+
+    # Every referenced parent must itself have been exported. An abandoned root
+    # leaves its children pointing at a span id nothing emitted.
+    #
+    # `openarmature.invocation` is excluded deliberately, not to make the test
+    # pass: a detached invocation span is parented under a synthetic
+    # `NonRecordingSpan` that exists only to carry the new trace id and is never
+    # exported by design, with the fan-out node span holding a Link to it
+    # instead. Including it would flag that design rather than a defect.
+    exported = {cast("Any", s.get_span_context()).span_id for s in spans}
+    dangling = sorted(
+        s.name
+        for s in spans
+        if s.name != "openarmature.invocation" and getattr(s.parent, "span_id", None) not in (None, *exported)
+    )
+    assert dangling == [], f"spans whose parent span was never exported: {dangling}"
+
+    # One instance means one detached trace: its inner nodes belong together, and
+    # there is no third trace holding an abandoned root's leftovers.
+    trace_of = {s.name: cast("Any", s.get_span_context()).trace_id for s in spans}
+    assert trace_of["a"] == trace_of["b"], (
+        "the two inner nodes of one fan-out instance landed in different traces"
+    )
+    trace_count = len({cast("Any", s.get_span_context()).trace_id for s in spans})
+    assert trace_count == 2, f"expected the parent trace plus one detached instance trace, got {trace_count}"
