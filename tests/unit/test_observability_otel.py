@@ -5400,7 +5400,9 @@ def _handler_event_types() -> list[str]:
     # opts into synthesis is covered the day it is written. Hand-listing is what
     # failed before: `FailureIsolatedEvent` was threaded in without anyone
     # asking which event kinds actually arrive at the dispatch-span openers, and
-    # it declares neither `caller_invocation_metadata` nor `correlation_id`.
+    # at the time it declared neither `caller_invocation_metadata` nor
+    # `correlation_id`. It has since gained the first; `correlation_id` is still
+    # absent.
     import inspect
     import re
 
@@ -5683,9 +5685,11 @@ async def test_failure_isolated_marker_survives_orphan_path_synthesis() -> None:
     # `_handle_failure_isolated` threads its event into `_resolve_llm_parent`,
     # and its docstring says the calling span is already closed -- so this event
     # ALWAYS takes the orphan path and always reaches the dispatch-span openers.
-    # `FailureIsolatedEvent` declares neither `caller_invocation_metadata` nor
-    # `correlation_id`, so an opener reading the field directly raised, the graph
-    # observer swallowed it into a warning, and the marker span vanished.
+    # `FailureIsolatedEvent` declared neither `caller_invocation_metadata` nor
+    # `correlation_id`, so an opener reading either field directly raised, the
+    # graph observer swallowed it into a warning, and the marker span vanished.
+    # It has since gained `caller_invocation_metadata`; `correlation_id` is still
+    # absent, so the defensive read is still what keeps this shape working.
     #
     # End-to-end on purpose. Unit-testing the metadata helpers in isolation does
     # NOT pin this: reverting the openers' defensive read leaves those green,

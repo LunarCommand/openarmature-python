@@ -286,10 +286,15 @@ class _LineageEvent(Protocol):
     # eight concrete kinds: what synthesis needs is these six fields, and a new
     # event kind that carries them should work without editing a list here.
     #
-    # The three fields that vary -- `caller_invocation_metadata`,
-    # `correlation_id`, `subgraph_identities` -- are deliberately ABSENT from
-    # this Protocol and read defensively at each use, because `FailureIsolatedEvent`
-    # declares none of them and a Protocol cannot express "may be absent".
+    # The fields that vary -- `correlation_id` and `subgraph_identities` -- are
+    # deliberately ABSENT from this Protocol and read defensively at each use,
+    # because `FailureIsolatedEvent` declares neither and a Protocol cannot
+    # express "may be absent".
+    #
+    # `caller_invocation_metadata` belonged to that list until the change that
+    # added it to `FailureIsolatedEvent`, so no shipped kind now lacks it. It is
+    # still absent from this Protocol and still read defensively: the Protocol is
+    # the contract, and a conforming event is free not to carry the field.
     @property
     def namespace(self) -> tuple[str, ...]: ...
     @property
@@ -307,9 +312,15 @@ class _LineageEvent(Protocol):
 def _event_caller_metadata(event: object) -> Mapping[str, Any] | None:
     """Caller metadata from any event kind, absent field included."""
     # Three spellings of "no metadata" reach here: a mapping, None, and the
-    # attribute not existing at all. The last is `FailureIsolatedEvent`, and
-    # missing it is what dropped the `openarmature.failure_isolated` marker span
-    # behind a swallowed AttributeError.
+    # attribute not existing at all. The last was `FailureIsolatedEvent` until it
+    # gained the field, and missing it is what dropped the
+    # `openarmature.failure_isolated` marker span behind a swallowed
+    # AttributeError.
+    #
+    # No shipped kind lacks the attribute today, so the third spelling is
+    # currently unreachable through the concrete classes. The `getattr` stays
+    # because `_LineageEvent` does not declare the field: any conforming event
+    # may omit it, which is what the Protocol contract test asserts.
     return cast("Mapping[str, Any] | None", getattr(event, "caller_invocation_metadata", None))
 
 
