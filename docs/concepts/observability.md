@@ -142,8 +142,12 @@ A walk-through:
 
 - **`fan_out_config`**: populated on `started` / `completed` events
   for the *fan-out node itself*, carrying the resolved
-  `item_count` / `concurrency` / `error_policy` / `parent_node_name`.
-  `None` on every other event.
+  `item_count` / `concurrency` / `error_policy` / `parent_node_name`,
+  plus `subgraph_identity` when the node declares one. `None` on every
+  other event. An observer reads the identity to attribute a
+  per-instance span when the event that triggered its synthesis carries
+  no `subgraph_identities` of its own, which is the case for a provider
+  or tool call issued from instance middleware.
 
 - **`branch_name`**: populated on events from nodes inside a
   [parallel-branches branch](parallel-branches.md), carrying the

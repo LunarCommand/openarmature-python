@@ -86,6 +86,21 @@ class FanOutEventConfig:
     concurrency: int | None
     error_policy: str
     parent_node_name: str
+    # OPTIONAL fifth key, beyond the four graph-engine §6 requires. §6 says
+    # implementations MUST present all four whenever the field is populated;
+    # it does not close the set, and nothing forbids an additional key.
+    #
+    # It exists because the declared identity otherwise reaches an observer ONLY
+    # through an inner node event's `subgraph_identities`. When a fan-out's
+    # instance middleware short-circuits -- issues its call and returns without
+    # calling `next_call` -- no inner node event is ever emitted, so a synthesized
+    # per-instance span carried `openarmature.subgraph.name=''` despite a
+    # declared identity, with nothing able to repair it. Same reason
+    # `parent_node_name` rides here rather than being rederived.
+    #
+    # `None` when the fan-out declares no identity, which is the existing
+    # "no identity tracked" case and stays the empty string on the span.
+    subgraph_identity: str | None = None
 
 
 # Spec: realizes observability §5.7 parallel-branches attributes via
@@ -1158,6 +1173,16 @@ class FailureIsolatedEvent:
     # enclosing wrapper across concurrent sibling instances.
     fan_out_index_chain: tuple[int | None, ...] = ()
     branch_name_chain: tuple[str | None, ...] = ()
+    # OPTIONAL, the same shape graph-engine §6 already defines for the provider
+    # events (an absent-by-default snapshot of the caller-supplied invocation
+    # metadata). Added here because this event can SYNTHESIZE a dispatch span:
+    # when a wrapper sets metadata and then raises without issuing a provider
+    # call first, this is the only event that can open the span, and without the
+    # field the span carried no `openarmature.user.*` at all with nothing able to
+    # repair it. Reading the metadata live in the observer instead is unsound --
+    # it is per-async-context per observability §3.4, and observers resolve on
+    # the serial delivery queue rather than in the engine task.
+    caller_invocation_metadata: Mapping[str, AttributeValue] | None = None
 
 
 # Spec: realizes graph-engine §6 tool-execution observer events

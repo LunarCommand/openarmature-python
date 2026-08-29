@@ -5400,7 +5400,9 @@ def _handler_event_types() -> list[str]:
     # opts into synthesis is covered the day it is written. Hand-listing is what
     # failed before: `FailureIsolatedEvent` was threaded in without anyone
     # asking which event kinds actually arrive at the dispatch-span openers, and
-    # it declares neither `caller_invocation_metadata` nor `correlation_id`.
+    # at the time it declared neither `caller_invocation_metadata` nor
+    # `correlation_id`. It has since gained the first; `correlation_id` is still
+    # absent.
     import inspect
     import re
 
@@ -5683,9 +5685,11 @@ async def test_failure_isolated_marker_survives_orphan_path_synthesis() -> None:
     # `_handle_failure_isolated` threads its event into `_resolve_llm_parent`,
     # and its docstring says the calling span is already closed -- so this event
     # ALWAYS takes the orphan path and always reaches the dispatch-span openers.
-    # `FailureIsolatedEvent` declares neither `caller_invocation_metadata` nor
-    # `correlation_id`, so an opener reading the field directly raised, the graph
-    # observer swallowed it into a warning, and the marker span vanished.
+    # `FailureIsolatedEvent` declared neither `caller_invocation_metadata` nor
+    # `correlation_id`, so an opener reading either field directly raised, the
+    # graph observer swallowed it into a warning, and the marker span vanished.
+    # It has since gained `caller_invocation_metadata`; `correlation_id` is still
+    # absent, so the defensive read is still what keeps this shape working.
     #
     # End-to-end on purpose. Unit-testing the metadata helpers in isolation does
     # NOT pin this: reverting the openers' defensive read leaves those green,
@@ -6097,3 +6101,255 @@ async def test_outermost_serial_metadata_does_reach_the_invocation_span() -> Non
     graph = GraphBuilder(_S).add_node("solo", _body).add_edge("solo", END).set_entry("solo").compile()
     _dispatch, shared = await _run_and_collect_both(graph, _S())
     assert shared == {"invocation": {"from_serial"}}
+
+
+async def test_orphan_synthesis_recovers_a_declared_subgraph_identity() -> None:
+    # A fan-out declares `subgraph_identity="leaf_identity"`. Its instance
+    # middleware issues a call and returns without calling `next_`, so no inner
+    # node event ever arrives and the backfill never runs.
+    #
+    # The identity used to reach an observer ONLY through an inner node event's
+    # `subgraph_identities`, so this shape produced `openarmature.subgraph.name=''`
+    # with nothing able to repair it: `FanOutEventConfig` did not carry it, and
+    # the fan-out NODE's own event carries `subgraph_identities == ()`.
+    #
+    # It now rides `FanOutEventConfig` as an optional fifth key, cached off the
+    # node's started event, which always precedes its instances. graph-engine §6
+    # requires all four of its keys to be present and does not close the set, so
+    # the addition is permitted rather than a spec change.
+    from openarmature.observability.metadata import set_invocation_metadata
+    from openarmature.observability.tool_call import with_tool_call
+
+    class _Top(State):
+        items: list[int] = [0]
+        results: list[int] = []
+
+    class _Leaf(State):
+        item: int = 0
+        result: int = 0
+
+    async def _inner(s: _Leaf) -> dict[str, Any]:
+        return {"result": s.item + 1}
+
+    async def _wrapper(_state: Any, _next: Any) -> dict[str, Any]:
+        set_invocation_metadata(from_wrapper="yes")
+        with with_tool_call(tool_name="probe", arguments={}) as rec:
+            rec.set_result("r")
+        return {"result": -1}
+
+    leaf = GraphBuilder(_Leaf).add_node("g", _inner).add_edge("g", END).set_entry("g").compile()
+    graph = (
+        GraphBuilder(_Top)
+        .add_fan_out_node(
+            "fo",
+            subgraph=leaf,
+            items_field="items",
+            item_field="item",
+            collect_field="result",
+            target_field="results",
+            subgraph_identity="leaf_identity",
+            instance_middleware=(_wrapper,),
+        )
+        .add_edge("fo", END)
+        .set_entry("fo")
+        .compile()
+    )
+    exporter = InMemorySpanExporter()
+    observer = OTelObserver(span_processor=SimpleSpanProcessor(exporter))
+    graph.attach_observer(observer)
+    try:
+        await graph.invoke(_Top())
+        await graph.drain()
+    finally:
+        observer.shutdown()
+
+    dispatch_spans = [
+        s
+        for s in exporter.get_finished_spans()
+        if "openarmature.fan_out.parent_node_name" in dict(s.attributes or {})
+    ]
+    assert dispatch_spans, "expected the orphan path to synthesize an instance dispatch span"
+    # Non-vacuity: the caller metadata DOES arrive, because the tool event
+    # declares and carries it. Only the identity is missing, which is what
+    # separates this from a general "nothing reaches the span" failure.
+    attrs = dict(dispatch_spans[0].attributes or {})
+    assert attrs.get("openarmature.user.from_wrapper") == "yes", (
+        "non-vacuity: the tool event declares and carries caller metadata, so it "
+        "MUST reach the span. Only the subgraph identity is missing here, which "
+        "is what makes this a specific gap rather than 'nothing reaches it'."
+    )
+    assert attrs.get("openarmature.subgraph.name") == "leaf_identity", (
+        f"the declared identity must reach the span even when no inner node "
+        f"event ever arrives, got {attrs.get('openarmature.subgraph.name')!r}"
+    )
+
+
+async def test_a_failure_isolated_first_dispatch_span_carries_caller_metadata() -> None:
+    # When a wrapper sets metadata and then raises WITHOUT issuing a provider
+    # call first, `FailureIsolatedEvent` is the only event that can synthesize
+    # the dispatch span. It used to declare no `caller_invocation_metadata` at
+    # all, so the span carried no `openarmature.user.*` with nothing able to
+    # repair it.
+    #
+    # Reading the metadata live in the observer instead would be unsound, which
+    # is why the field had to move onto the event. The synthesis path already
+    # sources `correlation_id` live from the invocation, so "do the same for
+    # metadata" looks right: `correlation_id` is invocation-scoped, one value per
+    # run, while caller metadata is per-async-context with copy-on-write per
+    # §3.4, and every caller of this path is an async `_handle_*` on the serial
+    # delivery queue rather than in the engine task. A live read there sees the
+    # queue's context. The middleware populates the field in the engine task,
+    # which is the only place it is correct.
+    #
+    # In the ordinary ordering this never bit: the wrapper's provider call
+    # arrives first and carries the metadata itself.
+    from openarmature.graph import FailureIsolationMiddleware
+    from openarmature.observability.metadata import set_invocation_metadata
+
+    class _Top(State):
+        items: list[int] = [0]
+        results: list[int] = []
+
+    class _Leaf(State):
+        item: int = 0
+        result: int = 0
+
+    async def _inner(s: _Leaf) -> dict[str, Any]:
+        return {"result": s.item + 1}
+
+    async def _raiser(_state: Any, _next: Any) -> dict[str, Any]:
+        set_invocation_metadata(from_wrapper="yes")
+        raise RuntimeError("boom")
+
+    leaf = GraphBuilder(_Leaf).add_node("g", _inner).add_edge("g", END).set_entry("g").compile()
+    graph = (
+        GraphBuilder(_Top)
+        .add_fan_out_node(
+            "fo",
+            subgraph=leaf,
+            items_field="items",
+            item_field="item",
+            collect_field="result",
+            target_field="results",
+            instance_middleware=(
+                FailureIsolationMiddleware(degraded_update=lambda _s: {"result": -1}, event_name="degraded"),
+                _raiser,
+            ),
+        )
+        .add_edge("fo", END)
+        .set_entry("fo")
+        .compile()
+    )
+    exporter = InMemorySpanExporter()
+    observer = OTelObserver(span_processor=SimpleSpanProcessor(exporter))
+    graph.attach_observer(observer)
+    try:
+        await graph.invoke(_Top())
+        await graph.drain()
+    finally:
+        observer.shutdown()
+
+    spans = list(exporter.get_finished_spans())
+    # Non-vacuity: the shape really did run, isolate the failure, and synthesize
+    # a dispatch span. Without these the absence assertion below would hold in a
+    # run where nothing happened at all.
+    assert any(s.name == "openarmature.failure_isolated" for s in spans), [s.name for s in spans]
+    dispatch_spans = [s for s in spans if "openarmature.fan_out.parent_node_name" in dict(s.attributes or {})]
+    assert dispatch_spans, "expected the orphan path to synthesize an instance dispatch span"
+
+    attrs = dict(dispatch_spans[0].attributes or {})
+    assert attrs.get("openarmature.user.from_wrapper") == "yes", (
+        "the wrapper's metadata must reach the dispatch span even when a "
+        "FailureIsolatedEvent is the only event that can synthesize it"
+    )
+    # §5.6: the cross-cutting set goes on EVERY span in the invocation, so the
+    # marker span carries it too. It could not before the event did.
+    marker = next(s for s in spans if s.name == "openarmature.failure_isolated")
+    assert dict(marker.attributes or {}).get("openarmature.user.from_wrapper") == "yes"
+
+
+async def test_sibling_branches_do_not_share_a_fan_out_subgraph_identity() -> None:
+    # The identity cache is keyed lineage-aware, not by namespace. Branch names
+    # never enter the namespace, so two sibling parallel branches each holding a
+    # fan-out node of the same name share one: keyed on the namespace alone,
+    # whichever branch's started event landed second overwrote the other's
+    # declared identity and every instance span in both branches read the
+    # survivor. Same collision shape as the execution-state key in #282.
+    from openarmature.graph import CompiledGraph
+    from openarmature.graph.parallel_branches import BranchSpec
+    from openarmature.observability.tool_call import with_tool_call
+
+    class _Top(State):
+        a: list[int] = []
+        b: list[int] = []
+
+    class _Branch(State):
+        seeds: list[int] = [0]
+        out: list[int] = []
+
+    class _Leaf(State):
+        seed: int = 0
+        marker: int = 0
+
+    async def _leaf(s: _Leaf) -> dict[str, Any]:
+        return {"marker": s.seed + 1}
+
+    async def _wrapper(_state: Any, _next: Any) -> dict[str, Any]:
+        # Short-circuits: issues a call and returns without calling `next_`, so
+        # no inner node event arrives. That is what forces the identity to come
+        # from the cache rather than from the event's own `subgraph_identities`,
+        # which the `or` in the opener would otherwise satisfy first. Without
+        # this the test never reaches the cache and passes against the collision.
+        with with_tool_call(tool_name="probe", arguments={}) as rec:
+            rec.set_result("r")
+        return {"marker": -1}
+
+    def _sub(identity: str) -> CompiledGraph[Any]:
+        leaf = GraphBuilder(_Leaf).add_node("g", _leaf).add_edge("g", END).set_entry("g").compile()
+        return (
+            GraphBuilder(_Branch)
+            .add_fan_out_node(
+                "fo",
+                subgraph=leaf,
+                items_field="seeds",
+                item_field="seed",
+                collect_field="marker",
+                target_field="out",
+                subgraph_identity=identity,
+                instance_middleware=(_wrapper,),
+            )
+            .add_edge("fo", END)
+            .set_entry("fo")
+            .compile()
+        )
+
+    graph = (
+        GraphBuilder(_Top)
+        .add_parallel_branches_node(
+            "pb",
+            branches={
+                "a": BranchSpec(subgraph=_sub("identity_a"), outputs={"a": "out"}),
+                "b": BranchSpec(subgraph=_sub("identity_b"), outputs={"b": "out"}),
+            },
+        )
+        .add_edge("pb", END)
+        .set_entry("pb")
+        .compile()
+    )
+    exporter = InMemorySpanExporter()
+    observer = OTelObserver(span_processor=SimpleSpanProcessor(exporter))
+    graph.attach_observer(observer)
+    try:
+        await graph.invoke(_Top())
+        await graph.drain()
+    finally:
+        observer.shutdown()
+
+    identities = sorted(
+        str(dict(s.attributes or {}).get("openarmature.subgraph.name"))
+        for s in exporter.get_finished_spans()
+        if "openarmature.fan_out.parent_node_name" in dict(s.attributes or {})
+    )
+    assert identities == ["identity_a", "identity_b"], (
+        f"each branch's fan-out must keep its OWN declared identity, got {identities}"
+    )

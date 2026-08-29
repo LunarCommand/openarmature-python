@@ -51,6 +51,7 @@ from openarmature.observability.correlation import (
     current_fan_out_index_chain,
     current_namespace_prefix,
 )
+from openarmature.observability.metadata import current_invocation_metadata
 
 from ._core import NextCall
 
@@ -241,6 +242,11 @@ class FailureIsolationMiddleware:
                 pre_state=state,
                 post_state=degraded,
                 caught_exception=classification,
+                # Read HERE, in the engine task, which is the only place it is
+                # correct: the metadata is per-async-context per observability
+                # §3.4, and an observer resolving this event runs on the serial
+                # delivery queue where a live read sees the queue's context.
+                caller_invocation_metadata=current_invocation_metadata(),
             )
         )
 

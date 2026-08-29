@@ -727,3 +727,59 @@ async def test_langfuse_renders_failure_isolated_observation() -> None:
     assert marker.metadata.get("failure_isolation_event_name") == "extract_failed"
     assert marker.metadata.get("failure_isolation_node") == "extract"
     assert marker.metadata.get("error_category") == "provider_rate_limit"
+
+
+async def test_langfuse_failure_isolated_marker_carries_caller_metadata() -> None:
+    # observability §5.6: the cross-cutting caller set goes on EVERY observation
+    # in the invocation, and this marker is one. It carried none until
+    # `FailureIsolatedEvent` gained `caller_invocation_metadata`, because there
+    # was nothing to read.
+    #
+    # Asserted on the LANGFUSE side specifically. The OTel half was covered
+    # first, and covering only that leaves the two observers free to disagree
+    # about the same marker, which is the divergence this exists to prevent. The
+    # test above checks the three pre-existing marker fields and the payload-leak
+    # canary constructs the event with `caller_invocation_metadata=None`, so
+    # neither would notice the Langfuse half being reverted.
+    from openarmature.observability.langfuse.client import InMemoryLangfuseClient
+    from openarmature.observability.langfuse.observer import LangfuseObserver
+    from openarmature.observability.metadata import set_invocation_metadata
+
+    async def _sets_then_raises(_s: _DocState) -> Mapping[str, Any]:
+        set_invocation_metadata(from_wrapper="yes")
+        raise _TransientError("provider down")
+
+    graph = (
+        GraphBuilder(_DocState)
+        .add_node(
+            "extract",
+            _sets_then_raises,
+            middleware=[
+                FailureIsolationMiddleware(
+                    degraded_update={"note": "degraded"},
+                    event_name="extract_failed",
+                )
+            ],
+        )
+        .add_edge("extract", END)
+        .set_entry("extract")
+        .compile()
+    )
+    client = InMemoryLangfuseClient()
+    observer = LangfuseObserver(client=client)
+    graph.attach_observer(observer)
+
+    await graph.invoke(_DocState())
+    await graph.drain()
+
+    trace = next(iter(client.traces.values()))
+    marker = next(
+        (o for o in trace.observations if o.name == "openarmature.failure_isolated"),
+        None,
+    )
+    assert marker is not None, f"no failure_isolated observation; got {[o.name for o in trace.observations]}"
+    # Non-vacuity: the marker really is the isolation one, not some other span.
+    assert marker.metadata.get("failure_isolation_event_name") == "extract_failed"
+    assert marker.metadata.get("from_wrapper") == "yes", (
+        f"caller metadata must reach the Langfuse marker; got {marker.metadata}"
+    )

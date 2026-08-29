@@ -286,10 +286,15 @@ class _LineageEvent(Protocol):
     # eight concrete kinds: what synthesis needs is these six fields, and a new
     # event kind that carries them should work without editing a list here.
     #
-    # The three fields that vary -- `caller_invocation_metadata`,
-    # `correlation_id`, `subgraph_identities` -- are deliberately ABSENT from
-    # this Protocol and read defensively at each use, because `FailureIsolatedEvent`
-    # declares none of them and a Protocol cannot express "may be absent".
+    # The fields that vary -- `correlation_id` and `subgraph_identities` -- are
+    # deliberately ABSENT from this Protocol and read defensively at each use,
+    # because `FailureIsolatedEvent` declares neither and a Protocol cannot
+    # express "may be absent".
+    #
+    # `caller_invocation_metadata` belonged to that list until the change that
+    # added it to `FailureIsolatedEvent`, so no shipped kind now lacks it. It is
+    # still absent from this Protocol and still read defensively: the Protocol is
+    # the contract, and a conforming event is free not to carry the field.
     @property
     def namespace(self) -> tuple[str, ...]: ...
     @property
@@ -307,9 +312,15 @@ class _LineageEvent(Protocol):
 def _event_caller_metadata(event: object) -> Mapping[str, Any] | None:
     """Caller metadata from any event kind, absent field included."""
     # Three spellings of "no metadata" reach here: a mapping, None, and the
-    # attribute not existing at all. The last is `FailureIsolatedEvent`, and
-    # missing it is what dropped the `openarmature.failure_isolated` marker span
-    # behind a swallowed AttributeError.
+    # attribute not existing at all. The last was `FailureIsolatedEvent` until it
+    # gained the field, and missing it is what dropped the
+    # `openarmature.failure_isolated` marker span behind a swallowed
+    # AttributeError.
+    #
+    # No shipped kind lacks the attribute today, so the third spelling is
+    # currently unreachable through the concrete classes. The `getattr` stays
+    # because `_LineageEvent` does not declare the field: any conforming event
+    # may omit it, which is what the Protocol contract test asserts.
     return cast("Mapping[str, Any] | None", getattr(event, "caller_invocation_metadata", None))
 
 
@@ -337,6 +348,29 @@ def _apply_caller_metadata(attrs: dict[str, Any], metadata: Mapping[str, Any] | 
         return
     for key, value in metadata.items():
         attrs[f"openarmature.user.{key}"] = value
+
+
+def _fan_out_identity_key(
+    namespace: tuple[str, ...],
+    fan_out_index_chain: tuple[int | None, ...],
+    branch_name_chain: tuple[str | None, ...],
+) -> _DispatchKey:
+    """Identity key for a fan-out NODE's declared subgraph identity."""
+    # The ENCLOSING lineage only, sliced to the depth ABOVE the fan-out itself.
+    # Two sides build this key and they see different events: the write side has
+    # the fan-out NODE's own started event, whose chains carry no instance index
+    # at its own depth, while the read side has an inner or orphan event whose
+    # chains do. Including the fan-out's own axis would make them disagree.
+    #
+    # The enclosing entries are what actually disambiguate: branch names never
+    # enter the namespace, so two sibling branches each holding a fan-out of the
+    # same name share one, and only the branch chain tells them apart.
+    depth = len(namespace) - 1
+    return (
+        namespace,
+        tuple(fan_out_index_chain[:depth]),
+        tuple(branch_name_chain[:depth]),
+    )
 
 
 def _subgraph_identity_at(event: object, depth: int) -> str:
@@ -568,6 +602,12 @@ class _InvState:
     # ``openarmature.fan_out.parent_node_name`` even though the inner
     # event itself doesn't carry ``fan_out_config``.
     fan_out_parent_node_name: dict[tuple[str, ...], str] = field(default_factory=dict[tuple[str, ...], str])
+    # Declared subgraph identity per fan-out DISPATCH, cached off the node's own
+    # started event so a synthesized per-instance span can carry it without an
+    # inner node event to read it from. Keyed lineage-aware rather than by
+    # namespace: sibling parallel branches holding same-named fan-out nodes share
+    # a namespace and would otherwise overwrite each other's identity.
+    fan_out_subgraph_identity: dict[_DispatchKey, str] = field(default_factory=dict[_DispatchKey, str])
     # Per proposal 0044 (observability §5.7, v0.36.0): synthesize
     # per-branch dispatch spans nested between the parallel-branches
     # node span and the inner-branch spans (mirroring fan-out's
@@ -1079,6 +1119,23 @@ class OTelObserver:
         # branch, the NODE's own event carries the OUTER axis values.
         if event.fan_out_config is not None:
             inv_state.fan_out_parent_node_name[event.namespace] = event.fan_out_config.parent_node_name
+            # The declared subgraph identity, cached from the same event for the
+            # same reason. A per-instance span synthesized from a provider or
+            # tool event has no `subgraph_identities` to read, and when the
+            # instance middleware short-circuits no inner node event ever arrives
+            # to backfill it. The fan-out NODE's own started event always precedes
+            # its instances, so this is populated before any instance span opens.
+            if event.fan_out_config.subgraph_identity is not None:
+                # Keyed by the LINEAGE-aware dispatch key, not the namespace
+                # alone. Branch names never enter the namespace, so two sibling
+                # parallel branches each holding a fan-out node of the same name
+                # share one: keying on it lets whichever branch's started event
+                # lands second overwrite the other's declared identity, and every
+                # instance span in both branches then reads the survivor. Same
+                # collision shape as the execution-state key in #282.
+                inv_state.fan_out_subgraph_identity[
+                    _fan_out_identity_key(event.namespace, event.fan_out_index_chain, event.branch_name_chain)
+                ] = event.fan_out_config.subgraph_identity
 
         # Per proposal 0044 (v0.36.0): mirror cache for the parallel-
         # branches NODE.  Same logic as the fan-out cache: rely on
@@ -2330,6 +2387,10 @@ class OTelObserver:
         cid = current_correlation_id()
         if cid is not None:
             attrs["openarmature.correlation_id"] = cid
+        # §5.6: the cross-cutting set goes on EVERY span emitted during the
+        # invocation, and this marker is one. It carried none until the event
+        # gained the field, because there was nothing to read.
+        _apply_caller_metadata(attrs, _event_caller_metadata(event))
         span = self._tracer.start_span(
             name="openarmature.failure_isolated",
             context=cast("Any", parent_ctx),
@@ -3030,6 +3091,32 @@ class OTelObserver:
         for depth in range(1, len(namespace) + 1):
             prefix = namespace[:depth]
             fi_axis = fan_out_index_chain[depth - 1] if depth - 1 < len(fan_out_index_chain) else None
+            # The two DETACHED arms of `_sync_subgraph_spans` are deliberately
+            # NOT mirrored here. Doing so was attempted and reverted: an
+            # adversarial review found four separate defects, three of which
+            # only exist once this path can reach the detached openers.
+            #
+            # The root cause is pre-existing and has to be fixed first.
+            # `_sync_subgraph_spans` guards its detached fan-out arm with
+            # `if prefix in inv_state.detached_roots`, the BARE prefix, while
+            # `_open_detached_fan_out_instance_root` stores under
+            # `prefix + (str(fan_out_index),)`. That guard therefore never
+            # matches. With one caller it is merely dead; with two it is a
+            # double-open that overwrites the first root, leaks two unended
+            # spans, and strands the orphan in an abandoned trace.
+            #
+            # The others: the openers assume an invocation span already exists,
+            # which is true from the node path and not from here, so a call
+            # arriving first mints a disconnected trace; and
+            # `_open_detached_subgraph_root` reads the identity off the
+            # triggering event, so an identity-less provider event permanently
+            # blanks `openarmature.subgraph.name` on a subgraph that declares
+            # one -- a regression against this file's own behaviour today.
+            #
+            # Consequence of leaving it: for a wrapper-issued call inside a
+            # detached wrapper the enclosing span is still decided by drain
+            # scheduling, and the divergence is in trace id rather than only in
+            # parent. That is the open half of issue #279.
             if (
                 fi_axis is not None
                 and prefix[-1] not in self.detached_fan_outs
@@ -3093,7 +3180,17 @@ class OTelObserver:
             "openarmature.node.name": prefix[-1],
             "openarmature.fan_out.parent_node_name": parent_node_name,
             "openarmature.node.fan_out_index": fan_out_index,
-            "openarmature.subgraph.name": _subgraph_identity_at(event, len(prefix)),
+            # The event's own identities first; they are authoritative and
+            # per-depth. An event carrying none (a provider or tool event, or any
+            # kind without the field) falls back to the identity the fan-out NODE
+            # declared, cached from its started event. Without that fallback a
+            # short-circuiting instance middleware produced an empty name with
+            # nothing able to repair it, since the backfill needs an inner node
+            # event that never arrives.
+            "openarmature.subgraph.name": _subgraph_identity_at(event, len(prefix))
+            or inv_state.fan_out_subgraph_identity.get(
+                _fan_out_identity_key(prefix, event.fan_out_index_chain, event.branch_name_chain), ""
+            ),
         }
         if correlation_id is not None:
             attrs["openarmature.correlation_id"] = correlation_id

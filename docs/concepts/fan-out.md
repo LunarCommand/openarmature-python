@@ -137,7 +137,8 @@ resolves to 0):
 
 The fan-out node's own `started` / `completed` events carry a
 `fan_out_config` payload populated from the resolved
-`item_count` / `concurrency` / `error_policy` / `parent_node_name`.
+`item_count` / `concurrency` / `error_policy` / `parent_node_name`,
+plus `subgraph_identity` when the node declares one.
 
 Per-instance events have `fan_out_index = N` (0-based) and a
 namespace whose final element is the fan-out node's name; instances
