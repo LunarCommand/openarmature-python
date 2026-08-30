@@ -2658,6 +2658,32 @@ class OTelObserver:
             prefix = namespace[:depth]
             if prefix in inv_state.subgraph_spans:
                 continue
+            # `detached_roots` holds TWO key shapes. A detached SUBGRAPH root is
+            # stored under the bare prefix; a detached FAN-OUT INSTANCE root is
+            # stored under `prefix + (str(fan_out_index),)`.
+            #
+            # The bare prefix therefore never matched an instance root, so the
+            # instance arm below re-fired once per inner node event instead of
+            # once per instance. The second open replaced both dict entries,
+            # leaving the first root and its detached invocation span unended
+            # and unexported, and splitting one instance's inner nodes across
+            # traces with the first pointing at a parent nothing emitted.
+            # Visible only with two or more nodes in the instance subgraph: with
+            # one there is a single event and a single open. The instance arm
+            # now tests its OWN key.
+            #
+            # This test is REDUNDANT today, and is kept as depth rather than
+            # because anything reaches it. `_open_detached_subgraph_root` writes
+            # `subgraph_spans[prefix]` as well as `detached_roots[prefix]`, and
+            # the `subgraph_spans` guard immediately above runs first, so this
+            # one can never be the guard that fires. Established by mutation:
+            # deleting this leaves the whole suite green, while deleting the
+            # `subgraph_spans` guard is caught by conformance fixture 002.
+            #
+            # It is retained because a future path that populates
+            # `detached_roots` without `subgraph_spans` would need it, and the
+            # #279 rework may add exactly that. Delete it if that stops being
+            # plausible -- but do not keep it believing it is load-bearing.
             if prefix in inv_state.detached_roots:
                 continue
             # The fan-out instance axis at THIS depth -- the chain entry for the
@@ -2704,9 +2730,12 @@ class OTelObserver:
             # fan-out (event.fan_out_index populated, fan-out NODE
             # name at ``prefix[-1]`` in the configured set).
             if event.fan_out_index is not None and prefix[-1] in self.detached_fan_outs:
-                self._open_detached_fan_out_instance_root(
-                    inv_state, invocation_id, correlation_id, prefix, event
-                )
+                # Guarded on the key the opener actually stores under, not the
+                # bare prefix the loop tests above.
+                if prefix + (str(event.fan_out_index),) not in inv_state.detached_roots:
+                    self._open_detached_fan_out_instance_root(
+                        inv_state, invocation_id, correlation_id, prefix, event
+                    )
                 continue
             # Per spec §5.4 + proposal 0013: non-detached fan-out
             # instances get a synthetic per-instance dispatch span
