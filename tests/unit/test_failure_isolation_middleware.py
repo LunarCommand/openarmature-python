@@ -730,10 +730,14 @@ async def test_langfuse_renders_failure_isolated_observation() -> None:
 
 
 async def test_langfuse_failure_isolated_marker_carries_caller_metadata() -> None:
-    # observability §5.6: the cross-cutting caller set goes on EVERY observation
-    # in the invocation, and this marker is one. It carried none until
-    # `FailureIsolatedEvent` gained `caller_invocation_metadata`, because there
-    # was nothing to read.
+    # The cross-cutting caller set on the failure-isolation marker. It carried
+    # none until `FailureIsolatedEvent` gained `caller_invocation_metadata`,
+    # because there was nothing to read.
+    #
+    # This pins a CONSISTENCY choice, not a §5.6 obligation. §5.6 enumerates the
+    # spans it reaches and this marker is not among them; the span appears
+    # nowhere in the observability spec, only the event does. Spec is drafting a
+    # mapping. If it lands differently, this assertion changes with it.
     #
     # Asserted on the LANGFUSE side specifically. The OTel half was covered
     # first, and covering only that leaves the two observers free to disagree
