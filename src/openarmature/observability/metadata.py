@@ -64,7 +64,14 @@ _invocation_metadata_var: ContextVar[MappingProxyType[str, AttributeValue]] = Co
 # Reserved key prefixes per §3.4. Keys with these prefixes are
 # off-limits to caller-supplied metadata; the engine rejects at the
 # boundary so observers never see a colliding key.
-_RESERVED_PREFIXES: tuple[str, ...] = ("openarmature.", "gen_ai.")
+#
+# `openarmature_` is a NAMESPACE, not a set of exact names (proposal 0119,
+# spec v0.116.0). Any caller key under it is rejected, not merely the ones
+# an OA mapping happens to write today. It arrived in the same sentence as
+# four new exact names, which makes "a few more exact matches" the natural
+# misreading; it is the underscore form of the dotted prefix above, for
+# backends whose key syntax cannot carry a dot.
+_RESERVED_PREFIXES: tuple[str, ...] = ("openarmature.", "gen_ai.", "openarmature_")
 
 # Reserved exact key NAMES per §3.4 (proposals 0041, 0042): the
 # top-level metadata keys an OA-emitted §8 backend mapping writes
@@ -94,6 +101,15 @@ _RESERVED_KEY_NAMES: frozenset[str] = frozenset(
         "finish_reason",
         "system",
         "response_model",
+        # Proposal 0119 (spec v0.116.0). `error_type` / `error_message` became
+        # newly collidable when 0118 made `error_message` absent under the
+        # default posture: an unreserved caller key of that name would land
+        # unopposed in the very field 0118 requires to be absent, reintroducing
+        # the leak through the metadata channel.
+        "error_type",
+        "error_message",
+        "token_budget",
+        "token_budget_exceeded",
         "response_id",
         "prompt",
         "invocation_id",

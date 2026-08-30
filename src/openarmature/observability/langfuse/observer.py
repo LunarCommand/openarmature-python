@@ -562,13 +562,19 @@ class LangfuseObserver:
         # observer built by handing a from_credentials adapter to the constructor.
         return cls(client=client, **observer_kwargs)
 
-    # NOTE: an emitted error_message is written verbatim, not through the
-    # payload_byte_cap truncation every other payload-classified field uses. The
-    # cap is not applied because 0118 classifies the field for GATING without
-    # saying it is subject to §5.5.5 truncation, and fixtures 150/151 exist to
-    # assert the message LITERALLY, which truncation would contradict. A provider
-    # that returns a very large exception string therefore renders it in full.
-    # Raised for the batched spec review rather than changed unilaterally.
+    # An emitted error_message IS capped, through `_capped_error_message` below.
+    #
+    # It was written verbatim until proposal 0119 (spec v0.116.0). 0118 had
+    # classified the field for GATING without saying it was subject to §5.5.5
+    # truncation, so a provider returning a very large exception string rendered
+    # it in full. That reading was raised for the batched spec review rather than
+    # changed unilaterally, and 0119 answered it: §5.5.5 now governs every
+    # payload-classified VALUE, not only values written as span attributes, and
+    # §8.7 gives this one a direct-application arm because it has no span
+    # attribute to inherit a cap from.
+    #
+    # Do not re-derive the old behaviour from 0118 alone; 0119 is the governing
+    # text and it is later.
     def _emits_harvested_error_message(self) -> bool:
         # A failed observation's error_message is harvested exception text, so the
         # provider-payload flag governs it (0118) for every failure category and on
@@ -2053,7 +2059,7 @@ class LangfuseObserver:
         if event.error_type is not None:
             metadata["error_type"] = event.error_type
         if self._emits_harvested_error_message():
-            metadata["error_message"] = event.error_message
+            metadata["error_message"] = self._capped_error_message(event.error_message)
         model_parameters: dict[str, Any] = dict(event.request_params or {})
         input_value: Any = None
         output_value: Any = None
@@ -2160,8 +2166,19 @@ class LangfuseObserver:
             # is withheld statusMessage stays null rather than taking the message
             # instead, which would smuggle the harvested string out.
             if self._emits_harvested_error_message():
-                metadata["error_message"] = event.error_message
-                status_message = event.error_message
+                # BOTH surfaces are capped. §5.5.5 as 0119 restates it governs
+                # every payload-classified VALUE, not every payload-classified
+                # FIELD, and a Tool failure renders the harvested string twice:
+                # once in metadata and once as the status message. Capping one
+                # and not the other would leave the uncapped copy carrying the
+                # whole exception, which is the outcome the cap exists to stop.
+                #
+                # The other `status_message` writes in this file take
+                # `error_category`, a classification token rather than harvested
+                # content, and are correctly uncapped.
+                capped = self._capped_error_message(event.error_message)
+                metadata["error_message"] = capped
+                status_message = capped
         target_trace_id = self._trace_id_for(inv_state, event.namespace, event.fan_out_index)
         handle = self.client.tool(
             trace_id=target_trace_id,
@@ -2271,7 +2288,7 @@ class LangfuseObserver:
         if event.error_type is not None:
             metadata["error_type"] = event.error_type
         if self._emits_harvested_error_message():
-            metadata["error_message"] = event.error_message
+            metadata["error_message"] = self._capped_error_message(event.error_message)
         target_trace_id = self._trace_id_for(inv_state, event.namespace, event.fan_out_index)
         handle = self.client.embedding(
             trace_id=target_trace_id,
@@ -2398,7 +2415,7 @@ class LangfuseObserver:
         if event.error_type is not None:
             metadata["error_type"] = event.error_type
         if self._emits_harvested_error_message():
-            metadata["error_message"] = event.error_message
+            metadata["error_message"] = self._capped_error_message(event.error_message)
         target_trace_id = self._trace_id_for(inv_state, event.namespace, event.fan_out_index)
         handle = self.client.retriever(
             trace_id=target_trace_id,
@@ -2620,6 +2637,16 @@ class LangfuseObserver:
         if truncated is None:
             return value  # fits cap, native shape preserved
         return truncated
+
+    def _capped_error_message(self, message: str) -> str:
+        """A failed observation's ``error_message``, capped per §8.7."""
+        # Applied DIRECTLY, under THIS observer's `payload_byte_cap`. The value
+        # has no span attribute to inherit a cap from, which is why §8.7 gives it
+        # a direct-application arm, and an observer MUST NOT take the OTel
+        # observer's cap for it. The two are configured independently and a
+        # deployment can set one and leave the other at its default.
+        truncated = _truncate(message, self.payload_byte_cap)
+        return message if truncated is None else truncated
 
     def _maybe_truncate_for_output(self, value: str) -> str:
         # generation.output is a plain string in Langfuse's shape;

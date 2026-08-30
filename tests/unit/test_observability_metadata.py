@@ -779,3 +779,31 @@ async def test_cancellation_discards_in_flight_attempt_writes() -> None:
         assert dict(get_invocation_metadata()) == {"tenantId": "T1"}
     finally:
         _reset_invocation_metadata(baseline_token)
+
+
+def test_validate_rejects_the_openarmature_underscore_namespace() -> None:
+    # Proposal 0119 (spec v0.116.0) reserves `openarmature_` as a NAMESPACE, not
+    # a set of exact names: any caller key under it is rejected, not merely the
+    # ones an OA mapping writes today. It is the underscore form of the dotted
+    # `openarmature.` prefix, for backends whose key syntax cannot carry a dot.
+    #
+    # The distinction is the whole point of this test. 0119 introduced the
+    # namespace in the same sentence as four new exact names, which makes "a few
+    # more exact matches" the natural misreading; a name no mapping emits, like
+    # the one below, is the case that tells the two readings apart.
+    from openarmature.observability.metadata import validate_invocation_metadata
+
+    with pytest.raises(ValueError, match="openarmature_"):
+        validate_invocation_metadata({"openarmature_not_a_key_we_emit": "x"})
+
+
+@pytest.mark.parametrize("key", ["error_type", "error_message", "token_budget", "token_budget_exceeded"])
+def test_validate_rejects_the_0119_reserved_names(key: str) -> None:
+    # `error_type` / `error_message` became newly collidable when 0118 made
+    # `error_message` absent under the default privacy posture: an unreserved
+    # caller key of that name lands unopposed in the very field 0118 requires to
+    # be absent, reintroducing the leak through the metadata channel.
+    from openarmature.observability.metadata import validate_invocation_metadata
+
+    with pytest.raises(ValueError, match=key):
+        validate_invocation_metadata({key: "x"})

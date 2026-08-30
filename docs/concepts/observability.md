@@ -1255,9 +1255,19 @@ What remains is enough to triage the failure. `error_type` is a
 classification token (an exception class name or vendor code), never
 gated, and the error category still rides as the observation's status
 message wherever the event carries one. A **tool** failure has no
-category, so its status message is null rather than falling back to the
-exception string. The full exception text is unaffected on the OTel
-side.
+category, so when the message is withheld its status message is null
+rather than falling back to the exception string. The full exception
+text is unaffected on the OTel side.
+
+Where the flag does permit the message, it is capped at
+`payload_byte_cap` like any other payload value. The cap is applied
+directly by this observer rather than inherited: the OTel surface
+defines no `error_message` span attribute, so unlike
+`generation.input` / `output` the value arrives untruncated and has
+been capped by nobody upstream. A tool failure renders the same string
+twice, in `metadata.error_message` and as the status message, and both
+copies are capped, so a provider that echoes an HTML error page cannot
+render in full through either one.
 
 ### Prompt linkage
 

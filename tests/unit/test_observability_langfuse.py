@@ -2349,3 +2349,239 @@ async def test_tool_call_non_json_result_does_not_crash_observer() -> None:
 
     tools = [o for o in client.traces["inv-tool-opaque"].observations if o.type == "tool"]
     assert len(tools) == 1
+
+
+async def test_error_message_is_capped_under_this_observer_s_own_cap() -> None:
+    # Proposal 0119 (spec v0.116.0). §5.5.5 now governs every payload-classified
+    # VALUE rather than only values written as span attributes, and §8.7 gives a
+    # failed observation's `error_message` a DIRECT-application arm because it
+    # has no span attribute to inherit a cap from.
+    #
+    # It was written verbatim before 0119: 0118 classified the field for gating
+    # without saying it was subject to truncation, so a provider returning a very
+    # large exception string rendered it in full.
+    #
+    # The cap applied is THIS observer's `payload_byte_cap`. An observer MUST NOT
+    # take the OTel observer's cap for this value; the two are configured
+    # independently, under different names (`payload_max_bytes` there), and a
+    # deployment can set one and leave the other at its default. That asymmetry
+    # is what conformance fixture 160 exists to catch, and it is asserted below.
+    from openarmature.observability.correlation import (
+        _reset_invocation_id,
+        _set_invocation_id,
+    )
+    from tests._helpers.typed_event import make_failed_event
+
+    client = InMemoryLangfuseClient()
+    # Payloads off is the §8.9 default, which withholds the harvested message
+    # entirely; that arm is fixture 160's fourth case. These two are about the
+    # cap, so the channel is opened.
+    observer = LangfuseObserver(client=client, payload_byte_cap=256, disable_provider_payload=False)
+    long_message = "E" * 4000
+
+    token = _set_invocation_id("inv-cap")
+    try:
+        await observer(
+            make_failed_event(
+                invocation_id="inv-cap",
+                model="m-test",
+                error_category="provider_rate_limit",
+                error_type="ProviderRateLimit",
+                error_message=long_message,
+                call_id="cc-cap",
+            )
+        )
+    finally:
+        _reset_invocation_id(token)
+
+    obs = next(o for o in client.traces["inv-cap"].observations if o.type == "generation")
+    rendered = obs.metadata["error_message"]
+    assert rendered != long_message, "the message was written verbatim; the cap was not applied"
+    assert len(rendered.encode("utf-8")) <= 256, (
+        f"rendered {len(rendered.encode('utf-8'))} bytes against a 256-byte cap"
+    )
+
+
+async def test_a_below_cap_error_message_is_left_alone() -> None:
+    # The control. Without it, an implementation that truncated unconditionally,
+    # or wrote a fixed marker, satisfies the cap test above. This is the case
+    # conformance fixture 160 adds beyond the three the proposal designed, and it
+    # is the one that catches that mistake.
+    #
+    # It is also why fixtures 150 / 151 are unaffected by the cap landing: their
+    # messages are far below any cap, so they still render literally.
+    from openarmature.observability.correlation import (
+        _reset_invocation_id,
+        _set_invocation_id,
+    )
+    from tests._helpers.typed_event import make_failed_event
+
+    client = InMemoryLangfuseClient()
+    # Payloads off is the §8.9 default, which withholds the harvested message
+    # entirely; that arm is fixture 160's fourth case. These two are about the
+    # cap, so the channel is opened.
+    observer = LangfuseObserver(client=client, payload_byte_cap=256, disable_provider_payload=False)
+
+    token = _set_invocation_id("inv-small")
+    try:
+        await observer(
+            make_failed_event(
+                invocation_id="inv-small",
+                model="m-test",
+                error_category="provider_rate_limit",
+                error_type="ProviderRateLimit",
+                error_message="429 from upstream",
+                call_id="cc-small",
+            )
+        )
+    finally:
+        _reset_invocation_id(token)
+
+    obs = next(o for o in client.traces["inv-small"].observations if o.type == "generation")
+    assert obs.metadata["error_message"] == "429 from upstream"
+
+
+async def test_tool_failure_error_message_is_capped() -> None:
+    # §8.7's Tool arm, which is normative and has NO conformance fixture: a case
+    # would need a `mock_tool` primitive and a `calls_tool` block, and neither is
+    # defined in conformance-adapter §5. Spec recorded that in its
+    # open-questions and told us to read the arm as binding, so this unit test is
+    # the only cover the arm can have until the adapter grows those.
+    #
+    # The Tool observation is also the one where the message matters most. A
+    # failed Tool carries no error CATEGORY, so `error_type` is the only other
+    # discriminator on it; whatever the message does here cannot be inferred from
+    # the Generation arm, which has a category to fall back on.
+    from openarmature.graph.events import ToolCallFailedEvent
+    from openarmature.observability.correlation import (
+        _reset_invocation_id,
+        _set_invocation_id,
+    )
+
+    client = InMemoryLangfuseClient()
+    observer = LangfuseObserver(client=client, payload_byte_cap=256, disable_provider_payload=False)
+    long_message = "T" * 4000
+
+    token = _set_invocation_id("inv-tool-cap")
+    try:
+        await observer(
+            ToolCallFailedEvent(
+                invocation_id="inv-tool-cap",
+                correlation_id=None,
+                node_name="run_tool",
+                namespace=("run_tool",),
+                attempt_index=0,
+                fan_out_index=None,
+                branch_name=None,
+                call_id="cc-cap",
+                tool_name="get_weather",
+                tool_call_id="call_cap",
+                arguments={"city": "Paris"},
+                latency_ms=3.0,
+                error_type="TimeoutError",
+                error_message=long_message,
+            )
+        )
+    finally:
+        _reset_invocation_id(token)
+
+    obs = next(o for o in client.traces["inv-tool-cap"].observations if o.type == "tool")
+    rendered = obs.metadata["error_message"]
+    assert rendered != long_message, "the Tool arm wrote the message verbatim"
+    assert len(rendered.encode("utf-8")) <= 256
+    # `error_type` is NOT payload-gated and NOT capped: it is a classification
+    # token, and on a Tool observation it is the only discriminator left.
+    assert obs.metadata["error_type"] == "TimeoutError"
+    # The status message is the SECOND surface carrying the same harvested
+    # string, and it must be capped too. It was not until following the Tool arm
+    # turned it up: capping only the metadata copy leaves the whole exception
+    # rendered on the observation, which is the outcome the cap exists to stop.
+    assert obs.status_message is not None
+    assert len(obs.status_message.encode("utf-8")) <= 256, (
+        f"status message rendered {len(obs.status_message.encode('utf-8'))} bytes against a 256-byte cap"
+    )
+
+
+@pytest.mark.parametrize("arm", ["embedding", "rerank"])
+async def test_embedding_and_rerank_error_messages_are_capped(arm: str) -> None:
+    # The other two of §8.7's four mapped provider observations. Found by
+    # mutation: reverting the cap at each of the four sites individually left
+    # these two arms green, because the LLM and Tool tests above cover only their
+    # own handlers. A passthrough mutation of the shared helper, which breaks all
+    # four sites at once, produced exactly two failures rather than four, which is
+    # the same gap seen from the other side.
+    from openarmature.graph.events import EmbeddingFailedEvent, RerankFailedEvent
+    from openarmature.observability.correlation import (
+        _reset_invocation_id,
+        _set_invocation_id,
+    )
+
+    client = InMemoryLangfuseClient()
+    observer = LangfuseObserver(client=client, payload_byte_cap=256, disable_provider_payload=False)
+    long_message = "E" * 4000
+    inv = f"inv-{arm}-cap"
+
+    event: Any
+    if arm == "embedding":
+        event = EmbeddingFailedEvent(
+            invocation_id=inv,
+            correlation_id=None,
+            node_name="embed",
+            namespace=("embed",),
+            attempt_index=0,
+            fan_out_index=None,
+            branch_name=None,
+            provider="openai",
+            model="embed-model",
+            latency_ms=1.0,
+            input_strings=["q"],
+            request_params={},
+            request_extras={},
+            active_prompt=None,
+            active_prompt_group=None,
+            call_id=f"cc-{arm}-cap",
+            error_category="provider_unavailable",
+            error_message=long_message,
+        )
+    else:
+        event = RerankFailedEvent(
+            invocation_id=inv,
+            correlation_id=None,
+            node_name="rerank",
+            namespace=("rerank",),
+            attempt_index=0,
+            fan_out_index=None,
+            branch_name=None,
+            provider="cohere",
+            model="rerank-model",
+            latency_ms=1.0,
+            query="q",
+            documents=["d"],
+            document_count=1,
+            top_k=1,
+            request_params={},
+            request_extras={},
+            active_prompt=None,
+            active_prompt_group=None,
+            call_id=f"cc-{arm}-cap",
+            error_category="provider_unavailable",
+            error_message=long_message,
+        )
+
+    token = _set_invocation_id(inv)
+    try:
+        await observer(event)
+    finally:
+        _reset_invocation_id(token)
+
+    obs = next(o for o in client.traces[inv].observations if o.metadata.get("error_message"))
+    rendered = obs.metadata["error_message"]
+    assert rendered != long_message, f"the {arm} arm wrote the message verbatim; the cap was not applied"
+    assert len(rendered.encode("utf-8")) <= 256, (
+        f"{arm} rendered {len(rendered.encode('utf-8'))} bytes against a 256-byte cap"
+    )
+    # The status message on these two arms takes the error CATEGORY, a
+    # classification token rather than harvested text, so it is correctly
+    # uncapped and must survive intact. Only the Tool arm renders the harvested
+    # string twice.
+    assert obs.status_message == "provider_unavailable"
