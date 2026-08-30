@@ -2387,9 +2387,17 @@ class OTelObserver:
         cid = current_correlation_id()
         if cid is not None:
             attrs["openarmature.correlation_id"] = cid
-        # §5.6: the cross-cutting set goes on EVERY span emitted during the
-        # invocation, and this marker is one. It carried none until the event
-        # gained the field, because there was nothing to read.
+        # The cross-cutting caller set. It carried none until the event gained
+        # the field, because there was nothing to read.
+        #
+        # NOT a §5.6 obligation, though an earlier version of this comment said
+        # so. §5.6's scope sentence enumerates the spans it reaches -- invocation,
+        # node, subgraph, fan-out instance, LLM provider, retry attempt -- and
+        # `openarmature.failure_isolated` is not among them. It appears nowhere
+        # in the observability spec at all: the failure-isolation EVENT is
+        # mandated by pipeline-utilities, but the span we emit from it is ours
+        # and has no mapping. Spec is drafting one (coord release-v0.17.0/47);
+        # until it lands this is our own consistency choice, not conformance.
         _apply_caller_metadata(attrs, _event_caller_metadata(event))
         span = self._tracer.start_span(
             name="openarmature.failure_isolated",

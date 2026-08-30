@@ -964,11 +964,16 @@ class LangfuseObserver:
         correlation_id = current_correlation_id()
         if correlation_id is not None:
             metadata["correlation_id"] = correlation_id
-        # §5.6: the cross-cutting caller set goes on EVERY observation in the
-        # invocation, and this marker is one. It carried none until
+        # The cross-cutting caller set. It carried none until
         # `FailureIsolatedEvent` gained the field, because there was nothing to
         # read; omitting it now would leave the two observers disagreeing about
         # the same marker, which is worse than both lacking it.
+        #
+        # NOT a §5.6 obligation, though an earlier version of this comment said
+        # so. `openarmature.failure_isolated` appears nowhere in the
+        # observability spec: the EVENT is mandated by pipeline-utilities, the
+        # span is ours and unmapped. Cross-observer consistency is the reason
+        # this is here, not conformance.
         _apply_caller_metadata(metadata, event.caller_invocation_metadata)
         handle = self.client.span(
             trace_id=inv_state.trace_id,
