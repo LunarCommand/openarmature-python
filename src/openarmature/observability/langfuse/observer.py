@@ -955,20 +955,11 @@ class LangfuseObserver:
                 fan_out_index_chain=event.fan_out_index_chain,
                 branch_name_chain=event.branch_name_chain,
             )
-        # The caught exception's MESSAGE is deliberately absent: this marker is a
-        # graph-mechanism span, which no §8.4.x table maps, so writing harvested
-        # exception content onto it is non-conforming over-emission (0118). Like
-        # the node Span, it carries only the error category; the full exception
-        # reaches the OTel span via record_exception on OA's private provider.
+        # No exception message: no §8.4.x table maps this span, so harvested
+        # content on it is over-emission. It rides the OTel span instead.
         #
-        # Caller set FIRST so the OA keys below win a collision. Three of them
-        # (`failure_isolation_event_name`, `failure_isolation_node`,
-        # `error_category`) are unreserved, so §3.4 does not reject a colliding
-        # caller key at the boundary and it reaches this merge.
-        #
-        # Interim, pending the spec mapping that reserves them. Do not
-        # generalize it into a precedence rule: OA-wins drops the caller's value
-        # silently, which is why §3.4 rejects rather than resolving.
+        # Caller set first because the three keys below are unreserved: a
+        # colliding caller key survives the §3.4 boundary and would win.
         metadata: dict[str, Any] = {}
         _apply_caller_metadata(metadata, event.caller_invocation_metadata)
         metadata["failure_isolation_event_name"] = event.event_name
