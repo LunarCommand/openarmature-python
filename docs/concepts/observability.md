@@ -340,14 +340,28 @@ Every observability backend picks the entries up:
   work without any custom dashboard config.
 
 Validation runs at the `invoke()` boundary before any work begins.
-Two rules:
+Three rules:
 
-- **Keys** MUST NOT start with `openarmature.` or `gen_ai.`
-  (reserved for spec-normative attribute namespaces; collisions
-  would silently overwrite OA-emitted state).
+- **Keys** MUST NOT start with `openarmature.`, `gen_ai.`, or
+  `openarmature_` (reserved namespaces; collisions would silently
+  overwrite OA-emitted state). `openarmature_` is the underscore
+  form, for backends whose key syntax cannot carry a dot, and it is
+  a namespace rather than a list: any key under it is rejected, not
+  only the ones a mapping happens to write today.
+- **Keys** MUST NOT exactly match a reserved name. These are the
+  top-level metadata keys OA itself writes alongside yours, so a
+  caller key of the same name would overwrite one. The list grows
+  with the spec mapping and currently includes `correlation_id`,
+  `entry_node`, `spec_version`, `namespace`, `step`, `error_type`,
+  `error_message`, `token_budget`, and `token_budget_exceeded`. The
+  authoritative set is `_RESERVED_KEY_NAMES` in
+  `openarmature.observability.metadata`.
 - **Values** MUST be OTel-attribute-compatible scalars (`str`,
   `int`, `float`, `bool`) or homogeneous arrays of those types.
   `None`, nested objects, and mixed-type arrays are rejected.
+
+`userId` is deliberately not reserved: OA reads it to promote to
+Langfuse's first-class `trace.userId`, so you can keep passing it.
 
 Violations raise `ValueError` synchronously: no spans emitted, no
 work runs.
@@ -1255,9 +1269,19 @@ What remains is enough to triage the failure. `error_type` is a
 classification token (an exception class name or vendor code), never
 gated, and the error category still rides as the observation's status
 message wherever the event carries one. A **tool** failure has no
-category, so its status message is null rather than falling back to the
-exception string. The full exception text is unaffected on the OTel
-side.
+category, so when the message is withheld its status message is null
+rather than falling back to the exception string. The full exception
+text is unaffected on the OTel side.
+
+Where the flag does permit the message, it is capped at
+`payload_byte_cap` like any other payload value. The cap is applied
+directly by this observer rather than inherited: the OTel surface
+defines no `error_message` span attribute, so unlike
+`generation.input` / `output` the value arrives untruncated and has
+been capped by nobody upstream. A tool failure renders the same string
+twice, in `metadata.error_message` and as the status message, and both
+copies are capped, so a provider that echoes an HTML error page cannot
+render in full through either one.
 
 ### Prompt linkage
 

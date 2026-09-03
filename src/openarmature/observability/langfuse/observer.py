@@ -189,9 +189,9 @@ def _apply_caller_metadata(metadata: dict[str, Any], caller_metadata: Mapping[st
     (``correlation_id``, ``entry_node``, ``spec_version``,
     ``namespace``, etc.) is not currently checked here: the rejection
     may happen at either boundary, and the ``invoke()`` API-boundary
-    validation already rejects ``openarmature.*`` / ``gen_ai.*``
-    prefixed keys. Per-Langfuse-backend collision rejection is queued
-    as a follow-up.
+    validation already rejects every reserved namespace and reserved
+    name. Per-Langfuse-backend collision rejection is queued as a
+    follow-up.
     """
     # None-tolerant, matching the OTel helper. An event kind whose
     # `caller_invocation_metadata` is optional (FailureIsolatedEvent) reaches
@@ -562,13 +562,19 @@ class LangfuseObserver:
         # observer built by handing a from_credentials adapter to the constructor.
         return cls(client=client, **observer_kwargs)
 
-    # NOTE: an emitted error_message is written verbatim, not through the
-    # payload_byte_cap truncation every other payload-classified field uses. The
-    # cap is not applied because 0118 classifies the field for GATING without
-    # saying it is subject to §5.5.5 truncation, and fixtures 150/151 exist to
-    # assert the message LITERALLY, which truncation would contradict. A provider
-    # that returns a very large exception string therefore renders it in full.
-    # Raised for the batched spec review rather than changed unilaterally.
+    # An emitted error_message IS capped, through `_capped_error_message` below.
+    #
+    # It was written verbatim until proposal 0119 (spec v0.116.0). 0118 had
+    # classified the field for GATING without saying it was subject to §5.5.5
+    # truncation, so a provider returning a very large exception string rendered
+    # it in full. That reading was raised for the batched spec review rather than
+    # changed unilaterally, and 0119 answered it: §5.5.5 now governs every
+    # payload-classified VALUE, not only values written as span attributes, and
+    # §8.7 gives this one a direct-application arm because it has no span
+    # attribute to inherit a cap from.
+    #
+    # Do not re-derive the old behaviour from 0118 alone; 0119 is the governing
+    # text and it is later.
     def _emits_harvested_error_message(self) -> bool:
         # A failed observation's error_message is harvested exception text, so the
         # provider-payload flag governs it (0118) for every failure category and on
@@ -2053,7 +2059,7 @@ class LangfuseObserver:
         if event.error_type is not None:
             metadata["error_type"] = event.error_type
         if self._emits_harvested_error_message():
-            metadata["error_message"] = event.error_message
+            metadata["error_message"] = self._capped_error_message(event.error_message)
         model_parameters: dict[str, Any] = dict(event.request_params or {})
         input_value: Any = None
         output_value: Any = None
@@ -2160,8 +2166,19 @@ class LangfuseObserver:
             # is withheld statusMessage stays null rather than taking the message
             # instead, which would smuggle the harvested string out.
             if self._emits_harvested_error_message():
-                metadata["error_message"] = event.error_message
-                status_message = event.error_message
+                # BOTH surfaces are capped. §5.5.5 as 0119 restates it governs
+                # every payload-classified VALUE, not every payload-classified
+                # FIELD, and a Tool failure renders the harvested string twice:
+                # once in metadata and once as the status message. Capping one
+                # and not the other would leave the uncapped copy carrying the
+                # whole exception, which is the outcome the cap exists to stop.
+                #
+                # The other `status_message` writes in this file take
+                # `error_category`, a classification token rather than harvested
+                # content, and are correctly uncapped.
+                capped = self._capped_error_message(event.error_message)
+                metadata["error_message"] = capped
+                status_message = capped
         target_trace_id = self._trace_id_for(inv_state, event.namespace, event.fan_out_index)
         handle = self.client.tool(
             trace_id=target_trace_id,
@@ -2271,7 +2288,7 @@ class LangfuseObserver:
         if event.error_type is not None:
             metadata["error_type"] = event.error_type
         if self._emits_harvested_error_message():
-            metadata["error_message"] = event.error_message
+            metadata["error_message"] = self._capped_error_message(event.error_message)
         target_trace_id = self._trace_id_for(inv_state, event.namespace, event.fan_out_index)
         handle = self.client.embedding(
             trace_id=target_trace_id,
@@ -2398,7 +2415,7 @@ class LangfuseObserver:
         if event.error_type is not None:
             metadata["error_type"] = event.error_type
         if self._emits_harvested_error_message():
-            metadata["error_message"] = event.error_message
+            metadata["error_message"] = self._capped_error_message(event.error_message)
         target_trace_id = self._trace_id_for(inv_state, event.namespace, event.fan_out_index)
         handle = self.client.retriever(
             trace_id=target_trace_id,
@@ -2516,10 +2533,11 @@ class LangfuseObserver:
             # reflects the TERMINAL attempt's usage, so on a RETRIED call it can
             # differ from the OTel per-attempt attribute -- the parity is of the
             # FORMULA, not of per-attempt values, an intentional consequence of the
-            # terminal-only Generation; (b) like the token_budget bounds above,
-            # this unprefixed key shares the caller-metadata collision class -- a
-            # caller invocation-metadata key of the same name (applied later,
-            # unguarded) would shadow it until the reserved-key guard is extended.
+            # terminal-only Generation; (b) the caller-metadata collision
+            # this key once shared with the token_budget bounds is CLOSED: 0119
+            # reserved `token_budget` / `token_budget_exceeded`, so a caller
+            # invocation-metadata key of either name is now rejected at the
+            # invoke() boundary rather than shadowing the emitted value.
             evaluations = _token_budget_evaluations(token_budget, event.usage)
             if evaluations:
                 metadata["token_budget_exceeded"] = any(ev["actual"] > ev["max"] for ev in evaluations)
@@ -2620,6 +2638,31 @@ class LangfuseObserver:
         if truncated is None:
             return value  # fits cap, native shape preserved
         return truncated
+
+    def _capped_error_message(self, message: str) -> str:
+        """A failed observation's ``error_message``, capped for emission."""
+        # The cap is §8.7's. Applied DIRECTLY, under THIS observer's
+        # `payload_byte_cap`: the value has no span attribute to inherit a cap
+        # from, which is why §8.7 gives it
+        # a direct-application arm, and an observer MUST NOT take the OTel
+        # observer's cap for it. The two are configured independently and a
+        # deployment can set one and leave the other at its default.
+        #
+        # Encoding is guarded because this runs on the FAILURE path, where the
+        # value is harvested exception text and is the likeliest string in the
+        # observer to carry a lone surrogate: a `FileNotFoundError` naming a
+        # surrogateescape-decoded path, or a provider body decoded the same way.
+        # `"\udcff".encode("utf-8")` raises, and an observer that raises is only
+        # `warnings.warn`-ed by the engine, so the whole failed observation would
+        # vanish and the failure path would take out its own reporting. Degrade
+        # the one field instead.
+        try:
+            truncated = _truncate(message, self.payload_byte_cap)
+        except UnicodeEncodeError:
+            sanitized = message.encode("utf-8", errors="replace").decode("utf-8")
+            truncated = _truncate(sanitized, self.payload_byte_cap)
+            return sanitized if truncated is None else truncated
+        return message if truncated is None else truncated
 
     def _maybe_truncate_for_output(self, value: str) -> str:
         # generation.output is a plain string in Langfuse's shape;

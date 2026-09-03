@@ -26,12 +26,12 @@ around the outermost call.
 Validation rules (apply at every entry point):
 
 - Keys MUST be strings.
-- Keys MUST NOT start with ``openarmature.`` or ``gen_ai.`` (reserved
-  attribute namespaces; collisions would silently
-  overwrite OA-emitted state at the observer layer).
-- Keys MUST NOT exactly match a reserved OA-emitted top-level metadata
-  key name (the Langfuse set plus ``invocation_id``) for the same
-  collision reason.
+- Keys MUST NOT start with any namespace in ``_RESERVED_PREFIXES``;
+  collisions would silently overwrite OA-emitted state at the observer
+  layer.
+- Keys MUST NOT exactly match a name in ``_RESERVED_KEY_NAMES``, the
+  top-level metadata keys an OA-emitted backend mapping writes
+  alongside caller keys, for the same collision reason.
 - Values MUST be OTel-attribute-compatible scalars: ``str``, ``int``,
   ``float``, ``bool``, or a homogeneous list/tuple of those types.
   ``None``, nested objects, and mixed-type arrays are rejected.
@@ -61,10 +61,21 @@ _invocation_metadata_var: ContextVar[MappingProxyType[str, AttributeValue]] = Co
     "openarmature.invocation_metadata", default=_EMPTY_METADATA
 )
 
+# The module docstring names these two sets rather than spelling them out. A
+# hand-copied list there went stale the moment 0119 extended the tuple, and the
+# copy is what a reader trusts.
+#
 # Reserved key prefixes per §3.4. Keys with these prefixes are
 # off-limits to caller-supplied metadata; the engine rejects at the
 # boundary so observers never see a colliding key.
-_RESERVED_PREFIXES: tuple[str, ...] = ("openarmature.", "gen_ai.")
+#
+# `openarmature_` is a NAMESPACE, not a set of exact names (proposal 0119,
+# spec v0.116.0). Any caller key under it is rejected, not merely the ones
+# an OA mapping happens to write today. It arrived in the same sentence as
+# four new exact names, which makes "a few more exact matches" the natural
+# misreading; it is the underscore form of the dotted prefix above, for
+# backends whose key syntax cannot carry a dot.
+_RESERVED_PREFIXES: tuple[str, ...] = ("openarmature.", "gen_ai.", "openarmature_")
 
 # Reserved exact key NAMES per §3.4 (proposals 0041, 0042): the
 # top-level metadata keys an OA-emitted §8 backend mapping writes
@@ -94,6 +105,15 @@ _RESERVED_KEY_NAMES: frozenset[str] = frozenset(
         "finish_reason",
         "system",
         "response_model",
+        # Proposal 0119 (spec v0.116.0). `error_type` / `error_message` became
+        # newly collidable when 0118 made `error_message` absent under the
+        # default posture: an unreserved caller key of that name would land
+        # unopposed in the very field 0118 requires to be absent, reintroducing
+        # the leak through the metadata channel.
+        "error_type",
+        "error_message",
+        "token_budget",
+        "token_budget_exceeded",
         "response_id",
         "prompt",
         "invocation_id",
@@ -260,9 +280,16 @@ def _validate_metadata_key(key: Any) -> None:
         raise ValueError(f"invocation metadata key must be a string; got {type(key).__name__}")
     for reserved in _RESERVED_PREFIXES:
         if key.startswith(reserved):
+            # The list is rendered FROM the tuple, never hand-written. A
+            # hardcoded copy went stale the moment 0119 added a third prefix,
+            # leaving the message naming a prefix its own guidance excluded.
+            # "namespaces" rather than "attributes": these cover OTel span
+            # attributes AND the Langfuse top-level metadata keys.
+            known = ", ".join(f"{p}*" for p in _RESERVED_PREFIXES)
             raise ValueError(
                 f"invocation metadata key {key!r} uses reserved namespace prefix {reserved!r}; "
-                f"reserved prefixes are for spec-normative attributes (openarmature.*, gen_ai.*)"
+                f"reserved namespaces are {known}, held for OA-emitted attributes and "
+                f"metadata keys. Rename the key."
             )
     if key in _RESERVED_KEY_NAMES:
         raise ValueError(

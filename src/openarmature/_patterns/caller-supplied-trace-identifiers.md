@@ -87,8 +87,10 @@ Validation runs synchronously, before any node body fires. Both
 `invoke(metadata=...)` and `set_invocation_metadata(...)` enforce
 the same rules:
 
-- Keys MUST NOT start with `openarmature.` or `gen_ai.` (reserved
-  namespaces per the spec).
+- Keys MUST NOT start with `openarmature.`, `gen_ai.`, or
+  `openarmature_` (reserved namespaces per the spec). The
+  underscore form covers backends whose key syntax cannot carry a
+  dot.
 - Keys MUST NOT collide with the spec's reserved per-trace metadata
   keys (`correlation_id`, `entry_node`, `spec_version`, etc.). The
   set is enforced at the `invoke()` and `set_invocation_metadata`
