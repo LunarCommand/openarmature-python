@@ -960,43 +960,15 @@ class LangfuseObserver:
         # exception content onto it is non-conforming over-emission (0118). Like
         # the node Span, it carries only the error category; the full exception
         # reaches the OTel span via record_exception on OA's private provider.
-        # The cross-cutting caller set goes on FIRST, so the OA-emitted keys
-        # below overwrite a colliding caller key rather than the other way
-        # round. It used to be applied last, which made this the ONLY handler
-        # where the caller won: the LLM, embedding and rerank handlers all merge
-        # the caller set before writing their own keys.
         #
-        # That mattered here because three of the keys below are unreserved, so
-        # §3.4 does not reject a caller key of the same name at the `invoke()`
-        # boundary, and `metadata={"error_category": "ok"}` silently replaced
-        # this marker's only failure discriminator.
+        # Caller set FIRST so the OA keys below win a collision. Three of them
+        # (`failure_isolation_event_name`, `failure_isolation_node`,
+        # `error_category`) are unreserved, so §3.4 does not reject a colliding
+        # caller key at the boundary and it reaches this merge.
         #
-        # The OTel observer needs no equivalent change: every attribute it writes
-        # is `openarmature.`-prefixed and caller keys land under
-        # `openarmature.user.*`, both covered by a reserved PREFIX, so a
-        # colliding caller key is rejected at the boundary and never reaches the
-        # merge. Langfuse metadata is flat, which is the whole reason the reserved
-        # NAME set exists alongside the prefixes.
-        #
-        # Read this as the lesser harm, not as a settled precedence rule.
-        # OA-wins still drops the caller's value silently, which is the mirror of
-        # the bug rather than its opposite; §3.4 REJECTS a reserved collision
-        # precisely because silent resolution in either direction loses
-        # information without telling anyone. The real fix is reservation, and it
-        # arrives when the span is mapped: spec ruled that §3.4's reserved set
-        # does not reach a span no §8.4.x table maps, and committed the mapping
-        # to carry these three (coord release-v0.17.0/54).
-        #
-        # It carried no caller set at all until `FailureIsolatedEvent` gained the
-        # field, because there was nothing to read; omitting it now would leave
-        # the two observers disagreeing about the same marker.
-        #
-        # NOT a §5.6 obligation, and the reason is that
-        # `openarmature.failure_isolated` appears nowhere in the observability
-        # spec: the EVENT is mandated by pipeline-utilities, the span is ours and
-        # unmapped, and §5.6 cannot reach a span the spec never defines. It is
-        # NOT that §5.6's list of span kinds excludes it; spec ruled that list
-        # illustrative. Once the span is mapped this becomes required.
+        # Interim, pending the spec mapping that reserves them. Do not
+        # generalize it into a precedence rule: OA-wins drops the caller's value
+        # silently, which is why §3.4 rejects rather than resolving.
         metadata: dict[str, Any] = {}
         _apply_caller_metadata(metadata, event.caller_invocation_metadata)
         metadata["failure_isolation_event_name"] = event.event_name
