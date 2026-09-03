@@ -189,9 +189,9 @@ def _apply_caller_metadata(metadata: dict[str, Any], caller_metadata: Mapping[st
     (``correlation_id``, ``entry_node``, ``spec_version``,
     ``namespace``, etc.) is not currently checked here: the rejection
     may happen at either boundary, and the ``invoke()`` API-boundary
-    validation already rejects ``openarmature.*`` / ``gen_ai.*``
-    prefixed keys. Per-Langfuse-backend collision rejection is queued
-    as a follow-up.
+    validation already rejects every reserved namespace and reserved
+    name. Per-Langfuse-backend collision rejection is queued as a
+    follow-up.
     """
     # None-tolerant, matching the OTel helper. An event kind whose
     # `caller_invocation_metadata` is optional (FailureIsolatedEvent) reaches
@@ -2533,10 +2533,11 @@ class LangfuseObserver:
             # reflects the TERMINAL attempt's usage, so on a RETRIED call it can
             # differ from the OTel per-attempt attribute -- the parity is of the
             # FORMULA, not of per-attempt values, an intentional consequence of the
-            # terminal-only Generation; (b) like the token_budget bounds above,
-            # this unprefixed key shares the caller-metadata collision class -- a
-            # caller invocation-metadata key of the same name (applied later,
-            # unguarded) would shadow it until the reserved-key guard is extended.
+            # terminal-only Generation; (b) the caller-metadata collision
+            # this key once shared with the token_budget bounds is CLOSED: 0119
+            # reserved `token_budget` / `token_budget_exceeded`, so a caller
+            # invocation-metadata key of either name is now rejected at the
+            # invoke() boundary rather than shadowing the emitted value.
             evaluations = _token_budget_evaluations(token_budget, event.usage)
             if evaluations:
                 metadata["token_budget_exceeded"] = any(ev["actual"] > ev["max"] for ev in evaluations)
@@ -2639,13 +2640,28 @@ class LangfuseObserver:
         return truncated
 
     def _capped_error_message(self, message: str) -> str:
-        """A failed observation's ``error_message``, capped per §8.7."""
-        # Applied DIRECTLY, under THIS observer's `payload_byte_cap`. The value
-        # has no span attribute to inherit a cap from, which is why §8.7 gives it
+        """A failed observation's ``error_message``, capped for emission."""
+        # The cap is §8.7's. Applied DIRECTLY, under THIS observer's
+        # `payload_byte_cap`: the value has no span attribute to inherit a cap
+        # from, which is why §8.7 gives it
         # a direct-application arm, and an observer MUST NOT take the OTel
         # observer's cap for it. The two are configured independently and a
         # deployment can set one and leave the other at its default.
-        truncated = _truncate(message, self.payload_byte_cap)
+        #
+        # Encoding is guarded because this runs on the FAILURE path, where the
+        # value is harvested exception text and is the likeliest string in the
+        # observer to carry a lone surrogate: a `FileNotFoundError` naming a
+        # surrogateescape-decoded path, or a provider body decoded the same way.
+        # `"\udcff".encode("utf-8")` raises, and an observer that raises is only
+        # `warnings.warn`-ed by the engine, so the whole failed observation would
+        # vanish and the failure path would take out its own reporting. Degrade
+        # the one field instead.
+        try:
+            truncated = _truncate(message, self.payload_byte_cap)
+        except UnicodeEncodeError:
+            sanitized = message.encode("utf-8", errors="replace").decode("utf-8")
+            truncated = _truncate(sanitized, self.payload_byte_cap)
+            return sanitized if truncated is None else truncated
         return message if truncated is None else truncated
 
     def _maybe_truncate_for_output(self, value: str) -> str:

@@ -25,6 +25,8 @@ from openarmature.observability import (
     set_invocation_metadata,
 )
 from openarmature.observability.metadata import (
+    _RESERVED_KEY_NAMES,
+    _RESERVED_PREFIXES,
     validate_invocation_metadata,
 )
 
@@ -793,7 +795,11 @@ def test_validate_rejects_the_openarmature_underscore_namespace() -> None:
     # the one below, is the case that tells the two readings apart.
     from openarmature.observability.metadata import validate_invocation_metadata
 
-    with pytest.raises(ValueError, match="openarmature_"):
+    # Matched on the RULE, not the echoed key. The message interpolates the key,
+    # so `match="openarmature_"` succeeded for any ValueError naming it,
+    # including the exact-name rule and the value-type rule; it could not tell
+    # which branch fired.
+    with pytest.raises(ValueError, match="reserved namespace prefix"):
         validate_invocation_metadata({"openarmature_not_a_key_we_emit": "x"})
 
 
@@ -805,5 +811,153 @@ def test_validate_rejects_the_0119_reserved_names(key: str) -> None:
     # be absent, reintroducing the leak through the metadata channel.
     from openarmature.observability.metadata import validate_invocation_metadata
 
-    with pytest.raises(ValueError, match=key):
+    # The exact-name rule specifically, not merely "a rejection happened": these
+    # four are reserved by NAME, and matching the rule keeps the test honest if
+    # one of them ever gains a reserved prefix instead.
+    with pytest.raises(ValueError, match="is reserved: it exactly matches"):
         validate_invocation_metadata({key: "x"})
+
+
+# --- Proposal 0119: the repository check that lands alongside the proposal ---
+#
+# 0119 requires a check that fails when a top-level metadata key written by the
+# §8 mapping is neither in the §3.4 exact set nor covered by a reserved
+# namespace. Its rationale, from the proposal: the maintenance rule has been in
+# force since 0041 and has now been missed by THREE separate proposals.
+#
+# Two requirements the proposal states explicitly, both honored below:
+#
+# 1. It must scan every observation type rather than a subset. "A sweep that
+#    looked only at `observation.` / `trace.` / `generation.` / `span.metadata`
+#    is what missed the nine underscore keys in the first place." The analogue
+#    here is the metadata BAG NAME: the observer builds bags called `metadata`,
+#    `metadata_delta`, `link_metadata`, `dispatch_metadata` and
+#    `detached_metadata`, so a scan hardcoded to `metadata` would miss four of
+#    the five. The bag set is DISCOVERED from what is passed to a `metadata=`
+#    kwarg, so a sixth bag is picked up without editing this test.
+# 2. It must encode the `userId` exclusion. `userId` is caller-SUPPLIED and read
+#    by OA for the §8.4.1 promotion to `trace.userId`; reserving it would break
+#    that promotion, so the check asserts it stays unreserved.
+
+
+def _emitted_top_level_metadata_keys() -> dict[str, list[int]]:
+    # Static scan rather than a runtime sweep: a runtime sweep only sees the
+    # handlers a test happens to drive, which is the same subset problem one
+    # level up.
+    import ast
+    from pathlib import Path
+
+    source = Path(__file__).resolve().parents[2] / "src/openarmature/observability/langfuse/observer.py"
+    tree = ast.parse(source.read_text(encoding="utf-8"))
+
+    bags = {
+        kw.value.id
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        for kw in node.keywords
+        if kw.arg == "metadata" and isinstance(kw.value, ast.Name)
+    }
+
+    found: dict[str, list[int]] = {}
+
+    def note(key: str, lineno: int) -> None:
+        found.setdefault(key, []).append(lineno)
+
+    def note_dict(node: ast.Dict, lineno: int) -> None:
+        for key_node in node.keys:
+            if isinstance(key_node, ast.Constant) and isinstance(key_node.value, str):
+                note(key_node.value, lineno)
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                # bag["key"] = ...
+                if (
+                    isinstance(target, ast.Subscript)
+                    and isinstance(target.value, ast.Name)
+                    and target.value.id in bags
+                    and isinstance(target.slice, ast.Constant)
+                    and isinstance(target.slice.value, str)
+                ):
+                    note(target.slice.value, target.lineno)
+                # bag = {...}
+                if isinstance(target, ast.Name) and target.id in bags and isinstance(node.value, ast.Dict):
+                    note_dict(node.value, node.lineno)
+        # bag: dict[str, Any] = {...}
+        if (
+            isinstance(node, ast.AnnAssign)
+            and isinstance(node.target, ast.Name)
+            and node.target.id in bags
+            and isinstance(node.value, ast.Dict)
+        ):
+            note_dict(node.value, node.lineno)
+
+    return found
+
+
+# The three keys on the `openarmature.failure_isolated` marker span. They are
+# NOT reserved and a caller key of the same name overwrites them, because
+# `_apply_caller_metadata` runs last on that handler with a bare merge.
+#
+# Held rather than fixed: that span is a graph-mechanism span which no §8.4.x
+# table maps, so whether §3.4's reserved set should reach an UNMAPPED span is a
+# spec question, not ours to settle unilaterally. Raised to spec in coord thread
+# release-v0.17.0. When it rules, these move into `_RESERVED_KEY_NAMES` (or the
+# handler's merge order changes) and this set shrinks to empty.
+#
+# Listing them by name is the point: a NEW unreserved key fails this test, which
+# is the regression the proposal asks for.
+_UNRESERVED_PENDING_SPEC_RULING = frozenset(
+    {
+        "error_category",
+        "failure_isolation_event_name",
+        "failure_isolation_node",
+    }
+)
+
+
+def test_every_emitted_metadata_key_is_reserved_or_namespaced() -> None:
+    emitted = _emitted_top_level_metadata_keys()
+
+    # Guard the SCANNER, not just its verdict. If the observer is renamed or its
+    # metadata-building shape changes, a broken scan finds nothing and this test
+    # passes while checking nothing, which is the exact failure class the
+    # proposal is trying to close. The floor is far below today's count (44) so
+    # it does not need editing on every added key.
+    assert len(emitted) > 30, (
+        f"the scan found only {len(emitted)} metadata keys, so it has probably "
+        "stopped matching the observer's shape; fix the scan before trusting a pass"
+    )
+
+    uncovered = {
+        key: lines
+        for key, lines in emitted.items()
+        if key not in _RESERVED_KEY_NAMES
+        and not any(key.startswith(prefix) for prefix in _RESERVED_PREFIXES)
+        and key not in _UNRESERVED_PENDING_SPEC_RULING
+    }
+    assert not uncovered, (
+        "these top-level metadata keys are emitted by the Langfuse mapping but are "
+        "neither in _RESERVED_KEY_NAMES nor covered by a reserved prefix, so a "
+        f"caller metadata key of the same name silently overwrites them: {uncovered}. "
+        "Add each to _RESERVED_KEY_NAMES, or give it an `openarmature_` prefix."
+    )
+
+
+def test_the_scan_still_sees_the_keys_pending_a_spec_ruling() -> None:
+    # Pairs with the exclusion set above. Without this, a key that stops being
+    # emitted (or that the scan stops seeing) leaves a stale name in the
+    # exclusion set, quietly widening the hole the other test guards.
+    emitted = _emitted_top_level_metadata_keys()
+    assert _UNRESERVED_PENDING_SPEC_RULING <= set(emitted), (
+        "a key held pending the spec ruling is no longer emitted; drop it from "
+        "_UNRESERVED_PENDING_SPEC_RULING rather than leaving the exclusion standing"
+    )
+
+
+def test_user_id_stays_unreserved_for_the_trace_promotion() -> None:
+    # The exclusion 0119 names. `userId` is caller-supplied and OA reads it to
+    # promote to the first-class `trace.userId`; reserving it would reject the
+    # very key the promotion exists to consume.
+    assert "userId" not in _RESERVED_KEY_NAMES
+    assert not any("userId".startswith(prefix) for prefix in _RESERVED_PREFIXES)

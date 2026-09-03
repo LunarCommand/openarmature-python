@@ -340,14 +340,28 @@ Every observability backend picks the entries up:
   work without any custom dashboard config.
 
 Validation runs at the `invoke()` boundary before any work begins.
-Two rules:
+Three rules:
 
-- **Keys** MUST NOT start with `openarmature.` or `gen_ai.`
-  (reserved for spec-normative attribute namespaces; collisions
-  would silently overwrite OA-emitted state).
+- **Keys** MUST NOT start with `openarmature.`, `gen_ai.`, or
+  `openarmature_` (reserved namespaces; collisions would silently
+  overwrite OA-emitted state). `openarmature_` is the underscore
+  form, for backends whose key syntax cannot carry a dot, and it is
+  a namespace rather than a list: any key under it is rejected, not
+  only the ones a mapping happens to write today.
+- **Keys** MUST NOT exactly match a reserved name. These are the
+  top-level metadata keys OA itself writes alongside yours, so a
+  caller key of the same name would overwrite one. The list grows
+  with the spec mapping and currently includes `correlation_id`,
+  `entry_node`, `spec_version`, `namespace`, `step`, `error_type`,
+  `error_message`, `token_budget`, and `token_budget_exceeded`. The
+  authoritative set is `_RESERVED_KEY_NAMES` in
+  `openarmature.observability.metadata`.
 - **Values** MUST be OTel-attribute-compatible scalars (`str`,
   `int`, `float`, `bool`) or homogeneous arrays of those types.
   `None`, nested objects, and mixed-type arrays are rejected.
+
+`userId` is deliberately not reserved: OA reads it to promote to
+Langfuse's first-class `trace.userId`, so you can keep passing it.
 
 Violations raise `ValueError` synchronously: no spans emitted, no
 work runs.
