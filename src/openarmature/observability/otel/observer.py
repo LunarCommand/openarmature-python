@@ -2390,14 +2390,26 @@ class OTelObserver:
         # The cross-cutting caller set. It carried none until the event gained
         # the field, because there was nothing to read.
         #
-        # NOT a §5.6 obligation, though an earlier version of this comment said
-        # so. §5.6's scope sentence enumerates the spans it reaches -- invocation,
-        # node, subgraph, fan-out instance, LLM provider, retry attempt -- and
-        # `openarmature.failure_isolated` is not among them. It appears nowhere
-        # in the observability spec at all: the failure-isolation EVENT is
-        # mandated by pipeline-utilities, but the span we emit from it is ours
-        # and has no mapping. Spec is drafting one (coord release-v0.17.0/47);
-        # until it lands this is our own consistency choice, not conformance.
+        # NOT a §5.6 obligation, though two earlier versions of this comment got
+        # the reason wrong in opposite directions.
+        #
+        # The reason is that `openarmature.failure_isolated` appears nowhere in
+        # the observability spec: the failure-isolation EVENT is mandated by
+        # pipeline-utilities, but the span we emit from it is ours and no §8.4.x
+        # table maps it. §5.6 cannot mandate attributes on a span the spec never
+        # defines.
+        #
+        # It is NOT that §5.6's list of span kinds excludes this one. A previous
+        # version argued exactly that, and spec has since ruled the list is
+        # illustrative rather than exhaustive: the rule reaches every span
+        # emitted during the invocation, because a framework span missing
+        # `openarmature.correlation_id` is broken in the way that attribute
+        # exists to prevent. So do not resurrect the enumeration argument.
+        #
+        # The practical consequence: once the span IS mapped, §5.6 reaches it and
+        # this stops being a consistency choice and becomes required. Spec has
+        # committed to that mapping (coord release-v0.17.0/52, /54); until it
+        # lands this is ours.
         _apply_caller_metadata(attrs, _event_caller_metadata(event))
         span = self._tracer.start_span(
             name="openarmature.failure_isolated",

@@ -2764,3 +2764,69 @@ async def test_a_long_surrogate_bearing_message_is_still_capped() -> None:
         f"the sanitize path bypassed the cap: {len(rendered.encode('utf-8'))} bytes"
     )
     assert "[truncated," in rendered
+
+
+async def test_the_tool_observation_carries_caller_metadata_like_the_others() -> None:
+    # §8.4.2 maps the caller-supplied invocation metadata to
+    # `observation.metadata.<key>` on EVERY Observation. The table scopes its
+    # other rows explicitly ("fan-out node Span observation only"), so the
+    # unscoped wording is deliberate rather than loose.
+    #
+    # The Tool observation was the one provider observation that dropped it: the
+    # LLM handlers pick it up via `_typed_event_metadata`, embedding and rerank
+    # apply it directly, and this handler did neither. The OTel observer's tool
+    # span carried it all along, so the two observers disagreed about the same
+    # event, which is the divergence class the marker-span consistency choice
+    # exists to prevent.
+    from openarmature.graph.events import ToolCallEvent
+    from openarmature.observability.correlation import (
+        _reset_invocation_id,
+        _set_invocation_id,
+    )
+
+    client = InMemoryLangfuseClient()
+    observer = LangfuseObserver(client=client)
+
+    token = _set_invocation_id("inv-tool-meta")
+    try:
+        await observer(
+            ToolCallEvent(
+                invocation_id="inv-tool-meta",
+                correlation_id=None,
+                node_name="run_tool",
+                namespace=("run_tool",),
+                attempt_index=0,
+                fan_out_index=None,
+                branch_name=None,
+                call_id="cc-tool-meta",
+                tool_name="lookup",
+                tool_call_id="call_1",
+                arguments={"q": "x"},
+                result={"a": 1},
+                latency_ms=1.0,
+                caller_invocation_metadata={"tenant": "acme"},
+            )
+        )
+    finally:
+        _reset_invocation_id(token)
+
+    obs = next(o for o in client.traces["inv-tool-meta"].observations if o.type == "tool")
+    assert obs.metadata.get("tenant") == "acme", (
+        f"the Tool observation dropped the caller metadata; got {obs.metadata}"
+    )
+    # The OA-emitted key is still there: the caller set is merged first, not
+    # instead.
+    assert obs.metadata.get("openarmature_tool_name") == "lookup"
+    # Note on what this does NOT pin. Merging the caller set LAST here is
+    # behaviourally identical and no test catches it, which is correct rather
+    # than a coverage gap: every OA key this handler writes is reserved, the two
+    # `openarmature_*` ones by prefix and `error_type` / `error_message` by name,
+    # so a colliding caller key is rejected at the `invoke()` boundary and never
+    # reaches the merge. Precedence is unobservable on this observation by
+    # construction. Merge-first is for consistency with the other handlers, where
+    # it IS load-bearing.
+    #
+    # Worth knowing that this was reachable before 0119: `error_type` was
+    # unreserved then, so a caller key of that name merged last would have
+    # replaced the only discriminator a failed Tool observation carries. 0119
+    # closed it from the reservation side.

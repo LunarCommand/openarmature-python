@@ -960,9 +960,46 @@ class LangfuseObserver:
         # exception content onto it is non-conforming over-emission (0118). Like
         # the node Span, it carries only the error category; the full exception
         # reaches the OTel span via record_exception on OA's private provider.
-        metadata: dict[str, Any] = {
-            "failure_isolation_event_name": event.event_name,
-        }
+        # The cross-cutting caller set goes on FIRST, so the OA-emitted keys
+        # below overwrite a colliding caller key rather than the other way
+        # round. It used to be applied last, which made this the ONLY handler
+        # where the caller won: the LLM, embedding and rerank handlers all merge
+        # the caller set before writing their own keys.
+        #
+        # That mattered here because three of the keys below are unreserved, so
+        # §3.4 does not reject a caller key of the same name at the `invoke()`
+        # boundary, and `metadata={"error_category": "ok"}` silently replaced
+        # this marker's only failure discriminator.
+        #
+        # The OTel observer needs no equivalent change: every attribute it writes
+        # is `openarmature.`-prefixed and caller keys land under
+        # `openarmature.user.*`, both covered by a reserved PREFIX, so a
+        # colliding caller key is rejected at the boundary and never reaches the
+        # merge. Langfuse metadata is flat, which is the whole reason the reserved
+        # NAME set exists alongside the prefixes.
+        #
+        # Read this as the lesser harm, not as a settled precedence rule.
+        # OA-wins still drops the caller's value silently, which is the mirror of
+        # the bug rather than its opposite; §3.4 REJECTS a reserved collision
+        # precisely because silent resolution in either direction loses
+        # information without telling anyone. The real fix is reservation, and it
+        # arrives when the span is mapped: spec ruled that §3.4's reserved set
+        # does not reach a span no §8.4.x table maps, and committed the mapping
+        # to carry these three (coord release-v0.17.0/54).
+        #
+        # It carried no caller set at all until `FailureIsolatedEvent` gained the
+        # field, because there was nothing to read; omitting it now would leave
+        # the two observers disagreeing about the same marker.
+        #
+        # NOT a §5.6 obligation, and the reason is that
+        # `openarmature.failure_isolated` appears nowhere in the observability
+        # spec: the EVENT is mandated by pipeline-utilities, the span is ours and
+        # unmapped, and §5.6 cannot reach a span the spec never defines. It is
+        # NOT that §5.6's list of span kinds excludes it; spec ruled that list
+        # illustrative. Once the span is mapped this becomes required.
+        metadata: dict[str, Any] = {}
+        _apply_caller_metadata(metadata, event.caller_invocation_metadata)
+        metadata["failure_isolation_event_name"] = event.event_name
         if event.namespace:
             metadata["failure_isolation_node"] = event.namespace[-1]
         if event.caught_exception.category is not None:
@@ -970,17 +1007,6 @@ class LangfuseObserver:
         correlation_id = current_correlation_id()
         if correlation_id is not None:
             metadata["correlation_id"] = correlation_id
-        # The cross-cutting caller set. It carried none until
-        # `FailureIsolatedEvent` gained the field, because there was nothing to
-        # read; omitting it now would leave the two observers disagreeing about
-        # the same marker, which is worse than both lacking it.
-        #
-        # NOT a §5.6 obligation, though an earlier version of this comment said
-        # so. `openarmature.failure_isolated` appears nowhere in the
-        # observability spec: the EVENT is mandated by pipeline-utilities, the
-        # span is ours and unmapped. Cross-observer consistency is the reason
-        # this is here, not conformance.
-        _apply_caller_metadata(metadata, event.caller_invocation_metadata)
         handle = self.client.span(
             trace_id=inv_state.trace_id,
             name="openarmature.failure_isolated",
@@ -2139,7 +2165,21 @@ class LangfuseObserver:
             calling_branch_name_chain=event.branch_name_chain,
         )
         # §8.4.6 metadata: tool name always, tool_call_id when present.
-        metadata: dict[str, Any] = {"openarmature_tool_name": event.tool_name}
+        # Caller metadata FIRST, same ordering as every other handler, so an
+        # OA-emitted key wins a collision. It goes on at all because §8.4.2 maps
+        # the caller set to `observation.metadata.<key>` on EVERY Observation:
+        # the table scopes its other rows explicitly ("fan-out node Span
+        # observation only"), so the unscoped wording is deliberate.
+        #
+        # This handler carried NO caller metadata until now, which made the Tool
+        # observation the only one of the four provider observations to drop it,
+        # and left the two observers disagreeing about the same event: the OTel
+        # `_handle_tool_call` has applied it all along. The LLM handlers get it
+        # via `_typed_event_metadata`, and embedding / rerank apply it directly,
+        # so this was the one path with neither.
+        metadata: dict[str, Any] = {}
+        _apply_caller_metadata(metadata, event.caller_invocation_metadata)
+        metadata["openarmature_tool_name"] = event.tool_name
         if event.tool_call_id is not None:
             metadata["openarmature_tool_call_id"] = event.tool_call_id
         input_value: Any = None
