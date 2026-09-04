@@ -136,21 +136,20 @@ if TYPE_CHECKING:
 # signal. Validate in ``__init__`` against this set instead.
 _VALID_READINESS_PROBES = frozenset({"models", "chat_completions", "both"})
 
-# §8.1 managed wire fields and their collision arms (proposals 0105 + 0108). The
-# structural keys (model / messages / tools / tool_choice) are managed-internal
-# (0105 §3.5): 0105 §3.5 gives them no "while producing it" qualifier (that is
-# reserved for the conditionally-managed response_format / stream_options), so
-# they are ALWAYS managed -- an extras key of a structural name is rejected even
-# on a call that produced no such field. This closes the hole where an extras
-# `tools` / `tool_choice` on a no-tools call would otherwise ride untouched and
-# smuggle a raw, unvalidated tool array past validate_tools. The sampling scalars
-# are declared-field realizations (0108); stop realizes the list-shaped
-# stop_sequences so it MERGES; response_format is managed only on the
-# structured-output path (0105 conditionally-managed). Those non-structural keys
-# are managed only WHEN the mapping actually produced them, which the call site
-# enforces by filtering to keys present in the built body -- so a sampling field
-# the caller left None, or response_format on the free-form / §8.1.5.1 fallback
-# path, is unmanaged and an extra of that name rides untouched.
+# §8.1 managed wire fields and their collision arms (0105 + 0108).
+#
+# The structural keys (model / messages / tools / tool_choice) are ALWAYS
+# managed: 0105 §3.5 gives them no "while producing it" qualifier, unlike the
+# conditionally-managed response_format / stream_options. So an extras key of a
+# structural name is rejected even where the call produced no such field, which
+# is what stops an extras `tools` on a no-tools call smuggling an unvalidated
+# tool array past validate_tools.
+#
+# The rest are managed only WHEN the mapping produced them, which the call site
+# enforces by filtering to keys present in the built body. A sampling field left
+# None, or response_format off the structured-output path, is unmanaged and an
+# extra of that name rides untouched. `stop` realizes the list-shaped
+# stop_sequences, so it MERGES rather than collides.
 _OPENAI_MANAGED_ARMS: dict[str, ManagedArm] = {
     "model": "reject",
     "messages": "reject",
@@ -436,22 +435,14 @@ class OpenAIProvider:
         ``RetryMiddleware``); an exception raised by it propagates out
         of the call.
         """
-        # Spec observability §5.5 LLM provider span: when an
-        # observability backend is active in the current invocation,
-        # emit a typed LlmCompletionEvent (success) or LlmFailedEvent
-        # (failure) around the wire call so the backend can build a
-        # span / Generation observation. Queue-mediated dispatch
-        # preserves spec §6 serial event ordering across all event
-        # sources within an invocation. ``current_dispatch()`` returns
-        # ``None`` outside an openarmature invocation (direct provider
-        # use in scripts/tests), in which case the call proceeds
-        # without typed-event emission.
+        # §5.5: emit the typed completion / failure event around the wire call
+        # so a backend can build the span. Queue-mediated so §6 serial ordering
+        # holds across event sources. ``current_dispatch()`` is ``None`` outside
+        # an invocation (direct provider use), and the call then emits nothing.
         #
-        # ``call_id`` is minted once per ``complete()`` call. Per
-        # proposal 0058: a failed call gets its own ``call_id``
-        # distinct from any retry-attempt sibling — the retry
-        # middleware re-enters ``complete()`` for each attempt, so a
-        # fresh mint per call automatically satisfies that contract.
+        # ``call_id`` is minted per ``complete()`` call, which gives a failed
+        # call an id distinct from any retry-attempt sibling (0058), since the
+        # retry middleware re-enters ``complete()`` per attempt.
         dispatch = current_dispatch()
         call_id = str(uuid.uuid4())
         # Capture prompt context AT DISPATCH TIME (in the node task's
@@ -1167,14 +1158,10 @@ class OpenAIProvider:
         # path the mapping produces no response_format, so it is UNMANAGED there
         # (0105 §3.5): a caller's extras response_format rides untouched via the
         # reconciliation below rather than being stripped.
-        # Per §8.1.1 (proposal 0025): map the spec-level `tool_choice`
-        # shape onto the OpenAI wire shape. ``None`` omits the field
-        # entirely so the OpenAI provider's own default applies —
-        # load-bearing for backward compat with pre-0025 callers. The
-        # string-literal modes pass through verbatim; the ``ForceTool``
-        # record renames ``type: "tool"`` → ``type: "function"`` and
-        # nests the name under a ``function`` sub-object per OpenAI's
-        # request shape.
+        # §8.1.1: map the spec `tool_choice` onto the OpenAI wire shape.
+        # ``None`` omits the field so OpenAI's own default applies. String
+        # modes pass through; ``ForceTool`` renames ``type: "tool"`` to
+        # ``"function"`` and nests the name under a ``function`` object.
         if tool_choice is not None:
             if isinstance(tool_choice, ForceTool):
                 body["tool_choice"] = {
@@ -1647,24 +1634,12 @@ def _block_to_wire(block: ContentBlock) -> dict[str, Any]:
 # boundary so equivalent inputs produce byte-identical wire output, which is
 # what makes prompt-cache hits reliable.
 #
-# Recursion depth: bounded by the depth of the input dict, not by
-# any internal accumulator. Python's default recursion limit (1000)
-# is two orders of magnitude above realistic JSON Schema depths
-# (typical schemas top out at 5-10 nesting levels — OpenAI's API
-# rejects deeper ones at the wire layer before the cache prefix
-# matters). We don't impose our own cap; if a caller hands us a
-# 1000-deep nested dict, RecursionError surfaces immediately at
-# canonicalization time rather than producing silently-broken wire
-# bytes downstream.
+# No depth cap of its own: a pathologically nested dict raises RecursionError
+# here rather than producing broken wire bytes downstream.
 #
-# Byte-stability requires Python's dict insertion-order preservation
-# guarantee (PEP 468, 3.7+) AND httpx serializing the body via the
-# stdlib ``json.dumps`` default (which respects dict iteration
-# order). Both are stable contracts on the supported Python versions
-# + httpx 0.27+. If a future httpx release internalizes ordering
-# (e.g., switches to alphabetical key emission), the canonicalizer
-# becomes redundant but tests would continue to pass; if it
-# randomizes ordering, the wire-byte tests in
+# Byte-stability rests on dict insertion order (PEP 468) and on httpx
+# serializing through the stdlib ``json.dumps``, which respects it. If httpx
+# ever randomized key order the wire-byte tests in
 # ``tests/unit/test_llm_provider.py`` would fail loudly.
 def _canonicalize_dict_keys(value: Any) -> Any:
     if isinstance(value, dict):

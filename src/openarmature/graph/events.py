@@ -86,20 +86,17 @@ class FanOutEventConfig:
     concurrency: int | None
     error_policy: str
     parent_node_name: str
-    # OPTIONAL fifth key, beyond the four graph-engine §6 requires. §6 says
-    # implementations MUST present all four whenever the field is populated;
-    # it does not close the set, and nothing forbids an additional key.
+    # An OPTIONAL fifth key. graph-engine §6 requires all four whenever the
+    # field is populated but does not close the set.
     #
-    # It exists because the declared identity otherwise reaches an observer ONLY
-    # through an inner node event's `subgraph_identities`. When a fan-out's
-    # instance middleware short-circuits -- issues its call and returns without
-    # calling `next_call` -- no inner node event is ever emitted, so a synthesized
-    # per-instance span carried `openarmature.subgraph.name=''` despite a
-    # declared identity, with nothing able to repair it. Same reason
-    # `parent_node_name` rides here rather than being rederived.
+    # It is the only carrier of the declared identity when no inner node event
+    # is emitted, which happens when a fan-out's instance middleware issues its
+    # call and returns without calling `next_call`. Otherwise the identity
+    # reaches an observer only through `subgraph_identities`. `parent_node_name`
+    # rides here for the same reason.
     #
-    # `None` when the fan-out declares no identity, which is the existing
-    # "no identity tracked" case and stays the empty string on the span.
+    # `None` when the fan-out declares no identity, which stays the empty string
+    # on the span.
     subgraph_identity: str | None = None
 
 
@@ -292,34 +289,20 @@ class NodeEvent:
     # without re-deriving it from successive events.
     fan_out_index_chain: tuple[int | None, ...] = ()
     branch_name_chain: tuple[str | None, ...] = ()
-    # Per observability §5.3 + the coord-thread
-    # ``clarify-subgraph-name-semantics`` resolution: chain of
-    # compiled-subgraph identities parallel to the wrapper-depth
-    # positions of ``namespace``. Index ``i`` is the identity for
-    # the wrapper at ``namespace[i]`` (or ``None`` when that
-    # wrapper has no tracked identity); chain length equals the
-    # depth of wrapper nesting (always ``< len(namespace)`` since
-    # the last element of ``namespace`` is the current node, not
-    # a wrapper). Observers read by depth and emit it as
-    # ``observation.metadata.subgraph_name`` (Langfuse) /
-    # ``openarmature.subgraph.name`` (OTel), falling back to the
-    # empty string when ``None`` per §5.3's "if the implementation
-    # tracks one" clause.
+    # §5.3: compiled-subgraph identities parallel to the wrapper positions of
+    # ``namespace``, so index ``i`` is the identity for the wrapper at
+    # ``namespace[i]``, or ``None`` where it tracks none. Always shorter than
+    # ``namespace``, whose last element is the current node rather than a
+    # wrapper. Observers read by depth and fall back to the empty string.
     subgraph_identities: tuple[str | None, ...] = ()
-    # Per observability §3.4 + §5.6 (proposal 0034): snapshot of the
-    # caller-supplied invocation metadata at event-construction
-    # time. The engine reads ``current_invocation_metadata()`` when
-    # it constructs the event (in the engine task / node body's
-    # Context); the observer reads from the snapshot on the event
-    # rather than re-reading the ContextVar at observer time —
-    # critical because the observer runs on the engine's
-    # ``deliver_loop`` task whose Context is frozen at invoke time
-    # (asyncio.create_task copies the parent Context at task
-    # creation), so the live ContextVar value in the deliver_loop
-    # would NOT reflect mid-invocation augmentations made by node
-    # bodies running in the main engine task. Observers emit each
-    # entry as ``openarmature.user.<key>`` (OTel, §5.6) /
-    # ``metadata.<key>`` (Langfuse, §8.4.1+§8.4.2).
+    # §3.4 + §5.6: a snapshot taken where the event is constructed, in the
+    # engine task's Context. An observer MUST read this rather than
+    # re-reading the ContextVar: it runs on `deliver_loop`, whose Context was
+    # copied at task creation and so never sees a mid-invocation augmentation
+    # made by a node body.
+    #
+    # Rendered as `openarmature.user.<key>` (OTel) / `metadata.<key>`
+    # (Langfuse).
     caller_invocation_metadata: Mapping[str, AttributeValue] = field(default_factory=lambda: _EMPTY_METADATA)
 
 
@@ -453,34 +436,17 @@ class InvocationCompletedEvent:
     correlation_id: str | None
 
 
-# Spec: realizes proposal 0049's first spec-normatively-typed event
-# variant on the observer event union (graph-engine §6 +
-# observability §5.5.7). Dispatched on every LLM provider call that
-# returns a structured response, alongside the calling node's
-# NodeEvent pair. Failure cases (provider exceptions, malformed
-# responses) flow through the existing exception path and do NOT
-# emit this variant. Not subject to the §6 ``phases`` subscription
-# filter (matches MetadataAugmentationEvent / InvocationStartedEvent
-# / InvocationCompletedEvent treatment).
+# graph-engine §6 + observability §5.5.7. Dispatched on every LLM call that
+# returns a structured response, alongside the calling node's NodeEvent pair.
+# Failures take the exception path and emit `LlmFailedEvent` instead. Not
+# subject to the §6 ``phases`` filter. Field names match the spec table.
 #
-# Field naming matches the spec-canonical names verbatim per the spec
-# Q5 ack — Python snake_case happens to match the spec table 1:1.
-#
-# Spec proposal 0057 (v0.51.0) extension: adds 8 additive request-side
-# fields (input_messages, output_content, request_params,
-# request_extras, active_prompt, active_prompt_group, call_id,
-# response_model) and renames request_id → response_id to match the
-# response-side data the field carries. Inline image bytes in
-# input_messages MUST be redacted per observability §5.5.5 before
-# population — the provider reuses _serialize_messages_for_payload
-# which already enforces the redaction. The three payload-bearing
-# fields (input_messages, output_content, request_extras) are
-# populated unconditionally on the typed event per §5.5.7; observer-
-# side privacy gates (OTel disable_provider_payload, Langfuse equivalents)
-# apply at rendering, symmetric with the §5.5.1 span attribute path.
-# Custom queryable observers (per observability §9) own their own
-# redaction posture — gating belongs at rendering with the consumer's
-# awareness.
+# The payload-bearing fields (input_messages, output_content, request_extras)
+# are populated unconditionally per §5.5.7, with the observer-side privacy gates
+# applying at RENDERING, symmetric with the §5.5.1 span attribute path. A custom
+# §9 observer therefore owns its own redaction posture. Inline image bytes are
+# redacted per §5.5.5 before population, by the provider's
+# `_serialize_messages_for_payload`.
 @dataclass(frozen=True)
 class LlmCompletionEvent:
     """A typed LLM provider call event delivered to observers.
@@ -629,27 +595,17 @@ class LlmCompletionEvent:
     branch_name_chain: tuple[str | None, ...] = ()
 
 
-# Spec: realizes proposal 0058's second spec-normatively-typed event
-# variant on the observer event union (graph-engine §6 +
-# observability §5.5.7), accepted at spec v0.53.0. Dispatched on the
-# observer delivery queue whenever a provider.complete() call raises
-# a §7 category exception — covers BOTH the adapter-caught provider-
-# exception path AND the pre-send validation raise path
-# (provider_invalid_request / provider_unsupported_content_block
-# raise before any provider contact). The event is dispatched
-# ALONGSIDE the exception, not in place of it; caller-side exception
-# flow is unchanged.
+# graph-engine §6 + observability §5.5.7. Dispatched whenever `complete()`
+# raises a §7 category exception, covering both the adapter-caught provider
+# path and the pre-send validation raises that never reach the provider. It
+# rides ALONGSIDE the exception; caller-side flow is unchanged.
 #
-# Mutual exclusion with LlmCompletionEvent on the same
-# provider.complete() call — implementations MUST NOT emit both for
-# the same call. Conformance fixture 072 locks this down.
+# Mutually exclusive with LlmCompletionEvent for one `complete()` call, never
+# both. Fixture 072 locks that down.
 #
-# Privacy posture identical to LlmCompletionEvent: input_messages /
-# request_params / request_extras are populated unconditionally per
-# §5.5.7; observer-side privacy gates (OTel disable_provider_payload,
-# Langfuse equivalents) apply at rendering. Inline image bytes are
-# redacted per observability §5.5.5 before population. Custom
-# queryable observers own their own redaction posture.
+# Privacy posture as LlmCompletionEvent: payload fields populated
+# unconditionally, gates applied at rendering, image bytes redacted per
+# §5.5.5.
 @dataclass(frozen=True)
 class LlmFailedEvent:
     """A typed LLM provider call failure event delivered to observers.
@@ -976,18 +932,11 @@ class EmbeddingFailedEvent:
     branch_name_chain: tuple[str | None, ...] = ()
 
 
-# Spec: realizes graph-engine §6 -- the typed RerankEvent / RerankFailedEvent
-# pair (proposal 0060, retrieval-provider rerank capability), the rerank
-# sibling to the EmbeddingEvent / EmbeddingFailedEvent pair. Dispatched on the
-# observer delivery queue per RerankProvider.rerank() call: the success variant
-# after the response is parsed + validated (retrieval-provider §6), the failure
-# variant alongside a raised §7 category exception (mutually exclusive per
-# call). Scalar fan_out_index / branch_name only, matching the embedding pair
-# (the lineage chains arrive uniformly across the provider events with proposal
-# 0084). query / documents / request_extras / output_results are payload-
-# bearing, populated unconditionally; observer-side privacy gates (OTel
-# disable_provider_payload, Langfuse equivalents) apply at rendering, symmetric
-# with EmbeddingEvent.
+# graph-engine §6: the rerank sibling to the Embedding pair. One per
+# `rerank()` call, the success variant after the response is parsed and
+# validated, the failure variant alongside a raised §7 exception, never both.
+# query / documents / request_extras / output_results are payload-bearing and
+# populated unconditionally, with the gates applied at rendering.
 @dataclass(frozen=True)
 class RerankEvent:
     """A typed rerank provider call event delivered to observers.
@@ -1120,17 +1069,11 @@ class RerankFailedEvent:
     branch_name_chain: tuple[str | None, ...] = ()
 
 
-# Spec: realizes pipeline-utilities §6.3 failure-isolation middleware
-# (proposal 0050). Emitted by FailureIsolationMiddleware when it
-# catches an exception escaping the inner chain and substitutes a
-# degraded partial update. A distinct framework-emitted event kind
-# (NOT a NodeEvent — does not reuse node_name / namespace / error),
-# mirroring the proposal 0040 MetadataAugmentationEvent mechanism:
-# enqueued on the engine's serial observer-delivery queue via
-# ``current_dispatch()`` and NOT subject to the observer ``phases``
-# filter (matches MetadataAugmentationEvent / InvocationStartedEvent /
-# InvocationCompletedEvent / LlmCompletionEvent / LlmFailedEvent
-# treatment).
+# pipeline-utilities §6.3. Emitted by FailureIsolationMiddleware when it catches
+# an exception escaping the inner chain and substitutes a degraded update. A
+# framework event kind rather than a NodeEvent, so it reuses none of node_name /
+# namespace / error, and like the other framework events it is enqueued via
+# ``current_dispatch()`` and exempt from the ``phases`` filter.
 @dataclass(frozen=True)
 class FailureIsolatedEvent:
     """A failure-isolation event delivered to observers.

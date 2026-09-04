@@ -528,18 +528,13 @@ class _InvocationContext:
     # ----------------------------------------------------------------
     # Checkpointing fields (spec pipeline-utilities §10)
     #
-    # ``invocation_id`` and ``correlation_id`` are minted once at the
-    # outermost ``invoke`` call (or restored from a saved record on
-    # resume) and propagated unchanged through every descent. The
-    # checkpointer reference is set when a backend is registered; it
-    # is intentionally **None inside fan-out instances** so per-instance
-    # internal saves are gated off (§10.7 atomic-restart). The mutable
-    # ``completed_positions`` list is shared across descents so the
-    # save call sites can append the just-completed position before
-    # the engine's next step. ``resume_skip_set`` is a frozen set of
-    # namespace tuples whose corresponding nodes have already
-    # completed in a prior run and MUST be skipped on this resumed
-    # invocation.
+    # ``invocation_id`` and ``correlation_id`` are minted once at the outermost
+    # ``invoke`` (or restored on resume) and propagate unchanged. The
+    # checkpointer is deliberately None inside fan-out instances, which gates
+    # off per-instance internal saves (§10.7 atomic restart).
+    # ``completed_positions`` is shared across descents so save sites can append
+    # before the next step. ``resume_skip_set`` holds namespaces already
+    # completed in a prior run, which MUST be skipped.
     # ----------------------------------------------------------------
     invocation_id: str = ""
     correlation_id: str = ""
@@ -585,20 +580,15 @@ class _InvocationContext:
     # counters because subgraphs share the parent's queue + worker, so
     # the parent context's counts naturally cover subgraph events.
     drain_counters: _DrainCounters = field(default_factory=_DrainCounters)
-    # Per spec §10.2 (proposal 0028): the canonical source for
-    # ``CheckpointRecord.schema_version``. Set once at the outermost
-    # ``invoke`` to the compiled graph's declared state class
-    # (``CompiledGraph.state_cls``); propagated unchanged through every
-    # descent (subgraphs, fan-out instances, parallel branches). All
-    # save sites within an invocation MUST read ``schema_version`` from
-    # this class — NOT from ``type(state)`` at save time — so the
-    # value is consistent across the outer dispatch save, fan-out
-    # instance internal saves, and the fan-out node's own completion
-    # save. The distinction matters only when a user passes a State
-    # subclass that shadows ``schema_version``; the declared class is
-    # the only consistent choice for §10.12 migration lookups.
-    # ``Any`` rather than ``type[State]`` to avoid an import cycle
-    # between graph and observer; callers narrow at the read site.
+    # §10.2: the canonical source for ``CheckpointRecord.schema_version``, set
+    # once at the outermost ``invoke`` and propagated unchanged. Every save site
+    # MUST read it from here rather than from ``type(state)``, or the value
+    # diverges across the outer, per-instance and completion saves when a caller
+    # passes a State subclass that shadows it. The declared class is the only
+    # consistent choice for §10.12 migration lookups.
+    #
+    # ``Any`` rather than ``type[State]`` to avoid a graph/observer import
+    # cycle; callers narrow at the read site.
     state_cls: Any = None
     # Per proposal 0043 (observability §8.4.1 trace.output sourcing):
     # shared mutable single-element box tracking the most recently
@@ -610,22 +600,15 @@ class _InvocationContext:
     # descents so the inner-most node's name wins on failure (the
     # real culprit, not the wrapper).
     final_node_box: list[str] = field(default_factory=list[str])
-    # Per proposal 0043 (observability §8.4.1 *Resume semantics* +
-    # "partial final state captured at the failure point" clause).
-    # Tracks the most recent successful step's post-merge state at THIS
-    # context level so the outermost ``invoke()`` can populate
-    # ``InvocationCompletedEvent.final_state`` on the failure path with
-    # the partial outer state, not the bare ``starting_state``. On the
-    # success path the box is unused — the engine's return value is the
-    # canonical ``final_state``. **Distinct from ``final_node_box``**:
-    # the latest-state box is per-level (each subgraph / fan-out
-    # instance / parallel-branches branch gets its own fresh box),
-    # because the OUTER Langfuse trace cares about the outer-graph's
-    # state type, and an inner state has a different type. The
-    # ``final_node_box`` shares by reference because the spec wants the
-    # innermost failing node's name (the real culprit); state has the
-    # opposite contract — the outermost level's state is what the
-    # outer trace.output hook receives.
+    # §8.4.1: the most recent successful step's post-merge state at THIS level,
+    # so a failing ``invoke()`` reports partial state rather than the bare
+    # ``starting_state``. Unused on the success path, where the return value is
+    # canonical.
+    #
+    # Per-level, unlike ``final_node_box`` which shares by reference. The two
+    # have opposite contracts: the spec wants the INNERMOST failing node's name,
+    # but the OUTERMOST level's state, since that is what the outer trace.output
+    # hook receives and an inner state has a different type.
     latest_state_box: list[Any] = field(default_factory=list[Any])
 
     def full_observers(self) -> tuple[SubscribedObserver, ...]:
