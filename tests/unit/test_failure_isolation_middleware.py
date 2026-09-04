@@ -734,10 +734,12 @@ async def test_langfuse_failure_isolated_marker_carries_caller_metadata() -> Non
     # none until `FailureIsolatedEvent` gained `caller_invocation_metadata`,
     # because there was nothing to read.
     #
-    # This pins a CONSISTENCY choice, not a §5.6 obligation. §5.6 enumerates the
-    # spans it reaches and this marker is not among them; the span appears
-    # nowhere in the observability spec, only the event does. Spec is drafting a
-    # mapping. If it lands differently, this assertion changes with it.
+    # This pins a CONSISTENCY choice, not a §5.6 obligation. The reason is that
+    # the span appears nowhere in the observability spec, only the event does, so
+    # §5.6 cannot reach a span the spec never defines. It is NOT that §5.6's list
+    # of span kinds excludes this marker: spec has ruled that list illustrative
+    # rather than exhaustive. Spec has committed to a mapping; when it lands this
+    # becomes required rather than optional, and this assertion stays either way.
     #
     # Asserted on the LANGFUSE side specifically. The OTel half was covered
     # first, and covering only that leaves the two observers free to disagree
@@ -787,3 +789,67 @@ async def test_langfuse_failure_isolated_marker_carries_caller_metadata() -> Non
     assert marker.metadata.get("from_wrapper") == "yes", (
         f"caller metadata must reach the Langfuse marker; got {marker.metadata}"
     )
+
+
+async def test_oa_keys_win_over_a_colliding_caller_key_on_the_marker() -> None:
+    # Precedence on the failure-isolation marker. Three of its top-level metadata
+    # keys are UNRESERVED, so §3.4 does not reject a caller key of the same name
+    # at the `invoke()` boundary and the collision reaches the observer.
+    #
+    # This handler used to merge the caller set LAST, making it the only one
+    # where the caller won: the LLM, embedding and rerank handlers all merge the
+    # caller set before writing their own keys. So a caller passing
+    # `error_category` silently replaced the marker's only failure discriminator,
+    # on the failure path, with no warning.
+    #
+    # OA-wins is the interim, not a settled precedence rule (spec ruled on it in
+    # coord release-v0.17.0/54): it still drops the caller's value silently. The
+    # real fix is reservation, which arrives when the span is mapped.
+    from openarmature.observability.langfuse.client import InMemoryLangfuseClient
+    from openarmature.observability.langfuse.observer import LangfuseObserver
+    from openarmature.observability.metadata import set_invocation_metadata
+
+    async def _sets_then_raises(_s: _DocState) -> Mapping[str, Any]:
+        # `error_category` is the dangerous one: on a marker with no error
+        # category of its own it is the only discriminator a reader has.
+        set_invocation_metadata(
+            error_category="caller_wins_would_be_a_bug",
+            failure_isolation_node="not_the_real_node",
+            benign="kept",
+        )
+        raise _TransientError("provider down")
+
+    graph = (
+        GraphBuilder(_DocState)
+        .add_node(
+            "extract",
+            _sets_then_raises,
+            middleware=[
+                FailureIsolationMiddleware(
+                    degraded_update={"note": "degraded"},
+                    event_name="extract_failed",
+                )
+            ],
+        )
+        .add_edge("extract", END)
+        .set_entry("extract")
+        .compile()
+    )
+    client = InMemoryLangfuseClient()
+    observer = LangfuseObserver(client=client)
+    graph.attach_observer(observer)
+
+    await graph.invoke(_DocState())
+    await graph.drain()
+
+    trace = next(iter(client.traces.values()))
+    marker = next(o for o in trace.observations if o.name == "openarmature.failure_isolated")
+    # The OA-emitted values survive the collision.
+    assert marker.metadata.get("error_category") != "caller_wins_would_be_a_bug", (
+        "a caller metadata key overwrote the marker's failure discriminator"
+    )
+    assert marker.metadata.get("failure_isolation_node") == "extract"
+    assert marker.metadata.get("failure_isolation_event_name") == "extract_failed"
+    # Non-colliding caller keys still come through: the fix is precedence on a
+    # collision, not dropping the caller set.
+    assert marker.metadata.get("benign") == "kept"
