@@ -220,9 +220,8 @@ def _subgraph_identity_at(event: NodeEvent, depth: int) -> str:
     value; the empty-string path keeps direct callers conformant but
     failing those fixtures.
     """
-    # Spec observability §5.3 (coord thread
-    # clarify-subgraph-name-semantics): empty-string fallback is
-    # conformant for callers that don't track a subgraph identity.
+    # §5.3: the empty-string fallback is conformant for callers that do not
+    # track a subgraph identity.
     idx = depth - 1
     if 0 <= idx < len(event.subgraph_identities):
         identity = event.subgraph_identities[idx]

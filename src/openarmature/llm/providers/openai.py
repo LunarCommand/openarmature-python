@@ -1641,13 +1641,11 @@ def _block_to_wire(block: ContentBlock) -> dict[str, Any]:
     return {"type": "image_url", "image_url": image_url}
 
 
-# Spec 0047 §8 *Intra-impl wire-byte stability* canonicalizer.
-# Recursively sorts dict keys at every nesting level; preserves list
-# ordering (per Q5 ack on the proposal-0047 coord thread — array
-# ORDER is caller-supplied and stays as-is; object KEYS inside
-# arrays get sorted via the dict-recursion branch). Applied at every
-# user-supplied-dict boundary in the wire body so equivalent OA
-# inputs produce byte-identical wire output for APC hit reliability.
+# 0047 §8 wire-byte stability canonicalizer. Sorts dict keys at every nesting
+# level and preserves list ORDER, which is caller-supplied; object keys inside
+# arrays still sort via the dict branch. Applied at every user-supplied-dict
+# boundary so equivalent inputs produce byte-identical wire output, which is
+# what makes prompt-cache hits reliable.
 #
 # Recursion depth: bounded by the depth of the input dict, not by
 # any internal accumulator. Python's default recursion limit (1000)

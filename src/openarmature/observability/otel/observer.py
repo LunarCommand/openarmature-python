@@ -263,21 +263,14 @@ def _read_implementation_version() -> str:
 class _LineageEvent(Protocol):
     """The lineage an event must carry to place a span in the trace tree."""
 
-    # Typed as a Protocol rather than `Any` because `Any` is exactly what let a
-    # `FailureIsolatedEvent` reach an opener annotated `event: NodeEvent`, where
-    # it raised on a field it does not declare. Structural, not a union of the
-    # eight concrete kinds: what synthesis needs is these six fields, and a new
-    # event kind that carries them should work without editing a list here.
+    # A Protocol rather than `Any`, which is what let a `FailureIsolatedEvent`
+    # reach an opener annotated `event: NodeEvent` and raise on a field it does
+    # not declare. Structural rather than a union, so a new event kind carrying
+    # these fields works without editing a list here.
     #
-    # The fields that vary -- `correlation_id` and `subgraph_identities` -- are
-    # deliberately ABSENT from this Protocol and read defensively at each use,
-    # because `FailureIsolatedEvent` declares neither and a Protocol cannot
-    # express "may be absent".
-    #
-    # `caller_invocation_metadata` belonged to that list until the change that
-    # added it to `FailureIsolatedEvent`, so no shipped kind now lacks it. It is
-    # still absent from this Protocol and still read defensively: the Protocol is
-    # the contract, and a conforming event is free not to carry the field.
+    # `correlation_id`, `subgraph_identities` and `caller_invocation_metadata`
+    # are deliberately absent and read defensively: a Protocol cannot express
+    # "may be absent", and a conforming event may not carry them.
     @property
     def namespace(self) -> tuple[str, ...]: ...
     @property
@@ -365,10 +358,9 @@ def _subgraph_identity_at(event: object, depth: int) -> str:
     callers using ``SubgraphNode(name=..., compiled=...)`` without
     supplying ``subgraph_identity``.
     """
-    # Spec observability §5.3 (coord thread
-    # clarify-subgraph-name-semantics).
-    # `getattr`, because a dispatch span may now be synthesized from a provider
-    # or tool event, which carries the lineage fields but not the identities.
+    # §5.3. `getattr` because a dispatch span may be synthesized from a
+    # provider or tool event, which carries the lineage fields but not the
+    # identities.
     # The empty-string fallback below is that case; `_backfill_subgraph_identity`
     # fills it in from the first node event, so the attribute does not depend on
     # which event happened to trigger synthesis.
@@ -938,10 +930,9 @@ class OTelObserver:
             if not self.disable_llm_spans:
                 self._handle_typed_llm_retry_attempt(event)
             return
-        # The terminal LlmCompletionEvent / LlmFailedEvent no longer
-        # drive the OTel span (the per-attempt event does); they stay on
-        # the queue for the Langfuse mapping and payload/latency
-        # consumers, so the OTel observer ignores them here.
+        # The per-attempt event drives the OTel span, so the terminal
+        # completion / failure events are ignored here. They stay on the queue
+        # for the Langfuse mapping and the payload and latency consumers.
         if isinstance(event, LlmCompletionEvent | LlmFailedEvent):
             return
         # Proposal 0059 embedding observability (observability §5.5.8): emit
@@ -1285,24 +1276,14 @@ class OTelObserver:
         inv_state.detached_roots.pop(event.namespace, None)
 
     def _propagate_error_to_detached_spans(self, inv_state: _InvState, event: NodeEvent) -> None:
-        # Proposal 0061 §4.2 (Detached invocation span status): a node
-        # raising inside a detached subtree surfaces ERROR on that
-        # trace's OWN carriers, not just the parent trace's. For each
-        # enclosing detached prefix:
-        #   - the detached invocation span (the detached trace's root /
-        #     authoritative carrier) and the parent-trace dispatch span
-        #     (the §4.4 Link carrier) each get the FULL treatment —
-        #     ERROR status + an OTel exception event + the §4 category
-        #     attribute, mirroring the parent invocation span;
-        #   - the detached subgraph / instance span between them gets
-        #     ERROR status only (the invocation span above it carries
-        #     the exception event for that trace).
-        # Set while the spans are still open; the synthetic close paths
-        # SKIP their default ``set_status(OK)`` for keys recorded in
-        # ``errored_detached_keys`` (OTel treats OK as final and lets it
-        # override a prior ERROR), so the ERROR survives to export. Keys
-        # cover both the detached-subgraph (prefix) and detached-fan-out-
-        # instance (prefix + index) schemes.
+        # 0061 §4.2: a raise inside a detached subtree surfaces ERROR on that
+        # trace's own carriers, not only the parent's. The detached invocation
+        # span and the parent-trace dispatch span get the full treatment; the
+        # span between them gets status only.
+        #
+        # `errored_detached_keys` makes the synthetic close paths skip their
+        # default `set_status(OK)`, which OTel treats as final and would
+        # otherwise override the ERROR before export.
         if event.error is None:
             return
         err = event.error
@@ -1334,26 +1315,13 @@ class OTelObserver:
     # ------------------------------------------------------------------
 
     def _handle_metadata_augmentation(self, event: MetadataAugmentationEvent) -> None:
-        # Spec proposal 0040: spans whose lineage ancestor-or-equals the
-        # augmenting context (within the same fan-out instance /
-        # parallel-branch boundary) get ``openarmature.user.<key>``
-        # applied in place. Sibling instances / branches and ancestors
-        # ABOVE the boundary are skipped.
+        # 0040: apply `openarmature.user.<key>` to spans whose lineage
+        # ancestor-or-equals the augmenting context, skipping sibling instances
+        # and everything above the boundary.
         #
-        # Match rule (using the augmentation event's lineage tuple
-        # ``(NS, AI, FI, BN)``):
-        # - Invocation span: included iff ``FI is None and BN is None``
-        #   (outermost-serial context). The shared fan-out node span and
-        #   the invocation span are explicitly out of scope when
-        #   augmenting from inside a fan-out instance or branch.
-        # - Subgraph wrapper spans: included on the outermost-serial
-        #   path when their namespace is a strict prefix of NS.
-        # - Fan-out instance dispatch spans: included iff the dispatch
-        #   span's FI suffix matches ``str(FI)`` and the anchor namespace
-        #   is a strict prefix of NS.
-        # - Per-attempt node spans (``open_spans``): included iff the
-        #   span's FI equals the augmenter's FI and its namespace is a
-        #   prefix of (or equal to) NS.
+        # The invocation span and the shared fan-out node span are in scope only
+        # for an outermost-serial augmenter; from inside an instance or branch
+        # they belong to siblings too.
         from openarmature.observability.correlation import current_invocation_id
 
         invocation_id = current_invocation_id()
@@ -2531,22 +2499,11 @@ class OTelObserver:
         node event's lineage) and the §5.5 orphan LLM-span fallback (called with
         the calling node's lineage when its span is not open), so both resolve
         to the same parent."""
-        # 1. Walk prefix lengths longest-to-shortest.  The INNERMOST
-        #    matching synthetic dispatch span wins.  Three keying
-        #    schemes live alongside each other at each prefix:
-        #      - per-branch dispatch (proposal 0044, v0.36.0): keyed by
-        #        ``prefix + (branch_name,)`` in
-        #        ``parallel_branches_branch_spans``
-        #      - detached fan-out instance root: keyed by
-        #        ``prefix + (str(fan_out_index),)`` in
-        #        ``detached_roots``
-        #      - non-detached fan-out instance dispatch (proposal 0013,
-        #        v0.10.0): keyed by ``prefix + (str(fan_out_index),)``
-        #        in ``fan_out_instance_spans``
-        #    Walking longest-to-shortest gives the right answer for
-        #    arbitrary composition (parallel-branches inside fan-out
-        #    instance and vice versa) — the dispatch span at the
-        #    deepest matching depth is the most-immediate parent.
+        # Longest-to-shortest so the innermost dispatch span wins, which is
+        # what makes arbitrary composition work (branches inside instances and
+        # the reverse). Three keying schemes coexist at each prefix: per-branch
+        # under `prefix + (branch_name,)`, and both detached and non-detached
+        # instances under `prefix + (fan_out_index,)`.
         for prefix_len in range(len(namespace), 0, -1):
             prefix = namespace[:prefix_len]
             # Lineage-aware keys (proposal 0045): carry the enclosing fan-out

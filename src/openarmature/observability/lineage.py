@@ -101,16 +101,13 @@ def branch_dispatch_key(
     """Lineage-aware identity key for a per-branch dispatch span at namespace
     ``prefix``.
     """
-    # Shared by both observers.  They each held an identical copy, and the same
-    # defect had to be fixed twice by hand three times running.
+    # Shared by both observers so the keying cannot drift between them.
     n = len(prefix)
     # Chains are normalized to the prefix DEPTH in both directions: truncated
-    # when longer, padded with None when shorter.  Truncating alone was a
-    # defect: an orphan provider call issued from branch middleware carries
-    # empty chains and built `(prefix, (), (), branch)` where the span had been
-    # registered under `(prefix, (None,), (), branch)`.  Those denote the same
-    # lineage, "no enclosing fan-out at that depth", and differed only as tuple
-    # keys, so the lookup missed and the orphan fell through to the root.
+    # when longer, padded with None when shorter.  Padding is what makes the
+    # key canonical: `(prefix, (), (), branch)` and `(prefix, (None,), (),
+    # branch)` denote the same lineage, "no enclosing fan-out at that depth",
+    # and would otherwise differ as tuple keys.
     fan_out = tuple(fan_out_index_chain[:n]) + (None,) * max(0, n - len(fan_out_index_chain))
     branches = tuple(branch_name_chain[: max(0, n - 1)]) + (None,) * max(0, (n - 1) - len(branch_name_chain))
     # The branch's identity at THIS key's position, which is not always the
@@ -162,9 +159,8 @@ def dispatch_key(
     # because every lookup is gated on the fan-out axis at the lookup depth:
     # each call site computes `fi_axis` as the chain entry for that depth and
     # skips the lookup when it is None, which implies the chain already reaches
-    # `n`.  Grep `fi_axis` for the sites -- line numbers were tried here and
-    # went stale within the same commit that wrote them.  An ungated lookup with
-    # a short chain would build a short tuple and miss the padded registration
-    # key, which is the orphan-lookup miss fixture 152 exists for.
+    # `n`.  Grep `fi_axis` for the sites.  An ungated lookup with a short chain
+    # builds a short tuple and misses the padded registration key, which is the
+    # orphan-lookup miss fixture 152 covers.
     n = len(prefix)
     return (prefix, tuple(fan_out_index_chain[:n]), tuple(branch_name_chain[:n]))

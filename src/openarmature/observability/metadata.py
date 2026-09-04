@@ -61,10 +61,6 @@ _invocation_metadata_var: ContextVar[MappingProxyType[str, AttributeValue]] = Co
     "openarmature.invocation_metadata", default=_EMPTY_METADATA
 )
 
-# The module docstring names these two sets rather than spelling them out. A
-# hand-copied list there went stale the moment 0119 extended the tuple, and the
-# copy is what a reader trusts.
-#
 # Reserved key prefixes per §3.4. Keys with these prefixes are
 # off-limits to caller-supplied metadata; the engine rejects at the
 # boundary so observers never see a colliding key.
@@ -280,11 +276,9 @@ def _validate_metadata_key(key: Any) -> None:
         raise ValueError(f"invocation metadata key must be a string; got {type(key).__name__}")
     for reserved in _RESERVED_PREFIXES:
         if key.startswith(reserved):
-            # The list is rendered FROM the tuple, never hand-written. A
-            # hardcoded copy went stale the moment 0119 added a third prefix,
-            # leaving the message naming a prefix its own guidance excluded.
-            # "namespaces" rather than "attributes": these cover OTel span
-            # attributes AND the Langfuse top-level metadata keys.
+            # Rendered from the tuple so the message cannot name a prefix its
+            # own guidance omits. "Namespaces" rather than "attributes": these
+            # cover OTel span attributes and Langfuse metadata keys alike.
             known = ", ".join(f"{p}*" for p in _RESERVED_PREFIXES)
             raise ValueError(
                 f"invocation metadata key {key!r} uses reserved namespace prefix {reserved!r}; "

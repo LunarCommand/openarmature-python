@@ -331,10 +331,8 @@ def _find_innermost_fan_out_instance_state(
         # index i of either chain corresponds to `namespace_prefix[i]`.  A branch
         # descent is no exception: `descend_into_parallel_branch` appends the
         # parallel-branches NODE name to the namespace in the same call it
-        # appends the branch name to the chain.  (The BRANCH name never enters
-        # the namespace; the node name does.  Conflating those two is what an
-        # earlier version of this comment did, to justify leaving the branch
-        # chain unsliced.)
+        # appends the branch name to the chain.  The BRANCH name never enters
+        # the namespace; the node name does.
         #
         # Unsliced was reachable-wrong rather than harmless: with a branch
         # descent at or below the candidate fan-out's depth, the key carried
@@ -1545,13 +1543,10 @@ class CompiledGraph[StateT: State]:
             # any exception that escapes the chain, OUTSIDE this layer.
             attempt_counter[0] += 1
 
-            # Per graph-engine §6 (clarified in v0.16.1): event
-            # emission reads ``attempt_index`` from the ContextVar set
-            # by any enclosing retry middleware — direct (per-node
-            # MW) or transitive (instance / branch MW on a subgraph
-            # the retry re-invokes). The engine itself no longer
-            # writes the var; innermost-wins precedence falls out of
-            # Python's ContextVar token-stack semantics.
+            # graph-engine §6: ``attempt_index`` comes from the ContextVar set
+            # by any enclosing retry middleware, direct or transitive through a
+            # subgraph the retry re-invokes. The engine does not write it, and
+            # innermost-wins falls out of ContextVar token-stack semantics.
             attempt_index = current_attempt_index()
 
             self._dispatch_started(context, current, namespace, step, s, attempt_index=attempt_index)
@@ -1854,15 +1849,11 @@ class CompiledGraph[StateT: State]:
         # load time. Fires once per fan-out step.
         from .fan_out import _resolve_concurrency, _resolve_count  # noqa: PLC0415
 
-        # Resolver failures (callable count/concurrency raising,
-        # ``getattr`` on a malformed state, etc.) used to land inside
-        # ``innermost``'s ``except Exception → NodeException`` block
-        # below and produce a started/completed event pair via the
-        # surrounding dispatches. Hoisting resolution out of
-        # ``run_with_context`` for the eager ``FanOutEventConfig``
-        # build moved them past that scope, so re-establish the
-        # contract here: surface a started/completed pair with
-        # ``fan_out_config=None`` (we never built one) and raise as
+        # Resolution sits outside ``innermost``'s ``except Exception →
+        # NodeException`` scope, so a resolver failure (a callable count or
+        # concurrency raising, ``getattr`` on a malformed state) has to
+        # reproduce that contract here: a started/completed pair with
+        # ``fan_out_config=None``, since none was built, and a
         # ``NodeException``.
         try:
             if node.config.items_field is not None:
