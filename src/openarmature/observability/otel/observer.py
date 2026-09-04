@@ -149,9 +149,9 @@ logger = logging.getLogger("openarmature.observability")
 #
 # The chains stop an inner node under two concurrent outer instances from
 # colliding, since it shares the innermost scalar across them. The scalars are
-# retained for one reason: `_publish_active_span` looks up a callable
-# parallel-branch here, and such a branch carries branch_name on the event
-# without ever extending the chain. On the chains alone its key would EQUAL its
+# retained for one reason: `prepare_sync` looks up a callable parallel-branch
+# here, and such a branch carries branch_name on the event without ever
+# extending the chain. On the chains alone its key would EQUAL its
 # own node's key, the lookup would hit that node instead of missing, and the
 # per-branch dispatch span would never be synthesized.
 _StackKey = tuple[
