@@ -116,18 +116,11 @@ def _read_implementation_version() -> str:
     return __version__
 
 
-# In-flight Span observation handle, keyed by the scalars
-# (namespace, attempt_index, fan_out_index, branch_name) AND the enclosing
-# fan-out / branch lineage chains (proposal 0084). ``branch_name`` discriminates
-# concurrent same-named inner nodes across sibling parallel-branches branches;
-# the chains discriminate an inner node under two concurrent OUTER fan-out
-# instances (which share the innermost scalar fan_out_index), so the nested
-# exact-match Generation-parent lookup finds its own calling node's observation
-# rather than a sibling's. The scalars are retained (as in the OTel observer):
-# a callable parallel-branch carries branch_name on the event but does not
-# extend branch_name_chain, so key[3] keeps it distinct from its own
-# parallel-branches node. Mirrors the OTel observer's ``_StackKey`` shape but
-# holds a Langfuse handle instead of an OTel Span.
+# Keyed by the scalars AND the enclosing lineage chains (0084). Both are
+# needed: the chains separate an inner node under two concurrent outer
+# instances, which share the innermost scalar; the scalars keep a callable
+# parallel-branch distinct from its own node, since it never extends the chain.
+# Mirrors the OTel observer's `_StackKey`.
 _StackKey = tuple[
     tuple[str, ...], int, int | None, str | None, tuple[int | None, ...], tuple[str | None, ...]
 ]
@@ -227,9 +220,8 @@ def _subgraph_identity_at(event: NodeEvent, depth: int) -> str:
     value; the empty-string path keeps direct callers conformant but
     failing those fixtures.
     """
-    # Spec observability §5.3 (coord thread
-    # clarify-subgraph-name-semantics): empty-string fallback is
-    # conformant for callers that don't track a subgraph identity.
+    # §5.3: the empty-string fallback is conformant for callers that do not
+    # track a subgraph identity.
     idx = depth - 1
     if 0 <= idx < len(event.subgraph_identities):
         identity = event.subgraph_identities[idx]
@@ -251,15 +243,10 @@ class _InvState:
     open_observations: dict[_StackKey, _OpenObservation] = field(
         default_factory=dict[_StackKey, _OpenObservation]
     )
-    # Synthetic subgraph dispatch Span observations, keyed by namespace
-    # prefix. Per spec §8.3 each subgraph wrapper produces a Span
-    # observation in its parent's Trace; descendant node observations
-    # parent under it. For a detached subgraph, this dictionary holds
-    # the dispatch Span observation that lives in the DETACHED Trace
-    # (so descendants in that subtree parent under it via the detached
-    # Trace's observation tree); the main Trace carries a separate
-    # link observation surfacing metadata.detached_child_trace_ids
-    # that's opened and closed in one shot, not tracked here.
+    # Synthetic subgraph dispatch observations (§8.3), keyed by namespace
+    # prefix. For a detached subgraph this holds the one in the DETACHED Trace;
+    # the main Trace's link observation opens and closes in one shot and is not
+    # tracked here.
     subgraph_observations: dict[tuple[str, ...], _OpenObservation] = field(
         default_factory=dict[tuple[str, ...], _OpenObservation]
     )
@@ -312,13 +299,9 @@ class _InvState:
     parallel_branches_branch_names: dict[tuple[str, ...], frozenset[str]] = field(
         default_factory=dict[tuple[str, ...], frozenset[str]]
     )
-    # Side-cache: accumulator for `metadata.detached_child_trace_ids`
-    # on dispatch observations that spawn detached children. Keyed by
-    # the dispatch observation's prefix (the fan-out node's namespace,
-    # or the detached-subgraph parent's prefix). Each new detached
-    # child append-then-snapshot lets us preserve §8.5's string-array
-    # shape across multiple instances without re-reading metadata
-    # from the client (the Protocol doesn't expose a read accessor).
+    # Accumulator for `detached_child_trace_ids`, keyed by the dispatch
+    # observation's prefix. Held here because the client Protocol exposes no
+    # read accessor, so §8.5's array cannot be rebuilt from the client.
     detached_child_trace_ids: dict[tuple[str, ...], list[str]] = field(
         default_factory=dict[tuple[str, ...], list[str]]
     )
@@ -469,14 +452,10 @@ class LangfuseObserver:
             self.trace_input_from_state = None
             self.trace_output_from_state = None
         elif status == ISOLATION_LEAKED:
-            # Reachable only when no construction-time channel is live, so nothing
-            # is refused and nothing is currently leaking. Reported because the
-            # binding is a latent problem, and the two ways of enabling a channel
-            # fail closed differently: re-opening a knob on THIS observer is caught
-            # at emission by _isolation_blocks_payload() and the payload is
-            # withheld, while constructing a NEW observer over the same client with
-            # a channel live raises in __post_init__. Deliberately silent about the
-            # error message, which disable_provider_payload governs, not this status.
+            # Reached only when no channel is live, so nothing leaks yet. The
+            # binding is still latent: re-opening a knob here is caught at
+            # emission, while a new observer over the same client raises at
+            # construction.
             _logger.info(
                 "OA's Langfuse client is bound to a TracerProvider it did not isolate; "
                 "no payload channel is enabled, so nothing is being exported to it; "
@@ -562,32 +541,16 @@ class LangfuseObserver:
         # observer built by handing a from_credentials adapter to the constructor.
         return cls(client=client, **observer_kwargs)
 
-    # An emitted error_message IS capped, through `_capped_error_message` below.
-    #
-    # It was written verbatim until proposal 0119 (spec v0.116.0). 0118 had
-    # classified the field for GATING without saying it was subject to §5.5.5
-    # truncation, so a provider returning a very large exception string rendered
-    # it in full. That reading was raised for the batched spec review rather than
-    # changed unilaterally, and 0119 answered it: §5.5.5 now governs every
-    # payload-classified VALUE, not only values written as span attributes, and
-    # §8.7 gives this one a direct-application arm because it has no span
-    # attribute to inherit a cap from.
-    #
-    # Do not re-derive the old behaviour from 0118 alone; 0119 is the governing
-    # text and it is later.
+    # An emitted error_message is capped, via `_capped_error_message` below:
+    # §5.5.5 governs every payload-classified value, not only span attributes
+    # (0119).
     def _emits_harvested_error_message(self) -> bool:
-        # A failed observation's error_message is harvested exception text, so the
-        # provider-payload flag governs it (0118) for every failure category and on
-        # every provider observation -- the category does not tell you what the
-        # string contains, and a provider 4xx routinely quotes the request or the
-        # flagged prompt.
+        # error_message is harvested exception text, so the provider-payload
+        # flag governs it (0118): a provider 4xx routinely quotes the request or
+        # the flagged prompt, and the error category does not tell you which.
         #
-        # There is no separate isolation check: once the flag covers the field the
-        # §6 arms already decide every configuration. Flag on, nothing is emitted
-        # to suppress; flag off on an isolated provider, it emits legitimately;
-        # flag off on a detected shared provider, construction raised; flag off
-        # where isolation could not be established, suppress-all set the flag; flag
-        # off with the caller opted in, it emits as an acknowledged leak.
+        # No separate isolation check is needed; once the flag covers the field
+        # the §6 arms already decide every configuration.
         return self._emits_provider_payload()
 
     async def __call__(
@@ -681,15 +644,10 @@ class LangfuseObserver:
             self._open_trace(invocation_id, correlation_id, event)
 
         inv_state = self._inv_states[invocation_id]
-        # Cache the fan-out node's parent_node_name from its own
-        # started event so synthetic per-instance dispatch observations
-        # can attach metadata.fan_out_parent_node_name (the inner
-        # events from inside the fan-out don't carry fan_out_config
-        # themselves; this cache bridges). fan_out_config is set only on
-        # the NODE's own events, so it alone identifies them -- NOT
-        # ``fan_out_index is None``, which would miss a fan-out node nested
-        # inside an outer fan-out instance (its own event carries the OUTER
-        # instance index), leaving the inner dispatch unsynthesized.
+        # Inner events carry no fan_out_config, so cache it here for the
+        # synthetic per-instance dispatches. Identify the node's own events by
+        # fan_out_config, NOT by `fan_out_index is None`: a nested fan-out node
+        # carries the OUTER instance index on its own event.
         if event.fan_out_config is not None:
             inv_state.fan_out_parent_node_name[event.namespace] = event.fan_out_config.parent_node_name
 
@@ -812,29 +770,12 @@ class LangfuseObserver:
     # ------------------------------------------------------------------
 
     def _handle_metadata_augmentation(self, event: MetadataAugmentationEvent) -> None:
-        # Spec proposal 0040 §3.4 MUST: open observations whose lineage
-        # ancestor-or-equals the augmenting context get the entries
-        # applied in place via the Langfuse handle's
-        # ``update(metadata=...)`` method. Sibling instances / branches
-        # and ancestors above the containment are skipped (same scoping
-        # rule as the OTel mapping — see
-        # ``OTelObserver._handle_metadata_augmentation`` for the algebra).
-        #
-        # For an outermost-serial augmenter (FI=None, BN=None), the
-        # invocation's Trace itself is updated via
-        # ``client.update_trace`` so the augmented keys land on
-        # ``trace.metadata.<key>`` for §8.4-style top-level filtering.
-        # Inside a fan-out instance / parallel-branches branch the
-        # Trace is OUT of scope (it's shared with siblings); only the
-        # innermost containment + the augmenter's own subtree update.
-        #
-        # Per-instance / per-branch isolation:
-        # ``set_invocation_metadata`` runs in the calling node's task
-        # whose Context already carries the per-async-context COW
-        # mapping (proposal 0034 §3.4). The augmentation event's
-        # ``entries`` are that delta only — applying them to matching
-        # open observations preserves the per-async-context isolation
-        # 029 / 030 encode.
+        # 0040 §3.4: update observations whose lineage ancestor-or-equals the
+        # augmenting context; skip siblings and ancestors above it. An
+        # outermost-serial augmenter also updates the Trace, which is otherwise
+        # shared with siblings and out of scope. `entries` is the
+        # per-async-context delta only (0034 §3.4), which is what isolates
+        # siblings.
         from openarmature.observability.correlation import current_invocation_id
 
         invocation_id = current_invocation_id()
@@ -908,16 +849,11 @@ class LangfuseObserver:
     # ------------------------------------------------------------------
 
     def _handle_failure_isolated(self, event: FailureIsolatedEvent) -> None:
-        # Render the FailureIsolationMiddleware catch as a marker observation.
-        # The wrapped node's observation is typically already closed by delivery
-        # time (the node-body raise fires the node's completed event before the
-        # middleware recovers), so this usually takes the orphan fallback: the
-        # marker parents under the nearest enclosing wrapper on its lineage
-        # (proposal 0084 §5.5), matching the OTel observer -- which routes
-        # _handle_failure_isolated through _resolve_llm_parent -- for
-        # cross-observer parity (the enclosing fan-out instance / branch /
-        # subgraph observation, else None -> the Trace itself). The wrapped
-        # node's name rides on ``metadata.failure_isolation_node`` regardless.
+        # The wrapped node's observation is usually closed by delivery time
+        # (its completed event fires before the middleware recovers), so this
+        # normally takes the §5.5 orphan fallback and parents under the nearest
+        # enclosing wrapper. The OTel observer routes the same event through
+        # `_resolve_llm_parent` to keep the two in agreement.
         from openarmature.observability.correlation import (
             current_correlation_id,
             current_invocation_id,
@@ -983,19 +919,9 @@ class LangfuseObserver:
     # ------------------------------------------------------------------
 
     def _handle_invocation_started(self, event: InvocationStartedEvent) -> None:
-        # Spec proposal 0043 §8.4.1 *Trace input/output sourcing*.
-        # Lazy-open the Trace if this is the first signal for the
-        # invocation_id (no node event has fired yet), then resolve
-        # ``trace.input`` via the three-lever decision tree:
-        #   1. Hook supplied AND returns non-None → hook value.
-        #   2. ``disable_state_payload`` is False → raw initial_state
-        #      serialized (subject to payload_byte_cap truncation).
-        #   3. Otherwise → minimal stub:
-        #        {entry_node, correlation_id}.
-        # The stub carries no application payload — both fields are
-        # already in ``trace.metadata``; surfacing them on
-        # ``trace.input`` makes the Langfuse Traces list view
-        # scannable without revealing state shape.
+        # 0043 §8.4.1 trace input/output sourcing. The stub arm duplicates two
+        # fields already in trace.metadata so the Traces list view is scannable
+        # without exposing state shape.
         if event.invocation_id not in self._inv_states:
             self._open_trace_lazy(event.invocation_id, event.correlation_id, event.entry_node)
         input_value = self._resolve_trace_input(event)
@@ -1065,21 +991,10 @@ class LangfuseObserver:
 
     @staticmethod
     def _state_to_jsonable(state: Any) -> Any:
-        # Best-effort conversion of a State instance to a JSON-able
-        # shape. Pydantic models expose ``model_dump`` directly; other
-        # objects fall through to a str representation. The serialized
-        # form is what ends up on the Langfuse Trace's
-        # ``input`` / ``output`` field.
-        #
-        # ``mode="json"`` (rather than the default Python mode) coerces
-        # non-JSON-native types — ``datetime``, ``UUID``, ``Decimal``,
-        # etc. — into JSON-compatible strings BEFORE the dict reaches
-        # the downstream ``json.dumps`` truncation path. Without it the
-        # truncation path raises ``TypeError`` and the observer's
-        # ``__call__`` raise is swallowed by the engine's warnings-only
-        # observer-isolation contract, leaving ``trace.input`` /
-        # ``trace.output`` silently blank on states containing those
-        # types.
+        # `mode="json"` coerces datetime / UUID / Decimal before the value
+        # reaches `json.dumps`. Without it that raises TypeError, the engine
+        # swallows an observer raise as a warning, and trace.input / output go
+        # silently blank for any state carrying those types.
         dumper = getattr(state, "model_dump", None)
         if callable(dumper):
             try:
@@ -1089,15 +1004,9 @@ class LangfuseObserver:
         return str(state)
 
     def _client_trace(self, *, id: str, name: str | None, metadata: dict[str, Any]) -> None:
-        # Proposal 0064 §8.4.1: every Trace open routes through here so the
-        # sessionId / userId promotions apply uniformly across the main,
-        # lazy, and detached trace-open sites.
-        #   - trace.userId: promoted from the recognized ``userId`` caller
-        #     key (already merged into ``metadata`` by _apply_caller_metadata).
-        #   - trace.sessionId: sourced from openarmature.session_id (sessions
-        #     capability, observability §5.6 / proposal 0020). python has no
-        #     session_id source until 0020 lands, so it is unset (None) today;
-        #     this is the single hook 0020 wires the source into.
+        # Every Trace open routes through here so the §8.4.1 userId / sessionId
+        # promotions apply at the main, lazy and detached sites alike.
+        # sessionId has no source until 0020 lands; this is the hook it wires.
         self.client.trace(
             id=id,
             name=name,
@@ -1134,15 +1043,9 @@ class LangfuseObserver:
         self._inv_states[invocation_id] = _InvState(trace_id=invocation_id)
 
     def _open_trace(self, invocation_id: str, correlation_id: str | None, event: NodeEvent) -> None:
-        # ``entry_node`` and the trace name MUST identify the outer-graph
-        # entry, not whichever node fired first. Subgraph wrappers do not
-        # emit their own events — when the outer entry is a SubgraphNode
-        # the first event the observer sees comes from inside the
-        # subgraph (with ``event.namespace = (wrapper, inner)`` and
-        # ``event.node_name = inner``). Using ``event.namespace[0]``
-        # walks back to the outermost prefix component, which IS the
-        # outer entry by construction (the graph engine fires inner
-        # events under the wrapper's namespace).
+        # `namespace[0]`, not `node_name`: a subgraph wrapper emits no event of
+        # its own, so when the outer entry is one the first event seen comes
+        # from inside it and would name the inner node.
         entry_node = event.namespace[0] if event.namespace else event.node_name
         metadata: dict[str, Any] = {
             "entry_node": entry_node,
@@ -1177,15 +1080,9 @@ class LangfuseObserver:
         )
 
     def _resolve_parent_observation_id(self, inv_state: _InvState, event: NodeEvent) -> str | None:
-        # Parent precedence (innermost wins):
-        #   1. Per-instance fan-out / per-branch dispatch observation on the
-        #      event's lineage (the enclosing wrapper) — resolved by the shared
-        #      helper below.
-        #   2. Subgraph dispatch observation at any matching ancestor prefix
-        #      (also the shared helper).
-        #   3. Leaf node observation at any matching ancestor prefix, walked
-        #      longest-first.
-        #   4. None — the Trace itself becomes the implicit parent.
+        # Innermost wins: per-instance dispatch on the event's lineage, then
+        # subgraph dispatch at an ancestor prefix, then a leaf node observation
+        # walked longest-first, else the Trace.
         wrapper_id = self._resolve_enclosing_wrapper_observation_id(
             inv_state,
             namespace=event.namespace,
@@ -1290,13 +1187,8 @@ class LangfuseObserver:
         correlation_id: str | None,
         event: NodeEvent,
     ) -> None:
-        # Open synthetic subgraph dispatch / fan-out per-instance
-        # dispatch observations for any ancestor prefix of this
-        # event's namespace that doesn't have one yet. Also closes
-        # subgraph dispatch observations whose subtree we've left.
-        #
-        # Called BEFORE opening the leaf observation, so descendants
-        # find the right parent via _resolve_parent_observation_id.
+        # Must run BEFORE the leaf observation opens, so descendants resolve
+        # the right parent.
         namespace = event.namespace
         # 1. Close subgraph dispatch observations whose prefix is no
         #    longer an ancestor of the current namespace.
@@ -1385,14 +1277,10 @@ class LangfuseObserver:
                         inv_state, correlation_id, prefix, event
                     )
                 continue
-            # A parallel-branches or fan-out NODE prefix already has its own
-            # leaf observation (from the NODE's own started event), unlike a
-            # transparent subgraph wrapper. Don't synthesize a duplicate
-            # subgraph wrapper observation over it; inner branch / instance
-            # events parent under the NODE observation via the
-            # _resolve_parent_observation_id leaf fallback. Mirrors the OTel
-            # observer's same guard (it skips the synthetic subgraph span at a
-            # pb / fan-out NODE depth for the same reason).
+            # A fan-out or parallel-branches NODE already has its own leaf
+            # observation, unlike a transparent subgraph wrapper, so
+            # synthesizing one here would duplicate it. The OTel observer
+            # carries the same guard.
             if (
                 prefix in inv_state.parallel_branches_parent_node_name
                 or prefix in inv_state.fan_out_parent_node_name
@@ -1552,45 +1440,16 @@ class LangfuseObserver:
         prefix: tuple[str, ...],
         event: NodeEvent,
     ) -> None:
-        # Mint a fresh Trace for the detached subtree. The main Trace's
-        # dispatch observation surfaces the link via
-        # metadata.detached_child_trace_ids; the detached Trace gets
-        # its own dispatch observation that descendants parent under.
-        #
-        # Asymmetry note vs. _open_detached_fan_out_instance_trace:
-        # subgraphs are namespace-prefix-only constructs with no
-        # per-subgraph node event of their own. The observer never
-        # opens a leaf Span observation for the subgraph itself, only
-        # synthesized dispatch observations. To carry the cross-Trace
-        # link in the main Trace's shape, this helper opens an extra
-        # "link" Span observation in the main Trace — a small
-        # observation whose subtree is empty but whose
-        # detached_child_trace_ids metadata points at the new Trace.
-        # Dashboard users see two observations named ``prefix[-1]``:
-        # one in the main Trace (link with link metadata, no subtree)
-        # and one in the detached Trace (the real dispatch with the
-        # subgraph subtree under it).
-        #
-        # Detached fan-out instances, by contrast, already have a
-        # parent observation in the main Trace (the fan-out node's
-        # leaf observation opened on its own started event). The
-        # link metadata accumulates on that pre-existing observation
-        # instead of synthesizing a separate link observation.
+        # A subgraph has no node event of its own, so the main Trace holds no
+        # observation to hang the cross-Trace link on and this opens an empty
+        # one for it. A detached fan-out instance needs no equivalent: the
+        # fan-out node's own observation already exists to carry the link.
         detached_trace_id = str(uuid.uuid4())
-        # Open the link observation in the main Trace and update its
-        # metadata immediately — the array-form preserves §8.5's
-        # "string array, one entry per detached child" shape so
-        # later detached siblings under the same parent can append.
+        # §8.5 array form so later detached siblings can append; §8.4.2
+        # `detached: True` marks the dispatching side.
         #
-        # `detached: True` per §8.4.2 (proposal 0042) — the
-        # parent-side dispatching observation marks itself when it
-        # fires a detached child.
-        #
-        # Note: `subgraph_name` is intentionally NOT on this link
-        # observation. Per §5.3 + §8.5, in detached mode the wrapper
-        # role migrates to the detached trace's dispatch observation;
-        # the main trace's link observation IS the SubgraphNode span
-        # (no wrapper role) and so does not carry `subgraph_name`.
+        # No `subgraph_name` here: in detached mode the wrapper role migrates
+        # to the detached trace's dispatch observation (§5.3, §8.5).
         link_metadata: dict[str, Any] = {
             "detached_child_trace_ids": [detached_trace_id],
             "detached": True,
@@ -1624,31 +1483,14 @@ class LangfuseObserver:
             detached_metadata["correlation_id"] = correlation_id
         _apply_caller_metadata(detached_metadata, event.caller_invocation_metadata)
         identity = _subgraph_identity_at(event, len(prefix))
-        # The detached trace's wrapper observation IS the migrated
-        # SubgraphNode wrapper. Per the resolution in coord thread
-        # ``clarify-subgraph-name-semantics`` and fixture 033's
-        # expected shape, the observation name uses the compiled-
-        # subgraph identity (e.g., ``"long_running_workflow"``); its
-        # ``metadata.subgraph_name`` carries the same identity.
-        #
-        # When the identity is empty (BC path — ``SubgraphNode``
-        # constructed without ``subgraph_identity``), the two
-        # diverge intentionally: the observation NAME falls back to
-        # the wrapper node name (an empty observation name is worse
-        # UX than a wrapper-named one), but ``metadata.subgraph_name``
-        # stays empty per §5.3's "empty string when no identity is
-        # tracked" contract. Filtering on
-        # ``metadata.subgraph_name == "X"`` then matches only
-        # wrappers explicitly registered with
-        # ``subgraph_identity = "X"``, not every wrapper that
-        # happens to be named ``X``.
+        # Name and `subgraph_name` both take the compiled-subgraph identity
+        # (fixture 033). With no identity the name falls back to the wrapper
+        # node while `subgraph_name` stays empty per §5.3, so filtering on it
+        # matches only wrappers actually registered with that identity.
         wrapper_obs_name = identity or prefix[-1]
         self._client_trace(id=detached_trace_id, name=wrapper_obs_name, metadata=detached_metadata)
-        # §8.4.2 (proposal 0042): `detached: true` lives on the
-        # PARENT-side dispatching observation (the link observation
-        # above), not on the dispatch observation IN the detached
-        # trace. The detached-side observation is the migrated
-        # SubgraphNode wrapper and carries `subgraph_name` only.
+        # §8.4.2: `detached: true` belongs on the parent-side link observation
+        # above, not here. This side carries `subgraph_name` only.
         dispatch_metadata: dict[str, Any] = {
             "subgraph_name": identity,
         }
@@ -1661,9 +1503,8 @@ class LangfuseObserver:
             metadata=dispatch_metadata,
             parent_observation_id=None,
         )
-        # Per proposal 0045: detached subgraph wrapper sits in its own
-        # trace; chain still mirrors the parent-trace path so the
-        # augmentation lookup is consistent with non-detached.
+        # 0045: the chain mirrors the parent-trace path even though this sits
+        # in its own trace, so the augmentation lookup stays uniform.
         chain_len = len(prefix)
         inv_state.subgraph_observations[prefix] = _OpenObservation(
             handle=handle,
@@ -1679,18 +1520,9 @@ class LangfuseObserver:
         prefix: tuple[str, ...],
         event: NodeEvent,
     ) -> None:
-        # Mint a fresh Trace per instance. The fan-out node's own
-        # Span observation in the parent Trace accumulates the
-        # detached_child_trace_ids array (one entry per instance);
-        # each detached Trace gets its own per-instance dispatch
-        # observation that inner-node observations parent under.
-        #
-        # See _open_detached_subgraph_trace's docstring for why the
-        # detached-fan-out path doesn't synthesize a separate "link"
-        # observation in the main Trace: the fan-out node already
-        # has a leaf observation there (opened on its started event),
-        # so the link metadata accumulates on that existing
-        # observation rather than on a parallel link observation.
+        # One Trace per instance. No separate link observation is synthesized
+        # here, unlike the subgraph path: the fan-out node already has a leaf
+        # observation in the main Trace to accumulate the link metadata on.
         detached_trace_id = str(uuid.uuid4())
         # Accumulate the per-fan-out link-ids list via the side cache
         # so each new instance appends to the array on the fan-out
@@ -1783,18 +1615,12 @@ class LangfuseObserver:
     def _find_node_observation(
         self, inv_state: _InvState, prefix: tuple[str, ...], event: NodeEvent
     ) -> _OpenObservation | None:
-        # Find a NODE's own open leaf observation at ``prefix`` (the fan-out or
-        # parallel-branches NODE, whose per-instance / per-branch dispatches
-        # parent under it). Match the ENCLOSING lineage, not just the namespace:
-        # when the NODE is itself nested inside an outer fan-out instance /
-        # branch, several instances of the same NODE namespace are open at once
-        # under concurrency, so a namespace-only scan would bind the wrong one.
-        # Disambiguate by the full enclosing chain (proposal 0084): the NODE
-        # observation sits on the event's ancestor path iff its stored lineage
-        # chain is a prefix of the event's -- the same lineage-boundary rule the
-        # augmentation scoping uses (``_observation_chain_on_path``). Matching
-        # the innermost scalar alone is ambiguous at >=3 levels, where an
-        # intermediate instance index repeats across concurrent outer instances.
+        # Matched on the enclosing lineage, not the namespace alone: when this
+        # node is itself nested, several instances of the same namespace are
+        # open concurrently and a namespace-only scan binds the wrong one. The
+        # node is on the event's ancestor path iff its chain is a prefix of the
+        # event's (0084). The innermost scalar alone is ambiguous at >=3 levels,
+        # where an intermediate index repeats across outer instances.
         for key, observation in inv_state.open_observations.items():
             if key[0] == prefix and _observation_chain_on_path(
                 observation, event.fan_out_index_chain, event.branch_name_chain
@@ -1910,14 +1736,9 @@ class LangfuseObserver:
     # Generation observation lifecycle (LLM provider events)
     # ------------------------------------------------------------------
 
-    # v0.13.0 (proposals 0049 + 0057 + 0058): both Generation
-    # observation lifecycles are driven by typed events — success path
-    # from LlmCompletionEvent, failure path from LlmFailedEvent. Both
-    # handlers open + close in one shot at typed-event arrival, with
-    # start_time back-dated by latency_ms so duration reflects the
-    # adapter-boundary measurement rather than dispatcher queue delay.
-    # The provider dropped sentinel-namespace NodeEvent emission for
-    # LLM events entirely in this release.
+    # Both Generation lifecycles open and close in one shot on the typed event,
+    # with start_time back-dated by latency_ms so the duration reflects the
+    # adapter boundary rather than dispatcher queue delay.
     def _handle_typed_llm_completion(self, event: LlmCompletionEvent) -> None:
         """Open + close the Generation observation from the typed
         LlmCompletionEvent (success path)."""
@@ -2127,19 +1948,8 @@ class LangfuseObserver:
             calling_fan_out_index_chain=event.fan_out_index_chain,
             calling_branch_name_chain=event.branch_name_chain,
         )
-        # §8.4.6 metadata: tool name always, tool_call_id when present.
-        # Caller metadata FIRST, same ordering as every other handler, so an
-        # OA-emitted key wins a collision. It goes on at all because §8.4.2 maps
-        # the caller set to `observation.metadata.<key>` on EVERY Observation:
-        # the table scopes its other rows explicitly ("fan-out node Span
-        # observation only"), so the unscoped wording is deliberate.
-        #
-        # This handler carried NO caller metadata until now, which made the Tool
-        # observation the only one of the four provider observations to drop it,
-        # and left the two observers disagreeing about the same event: the OTel
-        # `_handle_tool_call` has applied it all along. The LLM handlers get it
-        # via `_typed_event_metadata`, and embedding / rerank apply it directly,
-        # so this was the one path with neither.
+        # §8.4.6 metadata. Caller set first, as in every handler, so an
+        # OA-emitted key wins a collision; §8.4.2 puts it on every observation.
         metadata: dict[str, Any] = {}
         _apply_caller_metadata(metadata, event.caller_invocation_metadata)
         metadata["openarmature_tool_name"] = event.tool_name
@@ -2169,16 +1979,10 @@ class LangfuseObserver:
             # is withheld statusMessage stays null rather than taking the message
             # instead, which would smuggle the harvested string out.
             if self._emits_harvested_error_message():
-                # BOTH surfaces are capped. §5.5.5 as 0119 restates it governs
-                # every payload-classified VALUE, not every payload-classified
-                # FIELD, and a Tool failure renders the harvested string twice:
-                # once in metadata and once as the status message. Capping one
-                # and not the other would leave the uncapped copy carrying the
-                # whole exception, which is the outcome the cap exists to stop.
-                #
-                # The other `status_message` writes in this file take
-                # `error_category`, a classification token rather than harvested
-                # content, and are correctly uncapped.
+                # Both surfaces capped: §5.5.5 governs the payload-classified
+                # VALUE, and a Tool failure renders it twice. The other
+                # `status_message` writes take `error_category`, a
+                # classification token, and stay uncapped.
                 capped = self._capped_error_message(event.error_message)
                 metadata["error_message"] = capped
                 status_message = capped
@@ -2444,15 +2248,10 @@ class LangfuseObserver:
         calling_fan_out_index_chain: tuple[int | None, ...],
         calling_branch_name_chain: tuple[str | None, ...],
     ) -> str | None:
-        # Calling-node identity precedence:
-        #   1. Exact-match leaf node observation at the calling key (the
-        #      lineage-disambiguated calling node).
-        #   2. Orphan fallback (proposal 0084 §5.5 "Lineage-resolved parent"):
-        #      the calling node's observation is not open (a middleware / wrapper
-        #      call), so the Generation parents under the nearest enclosing
-        #      wrapper observation per §4.3, resolved via the lineage chain to
-        #      the correct inner instance -- the same ancestor walk the node
-        #      parent uses, not the old top-level-scalar shortcut. None -> Trace.
+        # Exact-match the calling node's observation first. If it is not open
+        # (a middleware or wrapper call) take the §5.5 orphan fallback: parent
+        # under the nearest enclosing wrapper on the lineage chain, else the
+        # Trace.
         key: _StackKey = (
             calling_namespace_prefix,
             calling_attempt_index,
@@ -2523,34 +2322,20 @@ class LangfuseObserver:
                 budget["total_max_tokens"] = total_max
             if budget:
                 metadata["token_budget"] = budget
-            # §8.4.3 (proposal 0109): a flat sibling token_budget_exceeded boolean
-            # gives the Langfuse FAILURE path parity with the OTel
-            # openarmature.llm.token_budget.exceeded attribute. Because this
-            # metadata is shared with the failed Generation, the flag SURVIVES the
-            # ERROR-precedence rule (the ERROR level / statusMessage still win as
-            # the primary signal). Same evaluation as the OTel span + §11 counter:
-            # true if any evaluated bound was crossed, false if all held, ABSENT
-            # when no bound is evaluable (a not-reported counter is not evaluated,
-            # per 0101), mirroring the attribute's suppression from a null counter.
-            # Two known limitations, both pending a spec follow-up: (a) the flag
-            # reflects the TERMINAL attempt's usage, so on a RETRIED call it can
-            # differ from the OTel per-attempt attribute -- the parity is of the
-            # FORMULA, not of per-attempt values, an intentional consequence of the
-            # terminal-only Generation; (b) the caller-metadata collision
-            # this key once shared with the token_budget bounds is CLOSED: 0119
-            # reserved `token_budget` / `token_budget_exceeded`, so a caller
-            # invocation-metadata key of either name is now rejected at the
-            # invoke() boundary rather than shadowing the emitted value.
+            # §8.4.3 (0109): parity with the OTel token_budget.exceeded
+            # attribute. Absent, not false, when no bound is evaluable (0101).
+            #
+            # A Generation is terminal-only, so on a retried call this reflects
+            # the last attempt and can differ from the OTel per-attempt value.
+            # The parity is of the formula, not of per-attempt numbers.
             evaluations = _token_budget_evaluations(token_budget, event.usage)
             if evaluations:
                 metadata["token_budget_exceeded"] = any(ev["actual"] > ev["max"] for ev in evaluations)
         if event.caller_invocation_metadata is not None:
             _apply_caller_metadata(metadata, event.caller_invocation_metadata)
-        # Response-side metadata. A completion always carries it; a
-        # structured_output_invalid failure also carries it (proposal 0082),
-        # since its wire response was intact, so finish_reason (the truncation
-        # signal) and the response identity render on the failed Generation too.
-        # Every other failure category received no response and renders none.
+        # A `structured_output_invalid` failure carries response-side metadata
+        # too (0082): its wire response was intact. Other failure categories
+        # received no response.
         if isinstance(event, LlmCompletionEvent):
             renders_response_side = True
         else:
@@ -2628,14 +2413,9 @@ class LangfuseObserver:
         self._inv_states[invocation_id] = _InvState(trace_id=invocation_id)
 
     def _maybe_truncate_for_input(self, value: Any) -> Any:
-        # Returns the native value (list of message dicts) when it
-        # fits the cap, or the truncated marker-bearing string when
-        # it doesn't. The list-or-str union return is intentional per
-        # spec §8.7: the unparseable JSON IS the truncation signal —
-        # surfacing the marker preserves the diagnostic without
-        # faking a parse, and the Langfuse UI renders the string view
-        # rather than the structured-input view. Callers MUST NOT
-        # assume the return value is JSON-parseable.
+        # The list-or-str union is deliberate (§8.7): over the cap this returns
+        # the marker string, and the unparseable JSON IS the truncation signal.
+        # Callers cannot assume the result parses.
         serialized = self._serialize_payload_value(value)
         truncated = _truncate(serialized, self.payload_byte_cap)
         if truncated is None:
@@ -2644,21 +2424,13 @@ class LangfuseObserver:
 
     def _capped_error_message(self, message: str) -> str:
         """A failed observation's ``error_message``, capped for emission."""
-        # The cap is §8.7's. Applied DIRECTLY, under THIS observer's
-        # `payload_byte_cap`: the value has no span attribute to inherit a cap
-        # from, which is why §8.7 gives it
-        # a direct-application arm, and an observer MUST NOT take the OTel
-        # observer's cap for it. The two are configured independently and a
-        # deployment can set one and leave the other at its default.
+        # §8.7 direct-application arm: no span attribute carries this value, so
+        # it inherits no cap and takes this observer's own `payload_byte_cap`,
+        # never the OTel observer's.
         #
-        # Encoding is guarded because this runs on the FAILURE path, where the
-        # value is harvested exception text and is the likeliest string in the
-        # observer to carry a lone surrogate: a `FileNotFoundError` naming a
-        # surrogateescape-decoded path, or a provider body decoded the same way.
-        # `"\udcff".encode("utf-8")` raises, and an observer that raises is only
-        # `warnings.warn`-ed by the engine, so the whole failed observation would
-        # vanish and the failure path would take out its own reporting. Degrade
-        # the one field instead.
+        # The encode is guarded because harvested exception text can carry a
+        # lone surrogate, which raises. The engine only warns on an observer
+        # raise, so that would drop the observation reporting the failure.
         try:
             truncated = _truncate(message, self.payload_byte_cap)
         except UnicodeEncodeError:

@@ -209,29 +209,20 @@ class FanOutNode[ParentT: State, ChildT: State]:
         # ``context.fan_out_progress_state``; first-run constructs a
         # fresh one with all instances ``not_started``.
         #
-        # The key carries the ENCLOSING CONCURRENCY lineage, not just the
-        # namespace + node name, on BOTH axes that can put two live executions of
-        # the same fan-out node at the same namespace.
+        # The key carries the ENCLOSING CONCURRENCY lineage on BOTH axes, since
+        # either can put two live executions of the same fan-out node at the
+        # same namespace: nesting inside an outer instance repeats the namespace
+        # per instance, and nesting inside a parallel branch repeats it per
+        # branch, because branch names never enter the namespace.
         #
-        # A fan-out nested inside an outer fan-out instance has the same namespace
-        # for every outer instance. A fan-out nested inside a parallel BRANCH has
-        # the same namespace for every branch, because branch names do not enter
-        # the namespace at all. Either way, without the lineage the shared dict
-        # collides across concurrent enclosing contexts and the second execution
-        # finds the first's instances already ``completed`` and rolls its results
-        # forward -- returning results it never computed.
+        # Without both axes the shared dict collides and the second execution
+        # finds the first's instances already ``completed``, rolling forward
+        # results it never computed. Nothing surfaces it: a branch emits no
+        # inner node events, and a single ``await`` in the leaf body hides the
+        # interleaving, so a regression test here must not yield in the leaf.
         #
-        # The branch axis was missing, and its absence was not visible: a branch
-        # descent contributes only None entries to fan_out_index_chain, which the
-        # fan-out comprehension filters out, so both branches built an identical
-        # key. The branch also emitted no inner node events, so no observer could
-        # see the work had not happened. It is schedule-dependent -- a single
-        # ``await`` in the leaf body hides it -- which is why a regression test
-        # here must not yield in the leaf.
-        #
-        # Top-level fan-outs contribute neither axis, so both lineages are empty
-        # there, matching the resume restore (which defaults both to empty) and
-        # leaving top-level resume unaffected.
+        # A top-level fan-out contributes neither axis, so both lineages are
+        # empty and match what the resume restore defaults to.
         key = fan_out_progress_key(
             context.namespace_prefix,
             self.name,
@@ -248,41 +239,27 @@ class FanOutNode[ParentT: State, ChildT: State]:
             )
             context.fan_out_progress_state[key] = exec_state
         elif exec_state.instance_count != instance_count:
-            # Per spec §10.11 + §10.10 (proposal 0029): a saved
-            # ``instance_count`` that differs from the resumed run's
-            # resolved count MUST raise ``checkpoint_record_invalid``
-            # before any fan-out instance work runs on this path. The
-            # pre-0029 pad/truncate behavior would silently drop
-            # ``completed`` contributions on shrink (breaking §10.11.1's
-            # exactly-once guarantee) and dispatch unsaved work on grow
-            # (violating §10.5's idempotency framing). The strict raise
-            # surfaces the divergence to the user; they cohere inputs
-            # or restart cleanly.
-            # Local import to avoid an engine ↔ checkpoint package cycle
-            # at module load (mirrors the existing
-            # ``CheckpointSaveFailed`` imports below in this file).
+            # §10.11 + §10.10: a saved ``instance_count`` differing from the
+            # resumed run's resolved count MUST raise
+            # ``checkpoint_record_invalid`` before any instance work runs.
+            # Padding or truncating instead would drop ``completed``
+            # contributions on shrink, breaking §10.11.1 exactly-once, and
+            # dispatch unsaved work on grow.
+            #
+            # Local import to avoid an engine/checkpoint cycle at module load.
             from openarmature.checkpoint.errors import CheckpointRecordInvalid  # noqa: PLC0415
 
-            # ``context.resume_invocation`` identifies the SAVED record
-            # being validated (per spec §10.4 step 3); ``context.invocation_id``
-            # is freshly minted for the resumed run (step 4). The fresh-
-            # run fallback is defensive only — the count-drift path can
-            # only fire on resume since fan_out_progress_state is empty
-            # on a fresh first run.
+            # ``resume_invocation`` names the SAVED record being validated
+            # (§10.4 step 3); ``invocation_id`` is minted fresh for the resumed
+            # run (step 4). The fresh-run fallback is defensive: the count-drift
+            # path fires only on resume, since fan_out_progress_state is empty
+            # on a first run.
             #
-            # That claim was FALSE for sibling parallel branches until the
-            # branch axis joined the key: two branches whose subgraphs held a
-            # same-named fan-out over different item counts collided on a FRESH
-            # run, and the second branch raised here with a message about a
-            # checkpoint record that did not exist. Adding the branch axis is
-            # what makes the sentence above true.
-            #
-            # The other side of that: a branch-nested fan-out's restored entry
-            # now carries an empty branch lineage and can never be found by a
-            # re-entering execution, so this MUST raise is unreachable for that
-            # shape and a genuine count drift there resumes by re-running rather
-            # than by raising. That is the §10.11 no-mis-skip floor, and closing
-            # it needs a branch lineage on the record itself.
+            # Unreachable for a branch-nested fan-out: its restored entry
+            # carries an empty branch lineage that no re-entering execution can
+            # match, so a genuine count drift there resumes by re-running
+            # instead of raising. That is the §10.11 no-mis-skip floor, and
+            # closing it needs a branch lineage on the record itself.
             raise CheckpointRecordInvalid(
                 context.resume_invocation or context.invocation_id,
                 f"fan_out {self.name!r} at namespace {context.namespace_prefix!r}: "

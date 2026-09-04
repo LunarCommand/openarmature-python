@@ -150,6 +150,43 @@ User-facing docs live in `docs/` and build via MkDocs Material; the
 deployed site is at `openarmature.ai`. CI build + deploy is in
 `.github/workflows/docs.yml`. Local preview: `uv run mkdocs serve`.
 
+## Docstrings vs `#` comments
+
+They have different audiences, and the split is not a style preference.
+
+**Docstrings are published.** `mkdocstrings` renders them into
+`docs/reference/*.md` and they surface through `help()`, so a docstring is
+shipped end-user documentation. Write for someone *calling* the API who
+cannot see the implementation: what it does, what the arguments and return
+mean, what it raises, and any constraint the caller has to honour. If a
+sentence only makes sense to someone editing the body, it is not a
+docstring.
+
+**`#` comments are for maintainers**, and carry everything a caller does
+not need: spec section references, MUST / SHOULD / MAY rules, rationale,
+rejected alternatives, and why a line is the way it is. Keep them short
+per the comment rules in the global `CLAUDE.md`.
+
+So these move out of a docstring and into a `#` comment:
+
+- Spec citations (`§8.4.2`, `proposal 0119`, `spec v0.116.0`) and bare
+  prose like "the spec defines" or "the spec requires".
+- Normative language about what an implementation MUST or MAY do. A
+  caller does not implement the spec; we do.
+- Rationale for the implementation, and comparisons to how another
+  module or observer handles the same thing.
+
+Two things stay in docstrings even though they look like spec references:
+a `spec/` **path** (it is a location, not a normative claim) and a
+parameter genuinely named `spec`.
+
+Applies to `tests/` too. A test docstring is read by whoever is deciding
+whether the test still earns its place.
+
+Health check: the median docstring here is 6 lines. Past about 20, ask
+whether the extra is caller-facing documentation or maintainer notes that
+drifted in.
+
 ## Engine design notes that are easy to miss
 
 - `State` is `frozen=True` AND `extra="forbid"`. Nodes that return an

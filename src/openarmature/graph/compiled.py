@@ -320,31 +320,20 @@ def _find_innermost_fan_out_instance_state(
     # fan-out's full key is (namespace_before_fan_out, fan_out_name)
     # where namespace_before_fan_out + (fan_out_name,) == prefix.
     for split in range(len(prefix), 0, -1):
-        # The fan-out at prefix[:split] registered under its ENCLOSING lineage at
-        # its own level, prefix depth split-1. Reconstruct that depth from the
-        # current chains so a fan-out nested inside an outer instance routes to
-        # the right outer instance's entry.
+        # The fan-out at prefix[:split] registered under its enclosing lineage
+        # at depth split-1, so reconstruct that depth from the current chains
+        # and a nested fan-out routes to the right outer instance's entry.
         #
-        # Same builder the registration uses, and BOTH axes slice to
-        # the same depth.  Every descent grows all three of `namespace_prefix`,
-        # `fan_out_index_chain` and `branch_name_chain` by exactly one entry, so
-        # index i of either chain corresponds to `namespace_prefix[i]`.  A branch
-        # descent is no exception: `descend_into_parallel_branch` appends the
-        # parallel-branches NODE name to the namespace in the same call it
-        # appends the branch name to the chain.  (The BRANCH name never enters
-        # the namespace; the node name does.  Conflating those two is what an
-        # earlier version of this comment did, to justify leaving the branch
-        # chain unsliced.)
+        # BOTH axes slice to that depth, using the registration's own builder.
+        # Every descent grows `namespace_prefix` and both chains by one entry,
+        # so chain index i corresponds to `namespace_prefix[i]`; a branch
+        # descent puts the parallel-branches NODE name in the namespace and the
+        # branch name in the chain, in one call.
         #
-        # Unsliced was reachable-wrong rather than harmless: with a branch
-        # descent at or below the candidate fan-out's depth, the key carried
-        # branch entries the registration key did not, so the lookup missed and
-        # `completed_inner_positions` silently lost a position.  It does not fire
-        # today only because branch descent runs with `checkpointer=None`
-        # (observer.py), which makes `_maybe_save_checkpoint` early-return, so
-        # nothing calls this from inside a branch.  That is a policy in another
-        # module, not a property of this key -- slice correctly and the
-        # correctness stops depending on it.
+        # Nothing reaches this from inside a branch today, but only because
+        # branch descent runs with `checkpointer=None` (observer.py). An
+        # unsliced branch axis carries entries the registration key lacks, so
+        # the lookup misses and `completed_inner_positions` loses a position.
         key = fan_out_progress_key(
             prefix[: split - 1],
             prefix[split - 1],
@@ -392,21 +381,16 @@ def _project_fan_out_progress(
     # still order deterministically (preserving the byte-identical-record guarantee).
     for (namespace, name, _fan_out_lineage, branch_lineage), exec_state in sorted(state_dict.items()):
         # A branch-nested fan-out is NOT projected. `FanOutProgress` has no
-        # branch field and the spec keys the record by
-        # `(namespace, fan_out_node_name, enclosing_fan_out_lineage)`
-        # (pipeline-utilities §10.11), so sibling branches -- which share all
-        # three -- would emit entries indistinguishable on the record's own key.
-        # `_restore_fan_out_progress_state` is `out[key] = ...`, so restoring
-        # such a record silently keeps whichever sorted last and discards the
-        # rest.
+        # branch field and §10.11 keys the record by `(namespace,
+        # fan_out_node_name, enclosing_fan_out_lineage)`, which sibling branches
+        # all share, so their entries would be indistinguishable and restore
+        # (`out[key] = ...`) would keep whichever sorted last.
         #
-        # Emitting them buys nothing: restore always rebuilds the branch
-        # component as empty, so a branch-nested re-entry never positively
-        # matches one of these entries and re-runs regardless. Skipping keeps
-        # the record's key invariant intact and prevents an entry no live
-        # execution can ever key to from being restored, never matched, never
-        # popped by the branch-bearing cleanup key, and then re-projected onto
-        # every later save for the rest of the invocation.
+        # Nothing is lost by skipping: restore rebuilds the branch component as
+        # empty, so a branch-nested re-entry never matches such an entry and
+        # re-runs either way. Emitting one would leave a record no live
+        # execution can key to, never popped by the branch-bearing cleanup key
+        # and re-projected onto every later save.
         if branch_lineage:
             continue
         instances = tuple(
@@ -465,25 +449,18 @@ def _restore_fan_out_progress_state(
                     completed_inner_positions=list(inst.completed_inner_positions),
                 )
             )
-        # Key by the persisted enclosing fan-out instance lineage (proposal
-        # 0085 consume-side). The in-memory tracking key's third element is the
-        # non-None fan_out_index chain of the enclosing fan-out instances (see
-        # FanOutNode.run_with_context and _find_innermost_fan_out_instance_state),
-        # so project the record's enclosing_fan_out_lineage down to that same
-        # flat index tuple. This realizes §10.11's no-mis-skip invariant + the
-        # exactly-once extension for free via the existing keyed re-entry:
-        #   - a record entry with a lineage matching the re-entering execution's
-        #     lineage element-for-element is a POSITIVE match, so its completed
-        #     instances are skipped and rolled forward correctly;
-        #   - an empty saved lineage (a flat / top-level / subgraph-nested
-        #     fan-out, OR a legacy pre-0085 record) keys to (), which a non-empty
-        #     re-entering lineage never matches -- the re-entry misses and re-runs
-        #     from scratch rather than applying a different enclosing instance's
-        #     skips (correctness-preserving per §10.7). Empty positively matches
-        #     empty, so flat records resume exactly as before this field existed.
-        # The crash-PRODUCED write side (projecting the rich lineage onto a real
-        # crash record) is a tracked follow-up; until then a real nested-fan-out
-        # crash resumes at the safe re-run floor -- see _project_fan_out_progress.
+        # Key by the persisted enclosing fan-out lineage (0085 consume-side),
+        # projected down to the same flat index tuple the in-memory tracking key
+        # uses. §10.11's no-mis-skip invariant falls out of the keyed re-entry:
+        # a lineage matching element-for-element skips its completed instances,
+        # while an empty saved lineage keys to () and never matches a non-empty
+        # one, so a mismatched record re-runs from scratch rather than applying
+        # another instance's skips (§10.7). Empty matches empty, so flat and
+        # pre-0085 records resume unchanged.
+        #
+        # The write side, projecting the lineage onto a real crash record, is a
+        # tracked follow-up; until then a nested-fan-out crash resumes at the
+        # safe re-run floor. See _project_fan_out_progress.
         lineage = tuple(e.fan_out_index for e in fp.enclosing_fan_out_lineage)
         # The branch axis has no field on the record to source it from, so it
         # restores empty. A branch-nested fan-out re-enters with a NON-empty
@@ -1389,23 +1366,18 @@ class CompiledGraph[StateT: State]:
                 step_result = await self._step_parallel_branches_node(node, current, state, context)
             elif isinstance(node, SubgraphNode):
                 # Subgraph wrappers are transparent to the observer protocol
-                # (per fixture 013): no event is dispatched for the wrapper
-                # itself, the step counter does not advance for it, and any
-                # `RuntimeGraphError` bubbling up from the subgraph's
-                # _invoke is already wrapped with the inner node's identity
-                # — pass it through. Other exceptions (projection errors,
-                # subgraph state-class init errors) escape the spec §4
-                # categories, so we wrap them as NodeException tagged with
-                # the wrapper's name.
+                # (fixture 013): no event for the wrapper, no step advance. A
+                # `RuntimeGraphError` from the subgraph already carries the
+                # inner node's identity, so it passes through; anything else
+                # (projection, subgraph state-class init) escapes the §4
+                # categories and is wrapped as a NodeException tagged with the
+                # wrapper's name.
                 #
-                # Per pipeline-utilities §4: the parent's middleware wraps
-                # the subgraph dispatch as a single atomic call. Subgraph-
-                # internal nodes have their own middleware (from the
-                # subgraph's own CompiledGraph.middleware tuple) and do
-                # NOT see the parent's middleware. Cast erases ChildT
-                # because the dispatcher only needs to invoke `node.run`
-                # and pass the parent's chain — the inner state class
-                # lives on the subgraph's own CompiledGraph.
+                # pipeline-utilities §4: the parent's middleware wraps the
+                # dispatch as one atomic call, and subgraph-internal nodes see
+                # only the subgraph's own middleware. The cast erases ChildT
+                # because the dispatcher only invokes `node.run`; the inner
+                # state class lives on the subgraph's CompiledGraph.
                 sub = cast("SubgraphNode[StateT, State]", node)
                 step_result = await self._step_subgraph_node(sub, current, state, context)
             else:
@@ -1545,13 +1517,10 @@ class CompiledGraph[StateT: State]:
             # any exception that escapes the chain, OUTSIDE this layer.
             attempt_counter[0] += 1
 
-            # Per graph-engine §6 (clarified in v0.16.1): event
-            # emission reads ``attempt_index`` from the ContextVar set
-            # by any enclosing retry middleware — direct (per-node
-            # MW) or transitive (instance / branch MW on a subgraph
-            # the retry re-invokes). The engine itself no longer
-            # writes the var; innermost-wins precedence falls out of
-            # Python's ContextVar token-stack semantics.
+            # graph-engine §6: ``attempt_index`` comes from the ContextVar set
+            # by any enclosing retry middleware, direct or transitive through a
+            # subgraph the retry re-invokes. The engine does not write it, and
+            # innermost-wins falls out of ContextVar token-stack semantics.
             attempt_index = current_attempt_index()
 
             self._dispatch_started(context, current, namespace, step, s, attempt_index=attempt_index)
@@ -1837,32 +1806,20 @@ class CompiledGraph[StateT: State]:
         # hardcoded 0.
         attempt_counter: list[int] = [0]
 
-        # Resolve the fan-out config eagerly so the resolved values
-        # ride on every fan-out node event (per spec proposal 0013,
-        # v0.10.0: ``fan_out_config`` is populated on fan-out node
-        # events including retried attempts). For ``items_field``
-        # mode the count is ``len(parent_state.<items_field>)``; for
-        # ``count`` mode it's ``_resolve_count``. ``_resolve_concurrency``
-        # is pure regardless. Repeating these inside
-        # ``FanOutNode.run_with_context`` is cheap and matches the
-        # values surfaced here.
-        # Lazy import: function-scope to avoid a module-top
-        # textual cycle CodeQL flags. ``fan_out`` has a
-        # TYPE_CHECKING back-reference to this module, so the
-        # static-analyzer view of an importable cycle goes away
-        # when the engine doesn't reach into ``fan_out`` at module
-        # load time. Fires once per fan-out step.
+        # Resolved eagerly so `fan_out_config` rides every fan-out node event
+        # including retried attempts (0013). `FanOutNode.run_with_context`
+        # repeats the resolution, which is cheap and yields the same values.
+        #
+        # Function-scope import: `fan_out` has a TYPE_CHECKING back-reference to
+        # this module, and keeping the import out of module scope is what stops
+        # CodeQL seeing an importable cycle.
         from .fan_out import _resolve_concurrency, _resolve_count  # noqa: PLC0415
 
-        # Resolver failures (callable count/concurrency raising,
-        # ``getattr`` on a malformed state, etc.) used to land inside
-        # ``innermost``'s ``except Exception → NodeException`` block
-        # below and produce a started/completed event pair via the
-        # surrounding dispatches. Hoisting resolution out of
-        # ``run_with_context`` for the eager ``FanOutEventConfig``
-        # build moved them past that scope, so re-establish the
-        # contract here: surface a started/completed pair with
-        # ``fan_out_config=None`` (we never built one) and raise as
+        # Resolution sits outside ``innermost``'s ``except Exception →
+        # NodeException`` scope, so a resolver failure (a callable count or
+        # concurrency raising, ``getattr`` on a malformed state) has to
+        # reproduce that contract here: a started/completed pair with
+        # ``fan_out_config=None``, since none was built, and a
         # ``NodeException``.
         try:
             if node.config.items_field is not None:
@@ -1987,23 +1944,13 @@ class CompiledGraph[StateT: State]:
                     )
                     raise
                 except CheckpointError as e:
-                    # Spec proposal 0012's pairing contract requires
-                    # every started event have a paired completed
-                    # event. CheckpointError categories (notably
-                    # proposal 0029's count-drift raise) are sibling-
-                    # typed to RuntimeGraphError and propagate to the
-                    # invoke() caller unwrapped so callers can branch
-                    # on ``e.category``. To preserve pairing while
-                    # keeping ``NodeEvent.error`` typed as
-                    # ``RuntimeGraphError | None`` per spec §6, the
-                    # completed event carries a ``NodeException``
-                    # wrapper whose ``__cause__`` is the original
-                    # CheckpointError. The bare ``raise`` re-raises
-                    # the active exception (the CheckpointError, not
-                    # the wrapper) so the caller still sees the
-                    # checkpoint category. Mirrors the ``except
-                    # Exception`` branch below structurally; the
-                    # difference is what gets re-raised.
+                    # 0012 pairs every started event with a completed one, but
+                    # a CheckpointError is sibling-typed to RuntimeGraphError
+                    # and must reach the caller unwrapped so they can branch on
+                    # ``e.category``. So the completed event carries a
+                    # ``NodeException`` wrapper, keeping ``NodeEvent.error``
+                    # typed per §6, while the bare ``raise`` re-raises the
+                    # active CheckpointError rather than the wrapper.
                     wrapped = NodeException(node_name=current, cause=e, recoverable_state=s)
                     self._dispatch_completed(
                         context,
@@ -2074,21 +2021,14 @@ class CompiledGraph[StateT: State]:
         # Per proposal 0045: drive per-depth chain ContextVars.
         fan_out_chain_token = _set_fan_out_index_chain(context.fan_out_index_chain)
         branch_chain_token = _set_branch_name_chain(context.branch_name_chain)
-        # Per spec §10.11 the ``fan_out_progress`` entry is "in-flight
-        # only"; the fan-out's own completion save below is the last
-        # point where the entry is needed (proposal 0009: that save
-        # "also finalizes fan_out_progress to mark all instances
-        # complete"). Pop the entry after the save fires, regardless of
-        # whether the fan-out completed normally, short-circuited, or
-        # raised, so subsequent saves in this invocation do not carry
-        # stale fan-out progress and a retry middleware on the fan-out
-        # node sees a fresh tracked state on the second attempt.
-        # Match the lineage-aware key FanOutNode.run registers (namespace, node
-        # name, enclosing fan-out instance lineage, enclosing branch lineage) so a
-        # nested fan-out's cleanup pops its OWN entry, not a sibling's. Both axes
-        # are required: the pop below passes a default, so a key that does not
-        # match the registration silently no-ops and leaves the entry to be
-        # carried into later saves as stale progress.
+        # §10.11 makes the ``fan_out_progress`` entry in-flight only, and the
+        # completion save below is its last use. Pop it after that save on every
+        # exit path, normal, short-circuited or raised, so later saves carry no
+        # stale progress and a retry middleware sees fresh tracked state.
+        #
+        # Key on all four axes FanOutNode.run registers, so a nested fan-out
+        # pops its own entry. The pop passes a default, so a mismatched key
+        # silently no-ops and the entry survives as stale progress.
         progress_key = fan_out_progress_key(
             context.namespace_prefix,
             current,
@@ -2517,21 +2457,14 @@ class CompiledGraph[StateT: State]:
         checkpointer = context.checkpointer
         if checkpointer is None:
             return
-        # Per spec §10.2: NodePosition.namespace is the containing-
-        # graph chain (outermost first), NOT including the node's
-        # own name — distinct from NodeEvent.namespace which
-        # includes it. The two are related by
-        # NodeEvent.namespace == NodePosition.namespace +
-        # (NodePosition.node_name,).
+        # §10.2: NodePosition.namespace excludes the node's own name, unlike
+        # NodeEvent.namespace, so `NodeEvent.namespace ==
+        # NodePosition.namespace + (NodePosition.node_name,)`.
         #
-        # Inner-position scoping (per §10.11.1, in-flight observability
-        # rules): a position from inside a fan-out instance is scoped
-        # to that instance's inner subgraph execution, NOT the outer
-        # graph. It accumulates on the per-instance state's
-        # ``completed_inner_positions`` list rather than the outer
-        # ``completed_positions`` list. The outer list keeps the outer
-        # graph's positions plus the fan-out node's own completion
-        # position (added by ``_step_fan_out_node`` after fan-in).
+        # §10.11.1: a position from inside a fan-out instance is scoped to that
+        # instance and accumulates on its ``completed_inner_positions``. The
+        # outer ``completed_positions`` holds the outer graph's positions plus
+        # the fan-out node's own, added by ``_step_fan_out_node`` after fan-in.
         position = NodePosition(
             namespace=context.namespace_prefix,
             node_name=node_name,
