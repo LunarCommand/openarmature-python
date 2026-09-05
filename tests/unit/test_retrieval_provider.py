@@ -2866,3 +2866,35 @@ async def test_jina_rerank_extras_top_n_without_top_k_rides_untouched() -> None:
     await provider.rerank("q", ["a", "b"], config=RerankRuntimeConfig.model_validate({"top_n": 1}))
     await provider.aclose()
     assert captured[0]["top_n"] == 1
+
+
+async def test_cohere_embed_unrecognized_precision_strings_merge_rather_than_malform() -> None:
+    # §8.4 as 0122 tightens it: the malformed test is STRUCTURAL, never a
+    # VOCABULARY check. A well-typed string the provider does not recognize
+    # merges, and the provider rejects it if unsupported.
+    #
+    # The empty string is the element an implementation reading "not a precision
+    # string" as "not one of the known names" gets wrong, and this mapping did:
+    # the gate carried an `and t` truthiness clause that dropped the whole list
+    # to ["float"]. Fixture 053 case 3 pins it.
+    captured: list[dict[str, Any]] = []
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        captured.append(json.loads(req.content))
+        return httpx.Response(200, json=_cohere_embed_body(id="c", vectors=[[0.1, 0.2]], input_tokens=3))
+
+    provider = _cohere_embed_provider(handler)
+    cfg = EmbeddingRuntimeConfig.model_validate({"embedding_types": ["banana", ""]})
+    await provider.embed(["x"], config=cfg)
+    assert captured[0]["embedding_types"] == ["float", "banana", ""], (
+        "an unrecognized or empty precision string must merge, not read as malformed"
+    )
+
+    # The structural arm is unchanged: a non-string element is still malformed,
+    # and the whole list is dropped rather than partially salvaged.
+    captured.clear()
+    cfg_mixed = EmbeddingRuntimeConfig.model_validate({"embedding_types": ["int8", 7]})
+    await provider.embed(["x"], config=cfg_mixed)
+    assert captured[0]["embedding_types"] == ["float"], (
+        "a non-string element must still drop the whole list, with no partial salvage"
+    )

@@ -701,23 +701,22 @@ class CohereEmbeddingProvider:
         # The wire is order-insensitive here, so none of this carries meaning
         # beyond reproducibility.
         #
-        # A MALFORMED merge-extra -- not a list, or a list with any non-string /
-        # empty element -- is treated as ABSENT and the mapping sends only the
-        # mandatory ["float"]. All-or-nothing (no partial salvage), and no raise
-        # or diagnostic: 0113 (general §6 merge arm, inherited by §8.4) requires
-        # exactly this, as the request-side counterpart of §7's
+        # A MALFORMED merge-extra -- not a list, or a list holding a non-string
+        # element -- is treated as ABSENT and only the mandatory ["float"] is
+        # sent. All-or-nothing, with no raise or diagnostic: 0113's general §6
+        # merge arm requires that, as the request-side counterpart of §7's
         # malformed-ancillary-is-not-reported rule. Salvaging the valid entries
-        # would send a precision set the caller never wrote; failing loud would
-        # make a malformed optional extra call-fatal on a valid request.
-        # Malformation is STRUCTURAL only: a well-typed but
-        # provider-unrecognized precision string is NOT malformed -- it merges,
-        # and the provider rejects it if unsupported.
+        # would send a precision set the caller never wrote.
+        #
+        # Malformation is STRUCTURAL, never a VOCABULARY check (0122 §8.4): a
+        # well-typed string the provider does not recognize merges, INCLUDING
+        # the empty string, and the provider rejects it if unsupported.
         caller_types = request_extras.get("embedding_types")
         embedding_types = ["float"]
         if (
             isinstance(caller_types, list)
             and caller_types
-            and all(isinstance(t, str) and t for t in cast("list[object]", caller_types))
+            and all(isinstance(t, str) for t in cast("list[object]", caller_types))
         ):
             for precision in cast("list[str]", caller_types):
                 if precision not in embedding_types:
