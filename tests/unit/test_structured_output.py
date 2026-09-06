@@ -689,7 +689,7 @@ async def test_fallback_mode_preserves_response_format_on_free_form_calls() -> N
     provider._client.post = capturing_post  # type: ignore[method-assign]
     try:
         caller_extra = {"type": "json_object"}
-        config = RuntimeConfig(extras={"response_format": caller_extra})  # type: ignore[call-arg]
+        config = RuntimeConfig(extras={"response_format": caller_extra})
         await provider.complete(
             [UserMessage(content="hello")],
             config=config,
