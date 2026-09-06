@@ -1182,8 +1182,8 @@ class OpenAIProvider:
         # mapping actually produced it (present in the body), which realizes the
         # "while producing it" semantics for the declared-field realizations and
         # the conditionally-managed response_format.
-        if config is not None and config.model_extra:
-            extras = {k: _canonicalize_dict_keys(v) for k, v in config.model_extra.items()}
+        if config is not None and config.extras:
+            extras = {k: _canonicalize_dict_keys(v) for k, v in config.extras.items()}
             managed: dict[str, ManagedArm] = {
                 key: arm
                 for key, arm in _OPENAI_MANAGED_ARMS.items()
@@ -1968,7 +1968,7 @@ def _request_extras_from_config(config: RuntimeConfig | None) -> dict[str, Any]:
     dict; empty when no extras are set or when ``config`` is None."""
     if config is None:
         return {}
-    return dict(config.model_extra or {})
+    return dict(config.extras)
 
 
 __all__ = [

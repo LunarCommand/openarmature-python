@@ -306,7 +306,7 @@ class CohereRerankProvider:
         active_prompt_group = current_prompt_group()
         documents_list = list(documents)
         request_params = _request_params_from_config(config)
-        request_extras = dict(config.model_extra or {}) if config is not None else {}
+        request_extras = dict(config.extras) if config is not None else {}
         adapter_start = time.perf_counter()
         try:
             validate_rerank_input(query, documents_list, top_k)
@@ -576,7 +576,7 @@ class CohereEmbeddingProvider:
         active_prompt_group = current_prompt_group()
         input_strings = list(input)
         request_params = _embedding_request_params(config)
-        request_extras = dict(config.model_extra or {}) if config is not None else {}
+        request_extras = dict(config.extras) if config is not None else {}
         input_type = config.input_type if config is not None else None
         dimensions = config.dimensions if config is not None else None
         adapter_start = time.perf_counter()

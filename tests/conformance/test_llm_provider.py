@@ -638,16 +638,11 @@ async def _run_one_call(
     response_schema = call_spec.get("response_schema")
     retry_mw_cfg = cast("Mapping[str, Any] | None", call_spec.get("retry_middleware"))
     config_block = call_spec.get("config")
-    # YAML convention: `config.extras: {...}` is the sub-block for
-    # undeclared (provider-specific) RuntimeConfig fields. Flatten it
-    # into the kwargs splat so the extras land in RuntimeConfig's
-    # model_extra rather than as a single `extras` key.
+    # The fixture's `config.extras: {...}` sub-block maps straight onto the
+    # config's `extras` container (0122), so it passes through rather than being
+    # flattened into the declared-field kwargs.
     if config_block:
-        block = dict(cast("Mapping[str, Any]", config_block))
-        extras_block = cast("Mapping[str, Any] | None", block.pop("extras", None))
-        if extras_block:
-            block.update(extras_block)
-        config = RuntimeConfig(**block)
+        config = RuntimeConfig(**cast("Mapping[str, Any]", config_block))
     else:
         config = None
 

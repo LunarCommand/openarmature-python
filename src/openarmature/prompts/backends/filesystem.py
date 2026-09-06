@@ -257,19 +257,15 @@ class FilesystemPromptBackend:
 
 
 def _sampling_from_dict(data: dict[str, Any]) -> SamplingConfig:
-    # Top-level `extras` is flattened so caller-supplied vendor knobs
-    # end up in SamplingConfig's extras-allow bag rather than as a
-    # single literal `extras` key. Matches the YAML conformance-fixture
-    # convention from llm-provider/032 + the spec §5 sidecar example.
-    # `token_budget` (proposal 0083) is a sibling sub-object read by
-    # `_token_budget_from_dict`, not a sampling field, so it is excluded
-    # here alongside `extras`.
-    flat: dict[str, Any] = {k: v for k, v in data.items() if k not in ("extras", "token_budget")}
+    # The sidecar's `extras` sub-object maps onto the config's own extras
+    # container (0122). `token_budget` (0083) is a sibling sub-object read by
+    # `_token_budget_from_dict`, not a sampling field, so it is excluded too.
+    declared: dict[str, Any] = {k: v for k, v in data.items() if k not in ("extras", "token_budget")}
     extras = data.get("extras")
-    if isinstance(extras, dict):
-        for k, v in cast(dict[str, Any], extras).items():
-            flat.setdefault(k, v)
-    return SamplingConfig(**flat)
+    return SamplingConfig(
+        **declared,
+        extras=dict(cast(dict[str, Any], extras)) if isinstance(extras, dict) else {},
+    )
 
 
 def _token_budget_from_dict(data: dict[str, Any]) -> TokenBudget | None:

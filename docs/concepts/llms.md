@@ -641,11 +641,16 @@ you reach a backend-specific knob the portable config does not model, for
 example a vLLM `guided_decoding`:
 
 ```python
-config = RuntimeConfig.model_validate({
-    "temperature": 0.2,
-    "guided_decoding": {"grammar": "..."},   # forwarded as-is
-})
+config = RuntimeConfig(
+    temperature=0.2,
+    extras={"guided_decoding": {"grammar": "..."}},   # forwarded as-is
+)
 ```
+
+Undeclared knobs go in `extras`, a container separate from the declared
+fields. That separation is what lets you set a declared field and an
+extras key of the same name in one call, which is how a provider-specific
+override of a field OA already models is expressed.
 
 The value itself is never translated or renamed. One caveat for
 byte-level consumers: the OpenAI Chat Completions mapping canonicalizes

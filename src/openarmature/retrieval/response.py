@@ -93,7 +93,12 @@ class EmbeddingResponse(BaseModel):
 class EmbeddingRuntimeConfig(BaseModel):
     """Per-call embedding request parameters."""
 
-    model_config = ConfigDict(extra="allow")
+    # §6 (0122): see RuntimeConfig. Undeclared fields live in `extras`, which is
+    # separately addressable so a declared field and a same-named extras key can
+    # both be set; the name is normative.
+    model_config = ConfigDict(extra="forbid")
+
+    extras: dict[str, Any] = Field(default_factory=dict)
 
     dimensions: int | None = None
     input_type: str | None = None
@@ -181,7 +186,12 @@ class RerankResponse(BaseModel):
 class RerankRuntimeConfig(BaseModel):
     """Per-call rerank request parameters."""
 
-    model_config = ConfigDict(extra="allow")
+    # §6 (0122): see RuntimeConfig. Undeclared fields live in `extras`, which is
+    # separately addressable so a declared field and a same-named extras key can
+    # both be set; the name is normative.
+    model_config = ConfigDict(extra="forbid")
+
+    extras: dict[str, Any] = Field(default_factory=dict)
 
     return_documents: bool = False
 

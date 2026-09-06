@@ -240,11 +240,8 @@ def _build_provider(
 def _build_config(config_block: Mapping[str, Any] | None) -> EmbeddingRuntimeConfig | None:
     if not config_block:
         return None
-    block = dict(config_block)
-    extras = cast("Mapping[str, Any] | None", block.pop("extras", None))
-    if extras:
-        block.update(extras)
-    return EmbeddingRuntimeConfig(**block)
+    # `config.extras` maps onto the config's own extras container (0122).
+    return EmbeddingRuntimeConfig(**config_block)
 
 
 def _build_rerank_provider(
@@ -312,11 +309,8 @@ def _build_rerank_provider(
 def _build_rerank_config(config_block: Mapping[str, Any] | None) -> RerankRuntimeConfig | None:
     if not config_block:
         return None
-    block = dict(config_block)
-    extras = cast("Mapping[str, Any] | None", block.pop("extras", None))
-    if extras:
-        block.update(extras)
-    return RerankRuntimeConfig(**block)
+    # `config.extras` maps onto the config's own extras container (0122).
+    return RerankRuntimeConfig(**config_block)
 
 
 def _assert_embedding_response(

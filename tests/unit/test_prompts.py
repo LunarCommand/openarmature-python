@@ -627,7 +627,7 @@ async def test_filesystem_backend_per_prompt_sidecar(tmp_path: Path) -> None:
     assert prompt.sampling.temperature == 0.0
     assert prompt.sampling.max_tokens == 256
     # Vendor extra rides through the extras-allow bag.
-    assert (prompt.sampling.model_extra or {}).get("repetition_penalty") == 1.05
+    assert prompt.sampling.extras.get("repetition_penalty") == 1.05
 
 
 async def test_filesystem_backend_unified_sampling(tmp_path: Path) -> None:
@@ -678,7 +678,7 @@ async def test_filesystem_backend_token_budget_per_prompt_sidecar(tmp_path: Path
     # sampling excludes the token_budget sub-object (not a sampling field).
     assert prompt.sampling is not None
     assert prompt.sampling.temperature == 0.2
-    assert "token_budget" not in (prompt.sampling.model_extra or {})
+    assert "token_budget" not in prompt.sampling.extras
 
 
 async def test_filesystem_backend_token_budget_unrecognized_key_is_filtered(tmp_path: Path) -> None:
