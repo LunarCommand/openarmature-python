@@ -214,9 +214,8 @@ class MockPromptBackend:
         self._prompts: dict[tuple[str, str], Prompt] = {}
         now = datetime.now(UTC)
         for ps in spec.prompts:
-            # Sampling sub-record (fixture 013): flatten the fixture's
-            # The `extras:` sub-block maps onto the config's own extras
-            # container (0122).
+            # Sampling sub-record (fixture 013): the `extras:` sub-block maps
+            # onto the config's own extras container (0122).
             sampling: SamplingConfig | None = None
             if ps.sampling is not None:
                 declared: dict[str, Any] = {k: v for k, v in ps.sampling.items() if k != "extras"}

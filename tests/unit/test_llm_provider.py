@@ -925,9 +925,10 @@ def test_runtime_config_from_partial_forwards_extras() -> None:
 
     assert config.temperature == 0.5
     assert config.extras == {"repetition_penalty": 1.05}
-    # The None-dropping is the whole job: `top_k=None` is dropped before
-    # construction rather than rejected as an undeclared field.
-    assert not hasattr(config, "top_k")
+    # The None-dropping is the whole job: an undeclared name whose value is
+    # None is dropped before construction, where passing it directly raises.
+    with pytest.raises(ValidationError):
+        RuntimeConfig(top_k=None)  # type: ignore[call-arg]
 
 
 def test_runtime_config_from_partial_empty() -> None:
@@ -2551,9 +2552,8 @@ async def test_llm_completion_event_request_extras_flows_through() -> None:
     )
     provider = OpenAIProvider(base_url="http://test", model="m", api_key="k", transport=transport)
     try:
-        # ``guided_decoding`` is a vLLM-specific extra; RuntimeConfig
-        # accepts undeclared fields via extra="allow". Use model_validate
-        # so pyright doesn't flag the undeclared kwarg.
+        # ``guided_decoding`` is a vLLM-specific extra, so it rides the
+        # ``extras`` container rather than being passed flat.
         await provider.complete(
             [UserMessage(content="hi")],
             config=RuntimeConfig.model_validate({"extras": {"guided_decoding": {"choice": ["a", "b"]}}}),
@@ -3371,9 +3371,8 @@ def test_undeclared_fields_must_go_in_the_extras_container(factory: str, declare
     # addressable from the declared fields. An undeclared name passed flat is
     # rejected, so there is one spelling rather than two.
     #
-    # Without this the config classes accept BOTH forms and the flat one silently
-    # keeps working. Verified by mutation: flipping `extra="forbid"` back to
-    # `extra="allow"` left the whole suite green before this landed.
+    # The rejection is the assertion that matters: without it the flat form keeps
+    # working alongside the container and there are two spellings.
     from openarmature.llm import RuntimeConfig
     from openarmature.prompts import SamplingConfig
     from openarmature.retrieval import EmbeddingRuntimeConfig, RerankRuntimeConfig
@@ -3403,3 +3402,55 @@ def test_undeclared_fields_must_go_in_the_extras_container(factory: str, declare
     collided = cls.model_validate({**declared, "extras": {same_name: "from-extras"}})
     assert getattr(collided, same_name) == declared[same_name]
     assert collided.extras == {same_name: "from-extras"}
+
+
+async def test_per_attempt_override_preserves_base_extras() -> None:
+    # A retry override merges into the base extras per key rather than replacing
+    # the container. `extras` is a declared field defaulting to `{}`, which
+    # `exclude_none` keeps, so a generic dump would carry an empty container into
+    # the update and wipe the caller's vendor knobs on every attempt.
+    #
+    # The loss is silent on the wire and invisible in the trace: `request_params`
+    # is projected once from the base config before the retry loop, so the
+    # emitted event still reports extras the attempt did not send.
+    bodies: list[dict[str, Any]] = []
+    calls = {"n": 0}
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        bodies.append(json.loads(req.content))
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return httpx.Response(503, json={"error": {"message": "upstream"}})
+        return httpx.Response(
+            200,
+            json={
+                "id": "c",
+                "model": "m",
+                "choices": [
+                    {"index": 0, "message": {"role": "assistant", "content": "ok"}, "finish_reason": "stop"}
+                ],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+            },
+        )
+
+    from openarmature.llm import LlmRetryConfig
+
+    provider = _collision_provider(handler)
+    await provider.complete(
+        [UserMessage(content="hi")],
+        config=RuntimeConfig(temperature=0.2, extras={"guided_decoding": {"grammar": "g"}}),
+        retry=LlmRetryConfig(
+            max_attempts=2,
+            backoff=deterministic_backoff(0),
+            per_attempt_override=[RuntimeConfig(temperature=0.6)],
+        ),
+    )
+    await provider.aclose()
+
+    assert len(bodies) == 2, f"expected a retry, got {len(bodies)} call(s)"
+    assert bodies[0]["guided_decoding"] == {"grammar": "g"}
+    assert bodies[1]["guided_decoding"] == {"grammar": "g"}, (
+        "the retry attempt dropped the base config's extras"
+    )
+    # The override's own declared field still applies on the retry.
+    assert bodies[1]["temperature"] == 0.6

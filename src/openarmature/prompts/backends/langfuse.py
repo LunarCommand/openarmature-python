@@ -173,9 +173,15 @@ def _sampling_from_config(config: dict[str, Any] | None) -> SamplingConfig | Non
     if not config:
         return None
     declared = {k: config[k] for k in _SAMPLING_FIELDS if k in config}
-    if not declared:
+    # The `extras` sub-object maps onto the config's extras container (0122),
+    # so a vendor knob reaches `Prompt.sampling` from this source as it does
+    # from the filesystem sidecar. The full config still rides
+    # `Prompt.metadata`, so nothing is lost either way.
+    raw_extras = config.get("extras")
+    extras = dict(cast("dict[str, Any]", raw_extras)) if isinstance(raw_extras, dict) else {}
+    if not declared and not extras:
         return None
-    return SamplingConfig(**declared)
+    return SamplingConfig(**declared, extras=extras)
 
 
 def _token_budget_from_config(config: dict[str, Any] | None) -> TokenBudget | None:

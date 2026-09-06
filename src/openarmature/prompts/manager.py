@@ -540,8 +540,15 @@ class PromptManager:
             variables=variables,
             fetched_at=prompt.fetched_at,
             rendered_at=datetime.now(UTC),
-            # Defensive copy of the mutable propagated fields.
-            sampling=prompt.sampling.model_copy() if prompt.sampling is not None else None,
+            # Defensive copy of the mutable propagated fields. `extras` is
+            # copied explicitly: `model_copy` shares the container by reference,
+            # so mutating a result's extras would reach back into the Prompt and
+            # every other result rendered from it.
+            sampling=(
+                prompt.sampling.model_copy(update={"extras": dict(prompt.sampling.extras)})
+                if prompt.sampling is not None
+                else None
+            ),
             # Proposal 0083: advisory token budget propagated verbatim (defensive
             # copy), mirroring sampling -- rendering does not modify it.
             token_budget=prompt.token_budget.model_copy() if prompt.token_budget is not None else None,

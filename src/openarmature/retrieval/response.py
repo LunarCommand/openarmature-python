@@ -83,7 +83,7 @@ class EmbeddingResponse(BaseModel):
 
 # Spec §2 declared-field surface: an optional ``dimensions``, an optional
 # ``input_type`` (proposal 0077), plus the extras pass-through bag
-# in the ``extras`` container. Undeclared fields supplied by callers are forwarded to
+# in the ``extras`` container, from which they are forwarded to
 # the wire body untouched by the §8 wire-format mapping; declared fields with
 # value ``None`` are omitted on the wire. ``input_type`` ("query" / "document",
 # an extensible string) declares what the embedded text is for; absent means

@@ -201,10 +201,23 @@ behavior; most callers just pass the prompt back into `render()`.
 A `Prompt` carries an optional `sampling` field: a `SamplingConfig`
 sub-record mirroring `RuntimeConfig`'s seven declared fields
 (`temperature`, `max_tokens`, `top_p`, `seed`, `frequency_penalty`,
-`presence_penalty`, `stop_sequences`) plus the extras pass-through
-bag. Backends that source per-prompt config (Langfuse's
+`presence_penalty`, `stop_sequences`) plus the `extras` container for
+vendor knobs. Backends that source per-prompt config (Langfuse's
 `prompt.config`, a filesystem sidecar) populate it; backends that
 don't leave it `None`.
+
+Both sources spell vendor knobs the same way, as an `extras` sub-object
+beside the declared keys:
+
+```json
+{"temperature": 0.0, "max_tokens": 256, "extras": {"repetition_penalty": 1.05}}
+```
+
+An unrecognized key beside them is ignored rather than failing the
+fetch, so a stray or future key does not invalidate a well-formed
+config. A vendor knob written flat, next to the declared keys rather
+than inside `extras`, is one such key: it is filtered out and does not
+reach `sampling.extras`.
 
 ```python
 prompt = await manager.fetch("classify", "production")

@@ -635,10 +635,11 @@ is a one-node change.
 ## Provider-specific extras
 
 `RuntimeConfig` (and the retrieval `EmbeddingRuntimeConfig` /
-`RerankRuntimeConfig`) accept fields beyond the declared set, and any
-undeclared field is forwarded to the wire request untouched. This is how
-you reach a backend-specific knob the portable config does not model, for
-example a vLLM `guided_decoding`:
+`RerankRuntimeConfig`) carry undeclared fields in an `extras` container,
+and everything in it is forwarded to the wire request untouched. Passing
+an undeclared name directly is rejected. This is how you reach a
+backend-specific knob the portable config does not model, for example a
+vLLM `guided_decoding`:
 
 ```python
 config = RuntimeConfig(

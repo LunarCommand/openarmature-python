@@ -1190,3 +1190,47 @@ def test_cross_variable_substring_stability_chat_prompt() -> None:
     # degenerate-equality false pass.
     assert "alice's email" in user_a and "bob's email" in user_b
     assert user_a.endswith("hello") and user_b.endswith("world")
+
+
+async def test_filesystem_sidecar_ignores_an_unrecognized_sampling_key(tmp_path: Path) -> None:
+    # An unrecognized top-level key is filtered, not fatal (0109
+    # tolerate-and-filter, matching the token_budget path and the langfuse
+    # backend). The config rejects undeclared names, so splatting the sidecar
+    # verbatim raises a pydantic error out of `fetch()`. That is neither
+    # PromptNotFound nor PromptStoreUnavailable, so PromptManager's
+    # multi-backend fallback would never run and one stray key in one
+    # operator-authored file would take down every fetch for that prompt.
+    (tmp_path / "production").mkdir()
+    (tmp_path / "production" / "summarize.j2").write_text("S: {{ text }}", encoding="utf-8")
+    (tmp_path / "production" / "summarize.config.json").write_text(
+        '{"temperature": 0.0, "repetition_penalty": 1.05}', encoding="utf-8"
+    )
+
+    backend = FilesystemPromptBackend(tmp_path, sampling_source="per-prompt-sidecar")
+    prompt = await backend.fetch("summarize", "production")
+
+    assert prompt.sampling is not None
+    assert prompt.sampling.temperature == 0.0
+    # Filtered rather than lifted: the flat spelling is not a second way to
+    # reach the container.
+    assert prompt.sampling.extras == {}
+
+
+def test_langfuse_prompt_config_lifts_the_extras_sub_object() -> None:
+    # The container name is normative, so a vendor knob reaches Prompt.sampling
+    # from a Langfuse `prompt.config` as it does from a filesystem sidecar.
+    from openarmature.prompts.backends.langfuse import _sampling_from_config
+
+    sampling = _sampling_from_config(
+        {"temperature": 0.3, "extras": {"repetition_penalty": 1.05}, "unrelated": "x"}
+    )
+
+    assert sampling is not None
+    assert sampling.temperature == 0.3
+    assert sampling.extras == {"repetition_penalty": 1.05}
+    # A config carrying ONLY extras still yields a config rather than None.
+    only_extras = _sampling_from_config({"extras": {"k": 1}})
+    assert only_extras is not None
+    assert only_extras.extras == {"k": 1}
+    # Nothing recognized at all still yields None.
+    assert _sampling_from_config({"unrelated": "x"}) is None

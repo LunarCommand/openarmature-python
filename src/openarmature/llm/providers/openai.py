@@ -640,7 +640,16 @@ class OpenAIProvider:
         base_or_empty = base if base is not None else RuntimeConfig()
         # exclude_none (not exclude_unset): a None override field inherits the
         # base per §6 null-skip, rather than an explicit None clobbering it.
-        return base_or_empty.model_copy(update=override.model_dump(exclude_none=True))
+        #
+        # `extras` is excluded from that dump and merged per key below. It is a
+        # declared field whose default is `{}`, which `exclude_none` keeps, so
+        # leaving it in the update would replace the base container on every
+        # attempt and drop the caller's vendor knobs from the retry body.
+        update = override.model_dump(exclude_none=True, exclude={"extras"})
+        merged_extras = {**base_or_empty.extras, **override.extras}
+        if merged_extras:
+            update["extras"] = merged_extras
+        return base_or_empty.model_copy(update=update)
 
     @staticmethod
     def _append_reask_pair(

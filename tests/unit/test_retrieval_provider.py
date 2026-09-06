@@ -2741,7 +2741,7 @@ async def test_cohere_embed_matching_managed_extra_is_a_noop() -> None:
     assert captured[0]["user_tag"] == "keep"
 
 
-async def test_openai_embed_conflicting_model_extra_rejects() -> None:
+async def test_openai_embed_conflicting_extras_key_rejects() -> None:
     provider = _openai_embed_provider(_never_called)
     with pytest.raises(ProviderInvalidRequest):
         await provider.embed(

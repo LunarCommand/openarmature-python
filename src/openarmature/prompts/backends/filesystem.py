@@ -259,8 +259,17 @@ class FilesystemPromptBackend:
 def _sampling_from_dict(data: dict[str, Any]) -> SamplingConfig:
     # The sidecar's `extras` sub-object maps onto the config's own extras
     # container (0122). `token_budget` (0083) is a sibling sub-object read by
-    # `_token_budget_from_dict`, not a sampling field, so it is excluded too.
-    declared: dict[str, Any] = {k: v for k, v in data.items() if k not in ("extras", "token_budget")}
+    # `_token_budget_from_dict`, not a sampling field.
+    #
+    # UNRECOGNIZED top-level keys are ignored rather than raising (0109
+    # tolerate-and-filter, as `_token_budget_from_dict` and the langfuse backend
+    # already do). The config rejects undeclared names, so splatting the sidecar
+    # verbatim would turn one stray key in an operator-authored file into a
+    # pydantic error escaping `fetch()`, which is not one of the two documented
+    # error types and so bypasses the manager's multi-backend fallback.
+    declared: dict[str, Any] = {
+        k: v for k, v in data.items() if k in SamplingConfig.model_fields and k != "extras"
+    }
     extras = data.get("extras")
     return SamplingConfig(
         **declared,

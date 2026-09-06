@@ -137,6 +137,29 @@ providers, will quietly index unprefixed vectors and cost you recall with
 no signal. So treat `query` / `document` as the portable pair, and reach
 for the other purposes only when you know which provider you are on.
 
+## Provider-specific extras
+
+`EmbeddingRuntimeConfig` and `RerankRuntimeConfig` carry undeclared
+fields in an `extras` container, forwarded to the wire request
+untouched. Passing an undeclared name directly is rejected.
+
+```python
+await provider.embed(
+    passages,
+    config=EmbeddingRuntimeConfig(
+        input_type="document",
+        extras={"output_dimension": 256},
+    ),
+)
+```
+
+The container is separate from the declared fields, so you can set a
+declared field and an extras key of the same name in one call. That is
+how you override a wire field OA already models from the declared side.
+Where the mapping itself produces that wire field, the conflicting
+extras key is rejected before the request is sent rather than silently
+winning or losing.
+
 ## Long input lists are chunked for you
 
 Every hosted embedding API caps how many inputs one request may carry.
