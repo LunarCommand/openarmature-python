@@ -626,7 +626,7 @@ async def test_filesystem_backend_per_prompt_sidecar(tmp_path: Path) -> None:
     assert prompt.sampling is not None
     assert prompt.sampling.temperature == 0.0
     assert prompt.sampling.max_tokens == 256
-    # Vendor extra rides through the extras-allow bag.
+    # Vendor extra rides through the extras container.
     assert prompt.sampling.extras.get("repetition_penalty") == 1.05
 
 

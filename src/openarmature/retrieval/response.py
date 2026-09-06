@@ -83,7 +83,7 @@ class EmbeddingResponse(BaseModel):
 
 # Spec §2 declared-field surface: an optional ``dimensions``, an optional
 # ``input_type`` (proposal 0077), plus the extras pass-through bag
-# (``extra="allow"``). Undeclared fields supplied by callers are forwarded to
+# in the ``extras`` container. Undeclared fields supplied by callers are forwarded to
 # the wire body untouched by the §8 wire-format mapping; declared fields with
 # value ``None`` are omitted on the wire. ``input_type`` ("query" / "document",
 # an extensible string) declares what the embedded text is for; absent means
@@ -178,7 +178,7 @@ class RerankResponse(BaseModel):
 
 
 # Spec §2 rerank runtime config: one declared field ``return_documents``
-# (boolean, default False) plus the extras pass-through bag (``extra="allow"``).
+# (boolean, default False) plus the ``extras`` container.
 # Undeclared fields supplied by callers are forwarded to the wire body by the
 # §8 wire-format mapping, except for the provider-reserved keys a mapping
 # manages itself (e.g. the Cohere mapping owns model / query / documents /

@@ -100,16 +100,6 @@ _DEFERRED_FIXTURES: dict[str, str] = {
     # v0.17.0 spec-pin bump (v0.88.0 -> v0.107.0). Behavior for each of
     # these shipped + is unit-tested ahead of the pin; the conformance
     # fixture wiring rides the v0.17.0 fixture-wiring PR.
-    # Proposal 0108 (spec v0.103.0) same-NAME declared-field collision. The
-    # dimensions reject is coded (openai.py) but a declared-field-named extras
-    # key routes to the declared field, never into model_extra, so the collision
-    # is not reachable through the real caller path -- adoption is held pending
-    # the batched spec review (the llm 075 sibling is held for the same reason).
-    "052-embed-openai-dimensions-collision": (
-        "Proposal 0108 same-name declared collision: the coded reject is unreachable via "
-        "the real caller path (a declared-name key routes to the declared field, never "
-        "model_extra), so adoption is held pending the batched spec review"
-    ),
 }
 
 

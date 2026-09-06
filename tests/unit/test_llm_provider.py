@@ -3277,14 +3277,12 @@ def _collision_provider(handler: Any) -> OpenAIProvider:
     return OpenAIProvider(base_url="http://x", model="m", api_key="k", transport=httpx.MockTransport(handler))
 
 
-# A same-named declared sampling field (temperature, top_p, ...) cannot be
-# shadowed by an extras key via the config API: pydantic binds the key to the
-# declared field, so `model_validate({"temperature": ...})` never lands in
-# model_extra. That collision is therefore unconstructible here (the resolver
-# still handles it defensively; its reject arm is covered generically in
-# test_managed_extras.py). The reachable collisions are the STRUCTURAL fields
-# (model / messages / tools / tool_choice, not RuntimeConfig fields) and the
-# RENAMED realizations (stop from stop_sequences), plus response_format.
+# A same-named declared sampling field IS shadowable: `extras` is a container
+# separately addressable from the declared fields, so `RuntimeConfig(
+# temperature=0.2, extras={"temperature": ...})` sets both and the extras key
+# stays an extras key. The other reachable collisions are the STRUCTURAL fields
+# (model / messages / tools / tool_choice) and the RENAMED realizations (stop
+# from stop_sequences), plus response_format.
 async def test_llm_conflicting_structural_extra_rejects() -> None:
     # A structural managed field (model) shadowed by an extra is rejected
     # pre-send rather than silently re-routing the model.

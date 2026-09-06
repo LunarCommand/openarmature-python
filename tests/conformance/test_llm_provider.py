@@ -158,12 +158,6 @@ _DEFERRED_FIXTURES: dict[str, str] = {
     "073-managed-stream-options-collision": (
         "Proposal 0105 stream_options collision; streaming not implemented (0062)"
     ),
-    # Proposal 0108 (spec v0.103.0) declared-field-vs-extras collision.
-    "075-managed-declared-scalar-collision": (
-        "Proposal 0108 same-name declared collision: the coded reject is unreachable via "
-        "the real caller path (a declared-name key routes to the declared field, never "
-        "model_extra), so adoption is held pending the batched spec review"
-    ),
     "077-managed-declared-stream-collision": (
         "Proposal 0108 stream collision; streaming not implemented (0062)"
     ),
