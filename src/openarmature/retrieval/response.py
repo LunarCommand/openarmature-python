@@ -82,10 +82,9 @@ class EmbeddingResponse(BaseModel):
 
 
 # Spec §2 declared-field surface: an optional ``dimensions``, an optional
-# ``input_type`` (proposal 0077), plus the extras pass-through bag
-# in the ``extras`` container, from which they are forwarded to
-# the wire body untouched by the §8 wire-format mapping; declared fields with
-# value ``None`` are omitted on the wire. ``input_type`` ("query" / "document",
+# ``input_type`` (proposal 0077), plus the ``extras`` container, whose entries
+# the §8 wire-format mapping forwards to the wire body untouched; declared
+# fields with value ``None`` are omitted on the wire. ``input_type`` ("query" / "document",
 # an extensible string) declares what the embedded text is for; absent means
 # the symmetric default. Each §8 mapping realizes it per its wire shape (TEI
 # prompt_name, Jina task, client-side prefix, ...); a symmetric model ignores

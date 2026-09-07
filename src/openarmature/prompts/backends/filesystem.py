@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal, cast
@@ -13,6 +14,8 @@ from pydantic import ValidationError
 from ..errors import PromptNotFound, PromptStoreUnavailable
 from ..hashing import compute_template_hash
 from ..prompt import Prompt, SamplingConfig, TextPrompt, TokenBudget
+
+_log = logging.getLogger(__name__)
 
 
 class FilesystemPromptBackend:
@@ -158,11 +161,24 @@ class FilesystemPromptBackend:
                     name=name,
                     label="",
                 )
-            return _sampling_from_dict(cast(dict[str, Any], raw))
+            return self._sampling_or_unavailable(name, "", cast(dict[str, Any], raw))
         # per-prompt-sidecar: use the single pre-read snapshot.
         if sidecar is None:
             return None
-        return _sampling_from_dict(sidecar)
+        return self._sampling_or_unavailable(name, "", sidecar)
+
+    def _sampling_or_unavailable(self, name: str, label: str, data: dict[str, Any]) -> SamplingConfig | None:
+        # A malformed VALUE on a recognized key (`{"temperature": "warm"}`)
+        # raises from pydantic. Converted to PromptStoreUnavailable so it stays
+        # fallback-eligible: the manager catches only its two documented types,
+        # so a raw error here would take down every fetch for this prompt with
+        # another backend sitting idle. Mirrors `_resolve_token_budget`.
+        try:
+            return _sampling_from_dict(data)
+        except (ValueError, ValidationError) as exc:
+            raise PromptStoreUnavailable(
+                f"sampling config for {name!r} is malformed: {exc}", name=name, label=label
+            ) from exc
 
     def _resolve_token_budget(
         self, name: str, label: str, sidecar: dict[str, Any] | None
@@ -270,6 +286,13 @@ def _sampling_from_dict(data: dict[str, Any]) -> SamplingConfig:
     declared: dict[str, Any] = {
         k: v for k, v in data.items() if k in SamplingConfig.model_fields and k != "extras"
     }
+    ignored = sorted(set(data) - set(declared) - {"extras", "token_budget"})
+    if ignored:
+        _log.warning(
+            "sidecar sampling config carries unrecognized top-level key(s) %s; ignored "
+            "(vendor knobs belong under `extras`)",
+            ", ".join(repr(k) for k in ignored),
+        )
     extras = data.get("extras")
     return SamplingConfig(
         **declared,

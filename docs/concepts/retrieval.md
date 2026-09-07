@@ -153,12 +153,14 @@ await provider.embed(
 )
 ```
 
-The container is separate from the declared fields, so you can set a
-declared field and an extras key of the same name in one call. That is
-how you override a wire field OA already models from the declared side.
-Where the mapping itself produces that wire field, the conflicting
-extras key is rejected before the request is sent rather than silently
-winning or losing.
+The container is separate from the declared fields, so a key in it whose
+name matches a declared field stays an extras key rather than binding
+the field. Where the mapping itself produces that wire field, the two
+conflict and the call is rejected before the request is sent rather than
+one silently winning. So `EmbeddingRuntimeConfig(dimensions=4,
+extras={"output_dimension": 8})` raises on a provider that realizes
+`dimensions` as `output_dimension`, instead of sending one of the two.
+An extras key the mapping does not produce rides through untouched.
 
 ## Long input lists are chunked for you
 

@@ -142,6 +142,13 @@ replace, the rest inherited from the base), and the last entry carries
 forward when the schedule is shorter than the retry count. The caller's
 `config` is never mutated.
 
+`extras` follows the same rule with one wrinkle, because its default is
+an empty container rather than `None`. An override that declares no
+extras inherits the base's; one that declares any replaces them
+wholesale, and any base key it does not carry is logged as not sent on
+that attempt. Clearing extras for a single attempt is therefore not
+expressible, since an empty container is how inheriting is spelled.
+
 ### Reasking on invalid structured output
 
 A `response_schema` call that returns schema-invalid output raises

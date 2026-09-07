@@ -3405,14 +3405,14 @@ def test_undeclared_fields_must_go_in_the_extras_container(factory: str, declare
 
 
 async def test_per_attempt_override_preserves_base_extras() -> None:
-    # A retry override merges into the base extras per key rather than replacing
-    # the container. `extras` is a declared field defaulting to `{}`, which
-    # `exclude_none` keeps, so a generic dump would carry an empty container into
-    # the update and wipe the caller's vendor knobs on every attempt.
+    # An override that declares no extras INHERITS the base container. `extras`
+    # is the one field whose default is not None, so an empty container survives
+    # `exclude_none` and a generic dump would clear the caller's vendor knobs on
+    # any override that never mentioned them.
     #
-    # The loss is silent on the wire and invisible in the trace: `request_params`
-    # is projected once from the base config before the retry loop, so the
-    # emitted event still reports extras the attempt did not send.
+    # Nothing on the wire or in the trace shows the loss: the extras projection
+    # (`_request_extras_from_config`) runs once against the base config before
+    # the retry loop, so the emitted event reports extras the attempt never sent.
     bodies: list[dict[str, Any]] = []
     calls = {"n": 0}
 
@@ -3454,3 +3454,66 @@ async def test_per_attempt_override_preserves_base_extras() -> None:
     )
     # The override's own declared field still applies on the retry.
     assert bodies[1]["temperature"] == 0.6
+
+
+async def test_per_attempt_override_with_extras_replaces_and_warns(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # An override that DOES declare extras replaces the container, following the
+    # same rule its declared fields follow. The base keys it does not carry are
+    # dropped for that attempt, so they are logged: replacing is legitimate, but
+    # losing a key the caller set without saying so is not.
+    #
+    # Without this the merge direction is unpinned. Verified by mutation: both
+    # dropping `override.extras` and reversing the precedence left the suite
+    # green while this test was absent.
+    from openarmature.llm import LlmRetryConfig
+
+    bodies: list[dict[str, Any]] = []
+    calls = {"n": 0}
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        bodies.append(json.loads(req.content))
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return httpx.Response(503, json={"error": {"message": "upstream"}})
+        return httpx.Response(
+            200,
+            json={
+                "id": "c",
+                "model": "m",
+                "choices": [
+                    {"index": 0, "message": {"role": "assistant", "content": "ok"}, "finish_reason": "stop"}
+                ],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+            },
+        )
+
+    provider = _collision_provider(handler)
+    try:
+        with caplog.at_level(logging.WARNING):
+            await provider.complete(
+                [UserMessage(content="hi")],
+                config=RuntimeConfig(extras={"strict_grammar": "g", "keep": 1}),
+                retry=LlmRetryConfig(
+                    max_attempts=2,
+                    backoff=deterministic_backoff(0),
+                    per_attempt_override=[RuntimeConfig(extras={"relaxed": True})],
+                ),
+            )
+    finally:
+        await provider.aclose()
+
+    assert len(bodies) == 2, f"expected a retry, got {len(bodies)} call(s)"
+    # Attempt 0 carries the base's extras.
+    assert bodies[0]["strict_grammar"] == "g"
+    assert "relaxed" not in bodies[0]
+    # Attempt 1 carries the override's, and NOT the base's.
+    assert bodies[1]["relaxed"] is True
+    assert "strict_grammar" not in bodies[1], "the override's extras must replace, not merge"
+    assert "keep" not in bodies[1]
+    # The dropped keys are named rather than lost silently.
+    warnings_seen = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert any("strict_grammar" in m and "keep" in m for m in warnings_seen), (
+        f"expected a warning naming the dropped keys; got {warnings_seen}"
+    )

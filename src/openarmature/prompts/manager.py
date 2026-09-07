@@ -540,12 +540,25 @@ class PromptManager:
             variables=variables,
             fetched_at=prompt.fetched_at,
             rendered_at=datetime.now(UTC),
-            # Defensive copy of the mutable propagated fields. `extras` is
-            # copied explicitly: `model_copy` shares the container by reference,
-            # so mutating a result's extras would reach back into the Prompt and
-            # every other result rendered from it.
+            # Copied so a result cannot reach back into the Prompt it was
+            # rendered from, or into a sibling result. `model_copy` shares every
+            # mutable field by reference, so the two the config carries are
+            # rebuilt: the `extras` container and the `stop_sequences` list.
+            #
+            # One level deep. A nested value inside `extras` (a grammar object,
+            # say) stays shared, which is what pydantic did for the same shape
+            # before the container existed.
             sampling=(
-                prompt.sampling.model_copy(update={"extras": dict(prompt.sampling.extras)})
+                prompt.sampling.model_copy(
+                    update={
+                        "extras": dict(prompt.sampling.extras),
+                        "stop_sequences": (
+                            list(prompt.sampling.stop_sequences)
+                            if prompt.sampling.stop_sequences is not None
+                            else None
+                        ),
+                    }
+                )
                 if prompt.sampling is not None
                 else None
             ),

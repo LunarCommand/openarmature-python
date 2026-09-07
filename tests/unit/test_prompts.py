@@ -11,6 +11,7 @@ propagation, and the empty-string-render boundary wrap.
 from __future__ import annotations
 
 import asyncio
+import logging
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -1192,7 +1193,9 @@ def test_cross_variable_substring_stability_chat_prompt() -> None:
     assert user_a.endswith("hello") and user_b.endswith("world")
 
 
-async def test_filesystem_sidecar_ignores_an_unrecognized_sampling_key(tmp_path: Path) -> None:
+async def test_filesystem_sidecar_ignores_an_unrecognized_sampling_key(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
     # An unrecognized top-level key is filtered, not fatal (0109
     # tolerate-and-filter, matching the token_budget path and the langfuse
     # backend). The config rejects undeclared names, so splatting the sidecar
@@ -1207,13 +1210,19 @@ async def test_filesystem_sidecar_ignores_an_unrecognized_sampling_key(tmp_path:
     )
 
     backend = FilesystemPromptBackend(tmp_path, sampling_source="per-prompt-sidecar")
-    prompt = await backend.fetch("summarize", "production")
+    with caplog.at_level(logging.WARNING):
+        prompt = await backend.fetch("summarize", "production")
 
     assert prompt.sampling is not None
     assert prompt.sampling.temperature == 0.0
     # Filtered rather than lifted: the flat spelling is not a second way to
     # reach the container.
     assert prompt.sampling.extras == {}
+    # Named rather than dropped in silence: a filtered knob changes model
+    # behavior, and "my sampling config has no effect" is the symptom.
+    assert any("repetition_penalty" in r.getMessage() for r in caplog.records), (
+        f"expected a warning naming the ignored key; got {[r.getMessage() for r in caplog.records]}"
+    )
 
 
 def test_langfuse_prompt_config_lifts_the_extras_sub_object() -> None:
@@ -1234,3 +1243,20 @@ def test_langfuse_prompt_config_lifts_the_extras_sub_object() -> None:
     assert only_extras.extras == {"k": 1}
     # Nothing recognized at all still yields None.
     assert _sampling_from_config({"unrelated": "x"}) is None
+
+
+async def test_filesystem_sidecar_malformed_value_stays_fallback_eligible(tmp_path: Path) -> None:
+    # A malformed VALUE on a RECOGNIZED key is a different arm from an
+    # unrecognized key: filtering cannot help, so it raises. It must raise one of
+    # the two types PromptManager catches, or the multi-backend fallback and its
+    # warning both go dark and one bad file takes down every fetch for the
+    # prompt with another backend sitting idle.
+    (tmp_path / "production").mkdir()
+    (tmp_path / "production" / "summarize.j2").write_text("S: {{ text }}", encoding="utf-8")
+    (tmp_path / "production" / "summarize.config.json").write_text(
+        '{"temperature": "warm"}', encoding="utf-8"
+    )
+
+    backend = FilesystemPromptBackend(tmp_path, sampling_source="per-prompt-sidecar")
+    with pytest.raises(PromptStoreUnavailable):
+        await backend.fetch("summarize", "production")
