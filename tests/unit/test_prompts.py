@@ -36,6 +36,7 @@ from openarmature.prompts import (
     PromptRenderError,
     PromptResult,
     PromptStoreUnavailable,
+    SamplingConfig,
     TextPrompt,
     compute_rendered_hash,
     compute_template_hash,
@@ -1260,3 +1261,47 @@ async def test_filesystem_sidecar_malformed_value_stays_fallback_eligible(tmp_pa
     backend = FilesystemPromptBackend(tmp_path, sampling_source="per-prompt-sidecar")
     with pytest.raises(PromptStoreUnavailable):
         await backend.fetch("summarize", "production")
+
+
+def test_render_isolates_the_mutable_sampling_fields() -> None:
+    # A rendered result must not share mutable state with the Prompt it came
+    # from, or with a sibling result. `model_copy` shares every mutable field by
+    # reference, so both of the config's have to be rebuilt: the `extras`
+    # container and the `stop_sequences` list.
+    #
+    # Without this nothing pins either. Verified by mutation: dropping the
+    # `dict(...)` around extras, and the `list(...)` around stop_sequences, each
+    # left the whole suite green.
+    template = "Hello, {{ user }}!"
+    prompt = TextPrompt(
+        name="greeting",
+        version="v1",
+        label="production",
+        template=template,
+        template_hash=compute_template_hash(template),
+        fetched_at=datetime.now(UTC),
+        sampling=SamplingConfig(stop_sequences=["END"], extras={"guided_decoding": {"grammar": "g"}}),
+    )
+
+    class _Backend:
+        async def fetch(
+            self, name: str, label: str = "production", *, cache_ttl_seconds: int | None = None
+        ) -> Prompt:
+            return prompt
+
+    manager = PromptManager(_Backend())
+    first = manager.render(prompt, {"user": "Alice"})
+    second = manager.render(prompt, {"user": "Bob"})
+
+    assert first.sampling is not None
+    assert second.sampling is not None
+    assert first.sampling.stop_sequences is not None
+    first.sampling.extras["injected"] = True
+    first.sampling.stop_sequences.append("STOP2")
+
+    # Neither the source Prompt nor the sibling result sees the mutation.
+    assert prompt.sampling is not None
+    assert "injected" not in prompt.sampling.extras
+    assert prompt.sampling.stop_sequences == ["END"]
+    assert "injected" not in second.sampling.extras
+    assert second.sampling.stop_sequences == ["END"]
