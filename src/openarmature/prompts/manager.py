@@ -540,8 +540,28 @@ class PromptManager:
             variables=variables,
             fetched_at=prompt.fetched_at,
             rendered_at=datetime.now(UTC),
-            # Defensive copy of the mutable propagated fields.
-            sampling=prompt.sampling.model_copy() if prompt.sampling is not None else None,
+            # Copied so a result cannot reach back into the Prompt it was
+            # rendered from, or into a sibling result. `model_copy` shares every
+            # mutable field by reference, so the two the config carries are
+            # rebuilt: the `extras` container and the `stop_sequences` list.
+            #
+            # One level deep. A nested value inside `extras` (a grammar object,
+            # say) stays shared, which is what pydantic did for the same shape
+            # before the container existed.
+            sampling=(
+                prompt.sampling.model_copy(
+                    update={
+                        "extras": dict(prompt.sampling.extras),
+                        "stop_sequences": (
+                            list(prompt.sampling.stop_sequences)
+                            if prompt.sampling.stop_sequences is not None
+                            else None
+                        ),
+                    }
+                )
+                if prompt.sampling is not None
+                else None
+            ),
             # Proposal 0083: advisory token budget propagated verbatim (defensive
             # copy), mirroring sampling -- rendering does not modify it.
             token_budget=prompt.token_budget.model_copy() if prompt.token_budget is not None else None,

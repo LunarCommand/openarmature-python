@@ -916,12 +916,19 @@ def test_runtime_config_from_partial_drops_nones() -> None:
 
 
 def test_runtime_config_from_partial_forwards_extras() -> None:
+    # `from_partial` drops None-valued entries; it does not route undeclared
+    # names. Extras reach the container the same way they do everywhere else,
+    # so there is one spelling rather than two (0122).
     from openarmature.llm import RuntimeConfig
 
-    config = RuntimeConfig.from_partial(temperature=0.5, repetition_penalty=1.05, top_k=None)
+    config = RuntimeConfig.from_partial(temperature=0.5, extras={"repetition_penalty": 1.05}, top_k=None)
 
     assert config.temperature == 0.5
-    assert (config.model_extra or {}) == {"repetition_penalty": 1.05}
+    assert config.extras == {"repetition_penalty": 1.05}
+    # The None-dropping is the whole job: an undeclared name whose value is
+    # None is dropped before construction, where passing it directly raises.
+    with pytest.raises(ValidationError):
+        RuntimeConfig(top_k=None)  # type: ignore[call-arg]
 
 
 def test_runtime_config_from_partial_empty() -> None:
@@ -2545,12 +2552,11 @@ async def test_llm_completion_event_request_extras_flows_through() -> None:
     )
     provider = OpenAIProvider(base_url="http://test", model="m", api_key="k", transport=transport)
     try:
-        # ``guided_decoding`` is a vLLM-specific extra; RuntimeConfig
-        # accepts undeclared fields via extra="allow". Use model_validate
-        # so pyright doesn't flag the undeclared kwarg.
+        # ``guided_decoding`` is a vLLM-specific extra, so it rides the
+        # ``extras`` container rather than being passed flat.
         await provider.complete(
             [UserMessage(content="hi")],
-            config=RuntimeConfig.model_validate({"guided_decoding": {"choice": ["a", "b"]}}),
+            config=RuntimeConfig.model_validate({"extras": {"guided_decoding": {"choice": ["a", "b"]}}}),
         )
     finally:
         await provider.aclose()
@@ -2938,10 +2944,10 @@ async def test_wire_byte_equality_across_runtime_config_extras_dict_order() -> N
         )
 
     config_a = RuntimeConfig.model_validate(
-        {"guided_decoding": {"choice": ["a", "b"], "backend": "outlines"}}
+        {"extras": {"guided_decoding": {"choice": ["a", "b"], "backend": "outlines"}}}
     )
     config_b = RuntimeConfig.model_validate(
-        {"guided_decoding": {"backend": "outlines", "choice": ["a", "b"]}}
+        {"extras": {"guided_decoding": {"backend": "outlines", "choice": ["a", "b"]}}}
     )
     provider = OpenAIProvider(
         base_url="http://test", model="m", api_key="k", transport=httpx.MockTransport(_handler)
@@ -3271,14 +3277,12 @@ def _collision_provider(handler: Any) -> OpenAIProvider:
     return OpenAIProvider(base_url="http://x", model="m", api_key="k", transport=httpx.MockTransport(handler))
 
 
-# A same-named declared sampling field (temperature, top_p, ...) cannot be
-# shadowed by an extras key via the config API: pydantic binds the key to the
-# declared field, so `model_validate({"temperature": ...})` never lands in
-# model_extra. That collision is therefore unconstructible here (the resolver
-# still handles it defensively; its reject arm is covered generically in
-# test_managed_extras.py). The reachable collisions are the STRUCTURAL fields
-# (model / messages / tools / tool_choice, not RuntimeConfig fields) and the
-# RENAMED realizations (stop from stop_sequences), plus response_format.
+# A same-named declared sampling field IS shadowable: `extras` is a container
+# separately addressable from the declared fields, so `RuntimeConfig(
+# temperature=0.2, extras={"temperature": ...})` sets both and the extras key
+# stays an extras key. The other reachable collisions are the STRUCTURAL fields
+# (model / messages / tools / tool_choice) and the RENAMED realizations (stop
+# from stop_sequences), plus response_format.
 async def test_llm_conflicting_structural_extra_rejects() -> None:
     # A structural managed field (model) shadowed by an extra is rejected
     # pre-send rather than silently re-routing the model.
@@ -3288,7 +3292,7 @@ async def test_llm_conflicting_structural_extra_rejects() -> None:
     provider = _collision_provider(never)
     with pytest.raises(ProviderInvalidRequest):
         await provider.complete(
-            [UserMessage(content="hi")], config=RuntimeConfig.model_validate({"model": "other"})
+            [UserMessage(content="hi")], config=RuntimeConfig.model_validate({"extras": {"model": "other"}})
         )
     await provider.aclose()
 
@@ -3305,7 +3309,7 @@ async def test_llm_extras_tools_on_no_tools_call_rejects() -> None:
     tool = {"type": "function", "function": {"name": "x"}}
     for extra in ({"tools": [tool]}, {"tool_choice": "auto"}):
         with pytest.raises(ProviderInvalidRequest):
-            await provider.complete([UserMessage(content="hi")], config=RuntimeConfig.model_validate(extra))
+            await provider.complete([UserMessage(content="hi")], config=RuntimeConfig(extras=extra))
     await provider.aclose()
 
 
@@ -3313,7 +3317,9 @@ async def test_llm_matching_structural_extra_is_a_noop() -> None:
     # An extras model equal to the bound model is a redundant no-op.
     bodies: list[dict[str, Any]] = []
     provider = _collision_provider(_ok_handler(bodies))
-    await provider.complete([UserMessage(content="hi")], config=RuntimeConfig.model_validate({"model": "m"}))
+    await provider.complete(
+        [UserMessage(content="hi")], config=RuntimeConfig.model_validate({"extras": {"model": "m"}})
+    )
     await provider.aclose()
     assert bodies[0]["model"] == "m"
 
@@ -3323,7 +3329,7 @@ async def test_llm_stop_merges_declared_and_extras() -> None:
     # wire-name extras `stop` MERGE, managed-first, de-duplicated.
     bodies: list[dict[str, Any]] = []
     provider = _collision_provider(_ok_handler(bodies))
-    cfg = RuntimeConfig.model_validate({"stop_sequences": ["A"], "stop": ["B", "A"]})
+    cfg = RuntimeConfig.model_validate({"stop_sequences": ["A"], "extras": {"stop": ["B", "A"]}})
     await provider.complete([UserMessage(content="hi")], config=cfg)
     await provider.aclose()
     assert bodies[0]["stop"] == ["A", "B"]
@@ -3332,7 +3338,7 @@ async def test_llm_stop_merges_declared_and_extras() -> None:
 async def test_llm_unmanaged_extra_rides_untouched() -> None:
     bodies: list[dict[str, Any]] = []
     provider = _collision_provider(_ok_handler(bodies))
-    cfg = RuntimeConfig.model_validate({"guided_decoding": {"grammar": "g"}})
+    cfg = RuntimeConfig.model_validate({"extras": {"guided_decoding": {"grammar": "g"}}})
     await provider.complete([UserMessage(content="hi")], config=cfg)
     await provider.aclose()
     assert bodies[0]["guided_decoding"] == {"grammar": "g"}
@@ -3345,7 +3351,169 @@ async def test_llm_response_format_rides_untouched_on_free_form_call() -> None:
     # tests.)
     bodies: list[dict[str, Any]] = []
     provider = _collision_provider(_ok_handler(bodies))
-    cfg = RuntimeConfig.model_validate({"response_format": {"type": "text"}})
+    cfg = RuntimeConfig.model_validate({"extras": {"response_format": {"type": "text"}}})
     await provider.complete([UserMessage(content="hi")], config=cfg)
     await provider.aclose()
     assert bodies[0]["response_format"] == {"type": "text"}
+
+
+@pytest.mark.parametrize(
+    ("factory", "declared"),
+    [
+        ("RuntimeConfig", {"temperature": 0.2}),
+        ("SamplingConfig", {"temperature": 0.2}),
+        ("EmbeddingRuntimeConfig", {"input_type": "document"}),
+        ("RerankRuntimeConfig", {"return_documents": True}),
+    ],
+)
+def test_undeclared_fields_must_go_in_the_extras_container(factory: str, declared: dict[str, Any]) -> None:
+    # 0122 gives the extras surface one shape: a container separately
+    # addressable from the declared fields. An undeclared name passed flat is
+    # rejected, so there is one spelling rather than two.
+    #
+    # The rejection is the assertion that matters: without it the flat form keeps
+    # working alongside the container and there are two spellings.
+    from openarmature.llm import RuntimeConfig
+    from openarmature.prompts import SamplingConfig
+    from openarmature.retrieval import EmbeddingRuntimeConfig, RerankRuntimeConfig
+
+    cls = {
+        "RuntimeConfig": RuntimeConfig,
+        "SamplingConfig": SamplingConfig,
+        "EmbeddingRuntimeConfig": EmbeddingRuntimeConfig,
+        "RerankRuntimeConfig": RerankRuntimeConfig,
+    }[factory]
+
+    # Built through `model_validate` rather than the constructor: `cls` is a
+    # union of the four config types here, and a checker cannot verify a keyword
+    # against all of them.
+    with pytest.raises(ValidationError):
+        cls.model_validate({**declared, "vendor_specific_knob": 1})
+
+    # The container is the way through, and the declared field is untouched by it.
+    config = cls.model_validate({**declared, "extras": {"vendor_specific_knob": 1}})
+    assert config.extras == {"vendor_specific_knob": 1}
+    for name, value in declared.items():
+        assert getattr(config, name) == value
+
+    # A same-named key is a legitimate extras key, not a rebinding of the
+    # declared field. This is the arm the flat reading could not express.
+    same_name = next(iter(declared))
+    collided = cls.model_validate({**declared, "extras": {same_name: "from-extras"}})
+    assert getattr(collided, same_name) == declared[same_name]
+    assert collided.extras == {same_name: "from-extras"}
+
+
+async def test_per_attempt_override_preserves_base_extras() -> None:
+    # An override that declares no extras INHERITS the base container. `extras`
+    # is the one field whose default is not None, so an empty container survives
+    # `exclude_none` and a generic dump would clear the caller's vendor knobs on
+    # any override that never mentioned them.
+    #
+    # Nothing on the wire or in the trace shows the loss: the extras projection
+    # (`_request_extras_from_config`) runs once against the base config before
+    # the retry loop, so the emitted event reports extras the attempt never sent.
+    bodies: list[dict[str, Any]] = []
+    calls = {"n": 0}
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        bodies.append(json.loads(req.content))
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return httpx.Response(503, json={"error": {"message": "upstream"}})
+        return httpx.Response(
+            200,
+            json={
+                "id": "c",
+                "model": "m",
+                "choices": [
+                    {"index": 0, "message": {"role": "assistant", "content": "ok"}, "finish_reason": "stop"}
+                ],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+            },
+        )
+
+    from openarmature.llm import LlmRetryConfig
+
+    provider = _collision_provider(handler)
+    await provider.complete(
+        [UserMessage(content="hi")],
+        config=RuntimeConfig(temperature=0.2, extras={"guided_decoding": {"grammar": "g"}}),
+        retry=LlmRetryConfig(
+            max_attempts=2,
+            backoff=deterministic_backoff(0),
+            per_attempt_override=[RuntimeConfig(temperature=0.6)],
+        ),
+    )
+    await provider.aclose()
+
+    assert len(bodies) == 2, f"expected a retry, got {len(bodies)} call(s)"
+    assert bodies[0]["guided_decoding"] == {"grammar": "g"}
+    assert bodies[1]["guided_decoding"] == {"grammar": "g"}, (
+        "the retry attempt dropped the base config's extras"
+    )
+    # The override's own declared field still applies on the retry.
+    assert bodies[1]["temperature"] == 0.6
+
+
+async def test_per_attempt_override_with_extras_replaces_and_warns(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # An override that DOES declare extras replaces the container, following the
+    # same rule its declared fields follow. The base keys it does not carry are
+    # dropped for that attempt, so they are logged: replacing is legitimate, but
+    # losing a key the caller set without saying so is not.
+    #
+    # Without this the merge direction is unpinned. Verified by mutation: both
+    # dropping `override.extras` and reversing the precedence left the suite
+    # green while this test was absent.
+    from openarmature.llm import LlmRetryConfig
+
+    bodies: list[dict[str, Any]] = []
+    calls = {"n": 0}
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        bodies.append(json.loads(req.content))
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return httpx.Response(503, json={"error": {"message": "upstream"}})
+        return httpx.Response(
+            200,
+            json={
+                "id": "c",
+                "model": "m",
+                "choices": [
+                    {"index": 0, "message": {"role": "assistant", "content": "ok"}, "finish_reason": "stop"}
+                ],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+            },
+        )
+
+    provider = _collision_provider(handler)
+    try:
+        with caplog.at_level(logging.WARNING):
+            await provider.complete(
+                [UserMessage(content="hi")],
+                config=RuntimeConfig(extras={"strict_grammar": "g", "keep": 1}),
+                retry=LlmRetryConfig(
+                    max_attempts=2,
+                    backoff=deterministic_backoff(0),
+                    per_attempt_override=[RuntimeConfig(extras={"relaxed": True})],
+                ),
+            )
+    finally:
+        await provider.aclose()
+
+    assert len(bodies) == 2, f"expected a retry, got {len(bodies)} call(s)"
+    # Attempt 0 carries the base's extras.
+    assert bodies[0]["strict_grammar"] == "g"
+    assert "relaxed" not in bodies[0]
+    # Attempt 1 carries the override's, and NOT the base's.
+    assert bodies[1]["relaxed"] is True
+    assert "strict_grammar" not in bodies[1], "the override's extras must replace, not merge"
+    assert "keep" not in bodies[1]
+    # The dropped keys are named rather than lost silently.
+    warnings_seen = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert any("strict_grammar" in m and "keep" in m for m in warnings_seen), (
+        f"expected a warning naming the dropped keys; got {warnings_seen}"
+    )

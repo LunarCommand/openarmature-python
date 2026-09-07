@@ -126,15 +126,21 @@ class Response(BaseModel):
     response_model: str | None = None
 
 
-# Spec §6 declared-field surface: seven optional fields. Undeclared
-# fields supplied by callers MUST be forwarded to the wire body
-# untouched (extras pass-through); declared fields with value ``None``
-# MUST be omitted from the wire body (null-skip). Both rules are
-# enforced by the §8 wire-format mapping, not by RuntimeConfig itself.
+# Spec §6 declared-field surface: seven optional fields. Undeclared fields go in
+# the `extras` container and are forwarded to the wire body untouched; declared
+# fields with value ``None`` are omitted (null-skip). Both rules are enforced by
+# the §8 wire-format mapping, not by RuntimeConfig itself.
 class RuntimeConfig(BaseModel):
     """Per-call sampling parameters and budget hints."""
 
-    model_config = ConfigDict(extra="allow")
+    # §6 (0122): undeclared fields live in a container that is separately
+    # addressable from the declared ones, so a caller can set a declared field
+    # AND an extras key of the same name in one call. That collision is what
+    # 0108 clause (b) governs, and it is unreachable if undeclared keys land
+    # flat on the record. The container's name is normative.
+    model_config = ConfigDict(extra="forbid")
+
+    extras: dict[str, Any] = Field(default_factory=dict)
 
     temperature: float | None = None
     max_tokens: int | None = None
@@ -156,10 +162,11 @@ class RuntimeConfig(BaseModel):
     # name; the declared layer matches the cross-vendor norm.
     stop_sequences: list[str] | None = None
 
-    # Pure Python ergonomic, not a spec contract. The wire-layer
-    # null-skip rule already drops ``None``-valued declared fields, so
-    # this helper exists solely to let callers splat a dict whose
-    # entries may be ``None`` without filtering at the call site.
+    # Pure Python ergonomic, not a spec contract. The wire-layer null-skip rule
+    # already drops ``None``-valued declared fields, so this exists solely to let
+    # callers splat a dict whose entries may be ``None`` without filtering at the
+    # call site. It does NOT route undeclared names: those go in ``extras`` like
+    # anywhere else, so there is one spelling rather than two.
     @classmethod
     def from_partial(cls, **kwargs: Any) -> RuntimeConfig:
         """Construct a config, dropping kwargs whose value is ``None``.

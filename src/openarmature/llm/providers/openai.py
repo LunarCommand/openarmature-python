@@ -53,6 +53,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 import re
 import time
 import uuid
@@ -134,6 +135,9 @@ if TYPE_CHECKING:
 # at runtime, so an unknown string would silently no-op both dispatch
 # branches in ``ready()`` and return None — a false-green readiness
 # signal. Validate in ``__init__`` against this set instead.
+
+_log = logging.getLogger(__name__)
+
 _VALID_READINESS_PROBES = frozenset({"models", "chat_completions", "both"})
 
 # §8.1 managed wire fields and their collision arms (0105 + 0108).
@@ -625,7 +629,8 @@ class OpenAIProvider:
         (attempt ``i > 0``) merges ``overrides[i-1]`` onto the base -- the
         override's non-None fields replace, a None field (like an absent one)
         inherits the base -- and the last entry carries forward when the
-        schedule is shorter than the retry count. Attempt 0 and the no-override
+        schedule is shorter than the retry count. ``extras`` replaces when the
+        override declares any and inherits when it declares none. Attempt 0 and the no-override
         case return the caller's base config as-is; only the override path
         returns a fresh ``model_copy``. The caller's config is never mutated
         either way -- the base path relies on the downstream body build reading
@@ -640,7 +645,34 @@ class OpenAIProvider:
         base_or_empty = base if base is not None else RuntimeConfig()
         # exclude_none (not exclude_unset): a None override field inherits the
         # base per §6 null-skip, rather than an explicit None clobbering it.
-        return base_or_empty.model_copy(update=override.model_dump(exclude_none=True))
+        #
+        # `extras` is handled separately because it is the one field whose
+        # default is not None: an empty container survives `exclude_none`, so
+        # leaving it in the dump would clear the caller's vendor knobs on any
+        # override that never mentioned them.
+        #
+        # An EMPTY override container therefore means "unspecified" and inherits,
+        # matching what None means for the declared fields. A NON-EMPTY one
+        # replaces, matching the same rule those fields follow. Clearing extras
+        # for one attempt is not expressible, since empty is how inherit is
+        # spelled.
+        #
+        # Replacing discards whatever the base carried, so the keys that go
+        # missing are logged rather than dropped in silence.
+        update = override.model_dump(exclude_none=True, exclude={"extras"})
+        if override.extras:
+            dropped = sorted(set(base_or_empty.extras) - set(override.extras))
+            if dropped:
+                _log.warning(
+                    "per-attempt override for attempt %d replaces the base config's "
+                    "extras; %s not sent on this attempt",
+                    attempt,
+                    ", ".join(repr(k) for k in dropped),
+                )
+            update["extras"] = dict(override.extras)
+        else:
+            update["extras"] = dict(base_or_empty.extras)
+        return base_or_empty.model_copy(update=update)
 
     @staticmethod
     def _append_reask_pair(
@@ -1182,8 +1214,8 @@ class OpenAIProvider:
         # mapping actually produced it (present in the body), which realizes the
         # "while producing it" semantics for the declared-field realizations and
         # the conditionally-managed response_format.
-        if config is not None and config.model_extra:
-            extras = {k: _canonicalize_dict_keys(v) for k, v in config.model_extra.items()}
+        if config is not None and config.extras:
+            extras = {k: _canonicalize_dict_keys(v) for k, v in config.extras.items()}
             managed: dict[str, ManagedArm] = {
                 key: arm
                 for key, arm in _OPENAI_MANAGED_ARMS.items()
@@ -1968,7 +2000,7 @@ def _request_extras_from_config(config: RuntimeConfig | None) -> dict[str, Any]:
     dict; empty when no extras are set or when ``config`` is None."""
     if config is None:
         return {}
-    return dict(config.model_extra or {})
+    return dict(config.extras)
 
 
 __all__ = [

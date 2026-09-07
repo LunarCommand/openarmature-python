@@ -346,8 +346,9 @@ class RuntimeConfigSpec(_AllowExtras):
     extras emission) and by the GenAI semconv set.
 
     Each field maps one-to-one to ``openarmature.llm.response.RuntimeConfig``
-    on the source side. ``extras`` is the ``extra="allow"`` pass-through
-    bag for provider-specific parameters (frequency_penalty, etc.).
+    on the source side, and ``extras`` maps onto that config's own ``extras``
+    container, which carries provider-specific parameters the declared set does
+    not model.
     """
 
     temperature: float | None = None

@@ -11,6 +11,7 @@ propagation, and the empty-string-render boundary wrap.
 from __future__ import annotations
 
 import asyncio
+import logging
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -35,6 +36,7 @@ from openarmature.prompts import (
     PromptRenderError,
     PromptResult,
     PromptStoreUnavailable,
+    SamplingConfig,
     TextPrompt,
     compute_rendered_hash,
     compute_template_hash,
@@ -626,8 +628,8 @@ async def test_filesystem_backend_per_prompt_sidecar(tmp_path: Path) -> None:
     assert prompt.sampling is not None
     assert prompt.sampling.temperature == 0.0
     assert prompt.sampling.max_tokens == 256
-    # Vendor extra rides through the extras-allow bag.
-    assert (prompt.sampling.model_extra or {}).get("repetition_penalty") == 1.05
+    # Vendor extra rides through the extras container.
+    assert prompt.sampling.extras.get("repetition_penalty") == 1.05
 
 
 async def test_filesystem_backend_unified_sampling(tmp_path: Path) -> None:
@@ -678,7 +680,7 @@ async def test_filesystem_backend_token_budget_per_prompt_sidecar(tmp_path: Path
     # sampling excludes the token_budget sub-object (not a sampling field).
     assert prompt.sampling is not None
     assert prompt.sampling.temperature == 0.2
-    assert "token_budget" not in (prompt.sampling.model_extra or {})
+    assert "token_budget" not in prompt.sampling.extras
 
 
 async def test_filesystem_backend_token_budget_unrecognized_key_is_filtered(tmp_path: Path) -> None:
@@ -1190,3 +1192,116 @@ def test_cross_variable_substring_stability_chat_prompt() -> None:
     # degenerate-equality false pass.
     assert "alice's email" in user_a and "bob's email" in user_b
     assert user_a.endswith("hello") and user_b.endswith("world")
+
+
+async def test_filesystem_sidecar_ignores_an_unrecognized_sampling_key(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    # An unrecognized top-level key is filtered, not fatal (0109
+    # tolerate-and-filter, matching the token_budget path and the langfuse
+    # backend). The config rejects undeclared names, so splatting the sidecar
+    # verbatim raises a pydantic error out of `fetch()`. That is neither
+    # PromptNotFound nor PromptStoreUnavailable, so PromptManager's
+    # multi-backend fallback would never run and one stray key in one
+    # operator-authored file would take down every fetch for that prompt.
+    (tmp_path / "production").mkdir()
+    (tmp_path / "production" / "summarize.j2").write_text("S: {{ text }}", encoding="utf-8")
+    (tmp_path / "production" / "summarize.config.json").write_text(
+        '{"temperature": 0.0, "repetition_penalty": 1.05}', encoding="utf-8"
+    )
+
+    backend = FilesystemPromptBackend(tmp_path, sampling_source="per-prompt-sidecar")
+    with caplog.at_level(logging.WARNING):
+        prompt = await backend.fetch("summarize", "production")
+
+    assert prompt.sampling is not None
+    assert prompt.sampling.temperature == 0.0
+    # Filtered rather than lifted: the flat spelling is not a second way to
+    # reach the container.
+    assert prompt.sampling.extras == {}
+    # Named rather than dropped in silence: a filtered knob changes model
+    # behavior, and "my sampling config has no effect" is the symptom.
+    assert any("repetition_penalty" in r.getMessage() for r in caplog.records), (
+        f"expected a warning naming the ignored key; got {[r.getMessage() for r in caplog.records]}"
+    )
+
+
+def test_langfuse_prompt_config_lifts_the_extras_sub_object() -> None:
+    # The container name is normative, so a vendor knob reaches Prompt.sampling
+    # from a Langfuse `prompt.config` as it does from a filesystem sidecar.
+    from openarmature.prompts.backends.langfuse import _sampling_from_config
+
+    sampling = _sampling_from_config(
+        {"temperature": 0.3, "extras": {"repetition_penalty": 1.05}, "unrelated": "x"}
+    )
+
+    assert sampling is not None
+    assert sampling.temperature == 0.3
+    assert sampling.extras == {"repetition_penalty": 1.05}
+    # A config carrying ONLY extras still yields a config rather than None.
+    only_extras = _sampling_from_config({"extras": {"k": 1}})
+    assert only_extras is not None
+    assert only_extras.extras == {"k": 1}
+    # Nothing recognized at all still yields None.
+    assert _sampling_from_config({"unrelated": "x"}) is None
+
+
+async def test_filesystem_sidecar_malformed_value_stays_fallback_eligible(tmp_path: Path) -> None:
+    # A malformed VALUE on a RECOGNIZED key is a different arm from an
+    # unrecognized key: filtering cannot help, so it raises. It must raise one of
+    # the two types PromptManager catches, or the multi-backend fallback and its
+    # warning both go dark and one bad file takes down every fetch for the
+    # prompt with another backend sitting idle.
+    (tmp_path / "production").mkdir()
+    (tmp_path / "production" / "summarize.j2").write_text("S: {{ text }}", encoding="utf-8")
+    (tmp_path / "production" / "summarize.config.json").write_text(
+        '{"temperature": "warm"}', encoding="utf-8"
+    )
+
+    backend = FilesystemPromptBackend(tmp_path, sampling_source="per-prompt-sidecar")
+    with pytest.raises(PromptStoreUnavailable):
+        await backend.fetch("summarize", "production")
+
+
+def test_render_isolates_the_mutable_sampling_fields() -> None:
+    # A rendered result must not share mutable state with the Prompt it came
+    # from, or with a sibling result. `model_copy` shares every mutable field by
+    # reference, so both of the config's have to be rebuilt: the `extras`
+    # container and the `stop_sequences` list.
+    #
+    # Without this nothing pins either. Verified by mutation: dropping the
+    # `dict(...)` around extras, and the `list(...)` around stop_sequences, each
+    # left the whole suite green.
+    template = "Hello, {{ user }}!"
+    prompt = TextPrompt(
+        name="greeting",
+        version="v1",
+        label="production",
+        template=template,
+        template_hash=compute_template_hash(template),
+        fetched_at=datetime.now(UTC),
+        sampling=SamplingConfig(stop_sequences=["END"], extras={"guided_decoding": {"grammar": "g"}}),
+    )
+
+    class _Backend:
+        async def fetch(
+            self, name: str, label: str = "production", *, cache_ttl_seconds: int | None = None
+        ) -> Prompt:
+            return prompt
+
+    manager = PromptManager(_Backend())
+    first = manager.render(prompt, {"user": "Alice"})
+    second = manager.render(prompt, {"user": "Bob"})
+
+    assert first.sampling is not None
+    assert second.sampling is not None
+    assert first.sampling.stop_sequences is not None
+    first.sampling.extras["injected"] = True
+    first.sampling.stop_sequences.append("STOP2")
+
+    # Neither the source Prompt nor the sibling result sees the mutation.
+    assert prompt.sampling is not None
+    assert "injected" not in prompt.sampling.extras
+    assert prompt.sampling.stop_sequences == ["END"]
+    assert "injected" not in second.sampling.extras
+    assert second.sampling.stop_sequences == ["END"]

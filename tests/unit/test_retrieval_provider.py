@@ -1093,7 +1093,9 @@ async def test_rerank_top_k_maps_to_top_n_and_return_documents_not_sent() -> Non
     # return_documents=True is a silent no-op on the Cohere wire (no such field);
     # max_tokens_per_doc rides the extras pass-through bag (model_validate so
     # the undeclared extra is accepted, mirroring the conformance config path).
-    config = RerankRuntimeConfig.model_validate({"return_documents": True, "max_tokens_per_doc": 100})
+    config = RerankRuntimeConfig.model_validate(
+        {"return_documents": True, "extras": {"max_tokens_per_doc": 100}}
+    )
     await provider.rerank("q", ["a", "b", "c"], top_k=2, config=config)
     body = captured[0]
     assert body["model"] == "rerank-test"
@@ -1708,18 +1710,22 @@ async def test_cohere_embed_embedding_types_extra_merges_float_not_clobbers() ->
         captured.append(json.loads(req.content))
         return httpx.Response(200, json=_cohere_embed_body(id="c", vectors=[[0.1, 0.2]], input_tokens=3))
 
-    cfg_both = EmbeddingRuntimeConfig.model_validate({"embedding_types": ["float", "int8"]})
-    cfg_int8 = EmbeddingRuntimeConfig.model_validate({"embedding_types": ["int8"]})
-    cfg_float_last = EmbeddingRuntimeConfig.model_validate({"embedding_types": ["int8", "float"]})
-    cfg_dupes = EmbeddingRuntimeConfig.model_validate({"embedding_types": ["int8", "uint8", "int8"]})
+    cfg_both = EmbeddingRuntimeConfig.model_validate({"extras": {"embedding_types": ["float", "int8"]}})
+    cfg_int8 = EmbeddingRuntimeConfig.model_validate({"extras": {"embedding_types": ["int8"]}})
+    cfg_float_last = EmbeddingRuntimeConfig.model_validate({"extras": {"embedding_types": ["int8", "float"]}})
+    cfg_dupes = EmbeddingRuntimeConfig.model_validate(
+        {"extras": {"embedding_types": ["int8", "uint8", "int8"]}}
+    )
     # Supplied order is NOT alphabetical here, and "binary" sorts BEFORE
     # "float". These two cases are what distinguish "in the order supplied" from
     # a sorted implementation: without them, every list under test is already
     # ascending and a sorted(set(...)) merge passes the whole suite while
     # violating both the supplied-order and float-first rules.
-    cfg_unsorted = EmbeddingRuntimeConfig.model_validate({"embedding_types": ["uint8", "int8"]})
-    cfg_pre_float = EmbeddingRuntimeConfig.model_validate({"embedding_types": ["binary", "int8", "binary"]})
-    cfg_bad = EmbeddingRuntimeConfig.model_validate({"embedding_types": [{"x": 1}]})
+    cfg_unsorted = EmbeddingRuntimeConfig.model_validate({"extras": {"embedding_types": ["uint8", "int8"]}})
+    cfg_pre_float = EmbeddingRuntimeConfig.model_validate(
+        {"extras": {"embedding_types": ["binary", "int8", "binary"]}}
+    )
+    cfg_bad = EmbeddingRuntimeConfig.model_validate({"extras": {"embedding_types": [{"x": 1}]}})
     provider = _cohere_embed_provider(handler)
     # Caller names float first -> unchanged, and float appears exactly once.
     await provider.embed(["x"], config=cfg_both)
@@ -2698,18 +2704,24 @@ async def test_cohere_embed_conflicting_managed_extra_rejects_pre_send() -> None
     # mapping's value. output_dimension is the wire realization of the declared
     # `dimensions`, so an extras output_dimension against a declared dimensions
     # is a genuine collision -- the wire name differs from the declared name.
-    # input_type is deliberately NOT tested here: its wire name equals its
-    # declared name, so a like-named key binds the declared field rather than
-    # model_extra and can never reach the reject arm as an extra.
+    #
+    # The SAME-name arm is reachable too, since 0122: `extras` is a container
+    # separately addressable from the declared fields, so a key whose name
+    # matches a declared field is a legitimate extras key rather than binding
+    # the field. It was unreachable while undeclared keys landed flat on the
+    # record, which is what made this arm look like dead code.
     provider = _cohere_embed_provider(_never_called)
-    configs = (
-        {"input_type": "document", "model": "other"},
-        {"input_type": "document", "truncate": "END"},
-        {"input_type": "document", "dimensions": 512, "output_dimension": 256},
+    configs: tuple[tuple[dict[str, Any], dict[str, Any]], ...] = (
+        ({"input_type": "document"}, {"model": "other"}),
+        ({"input_type": "document"}, {"truncate": "END"}),
+        ({"input_type": "document", "dimensions": 512}, {"output_dimension": 256}),
+        # Same declared name on both sides: the wire name equals the declared
+        # name, so this is the arm the flat reading could not express.
+        ({"input_type": "document"}, {"input_type": "query"}),
     )
-    for raw in configs:
+    for declared, extras in configs:
         with pytest.raises(ProviderInvalidRequest):
-            await provider.embed(["x"], config=EmbeddingRuntimeConfig.model_validate(raw))
+            await provider.embed(["x"], config=EmbeddingRuntimeConfig(**declared, extras=extras))
     await provider.aclose()
 
 
@@ -2722,17 +2734,19 @@ async def test_cohere_embed_matching_managed_extra_is_a_noop() -> None:
 
     provider = _cohere_embed_provider(handler)
     # A matching truncate is a no-op; an unmanaged extra rides untouched.
-    cfg = EmbeddingRuntimeConfig.model_validate({"truncate": "NONE", "user_tag": "keep"})
+    cfg = EmbeddingRuntimeConfig.model_validate({"extras": {"truncate": "NONE", "user_tag": "keep"}})
     await provider.embed(["x"], config=cfg)
     await provider.aclose()
     assert captured[0]["truncate"] == "NONE"
     assert captured[0]["user_tag"] == "keep"
 
 
-async def test_openai_embed_conflicting_model_extra_rejects() -> None:
+async def test_openai_embed_conflicting_extras_key_rejects() -> None:
     provider = _openai_embed_provider(_never_called)
     with pytest.raises(ProviderInvalidRequest):
-        await provider.embed(["x"], config=EmbeddingRuntimeConfig.model_validate({"model": "other"}))
+        await provider.embed(
+            ["x"], config=EmbeddingRuntimeConfig.model_validate({"extras": {"model": "other"}})
+        )
     await provider.aclose()
 
 
@@ -2753,7 +2767,9 @@ async def test_jina_embed_task_escape_hatch_when_input_type_absent() -> None:
         return _jina_embed_response(req)
 
     provider = _jina_embed_provider(handler)
-    await provider.embed(["x"], config=EmbeddingRuntimeConfig.model_validate({"task": "text-matching"}))
+    await provider.embed(
+        ["x"], config=EmbeddingRuntimeConfig.model_validate({"extras": {"task": "text-matching"}})
+    )
     await provider.aclose()
     assert captured[0]["task"] == "text-matching"
 
@@ -2761,7 +2777,9 @@ async def test_jina_embed_task_escape_hatch_when_input_type_absent() -> None:
 async def test_jina_embed_task_conflict_rejects_when_input_type_set() -> None:
     # input_type set -> task managed -> a conflicting extras task is rejected.
     provider = _jina_embed_provider(_never_called)
-    cfg = EmbeddingRuntimeConfig.model_validate({"input_type": "query", "task": "retrieval.passage"})
+    cfg = EmbeddingRuntimeConfig.model_validate(
+        {"input_type": "query", "extras": {"task": "retrieval.passage"}}
+    )
     with pytest.raises(ProviderInvalidRequest):
         await provider.embed(["x"], config=cfg)
     await provider.aclose()
@@ -2775,7 +2793,9 @@ async def test_jina_embed_task_matching_is_a_noop() -> None:
         return _jina_embed_response(req)
 
     provider = _jina_embed_provider(handler)
-    cfg = EmbeddingRuntimeConfig.model_validate({"input_type": "query", "task": "retrieval.query"})
+    cfg = EmbeddingRuntimeConfig.model_validate(
+        {"input_type": "query", "extras": {"task": "retrieval.query"}}
+    )
     await provider.embed(["x"], config=cfg)
     await provider.aclose()
     assert captured[0]["task"] == "retrieval.query"
@@ -2786,7 +2806,9 @@ async def test_tei_embed_relied_on_truncate_default_conflict_rejects() -> None:
     # sending it; a conflicting extras truncate is still rejected (0105 fx 047).
     provider = _tei_embed_provider(_never_called)
     with pytest.raises(ProviderInvalidRequest):
-        await provider.embed(["x"], config=EmbeddingRuntimeConfig.model_validate({"truncate": True}))
+        await provider.embed(
+            ["x"], config=EmbeddingRuntimeConfig.model_validate({"extras": {"truncate": True}})
+        )
     await provider.aclose()
 
 
@@ -2800,7 +2822,7 @@ async def test_tei_embed_matching_truncate_default_leaves_body_minimal() -> None
         return httpx.Response(200, json=[[0.1, 0.2]])
 
     provider = _tei_embed_provider(handler)
-    await provider.embed(["x"], config=EmbeddingRuntimeConfig.model_validate({"truncate": False}))
+    await provider.embed(["x"], config=EmbeddingRuntimeConfig.model_validate({"extras": {"truncate": False}}))
     await provider.aclose()
     assert "truncate" not in captured[0]
 
@@ -2809,7 +2831,9 @@ async def test_jina_rerank_conflicting_truncation_rejects() -> None:
     # 0105 fixture 048: the distinct `truncation` name on Jina /v1/rerank.
     provider = _jina_rerank_provider(_never_called)
     with pytest.raises(ProviderInvalidRequest):
-        await provider.rerank("q", ["d"], config=RerankRuntimeConfig.model_validate({"truncation": True}))
+        await provider.rerank(
+            "q", ["d"], config=RerankRuntimeConfig.model_validate({"extras": {"truncation": True}})
+        )
     await provider.aclose()
 
 
@@ -2821,7 +2845,7 @@ async def test_cohere_rerank_conflicting_top_n_extra_rejects() -> None:
     provider = _rerank_provider(_never_called)
     with pytest.raises(ProviderInvalidRequest):
         await provider.rerank(
-            "q", ["a", "b"], top_k=2, config=RerankRuntimeConfig.model_validate({"top_n": 1})
+            "q", ["a", "b"], top_k=2, config=RerankRuntimeConfig.model_validate({"extras": {"top_n": 1}})
         )
     await provider.aclose()
 
@@ -2834,7 +2858,9 @@ async def test_cohere_rerank_extras_top_n_without_top_k_rides_untouched() -> Non
         return httpx.Response(200, json=_rerank_body(results=[{"index": 0, "relevance_score": 0.9}]))
 
     provider = _rerank_provider(handler)
-    await provider.rerank("q", ["a", "b"], config=RerankRuntimeConfig.model_validate({"top_n": 1}))
+    await provider.rerank(
+        "q", ["a", "b"], config=RerankRuntimeConfig.model_validate({"extras": {"top_n": 1}})
+    )
     await provider.aclose()
     assert captured[0]["top_n"] == 1
 
@@ -2843,7 +2869,7 @@ async def test_jina_rerank_conflicting_top_n_extra_rejects() -> None:
     provider = _jina_rerank_provider(_never_called)
     with pytest.raises(ProviderInvalidRequest):
         await provider.rerank(
-            "q", ["a", "b"], top_k=2, config=RerankRuntimeConfig.model_validate({"top_n": 1})
+            "q", ["a", "b"], top_k=2, config=RerankRuntimeConfig.model_validate({"extras": {"top_n": 1}})
         )
     await provider.aclose()
 
@@ -2863,6 +2889,42 @@ async def test_jina_rerank_extras_top_n_without_top_k_rides_untouched() -> None:
         )
 
     provider = _jina_rerank_provider(handler)
-    await provider.rerank("q", ["a", "b"], config=RerankRuntimeConfig.model_validate({"top_n": 1}))
+    await provider.rerank(
+        "q", ["a", "b"], config=RerankRuntimeConfig.model_validate({"extras": {"top_n": 1}})
+    )
     await provider.aclose()
     assert captured[0]["top_n"] == 1
+
+
+async def test_cohere_embed_unrecognized_precision_strings_merge_rather_than_malform() -> None:
+    # §8.4 as 0122 tightens it: the malformed test is STRUCTURAL, never a
+    # VOCABULARY check. A well-typed string the provider does not recognize
+    # merges, and the provider rejects it if unsupported.
+    #
+    # The empty string is the element a reading of "not a precision string" as
+    # "not one of the known names" gets wrong. Fixture 053 case 3 pins it.
+    captured: list[dict[str, Any]] = []
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        captured.append(json.loads(req.content))
+        return httpx.Response(200, json=_cohere_embed_body(id="c", vectors=[[0.1, 0.2]], input_tokens=3))
+
+    provider = _cohere_embed_provider(handler)
+    try:
+        cfg = EmbeddingRuntimeConfig.model_validate({"extras": {"embedding_types": ["banana", ""]}})
+        await provider.embed(["x"], config=cfg)
+        assert captured[0]["embedding_types"] == ["float", "banana", ""], (
+            "an unrecognized or empty precision string must merge, not read as malformed"
+        )
+
+        # The structural arm is unchanged: a non-string element is still
+        # malformed, and the whole list is dropped rather than partially
+        # salvaged.
+        captured.clear()
+        cfg_mixed = EmbeddingRuntimeConfig.model_validate({"extras": {"embedding_types": ["int8", 7]}})
+        await provider.embed(["x"], config=cfg_mixed)
+        assert captured[0]["embedding_types"] == ["float"], (
+            "a non-string element must still drop the whole list, with no partial salvage"
+        )
+    finally:
+        await provider.aclose()

@@ -2274,8 +2274,11 @@ def _runtime_config_from_spec(config_spec: dict[str, Any] | None) -> RuntimeConf
     }
     kwargs = {k: v for k, v in config_spec.items() if k in declared}
     extras = cast("dict[str, Any]", config_spec.get("extras") or {})
-    kwargs.update(extras)
-    return RuntimeConfig(**kwargs)
+    # The fixture's `extras` sub-block maps onto the config's own container
+    # (0122). Merging it into the declared kwargs would let an extras key naming
+    # a declared field rebind that field, which is the collision 0122 exists to
+    # make expressible.
+    return RuntimeConfig(**kwargs, extras=dict(extras))
 
 
 # ---------------------------------------------------------------------------

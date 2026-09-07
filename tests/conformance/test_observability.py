@@ -6412,8 +6412,7 @@ def _build_runtime_config(config_spec: Mapping[str, Any] | None) -> RuntimeConfi
             "stop_sequences",
         }
     }
-    kwargs.update(extras)
-    return RuntimeConfig(**kwargs)
+    return RuntimeConfig(**kwargs, extras=dict(extras))
 
 
 def _require_text_content(role: object, content: object) -> str:

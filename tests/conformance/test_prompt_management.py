@@ -214,18 +214,16 @@ class MockPromptBackend:
         self._prompts: dict[tuple[str, str], Prompt] = {}
         now = datetime.now(UTC)
         for ps in spec.prompts:
-            # Sampling sub-record (fixture 013): flatten the fixture's
-            # `extras:` sub-block into top-level kwargs so caller-
-            # supplied vendor knobs land in SamplingConfig's extras-
-            # allow bag rather than as a literal `extras` key.
+            # Sampling sub-record (fixture 013): the `extras:` sub-block maps
+            # onto the config's own extras container (0122).
             sampling: SamplingConfig | None = None
             if ps.sampling is not None:
-                flat: dict[str, Any] = {k: v for k, v in ps.sampling.items() if k != "extras"}
+                declared: dict[str, Any] = {k: v for k, v in ps.sampling.items() if k != "extras"}
                 extras = ps.sampling.get("extras")
-                if isinstance(extras, dict):
-                    for k, v in cast(dict[str, Any], extras).items():
-                        flat.setdefault(k, v)
-                sampling = SamplingConfig(**flat)
+                sampling = SamplingConfig(
+                    **declared,
+                    extras=dict(cast(dict[str, Any], extras)) if isinstance(extras, dict) else {},
+                )
             if ps.chat_template is not None:
                 # Proposal 0046: chat-prompt variant.  Map fixture
                 # YAML segment dicts to OA ChatSegment entries via
@@ -574,16 +572,14 @@ def _assert_capture_attrs(capture_name: str, actual: Any, expected: dict[str, An
         if key == "sampling":
             actual_sampling = getattr(actual, "sampling", None)
             assert actual_sampling is not None, f"{capture_name}.sampling: expected present, got None"
-            # Spec sidecar convention nests vendor extras under
-            # `extras:`; SamplingConfig.model_dump() flattens them to
-            # the top level (extra="allow"). Normalize the expected
-            # shape before equality compare.
-            expected_flat = {k: v for k, v in expected_value.items() if k != "extras"}
-            if isinstance(expected_value.get("extras"), dict):
-                expected_flat.update(expected_value["extras"])
-            actual_flat = actual_sampling.model_dump(exclude_none=True)
-            assert actual_flat == expected_flat, (
-                f"{capture_name}.sampling: expected {expected_flat!r}, got {actual_flat!r}"
+            # The sidecar's `extras:` sub-block and the config's `extras`
+            # container are the same shape (0122), so this compares directly.
+            # An absent extras block means an empty container, not a missing key.
+            expected_shape = dict(expected_value)
+            expected_shape.setdefault("extras", {})
+            actual_shape = actual_sampling.model_dump(exclude_none=True)
+            assert actual_shape == expected_shape, (
+                f"{capture_name}.sampling: expected {expected_shape!r}, got {actual_shape!r}"
             )
             continue
         actual_value = getattr(actual, key)

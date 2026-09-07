@@ -47,7 +47,9 @@ class LlmRetryConfig(RetryConfig):
       partial-overrides applied to RETRIES only. Attempt 0 uses the caller's
       base ``config`` unmodified; retry ``i`` (attempt ``i+1``) merges
       ``per_attempt_override[i]`` onto the base (the override's set fields
-      replace, unspecified fields inherited). When the schedule is shorter
+      replace, unspecified fields inherited; ``extras`` counts as unspecified
+      when empty, so it inherits, and replaces wholesale when not). When the
+      schedule is shorter
       than the retry count, the last entry carries forward. The canonical form
       is an escalating temperature schedule (e.g. ``[RuntimeConfig(temperature=0.3),
       RuntimeConfig(temperature=0.6)]``). ``complete()`` never mutates the

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal, cast
@@ -13,6 +14,8 @@ from pydantic import ValidationError
 from ..errors import PromptNotFound, PromptStoreUnavailable
 from ..hashing import compute_template_hash
 from ..prompt import Prompt, SamplingConfig, TextPrompt, TokenBudget
+
+_log = logging.getLogger(__name__)
 
 
 class FilesystemPromptBackend:
@@ -158,11 +161,24 @@ class FilesystemPromptBackend:
                     name=name,
                     label="",
                 )
-            return _sampling_from_dict(cast(dict[str, Any], raw))
+            return self._sampling_or_unavailable(name, "", cast(dict[str, Any], raw))
         # per-prompt-sidecar: use the single pre-read snapshot.
         if sidecar is None:
             return None
-        return _sampling_from_dict(sidecar)
+        return self._sampling_or_unavailable(name, "", sidecar)
+
+    def _sampling_or_unavailable(self, name: str, label: str, data: dict[str, Any]) -> SamplingConfig | None:
+        # A malformed VALUE on a recognized key (`{"temperature": "warm"}`)
+        # raises from pydantic. Converted to PromptStoreUnavailable so it stays
+        # fallback-eligible: the manager catches only its two documented types,
+        # so a raw error here would take down every fetch for this prompt with
+        # another backend sitting idle. Mirrors `_resolve_token_budget`.
+        try:
+            return _sampling_from_dict(data)
+        except (ValueError, ValidationError) as exc:
+            raise PromptStoreUnavailable(
+                f"sampling config for {name!r} is malformed: {exc}", name=name, label=label
+            ) from exc
 
     def _resolve_token_budget(
         self, name: str, label: str, sidecar: dict[str, Any] | None
@@ -257,19 +273,31 @@ class FilesystemPromptBackend:
 
 
 def _sampling_from_dict(data: dict[str, Any]) -> SamplingConfig:
-    # Top-level `extras` is flattened so caller-supplied vendor knobs
-    # end up in SamplingConfig's extras-allow bag rather than as a
-    # single literal `extras` key. Matches the YAML conformance-fixture
-    # convention from llm-provider/032 + the spec §5 sidecar example.
-    # `token_budget` (proposal 0083) is a sibling sub-object read by
-    # `_token_budget_from_dict`, not a sampling field, so it is excluded
-    # here alongside `extras`.
-    flat: dict[str, Any] = {k: v for k, v in data.items() if k not in ("extras", "token_budget")}
+    # The sidecar's `extras` sub-object maps onto the config's own extras
+    # container (0122). `token_budget` (0083) is a sibling sub-object read by
+    # `_token_budget_from_dict`, not a sampling field.
+    #
+    # UNRECOGNIZED top-level keys are ignored rather than raising (0109
+    # tolerate-and-filter, as `_token_budget_from_dict` and the langfuse backend
+    # already do). The config rejects undeclared names, so splatting the sidecar
+    # verbatim would turn one stray key in an operator-authored file into a
+    # pydantic error escaping `fetch()`, which is not one of the two documented
+    # error types and so bypasses the manager's multi-backend fallback.
+    declared: dict[str, Any] = {
+        k: v for k, v in data.items() if k in SamplingConfig.model_fields and k != "extras"
+    }
+    ignored = sorted(set(data) - set(declared) - {"extras", "token_budget"})
+    if ignored:
+        _log.warning(
+            "sidecar sampling config carries unrecognized top-level key(s) %s; ignored "
+            "(vendor knobs belong under `extras`)",
+            ", ".join(repr(k) for k in ignored),
+        )
     extras = data.get("extras")
-    if isinstance(extras, dict):
-        for k, v in cast(dict[str, Any], extras).items():
-            flat.setdefault(k, v)
-    return SamplingConfig(**flat)
+    return SamplingConfig(
+        **declared,
+        extras=dict(cast(dict[str, Any], extras)) if isinstance(extras, dict) else {},
+    )
 
 
 def _token_budget_from_dict(data: dict[str, Any]) -> TokenBudget | None:

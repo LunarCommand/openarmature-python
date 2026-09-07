@@ -142,6 +142,13 @@ replace, the rest inherited from the base), and the last entry carries
 forward when the schedule is shorter than the retry count. The caller's
 `config` is never mutated.
 
+`extras` follows the same rule with one wrinkle, because its default is
+an empty container rather than `None`. An override that declares no
+extras inherits the base's; one that declares any replaces them
+wholesale, and any base key it does not carry is logged as not sent on
+that attempt. Clearing extras for a single attempt is therefore not
+expressible, since an empty container is how inheriting is spelled.
+
 ### Reasking on invalid structured output
 
 A `response_schema` call that returns schema-invalid output raises
@@ -635,17 +642,23 @@ is a one-node change.
 ## Provider-specific extras
 
 `RuntimeConfig` (and the retrieval `EmbeddingRuntimeConfig` /
-`RerankRuntimeConfig`) accept fields beyond the declared set, and any
-undeclared field is forwarded to the wire request untouched. This is how
-you reach a backend-specific knob the portable config does not model, for
-example a vLLM `guided_decoding`:
+`RerankRuntimeConfig`) carry undeclared fields in an `extras` container,
+and everything in it is forwarded to the wire request untouched. Passing
+an undeclared name directly is rejected. This is how you reach a
+backend-specific knob the portable config does not model, for example a
+vLLM `guided_decoding`:
 
 ```python
-config = RuntimeConfig.model_validate({
-    "temperature": 0.2,
-    "guided_decoding": {"grammar": "..."},   # forwarded as-is
-})
+config = RuntimeConfig(
+    temperature=0.2,
+    extras={"guided_decoding": {"grammar": "..."}},   # forwarded as-is
+)
 ```
+
+Undeclared knobs go in `extras`, a container separate from the declared
+fields. That separation is what lets you set a declared field and an
+extras key of the same name in one call, which is how a provider-specific
+override of a field OA already models is expressed.
 
 The value itself is never translated or renamed. One caveat for
 byte-level consumers: the OpenAI Chat Completions mapping canonicalizes
