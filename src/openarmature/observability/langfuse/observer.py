@@ -49,6 +49,11 @@ from openarmature.graph.events import (
     ToolCallFailedEvent,
 )
 from openarmature.graph.observer import ObserverEvent
+from openarmature.observability.diagnostics import (
+    LANGFUSE_PAYLOAD_SUPPRESSED,
+    LANGFUSE_SHARED_PROVIDER_ACCEPTED,
+    diagnostic,
+)
 from openarmature.observability.lineage import (
     BranchDispatchKey as _BranchDispatchKey,
 )
@@ -445,7 +450,8 @@ class LangfuseObserver:
                 _logger.warning(
                     "cannot establish the Langfuse client's TracerProvider binding; "
                     "suppressing the provider and state payloads you enabled, to avoid "
-                    "a possible leak to a shared provider"
+                    "a possible leak to a shared provider",
+                    extra=diagnostic(LANGFUSE_PAYLOAD_SUPPRESSED),
                 )
             self.disable_provider_payload = True
             self.disable_state_payload = True
@@ -467,7 +473,8 @@ class LangfuseObserver:
             # whatever the payload knobs say.
             _logger.warning(
                 "accept_shared_provider=True: OA's Langfuse observations may reach a "
-                "TracerProvider shared with the application (acknowledged)"
+                "TracerProvider shared with the application (acknowledged)",
+                extra=diagnostic(LANGFUSE_SHARED_PROVIDER_ACCEPTED),
             )
 
     def _construction_channels_live(self) -> bool:

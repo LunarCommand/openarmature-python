@@ -19,6 +19,8 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, Any
 
+from ..diagnostics import EVENT_NAME_ATTR as _EVENT_NAME_ATTR
+
 if TYPE_CHECKING:
     from opentelemetry.sdk._logs import LoggerProvider
 
@@ -122,9 +124,33 @@ def install_log_bridge(
         LoggingHandler as _InstrLoggingHandler,
     )
 
+    # §7 wants a diagnostic's event name on the OTel LogRecord's `event_name`
+    # FIELD. Neither OTel logging handler populates it: both map every stdlib
+    # record attribute into `attributes` and leave the field unset, so a name
+    # passed via `extra=` would arrive as an attribute and the field would stay
+    # empty. This lifts it.
+    #
+    # `_translate` is the handlers' own private surface, so this reaches past
+    # the public API deliberately. It degrades rather than breaks if that
+    # surface moves: a missing or renamed `_translate` leaves the base
+    # behaviour, which is the pre-0121 attributes-only shape.
+    class _EventNameHandler(_InstrLoggingHandler):  # type: ignore[misc, valid-type]
+        def _translate(self, record: logging.LogRecord) -> Any:
+            translated = super()._translate(record)  # pyright: ignore[reportUnknownMemberType]
+            name = getattr(record, _EVENT_NAME_ATTR, None)
+            if isinstance(name, str) and getattr(translated, "event_name", None) is None:
+                try:
+                    translated.event_name = name
+                except AttributeError:
+                    # An SDK whose LogRecord has no such field: the name still
+                    # rides as an attribute, so nothing is lost that was there
+                    # before.
+                    pass
+            return translated
+
     root = logging.getLogger()
     if not _otel_logs_handler_already_bridges(root, provider):
-        handler = _InstrLoggingHandler(level=level, logger_provider=provider)
+        handler = _EventNameHandler(level=level, logger_provider=provider)
         # Direct assignment isn't typed on LoggingHandler; route
         # through ``object.__setattr__`` to avoid pyright's strict
         # attribute-access check without losing the idempotency-

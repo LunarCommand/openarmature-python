@@ -723,3 +723,67 @@ def test_fixture_round_trips(case: tuple[str, Path]) -> None:
 
     reparsed = _FIXTURE_ADAPTER.validate_python(dumped)
     assert parsed == reparsed, f"round-trip mismatch for {path}"
+
+
+def test_otel_observer_directive_and_the_bare_key_select_the_same_flag() -> None:
+    # §5.5 (0121) moves the OTel observer's construction knobs under an
+    # `otel_observer:` directive. Twelve fixtures carry the new spelling at
+    # v0.118.0 while the pinned copy still uses the bare case-level key, so the
+    # harness reads both and the directive wins where both appear.
+    #
+    # Without this a fixture that moved to the directive would silently fall
+    # back to the observer's default (payloads OFF), and a case asserting a
+    # payload is ABSENT would keep passing for the wrong reason.
+    from tests.conformance.test_observability import _observer_kwargs_for_case
+
+    directive_only = _observer_kwargs_for_case({"otel_observer": {"disable_provider_payload": False}})
+    bare_only = _observer_kwargs_for_case({"disable_provider_payload": False})
+    assert directive_only.get("disable_provider_payload") is False
+    assert bare_only.get("disable_provider_payload") is False
+
+    # The directive wins over a bare key, so a half-migrated fixture cannot
+    # resolve to the stale value.
+    both = _observer_kwargs_for_case(
+        {"disable_provider_payload": True, "otel_observer": {"disable_provider_payload": False}}
+    )
+    assert both.get("disable_provider_payload") is False
+
+    # Neither spelling present leaves the flag unset, so the observer default
+    # applies rather than a harness-invented one.
+    assert "disable_provider_payload" not in _observer_kwargs_for_case({})
+
+
+def test_log_records_event_name_discriminates_between_same_level_records() -> None:
+    # 0121's reason for existing: a `log_records` entry declaring only a level
+    # is satisfied by ANY record at that level, so silencing the mandated
+    # emitter leaves a fixture green if an unrelated warning fires on the same
+    # logger. The name discriminates portably where the emitting call site,
+    # which this harness fell back to, does not.
+    import logging
+
+    from openarmature.observability.diagnostics import (
+        LANGFUSE_PAYLOAD_SUPPRESSED,
+        LANGFUSE_SHARED_PROVIDER_ACCEPTED,
+        event_name_of,
+    )
+
+    def _record(msg: str, name: str | None) -> logging.LogRecord:
+        rec = logging.LogRecord("openarmature.observability", logging.WARNING, __file__, 0, msg, None, None)
+        if name is not None:
+            rec.event_name = name  # type: ignore[attr-defined]
+        return rec
+
+    records = [
+        _record("an unrelated cached-client notice", None),
+        _record("suppressing payloads", LANGFUSE_PAYLOAD_SUPPRESSED),
+    ]
+
+    # Level alone cannot tell them apart, which is the gap.
+    assert len([r for r in records if r.levelname == "WARNING"]) == 2
+    # The name can.
+    matched = [r for r in records if event_name_of(r) == LANGFUSE_PAYLOAD_SUPPRESSED]
+    assert len(matched) == 1
+    assert "suppressing" in matched[0].getMessage()
+    # And a name the run never emitted matches nothing, so a fixture asserting
+    # it fails rather than passing on a neighbour.
+    assert not [r for r in records if event_name_of(r) == LANGFUSE_SHARED_PROVIDER_ACCEPTED]

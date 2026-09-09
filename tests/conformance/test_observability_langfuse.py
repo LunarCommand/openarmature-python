@@ -34,6 +34,7 @@ from pydantic import SecretStr
 from openarmature.graph import END, BranchSpec, ExplicitMapping, GraphBuilder
 from openarmature.llm import OpenAIProvider
 from openarmature.llm.response import RuntimeConfig
+from openarmature.observability.diagnostics import event_name_of as _event_name_of
 from openarmature.observability.langfuse import (
     InMemoryLangfuseClient,
     LangfuseObservation,
@@ -3045,9 +3046,10 @@ class _IsolationCapture:
     isolated_exporter: Any | None  # the provider openarmature built for Langfuse
 
 
-# The observer method that emits the isolation-decision WARNINGs §6 mandates.
-# `from_credentials` emits its own, unrelated, WARNINGs on the same logger, so the
-# `log_records` assertion discriminates on this rather than on level alone.
+# The fallback discriminator, used only for a fixture that declares no
+# `event_name`. `from_credentials` emits unrelated WARNINGs on the same logger,
+# so level alone matches an incidental record; the emitting call site is not
+# portable to another implementation, which is why 0121 added the name.
 _ISOLATION_DECISION_FUNC = "_apply_isolation_policy"
 
 
@@ -3217,9 +3219,23 @@ def _assert_isolation_expectations(
         # the mandated emitter on its own then leaves the case green -- verified as
         # a surviving mutant before this was narrowed.
         assert log_records is not None, "log_records was declared but nothing captured logs"
-        _assert_isolation_decision_emitter_exists()
         for wanted in cast("list[dict[str, Any]]", expected_logs):
             level = cast("str", wanted["level"])
+            # §5.5 (0121) gives a fixture an `event_name` to discriminate on.
+            # Where it declares one, match on it: the name is portable, unlike
+            # the emitting call site this fell back to while level alone was the
+            # only declared key and any warning on the logger satisfied it.
+            wanted_name = cast("str | None", wanted.get("event_name"))
+            if wanted_name is not None:
+                matched = [
+                    r for r in log_records if r.levelname == level and _event_name_of(r) == wanted_name
+                ]
+                assert matched, (
+                    f"expected a {level} log record with event_name {wanted_name!r}; captured "
+                    f"{[(r.levelname, _event_name_of(r), r.getMessage()[:50]) for r in log_records]}"
+                )
+                continue
+            _assert_isolation_decision_emitter_exists()
             matched = [
                 r for r in log_records if r.levelname == level and r.funcName == _ISOLATION_DECISION_FUNC
             ]

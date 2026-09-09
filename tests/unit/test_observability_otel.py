@@ -6466,3 +6466,102 @@ async def test_detached_fan_out_instance_opens_one_root_per_instance() -> None:
     )
     trace_count = len({_span_ctx(s).trace_id for s in spans})
     assert trace_count == 2, f"expected the parent trace plus one detached instance trace, got {trace_count}"
+
+
+def test_log_bridge_lifts_the_event_name_onto_the_otel_record_field() -> None:
+    # §7 puts a diagnostic's event name on the OTel LogRecord's `event_name`
+    # FIELD. Neither OTel logging handler sets it: both map stdlib record
+    # attributes into `attributes` and leave the field unset, so a name passed
+    # through `extra=` arrives as an attribute and the field stays empty.
+    #
+    # Asserting the FIELD rather than the attribute is the point. An
+    # attributes-only implementation satisfies a fixture that reads the stdlib
+    # record while leaving an OTel consumer unable to filter on the name.
+    from opentelemetry.sdk._logs import LoggerProvider
+    from opentelemetry.sdk._logs.export import (
+        InMemoryLogRecordExporter,
+        SimpleLogRecordProcessor,
+    )
+
+    from openarmature.observability.diagnostics import (
+        LANGFUSE_PAYLOAD_SUPPRESSED,
+        diagnostic,
+    )
+
+    root = logging.getLogger()
+    prior_handlers = list(root.handlers)
+    prior_level = root.level
+    prior_factory = logging.getLogRecordFactory()
+    exporter = InMemoryLogRecordExporter()
+    provider = LoggerProvider()
+    provider.add_log_record_processor(SimpleLogRecordProcessor(exporter))
+    try:
+        install_log_bridge(provider)
+        root.setLevel(logging.INFO)
+        log = logging.getLogger("openarmature.observability")
+        log.warning("suppressing payload", extra=diagnostic(LANGFUSE_PAYLOAD_SUPPRESSED))
+        log.warning("some unrelated diagnostic")
+        provider.force_flush()
+
+        emitted = [d.log_record for d in exporter.get_finished_logs()]
+        tagged = [r for r in emitted if "suppressing payload" in str(r.body)]
+        assert len(tagged) == 1, f"expected the tagged record; got {[str(r.body) for r in emitted]}"
+        assert tagged[0].event_name == LANGFUSE_PAYLOAD_SUPPRESSED, (
+            "the event name must reach the OTel LogRecord's event_name field, not only its attributes"
+        )
+        # An untagged record leaves the field alone rather than inheriting a name.
+        untagged = [r for r in emitted if "unrelated" in str(r.body)]
+        assert len(untagged) == 1
+        assert untagged[0].event_name is None
+    finally:
+        root.handlers[:] = prior_handlers
+        root.setLevel(prior_level)
+        logging.setLogRecordFactory(prior_factory)
+        provider.shutdown()
+
+
+async def test_the_token_budget_diagnostic_carries_its_event_name() -> None:
+    # §7 (0121) names this one too, at SHOULD. It shares the
+    # `openarmature.observability` logger with the isolation decisions and with
+    # unrelated warnings, so without the name a consumer filtering for budget
+    # breaches cannot tell it apart from any other warning on that logger.
+    #
+    # Driven through a real over-budget event rather than by logging the record
+    # here, or the test would pass with the emitter dropping the name entirely.
+    from openarmature.llm.response import Usage
+    from openarmature.observability.diagnostics import (
+        TOKEN_BUDGET_EXCEEDED,
+        event_name_of,
+    )
+    from openarmature.observability.otel.observer import logger as otel_logger
+    from openarmature.prompts import TokenBudget
+    from tests._helpers.typed_event import make_retry_attempt_event
+
+    captured: list[logging.LogRecord] = []
+
+    class _Sink(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            captured.append(record)
+
+    sink = _Sink()
+    otel_logger.addHandler(sink)
+    prior = otel_logger.level
+    otel_logger.setLevel(logging.WARNING)
+    try:
+        await _drive_metrics_events(
+            [
+                make_retry_attempt_event(
+                    model="test-model",
+                    provider="openai",
+                    usage=Usage(prompt_tokens=20, completion_tokens=1, total_tokens=21),
+                    token_budget=TokenBudget(input_max_tokens=10),
+                )
+            ]
+        )
+    finally:
+        otel_logger.removeHandler(sink)
+        otel_logger.setLevel(prior)
+
+    breaches = [r for r in captured if "token budget exceeded" in r.getMessage()]
+    assert len(breaches) == 1, f"expected the breach warning; got {[r.getMessage() for r in captured]}"
+    assert event_name_of(breaches[0]) == TOKEN_BUDGET_EXCEEDED
