@@ -6565,3 +6565,34 @@ async def test_the_token_budget_diagnostic_carries_its_event_name() -> None:
     breaches = [r for r in captured if "token budget exceeded" in r.getMessage()]
     assert len(breaches) == 1, f"expected the breach warning; got {[r.getMessage() for r in captured]}"
     assert event_name_of(breaches[0]) == TOKEN_BUDGET_EXCEEDED
+
+
+def test_event_name_bridge_degrades_when_the_upstream_seam_is_gone() -> None:
+    # The lift subclasses the OTel handler's `_translate`, which is its private
+    # surface. Once that method no longer exists, `super()._translate(...)`
+    # inside an override raises AttributeError and breaks logging, so the
+    # subclass is only used while the seam is there.
+    #
+    # Driven against a stand-in base rather than asserted in prose, because the
+    # comment claiming this degraded was true of nothing until the guard landed.
+    from openarmature.observability.otel.logs import _event_name_handler_class
+
+    class _WithSeam(logging.Handler):
+        def _translate(self, record: logging.LogRecord) -> Any:
+            return type("R", (), {"event_name": None})()
+
+    class _WithoutSeam(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            return None
+
+    # Seam present: a subclass that lifts the name.
+    lifted = _event_name_handler_class(_WithSeam)
+    assert lifted is not _WithSeam
+    record = logging.LogRecord("x", logging.WARNING, __file__, 0, "m", None, None)
+    record.event_name = "openarmature.test.event"  # type: ignore[attr-defined]
+    assert lifted()._translate(record).event_name == "openarmature.test.event"
+
+    # Seam gone: the upstream class unchanged, so emitting still works rather
+    # than raising.
+    assert _event_name_handler_class(_WithoutSeam) is _WithoutSeam
+    _WithoutSeam().emit(record)

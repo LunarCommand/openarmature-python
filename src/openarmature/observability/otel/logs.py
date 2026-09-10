@@ -17,7 +17,7 @@ the correlation_id from the ContextVar.
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from ..diagnostics import EVENT_NAME_ATTR as _EVENT_NAME_ATTR
 
@@ -124,33 +124,10 @@ def install_log_bridge(
         LoggingHandler as _InstrLoggingHandler,
     )
 
-    # §7 wants a diagnostic's event name on the OTel LogRecord's `event_name`
-    # FIELD. Neither OTel logging handler populates it: both map every stdlib
-    # record attribute into `attributes` and leave the field unset, so a name
-    # passed via `extra=` would arrive as an attribute and the field would stay
-    # empty. This lifts it.
-    #
-    # `_translate` is the handlers' own private surface, so this reaches past
-    # the public API deliberately. It degrades rather than breaks if that
-    # surface moves: a missing or renamed `_translate` leaves the base
-    # behaviour, which is the pre-0121 attributes-only shape.
-    class _EventNameHandler(_InstrLoggingHandler):  # type: ignore[misc, valid-type]
-        def _translate(self, record: logging.LogRecord) -> Any:
-            translated = super()._translate(record)  # pyright: ignore[reportUnknownMemberType]
-            name = getattr(record, _EVENT_NAME_ATTR, None)
-            if isinstance(name, str) and getattr(translated, "event_name", None) is None:
-                try:
-                    translated.event_name = name
-                except AttributeError:
-                    # An SDK whose LogRecord has no such field: the name still
-                    # rides as an attribute, so nothing is lost that was there
-                    # before.
-                    pass
-            return translated
-
     root = logging.getLogger()
     if not _otel_logs_handler_already_bridges(root, provider):
-        handler = _EventNameHandler(level=level, logger_provider=provider)
+        handler_cls = _event_name_handler_class(_InstrLoggingHandler)
+        handler = handler_cls(level=level, logger_provider=provider)
         # Direct assignment isn't typed on LoggingHandler; route
         # through ``object.__setattr__`` to avoid pyright's strict
         # attribute-access check without losing the idempotency-
@@ -159,6 +136,45 @@ def install_log_bridge(
         root.addHandler(handler)
     # Idempotency #2: don't stack the LogRecord factory.
     _install_correlation_id_factory()
+
+
+def _event_name_handler_class(base: type[Any]) -> type[Any]:
+    """The handler class to bridge with, lifting a record's event name.
+
+    Returns ``base`` unchanged where the upstream handler no longer exposes the
+    seam this needs.
+    """
+    # §7 wants a diagnostic's event name on the OTel LogRecord's `event_name`
+    # FIELD. Neither OTel logging handler populates it: both map every stdlib
+    # record attribute into `attributes` and leave the field unset, so a name
+    # passed via `extra=` arrives as an attribute and the field stays empty.
+    #
+    # `_translate` is the handlers' own private surface, so subclassing it
+    # reaches past the public API. Guarded on the method still existing, because
+    # `super()._translate(...)` inside an override raises AttributeError once it
+    # does not, which would break logging rather than degrade. Without the
+    # subclass the name still rides as an attribute, which is where it sat
+    # before this.
+    if not hasattr(base, "_translate"):
+        return base
+
+    class _EventNameHandler(base):  # type: ignore[misc, valid-type]
+        def _translate(self, record: logging.LogRecord) -> Any:
+            # `base` is `type[Any]` so the checker cannot see through `super()`;
+            # the seam's existence is guarded above instead.
+            raw = super()._translate(record)  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
+            translated = cast("Any", raw)
+            name = getattr(record, _EVENT_NAME_ATTR, None)
+            if isinstance(name, str) and getattr(translated, "event_name", None) is None:
+                try:
+                    translated.event_name = name
+                except AttributeError:
+                    # A LogRecord with no such field: the name still rides as an
+                    # attribute, so nothing that was there before is lost.
+                    pass
+            return translated
+
+    return _EventNameHandler
 
 
 def _otel_logs_handler_already_bridges(root: logging.Logger, provider: LoggerProvider) -> bool:
