@@ -2830,3 +2830,58 @@ async def test_the_tool_observation_carries_caller_metadata_like_the_others() ->
     # unreserved then, so a caller key of that name merged last would have
     # replaced the only discriminator a failed Tool observation carries. 0119
     # closed it from the reservation side.
+
+
+def test_the_mandated_isolation_diagnostics_carry_their_event_names() -> None:
+    # §7 (0121): the two §6 isolation decisions are MUST-carry diagnostics, so
+    # each record carries its stable event name. A fixture asserting on level
+    # alone cannot tell them apart from any other warning on the same logger,
+    # which is what the names exist to fix.
+    import logging as _logging
+
+    from openarmature.observability.diagnostics import (
+        LANGFUSE_PAYLOAD_SUPPRESSED,
+        LANGFUSE_SHARED_PROVIDER_ACCEPTED,
+        event_name_of,
+    )
+    from openarmature.observability.langfuse.client import (
+        ISOLATION_SHARED_ACCEPTED,
+        ISOLATION_UNDETECTABLE,
+    )
+    from openarmature.observability.langfuse.observer import _logger as observer_logger
+
+    captured: list[_logging.LogRecord] = []
+
+    class _Sink(_logging.Handler):
+        def emit(self, record: _logging.LogRecord) -> None:
+            captured.append(record)
+
+    sink = _Sink()
+    observer_logger.addHandler(sink)
+    prior = observer_logger.level
+    observer_logger.setLevel(_logging.INFO)
+    try:
+        # The policy reads the status off the client, which a double does not
+        # carry, so each arm is driven by setting it and re-running the decision.
+        for status in (ISOLATION_UNDETECTABLE, ISOLATION_SHARED_ACCEPTED):
+            client = InMemoryLangfuseClient()
+            client._isolation_status = status  # type: ignore[attr-defined]
+            LangfuseObserver(client=client, disable_provider_payload=False)
+    finally:
+        observer_logger.removeHandler(sink)
+        observer_logger.setLevel(prior)
+
+    names = [event_name_of(r) for r in captured]
+    assert LANGFUSE_PAYLOAD_SUPPRESSED in names, (
+        f"the suppress decision must carry its event name; got {names}"
+    )
+    assert LANGFUSE_SHARED_PROVIDER_ACCEPTED in names, (
+        f"the shared-provider decision must carry its event name; got {names}"
+    )
+    # Each name lands on the record that means it, not on whichever fired last.
+    for record in captured:
+        name = event_name_of(record)
+        if name == LANGFUSE_PAYLOAD_SUPPRESSED:
+            assert "suppressing" in record.getMessage()
+        elif name == LANGFUSE_SHARED_PROVIDER_ACCEPTED:
+            assert "accept_shared_provider" in record.getMessage()

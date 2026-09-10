@@ -4211,6 +4211,22 @@ async def _run_llm_payload_fixture(spec: Mapping[str, Any]) -> None:
             raise AssertionError(f"case {case.get('name')!r}: {e}") from e
 
 
+def _observer_kwargs_for_case(case: Mapping[str, Any]) -> dict[str, Any]:
+    """The OTel observer construction knobs a fixture case declares."""
+    # §5.5 (0121): the knobs arrive under an `otel_observer:` directive. The
+    # bare case-level key is the pre-0121 spelling, still read so the harness
+    # works either side of the pin bump; the directive wins where both appear,
+    # so a half-migrated fixture cannot resolve to the stale value.
+    kwargs: dict[str, Any] = {}
+    directive = cast("Mapping[str, Any]", case.get("otel_observer") or {})
+    for key in ("disable_provider_payload", "disable_genai_semconv", "disable_llm_spans"):
+        if key in directive:
+            kwargs[key] = bool(directive[key])
+        elif key in case:
+            kwargs[key] = bool(case[key])
+    return kwargs
+
+
 async def _run_llm_payload_case(case: Mapping[str, Any]) -> None:
     """Build + invoke the graph, then walk the expected span tree
     asserting via the LLM-attribute helpers (parse-shape, truncation,
@@ -4339,13 +4355,10 @@ async def _run_llm_payload_case(case: Mapping[str, Any]) -> None:
 
     # ---- Observer
     exporter = InMemorySpanExporter()
-    observer_kwargs: dict[str, Any] = {"span_processor": SimpleSpanProcessor(exporter)}
-    if "disable_provider_payload" in case:
-        observer_kwargs["disable_provider_payload"] = bool(case["disable_provider_payload"])
-    if "disable_genai_semconv" in case:
-        observer_kwargs["disable_genai_semconv"] = bool(case["disable_genai_semconv"])
-    if "disable_llm_spans" in case:
-        observer_kwargs["disable_llm_spans"] = bool(case["disable_llm_spans"])
+    observer_kwargs: dict[str, Any] = {
+        "span_processor": SimpleSpanProcessor(exporter),
+        **_observer_kwargs_for_case(case),
+    }
     observer = OTelObserver(**observer_kwargs)
     graph.attach_observer(observer)
 

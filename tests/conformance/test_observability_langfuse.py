@@ -34,6 +34,7 @@ from pydantic import SecretStr
 from openarmature.graph import END, BranchSpec, ExplicitMapping, GraphBuilder
 from openarmature.llm import OpenAIProvider
 from openarmature.llm.response import RuntimeConfig
+from openarmature.observability.diagnostics import event_name_of as _event_name_of
 from openarmature.observability.langfuse import (
     InMemoryLangfuseClient,
     LangfuseObservation,
@@ -3045,10 +3046,32 @@ class _IsolationCapture:
     isolated_exporter: Any | None  # the provider openarmature built for Langfuse
 
 
-# The observer method that emits the isolation-decision WARNINGs §6 mandates.
-# `from_credentials` emits its own, unrelated, WARNINGs on the same logger, so the
-# `log_records` assertion discriminates on this rather than on level alone.
+# The fallback discriminator, used only for a fixture that declares no
+# `event_name`. `from_credentials` emits unrelated WARNINGs on the same logger,
+# so level alone matches an incidental record; the emitting call site is not
+# portable to another implementation, which is why 0121 added the name.
 _ISOLATION_DECISION_FUNC = "_apply_isolation_policy"
+
+
+def match_expected_log_record(wanted: Mapping[str, Any], records: Sequence[Any]) -> list[Any]:
+    """The captured records satisfying one ``expected.log_records`` entry."""
+    # §5.5 (0121) gives a fixture an `event_name` to discriminate on. Where it
+    # declares one, match on that: the name is portable, unlike the emitting
+    # call site this falls back to. Level alone is satisfied by any warning on
+    # the same logger, which is the looseness 0121 exists to close.
+    level = cast("str", wanted["level"])
+    wanted_name = cast("str | None", wanted.get("event_name"))
+    if wanted_name is not None:
+        return [r for r in records if r.levelname == level and _event_name_of(r) == wanted_name]
+    _assert_isolation_decision_emitter_exists()
+    return [r for r in records if r.levelname == level and r.funcName == _ISOLATION_DECISION_FUNC]
+
+
+def _log_record_mismatch_message(wanted: Mapping[str, Any], records: Sequence[Any]) -> str:
+    name = wanted.get("event_name")
+    discriminator = f"event_name {name!r}" if name else f"the isolation decision ({_ISOLATION_DECISION_FUNC})"
+    seen = [(r.levelname, _event_name_of(r), r.funcName, r.getMessage()[:40]) for r in records]
+    return f"expected a {wanted['level']} log record from {discriminator}; captured {seen}"
 
 
 def _assert_isolation_decision_emitter_exists() -> None:
@@ -3217,17 +3240,9 @@ def _assert_isolation_expectations(
         # the mandated emitter on its own then leaves the case green -- verified as
         # a surviving mutant before this was narrowed.
         assert log_records is not None, "log_records was declared but nothing captured logs"
-        _assert_isolation_decision_emitter_exists()
         for wanted in cast("list[dict[str, Any]]", expected_logs):
-            level = cast("str", wanted["level"])
-            matched = [
-                r for r in log_records if r.levelname == level and r.funcName == _ISOLATION_DECISION_FUNC
-            ]
-            assert matched, (
-                f"expected a {level} log record from the isolation decision "
-                f"({_ISOLATION_DECISION_FUNC}); captured "
-                f"{[(r.levelname, r.funcName, r.getMessage()[:50]) for r in log_records]}"
-            )
+            matched = match_expected_log_record(wanted, log_records)
+            assert matched, _log_record_mismatch_message(wanted, log_records)
 
     expected_trace = expected.get("langfuse_trace")
     if isinstance(expected_trace, dict):
