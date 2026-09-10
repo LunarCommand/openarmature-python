@@ -3053,6 +3053,27 @@ class _IsolationCapture:
 _ISOLATION_DECISION_FUNC = "_apply_isolation_policy"
 
 
+def match_expected_log_record(wanted: Mapping[str, Any], records: Sequence[Any]) -> list[Any]:
+    """The captured records satisfying one ``expected.log_records`` entry."""
+    # §5.5 (0121) gives a fixture an `event_name` to discriminate on. Where it
+    # declares one, match on that: the name is portable, unlike the emitting
+    # call site this falls back to. Level alone is satisfied by any warning on
+    # the same logger, which is the looseness 0121 exists to close.
+    level = cast("str", wanted["level"])
+    wanted_name = cast("str | None", wanted.get("event_name"))
+    if wanted_name is not None:
+        return [r for r in records if r.levelname == level and _event_name_of(r) == wanted_name]
+    _assert_isolation_decision_emitter_exists()
+    return [r for r in records if r.levelname == level and r.funcName == _ISOLATION_DECISION_FUNC]
+
+
+def _log_record_mismatch_message(wanted: Mapping[str, Any], records: Sequence[Any]) -> str:
+    name = wanted.get("event_name")
+    discriminator = f"event_name {name!r}" if name else f"the isolation decision ({_ISOLATION_DECISION_FUNC})"
+    seen = [(r.levelname, _event_name_of(r), r.funcName, r.getMessage()[:40]) for r in records]
+    return f"expected a {wanted['level']} log record from {discriminator}; captured {seen}"
+
+
 def _assert_isolation_decision_emitter_exists() -> None:
     # Renaming the method would leave the filter above matching nothing, which
     # fails as "no WARNING was emitted" and would send a reader hunting a
@@ -3220,30 +3241,8 @@ def _assert_isolation_expectations(
         # a surviving mutant before this was narrowed.
         assert log_records is not None, "log_records was declared but nothing captured logs"
         for wanted in cast("list[dict[str, Any]]", expected_logs):
-            level = cast("str", wanted["level"])
-            # §5.5 (0121) gives a fixture an `event_name` to discriminate on.
-            # Where it declares one, match on it: the name is portable, unlike
-            # the emitting call site this fell back to while level alone was the
-            # only declared key and any warning on the logger satisfied it.
-            wanted_name = cast("str | None", wanted.get("event_name"))
-            if wanted_name is not None:
-                matched = [
-                    r for r in log_records if r.levelname == level and _event_name_of(r) == wanted_name
-                ]
-                assert matched, (
-                    f"expected a {level} log record with event_name {wanted_name!r}; captured "
-                    f"{[(r.levelname, _event_name_of(r), r.getMessage()[:50]) for r in log_records]}"
-                )
-                continue
-            _assert_isolation_decision_emitter_exists()
-            matched = [
-                r for r in log_records if r.levelname == level and r.funcName == _ISOLATION_DECISION_FUNC
-            ]
-            assert matched, (
-                f"expected a {level} log record from the isolation decision "
-                f"({_ISOLATION_DECISION_FUNC}); captured "
-                f"{[(r.levelname, r.funcName, r.getMessage()[:50]) for r in log_records]}"
-            )
+            matched = match_expected_log_record(wanted, log_records)
+            assert matched, _log_record_mismatch_message(wanted, log_records)
 
     expected_trace = expected.get("langfuse_trace")
     if isinstance(expected_trace, dict):

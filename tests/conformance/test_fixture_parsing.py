@@ -787,3 +787,53 @@ def test_log_records_event_name_discriminates_between_same_level_records() -> No
     # And a name the run never emitted matches nothing, so a fixture asserting
     # it fails rather than passing on a neighbour.
     assert not [r for r in records if event_name_of(r) == LANGFUSE_SHARED_PROVIDER_ACCEPTED]
+
+
+def test_expected_log_record_matcher_uses_the_event_name_when_declared() -> None:
+    # The harness branch that reads a fixture's `event_name` is unreachable at
+    # the current pin: no fixture at v0.112.0 declares one, and the six that do
+    # arrive at v0.118.0. Verified by mutation, forcing the branch never to fire
+    # left the whole suite green.
+    #
+    # So the matcher is driven directly here. Without this the branch ships
+    # untested and a regression to level-only matching, the exact looseness 0121
+    # closes, goes unnoticed until the pin bump.
+    import logging
+
+    from openarmature.observability.diagnostics import (
+        LANGFUSE_PAYLOAD_SUPPRESSED,
+        LANGFUSE_SHARED_PROVIDER_ACCEPTED,
+    )
+    from tests.conformance.test_observability_langfuse import match_expected_log_record
+
+    def _record(msg: str, name: str | None, func: str) -> logging.LogRecord:
+        rec = logging.LogRecord("openarmature.observability", logging.WARNING, __file__, 0, msg, None, None)
+        rec.funcName = func
+        if name is not None:
+            rec.event_name = name  # type: ignore[attr-defined]
+        return rec
+
+    records = [
+        # An unrelated warning on the same logger: the record that made a
+        # level-only assertion pass for the wrong reason.
+        _record("cached client notice", None, "from_credentials"),
+        _record("suppressing payloads", LANGFUSE_PAYLOAD_SUPPRESSED, "_apply_isolation_policy"),
+    ]
+
+    matched = match_expected_log_record(
+        {"level": "WARNING", "event_name": LANGFUSE_PAYLOAD_SUPPRESSED}, records
+    )
+    assert len(matched) == 1
+    assert "suppressing" in matched[0].getMessage()
+
+    # A name the run never emitted matches nothing, so a fixture asserting it
+    # fails rather than being satisfied by a neighbour at the same level.
+    assert not match_expected_log_record(
+        {"level": "WARNING", "event_name": LANGFUSE_SHARED_PROVIDER_ACCEPTED}, records
+    )
+
+    # With no name declared, the pre-0121 fallback still discriminates on the
+    # emitting call site rather than matching the unrelated warning.
+    fallback = match_expected_log_record({"level": "WARNING"}, records)
+    assert len(fallback) == 1
+    assert "suppressing" in fallback[0].getMessage()
