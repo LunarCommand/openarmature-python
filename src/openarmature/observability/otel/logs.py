@@ -167,6 +167,11 @@ def _accepts_one_record(method: Any) -> bool:
 _logger = logging.getLogger("openarmature.observability")
 
 
+# Set on a generated handler class so a repeat call recognises its own work.
+# `hasattr(base, "_translate")` cannot: a lifted class has one, being ours.
+_LIFT_MARKER = "_openarmature_event_name_lift"
+
+
 def _otel_logs_handler_classes() -> tuple[type[Any], ...]:
     """The OTel logs handler classes a root-logger handler may be one of."""
     # Two classes named LoggingHandler exist in the OTel Python tree, the SDK's
@@ -233,6 +238,11 @@ def _event_name_handler_class(base: type[Any]) -> type[Any]:
     # `super()._translate(...)` inside an override raises AttributeError once it
     # does not, which would break logging rather than degrade. Without the
     # subclass the name rides as an attribute only.
+    if getattr(base, _LIFT_MARKER, False):
+        # Already lifted. Subclassing again would work, since the outer override
+        # finds the field set and skips, but each pass adds an MRO entry that
+        # never goes away.
+        return base
     inherited = getattr(base, "_translate", None)
     if inherited is None or not _accepts_one_record(inherited):
         return base
@@ -253,6 +263,7 @@ def _event_name_handler_class(base: type[Any]) -> type[Any]:
                     pass
             return translated
 
+    setattr(_EventNameHandler, _LIFT_MARKER, True)
     return _EventNameHandler
 
 

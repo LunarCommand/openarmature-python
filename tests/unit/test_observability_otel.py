@@ -6680,6 +6680,15 @@ def test_log_bridge_lifts_the_event_name_on_an_already_attached_handler() -> Non
         assert any("re-classed" in m for m in retrofit_warnings), (
             f"re-classing a caller's handler must not be silent; got {retrofit_warnings}"
         )
+
+        # Repeat calls are a no-op on an already-lifted handler. A name check
+        # cannot see that: the lifted class has `_translate`, being ours, so
+        # each pass would subclass again and grow the MRO for good.
+        before = type(theirs).__mro__
+        install_log_bridge(provider)
+        assert type(theirs).__mro__ == before, (
+            f"a repeat call stacked another subclass: {[k.__name__ for k in type(theirs).__mro__]}"
+        )
     finally:
         root.handlers[:] = prior_handlers
         root.setLevel(prior_level)
