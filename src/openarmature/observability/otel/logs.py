@@ -16,6 +16,7 @@ the correlation_id from the ContextVar.
 
 from __future__ import annotations
 
+import inspect
 import logging
 from typing import TYPE_CHECKING, Any, cast
 
@@ -125,7 +126,13 @@ def install_log_bridge(
     )
 
     root = logging.getLogger()
-    if not _otel_logs_handler_already_bridges(root, provider):
+    if _otel_logs_handler_already_bridges(root, provider):
+        # An application that wired its own OTel handler gets no second one, but
+        # it still needs the event-name lift: without this the field is never
+        # populated in the setup this module documents as typical, and the name
+        # survives only as an attribute.
+        _retrofit_event_name_lift(root)
+    else:
         handler_cls = _event_name_handler_class(_InstrLoggingHandler)
         handler = handler_cls(level=level, logger_provider=provider)
         # Direct assignment isn't typed on LoggingHandler; route
@@ -136,6 +143,52 @@ def install_log_bridge(
         root.addHandler(handler)
     # Idempotency #2: don't stack the LogRecord factory.
     _install_correlation_id_factory()
+
+
+def _accepts_one_record(method: Any) -> bool:
+    """True iff ``method`` still takes just ``self`` and the record."""
+    # A name check alone is not enough. The override hard-codes
+    # `super()._translate(record)`, so a seam that grew a parameter raises
+    # TypeError out of every `logging` call in the process, this handler being
+    # on the root logger. Shape-check it and decline the subclass instead.
+    #
+    # Two positionals, because the lookup is on the CLASS and so includes
+    # `self`. A keyword-only required parameter fails the check for the same
+    # reason a second positional does: the hard-coded call cannot supply it.
+    try:
+        params = list(inspect.signature(method).parameters.values())
+    except (TypeError, ValueError):
+        return False
+    required = [p for p in params if p.default is inspect.Parameter.empty]
+    positional = [p for p in required if p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD)]
+    return len(required) == len(positional) == 2
+
+
+def _otel_logs_handler_classes() -> tuple[type[Any], ...]:
+    """The OTel logs handler classes a root-logger handler may be one of."""
+    # Two classes named LoggingHandler exist in the OTel Python tree, the SDK's
+    # and the instrumentation package's, and an application may have attached
+    # either.
+    from opentelemetry.instrumentation.logging.handler import (
+        LoggingHandler as _InstrLoggingHandler,
+    )
+    from opentelemetry.sdk._logs import LoggingHandler as _SDKLoggingHandler
+
+    return (_SDKLoggingHandler, _InstrLoggingHandler)
+
+
+def _retrofit_event_name_lift(root: logging.Logger) -> None:
+    """Give an already-attached OTel logs handler the event-name lift."""
+    # Re-classing rather than replacing: the handler is the application's, with
+    # its own level, filters and formatter, and swapping it would discard them.
+    # Declines silently where the subclass cannot be built, which is the same
+    # attributes-only outcome as not having the lift at all.
+    for handler in list(root.handlers):
+        if not isinstance(handler, _otel_logs_handler_classes()):
+            continue
+        lifted = _event_name_handler_class(type(handler))
+        if lifted is not type(handler):
+            handler.__class__ = lifted
 
 
 def _event_name_handler_class(base: type[Any]) -> type[Any]:
@@ -153,15 +206,15 @@ def _event_name_handler_class(base: type[Any]) -> type[Any]:
     # reaches past the public API. Guarded on the method still existing, because
     # `super()._translate(...)` inside an override raises AttributeError once it
     # does not, which would break logging rather than degrade. Without the
-    # subclass the name still rides as an attribute, which is where it sat
-    # before this.
-    if not hasattr(base, "_translate"):
+    # subclass the name rides as an attribute only.
+    inherited = getattr(base, "_translate", None)
+    if inherited is None or not _accepts_one_record(inherited):
         return base
 
     class _EventNameHandler(base):  # type: ignore[misc, valid-type]
         def _translate(self, record: logging.LogRecord) -> Any:
             # `base` is `type[Any]` so the checker cannot see through `super()`;
-            # the seam's existence is guarded above instead.
+            # the seam is checked for both name and shape above.
             raw = super()._translate(record)  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
             translated = cast("Any", raw)
             name = getattr(record, _EVENT_NAME_ATTR, None)
@@ -192,12 +245,7 @@ def _otel_logs_handler_already_bridges(root: logging.Logger, provider: LoggerPro
     "doesn't bridge", falling back to adding our own handler. Worst
     case is the pre-fix behavior (potential dup); we never crash.
     """
-    from opentelemetry.instrumentation.logging.handler import (
-        LoggingHandler as _InstrLoggingHandler,
-    )
-    from opentelemetry.sdk._logs import LoggingHandler as _SDKLoggingHandler
-
-    handler_classes = (_SDKLoggingHandler, _InstrLoggingHandler)
+    handler_classes = _otel_logs_handler_classes()
     for handler in root.handlers:
         if not isinstance(handler, handler_classes):
             continue

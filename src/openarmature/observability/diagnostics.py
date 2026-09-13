@@ -16,19 +16,25 @@ from typing import Any
 # event name in the `openarmature.` namespace. The names are stable
 # identifiers and MUST NOT be reworded once shipped.
 #
-# The obligation is on the RECORD, which this does not change: where a record
-# is emitted it carries its name, and a diagnostic openarmature chooses not to
-# emit needs none. `openarmature.langfuse.supplied_client_shared_provider`
-# (MAY) has no emitter here, because a caller-supplied client is never
-# inspected: §6 mode (a) leaves its provider the caller's responsibility.
+# The obligation is on the RECORD: where a record is emitted it carries its
+# name, and a diagnostic openarmature chooses not to emit needs none.
+# `openarmature.langfuse.supplied_client_shared_provider` (MAY) has no emitter,
+# because §6 mode (a) leaves a caller-supplied client's provider the caller's
+# responsibility rather than something to inspect.
 LANGFUSE_SHARED_PROVIDER_ACCEPTED = "openarmature.langfuse.shared_provider_accepted"
 LANGFUSE_PAYLOAD_SUPPRESSED = "openarmature.langfuse.payload_suppressed"
+LANGFUSE_SHARED_PROVIDER_NO_PAYLOAD = "openarmature.langfuse.shared_provider_no_payload"
 TOKEN_BUDGET_EXCEEDED = "openarmature.token_budget.exceeded"
 
 # The stdlib LogRecord attribute the name rides on. `install_log_bridge` lifts
 # it onto the OTel LogRecord's own `event_name` field, which is where §7 wants
 # it; neither OTel logging handler populates that field on its own.
-EVENT_NAME_ATTR = "event_name"
+#
+# Namespaced, because `logging` raises rather than overwrite: a record factory
+# already stamping a bare `event_name`, which a structured-logging setup
+# routinely does, would turn every diagnostic into a KeyError at the emit site.
+# `openarmature.correlation_id` is namespaced for the same reason.
+EVENT_NAME_ATTR = "openarmature.event_name"
 
 
 def diagnostic(event_name: str) -> dict[str, Any]:

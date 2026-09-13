@@ -52,6 +52,7 @@ from openarmature.graph.observer import ObserverEvent
 from openarmature.observability.diagnostics import (
     LANGFUSE_PAYLOAD_SUPPRESSED,
     LANGFUSE_SHARED_PROVIDER_ACCEPTED,
+    LANGFUSE_SHARED_PROVIDER_NO_PAYLOAD,
     diagnostic,
 )
 from openarmature.observability.lineage import (
@@ -466,7 +467,8 @@ class LangfuseObserver:
                 "OA's Langfuse client is bound to a TracerProvider it did not isolate; "
                 "no payload channel is enabled, so nothing is being exported to it; "
                 "enabling one fails closed (the payload is withheld, or construction is "
-                "refused) until OA's client is constructed before any other for this key"
+                "refused) until OA's client is constructed before any other for this key",
+                extra=diagnostic(LANGFUSE_SHARED_PROVIDER_NO_PAYLOAD),
             )
         elif status == ISOLATION_SHARED_ACCEPTED:
             # A provider-binding decision, not a payload one, so it is reported

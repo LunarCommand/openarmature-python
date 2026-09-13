@@ -753,42 +753,6 @@ def test_otel_observer_directive_and_the_bare_key_select_the_same_flag() -> None
     assert "disable_provider_payload" not in _observer_kwargs_for_case({})
 
 
-def test_log_records_event_name_discriminates_between_same_level_records() -> None:
-    # 0121's reason for existing: a `log_records` entry declaring only a level
-    # is satisfied by ANY record at that level, so silencing the mandated
-    # emitter leaves a fixture green if an unrelated warning fires on the same
-    # logger. The name discriminates portably where the emitting call site,
-    # which this harness fell back to, does not.
-    import logging
-
-    from openarmature.observability.diagnostics import (
-        LANGFUSE_PAYLOAD_SUPPRESSED,
-        LANGFUSE_SHARED_PROVIDER_ACCEPTED,
-        event_name_of,
-    )
-
-    def _record(msg: str, name: str | None) -> logging.LogRecord:
-        rec = logging.LogRecord("openarmature.observability", logging.WARNING, __file__, 0, msg, None, None)
-        if name is not None:
-            rec.event_name = name  # type: ignore[attr-defined]
-        return rec
-
-    records = [
-        _record("an unrelated cached-client notice", None),
-        _record("suppressing payloads", LANGFUSE_PAYLOAD_SUPPRESSED),
-    ]
-
-    # Level alone cannot tell them apart, which is the gap.
-    assert len([r for r in records if r.levelname == "WARNING"]) == 2
-    # The name can.
-    matched = [r for r in records if event_name_of(r) == LANGFUSE_PAYLOAD_SUPPRESSED]
-    assert len(matched) == 1
-    assert "suppressing" in matched[0].getMessage()
-    # And a name the run never emitted matches nothing, so a fixture asserting
-    # it fails rather than passing on a neighbour.
-    assert not [r for r in records if event_name_of(r) == LANGFUSE_SHARED_PROVIDER_ACCEPTED]
-
-
 def test_expected_log_record_matcher_uses_the_event_name_when_declared() -> None:
     # The harness branch that reads a fixture's `event_name` is unreachable at
     # the current pin: no fixture at v0.112.0 declares one, and the six that do
@@ -801,6 +765,7 @@ def test_expected_log_record_matcher_uses_the_event_name_when_declared() -> None
     import logging
 
     from openarmature.observability.diagnostics import (
+        EVENT_NAME_ATTR,
         LANGFUSE_PAYLOAD_SUPPRESSED,
         LANGFUSE_SHARED_PROVIDER_ACCEPTED,
     )
@@ -809,8 +774,11 @@ def test_expected_log_record_matcher_uses_the_event_name_when_declared() -> None
     def _record(msg: str, name: str | None, func: str) -> logging.LogRecord:
         rec = logging.LogRecord("openarmature.observability", logging.WARNING, __file__, 0, msg, None, None)
         rec.funcName = func
+        # The matcher asserts the OTel field, which the capture helper stitches
+        # onto the record as `otel_event_name` after the case runs.
+        rec.otel_event_name = name  # type: ignore[attr-defined]
         if name is not None:
-            rec.event_name = name  # type: ignore[attr-defined]
+            setattr(rec, EVENT_NAME_ATTR, name)
         return rec
 
     records = [
@@ -837,3 +805,31 @@ def test_expected_log_record_matcher_uses_the_event_name_when_declared() -> None
     fallback = match_expected_log_record({"level": "WARNING"}, records)
     assert len(fallback) == 1
     assert "suppressing" in fallback[0].getMessage()
+
+
+def test_nested_directives_reject_sub_keys_the_harness_does_not_apply() -> None:
+    # A case-level unknown-key guard does not descend into a nested mapping, so
+    # a sub-key the harness never reads would be dropped in silence and the case
+    # would pass with the knob at its default. Both nested directives 0121 adds
+    # raise instead.
+    from tests.conformance.test_observability import _observer_kwargs_for_case
+    from tests.conformance.test_observability_langfuse import match_expected_log_record
+
+    # §5.5 defines payload_byte_cap on this directive; the harness does not
+    # apply it, so a fixture using it must fail rather than pass vacuously.
+    with pytest.raises(AssertionError, match="does not apply"):
+        _observer_kwargs_for_case({"otel_observer": {"payload_byte_cap": 512}})
+
+    # A non-mapping directive degrades to a substring or membership test if
+    # unchecked, silently resolving to the observer default.
+    with pytest.raises(AssertionError, match="must be a mapping"):
+        _observer_kwargs_for_case({"otel_observer": "disable_provider_payload=false"})
+
+    # Same shape on the log_records entry: a `body` claim this matcher never
+    # checks would otherwise pass against any record at the same level.
+    with pytest.raises(AssertionError, match="does not assert"):
+        match_expected_log_record({"level": "WARNING", "body": "suppressing"}, [])
+
+    # And an entry with no level is a fixture error, not a bare KeyError.
+    with pytest.raises(AssertionError, match="declares no `level`"):
+        match_expected_log_record({"event_name": "openarmature.x"}, [])

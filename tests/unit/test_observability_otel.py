@@ -6573,8 +6573,9 @@ def test_event_name_bridge_degrades_when_the_upstream_seam_is_gone() -> None:
     # inside an override raises AttributeError and breaks logging, so the
     # subclass is only used while the seam is there.
     #
-    # Driven against a stand-in base rather than asserted in prose, because the
-    # comment claiming this degraded was true of nothing until the guard landed.
+    # Driven against stand-in bases, because the real handler still exposes the
+    # seam and so cannot exercise either fallback.
+    from openarmature.observability.diagnostics import EVENT_NAME_ATTR
     from openarmature.observability.otel.logs import _event_name_handler_class
 
     class _WithSeam(logging.Handler):
@@ -6585,14 +6586,84 @@ def test_event_name_bridge_degrades_when_the_upstream_seam_is_gone() -> None:
         def emit(self, record: logging.LogRecord) -> None:
             return None
 
+    class _ChangedSeam(logging.Handler):
+        # The seam kept its name and grew a parameter, which the hard-coded
+        # `super()._translate(record)` cannot supply.
+        def _translate(self, record: logging.LogRecord, context: object) -> Any:
+            return None
+
+        def emit(self, record: logging.LogRecord) -> None:
+            return None
+
     # Seam present: a subclass that lifts the name.
     lifted = _event_name_handler_class(_WithSeam)
     assert lifted is not _WithSeam
     record = logging.LogRecord("x", logging.WARNING, __file__, 0, "m", None, None)
-    record.event_name = "openarmature.test.event"  # type: ignore[attr-defined]
+    setattr(record, EVENT_NAME_ATTR, "openarmature.test.event")
     assert lifted()._translate(record).event_name == "openarmature.test.event"
 
     # Seam gone: the upstream class unchanged, so emitting still works rather
     # than raising.
     assert _event_name_handler_class(_WithoutSeam) is _WithoutSeam
     _WithoutSeam().emit(record)
+
+    # Seam renamed in shape rather than in name. A name check alone would build
+    # the subclass here and raise TypeError out of every logging call, this
+    # handler being on the root logger.
+    assert _event_name_handler_class(_ChangedSeam) is _ChangedSeam
+    _ChangedSeam().emit(record)
+
+
+def test_log_bridge_lifts_the_event_name_on_an_already_attached_handler() -> None:
+    # An application that wired its own OTel logs handler gets no second one,
+    # and without the retrofit it also gets no lift: the field stays unset and
+    # the name survives only as an attribute. That is the documented typical
+    # setup, so the §7 field obligation would go unmet there with no signal.
+    #
+    # Re-classing rather than replacing, so the application's level, filters and
+    # formatter are kept.
+    from opentelemetry.sdk._logs import LoggerProvider, LoggingHandler
+    from opentelemetry.sdk._logs.export import (
+        InMemoryLogRecordExporter,
+        SimpleLogRecordProcessor,
+    )
+
+    from openarmature.observability.diagnostics import (
+        LANGFUSE_PAYLOAD_SUPPRESSED,
+        diagnostic,
+    )
+
+    root = logging.getLogger()
+    prior_handlers = list(root.handlers)
+    prior_level = root.level
+    prior_factory = logging.getLogRecordFactory()
+    exporter = InMemoryLogRecordExporter()
+    provider = LoggerProvider()
+    provider.add_log_record_processor(SimpleLogRecordProcessor(exporter))
+    try:
+        theirs = LoggingHandler(logger_provider=provider)
+        theirs.setLevel(logging.WARNING)
+        root.addHandler(theirs)
+        root.setLevel(logging.WARNING)
+
+        install_log_bridge(provider)
+        assert len(root.handlers) == len(prior_handlers) + 1, "a duplicate handler was added"
+
+        logging.getLogger("openarmature.observability").warning(
+            "suppressing payload", extra=diagnostic(LANGFUSE_PAYLOAD_SUPPRESSED)
+        )
+        provider.force_flush()
+
+        emitted = [d.log_record for d in exporter.get_finished_logs()]
+        tagged = [r for r in emitted if "suppressing payload" in str(r.body)]
+        assert len(tagged) == 1, f"expected the tagged record; got {[str(r.body) for r in emitted]}"
+        assert tagged[0].event_name == LANGFUSE_PAYLOAD_SUPPRESSED, (
+            "an already-attached handler must still carry the name on the field"
+        )
+        # The application's own configuration survives the re-class.
+        assert theirs.level == logging.WARNING
+    finally:
+        root.handlers[:] = prior_handlers
+        root.setLevel(prior_level)
+        logging.setLogRecordFactory(prior_factory)
+        provider.shutdown()
