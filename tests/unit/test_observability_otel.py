@@ -6646,7 +6646,19 @@ def test_log_bridge_lifts_the_event_name_on_an_already_attached_handler() -> Non
         root.addHandler(theirs)
         root.setLevel(logging.WARNING)
 
-        install_log_bridge(provider)
+        retrofit_warnings: list[str] = []
+
+        class _Cap(logging.Handler):
+            def emit(self, record: logging.LogRecord) -> None:
+                retrofit_warnings.append(record.getMessage())
+
+        cap = _Cap()
+        oa_logger = logging.getLogger("openarmature.observability")
+        oa_logger.addHandler(cap)
+        try:
+            install_log_bridge(provider)
+        finally:
+            oa_logger.removeHandler(cap)
         assert len(root.handlers) == len(prior_handlers) + 1, "a duplicate handler was added"
 
         logging.getLogger("openarmature.observability").warning(
@@ -6662,6 +6674,12 @@ def test_log_bridge_lifts_the_event_name_on_an_already_attached_handler() -> Non
         )
         # The application's own configuration survives the re-class.
         assert theirs.level == logging.WARNING
+        # And the caller is told their object was modified, since nothing else
+        # would reveal it: `type()` on their handler now reports a class they
+        # did not write.
+        assert any("re-classed" in m for m in retrofit_warnings), (
+            f"re-classing a caller's handler must not be silent; got {retrofit_warnings}"
+        )
     finally:
         root.handlers[:] = prior_handlers
         root.setLevel(prior_level)

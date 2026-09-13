@@ -164,6 +164,9 @@ def _accepts_one_record(method: Any) -> bool:
     return len(required) == len(positional) == 2
 
 
+_logger = logging.getLogger("openarmature.observability")
+
+
 def _otel_logs_handler_classes() -> tuple[type[Any], ...]:
     """The OTel logs handler classes a root-logger handler may be one of."""
     # Two classes named LoggingHandler exist in the OTel Python tree, the SDK's
@@ -181,14 +184,37 @@ def _retrofit_event_name_lift(root: logging.Logger) -> None:
     """Give an already-attached OTel logs handler the event-name lift."""
     # Re-classing rather than replacing: the handler is the application's, with
     # its own level, filters and formatter, and swapping it would discard them.
-    # Declines silently where the subclass cannot be built, which is the same
-    # attributes-only outcome as not having the lift at all.
+    #
+    # This modifies an object the caller constructed, so it says so. The
+    # alternatives are worse: adding a second handler double-exports every log
+    # record to the same pipeline, and doing nothing leaves §7's field unset in
+    # the setup this module documents as typical, with no signal at all.
     for handler in list(root.handlers):
         if not isinstance(handler, _otel_logs_handler_classes()):
             continue
-        lifted = _event_name_handler_class(type(handler))
-        if lifted is not type(handler):
-            handler.__class__ = lifted
+        original = type(handler)
+        lifted = _event_name_handler_class(original)
+        if lifted is original:
+            # The seam is gone or has changed shape. Nothing is modified, and
+            # the names ride as attributes only.
+            _logger.warning(
+                "%s on the root logger cannot carry openarmature's diagnostic event names: "
+                "its record-translation hook is missing or has changed shape. The names are "
+                "still set as log-record attributes, but not on the OTel LogRecord's "
+                "EventName field",
+                original.__name__,
+            )
+            continue
+        handler.__class__ = lifted
+        _logger.warning(
+            "openarmature re-classed the %s you attached to the root logger, so its records "
+            "carry openarmature's diagnostic event names on the OTel LogRecord's EventName "
+            "field. Your handler's level, filters and formatter are unchanged; only its class "
+            "is, and `type()` on it now reports %s. To avoid this, call install_log_bridge "
+            "before attaching your own handler, or attach yours to a different LoggerProvider",
+            original.__name__,
+            lifted.__name__,
+        )
 
 
 def _event_name_handler_class(base: type[Any]) -> type[Any]:
