@@ -763,8 +763,6 @@ def test_expected_log_record_matcher_uses_the_event_name_when_declared() -> None
     # So the matcher is driven directly here. Without this the branch ships
     # untested and a regression to level-only matching, the exact looseness 0121
     # closes, goes unnoticed until the pin bump.
-    import logging
-
     from openarmature.observability.diagnostics import (
         EVENT_NAME_ATTR,
         LANGFUSE_PAYLOAD_SUPPRESSED,
