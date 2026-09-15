@@ -23,12 +23,15 @@ Public surface:
 - :class:`OTelObserver`: observer-driven span lifecycle.
 - :func:`install_log_bridge`: helper to wire the OTel Logs SDK to
   the stdlib ``logging`` root with ``correlation_id`` injection.
+- :class:`LoggingSetupModified`: the warning category
+  ``install_log_bridge`` raises when it changes a logging object the
+  caller built, so a caller can silence or escalate it by type.
 """
 
 from __future__ import annotations
 
 try:
-    from .logs import install_log_bridge
+    from .logs import LoggingSetupModified, install_log_bridge
     from .observer import OTelObserver
 except ImportError as exc:  # pragma: no cover - exercised by extras-not-installed path
     if "opentelemetry" in str(exc):
@@ -39,6 +42,7 @@ except ImportError as exc:  # pragma: no cover - exercised by extras-not-install
     raise
 
 __all__ = [
+    "LoggingSetupModified",
     "OTelObserver",
     "install_log_bridge",
 ]

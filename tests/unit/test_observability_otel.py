@@ -50,7 +50,7 @@ from openarmature.graph import (
     State,
     append,
 )
-from openarmature.observability.otel import OTelObserver, install_log_bridge
+from openarmature.observability.otel import LoggingSetupModified, OTelObserver, install_log_bridge
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -2438,6 +2438,7 @@ def test_install_log_bridge_is_idempotent() -> None:
         logging.setLogRecordFactory(prior_factory)
 
 
+@pytest.mark.filterwarnings("ignore::openarmature.observability.otel.logs.LoggingSetupModified")
 def test_install_log_bridge_skips_when_sdk_handler_already_attached() -> None:
     """Downstream report (HyperDX integration): if an application's
     own logging setup attached
@@ -6615,6 +6616,7 @@ def test_event_name_bridge_degrades_when_the_upstream_seam_is_gone() -> None:
     _ChangedSeam().emit(record)
 
 
+@pytest.mark.filterwarnings("ignore::openarmature.observability.otel.logs.LoggingSetupModified")
 def test_log_bridge_lifts_the_event_name_on_an_already_attached_handler() -> None:
     # An application that wired its own OTel logs handler gets no second one,
     # and without the retrofit it also gets no lift: the field stays unset and
@@ -6751,10 +6753,13 @@ def test_the_re_class_announcement_survives_a_raised_handler_level() -> None:
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
             install_log_bridge(provider)
-            announced = [str(w.message) for w in caught]
+            announced = [(w.category, str(w.message)) for w in caught]
 
         assert type(theirs).__name__ != "LoggingHandler", "the handler was not re-classed"
-        assert any("re-classed" in m for m in announced), (
+        # By category, not by message: the category is the caller's handle for
+        # silencing or escalating this, so it is the contractual half. Matching
+        # the prose instead would keep passing if the category were dropped.
+        assert any(issubclass(cat, LoggingSetupModified) and "re-classed" in msg for cat, msg in announced), (
             f"the mutation must be announced on a channel the handler cannot swallow; got {announced}"
         )
     finally:

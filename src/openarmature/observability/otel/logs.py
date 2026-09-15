@@ -27,6 +27,17 @@ if TYPE_CHECKING:
     from opentelemetry.sdk._logs import LoggerProvider
 
 
+class LoggingSetupModified(UserWarning):
+    """``install_log_bridge`` changed a logging object the caller built.
+
+    Subclasses a plain ``UserWarning`` so the stdlib filter vocabulary
+    (``warnings.simplefilter``, ``-W`` flags, pytest's ``filterwarnings``)
+    applies unchanged: a caller who accepts the change can silence it by
+    category, and one who wants it fatal can opt in with
+    ``warnings.simplefilter("error", LoggingSetupModified)``.
+    """
+
+
 # Marker attribute used to detect "this is the OA-installed
 # LogRecord factory" so re-calling ``install_log_bridge`` doesn't
 # stack a second wrapper on top of the already-installed one.
@@ -193,7 +204,7 @@ def _announce(message: str) -> None:
     # at ERROR, which is a normal way to limit OTLP volume, swallows it and the
     # mutation happens in silence. `warnings` does not depend on the logging
     # configuration under change, and surfaces under pytest and `-W error`.
-    warnings.warn(message, stacklevel=3)
+    warnings.warn(message, LoggingSetupModified, stacklevel=3)
     _logger.warning("%s", message)
 
 
@@ -314,5 +325,6 @@ def _otel_logs_handler_already_bridges(root: logging.Logger, provider: LoggerPro
 
 
 __all__ = [
+    "LoggingSetupModified",
     "install_log_bridge",
 ]
