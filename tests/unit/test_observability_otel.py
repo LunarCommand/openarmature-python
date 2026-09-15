@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import warnings
 from pathlib import Path
 
 import pytest
@@ -49,7 +50,7 @@ from openarmature.graph import (
     State,
     append,
 )
-from openarmature.observability.otel import OTelObserver, install_log_bridge
+from openarmature.observability.otel import LoggingSetupModified, OTelObserver, install_log_bridge
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -2437,6 +2438,7 @@ def test_install_log_bridge_is_idempotent() -> None:
         logging.setLogRecordFactory(prior_factory)
 
 
+@pytest.mark.filterwarnings("ignore::openarmature.observability.otel.LoggingSetupModified")
 def test_install_log_bridge_skips_when_sdk_handler_already_attached() -> None:
     """Downstream report (HyperDX integration): if an application's
     own logging setup attached
@@ -6466,3 +6468,341 @@ async def test_detached_fan_out_instance_opens_one_root_per_instance() -> None:
     )
     trace_count = len({_span_ctx(s).trace_id for s in spans})
     assert trace_count == 2, f"expected the parent trace plus one detached instance trace, got {trace_count}"
+
+
+def test_log_bridge_lifts_the_event_name_onto_the_otel_record_field() -> None:
+    # §7 puts a diagnostic's event name on the OTel LogRecord's `event_name`
+    # FIELD. Neither OTel logging handler sets it: both map stdlib record
+    # attributes into `attributes` and leave the field unset, so a name passed
+    # through `extra=` arrives as an attribute and the field stays empty.
+    #
+    # Asserting the FIELD rather than the attribute is the point. An
+    # attributes-only implementation satisfies a fixture that reads the stdlib
+    # record while leaving an OTel consumer unable to filter on the name.
+    from opentelemetry.sdk._logs import LoggerProvider
+    from opentelemetry.sdk._logs.export import (
+        InMemoryLogRecordExporter,
+        SimpleLogRecordProcessor,
+    )
+
+    from openarmature.observability.diagnostics import (
+        LANGFUSE_PAYLOAD_SUPPRESSED,
+        diagnostic,
+    )
+
+    root = logging.getLogger()
+    prior_handlers = list(root.handlers)
+    prior_level = root.level
+    prior_factory = logging.getLogRecordFactory()
+    exporter = InMemoryLogRecordExporter()
+    provider = LoggerProvider()
+    provider.add_log_record_processor(SimpleLogRecordProcessor(exporter))
+    try:
+        install_log_bridge(provider)
+        root.setLevel(logging.INFO)
+        log = logging.getLogger("openarmature.observability")
+        log.warning("suppressing payload", extra=diagnostic(LANGFUSE_PAYLOAD_SUPPRESSED))
+        log.warning("some unrelated diagnostic")
+        provider.force_flush()
+
+        emitted = [d.log_record for d in exporter.get_finished_logs()]
+        tagged = [r for r in emitted if "suppressing payload" in str(r.body)]
+        assert len(tagged) == 1, f"expected the tagged record; got {[str(r.body) for r in emitted]}"
+        assert tagged[0].event_name == LANGFUSE_PAYLOAD_SUPPRESSED, (
+            "the event name must reach the OTel LogRecord's event_name field, not only its attributes"
+        )
+        # An untagged record leaves the field alone rather than inheriting a name.
+        untagged = [r for r in emitted if "unrelated" in str(r.body)]
+        assert len(untagged) == 1
+        assert untagged[0].event_name is None
+    finally:
+        root.handlers[:] = prior_handlers
+        root.setLevel(prior_level)
+        logging.setLogRecordFactory(prior_factory)
+        provider.shutdown()
+
+
+async def test_the_token_budget_diagnostic_carries_its_event_name() -> None:
+    # §7 (0121) names this one too, at SHOULD. It shares the
+    # `openarmature.observability` logger with the isolation decisions and with
+    # unrelated warnings, so without the name a consumer filtering for budget
+    # breaches cannot tell it apart from any other warning on that logger.
+    #
+    # Driven through a real over-budget event rather than by logging the record
+    # here, or the test would pass with the emitter dropping the name entirely.
+    from openarmature.llm.response import Usage
+    from openarmature.observability.diagnostics import (
+        TOKEN_BUDGET_EXCEEDED,
+        event_name_of,
+    )
+    from openarmature.observability.otel.observer import logger as otel_logger
+    from openarmature.prompts import TokenBudget
+    from tests._helpers.typed_event import make_retry_attempt_event
+
+    captured: list[logging.LogRecord] = []
+
+    class _Sink(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            captured.append(record)
+
+    sink = _Sink()
+    otel_logger.addHandler(sink)
+    prior = otel_logger.level
+    otel_logger.setLevel(logging.WARNING)
+    try:
+        await _drive_metrics_events(
+            [
+                make_retry_attempt_event(
+                    model="test-model",
+                    provider="openai",
+                    usage=Usage(prompt_tokens=20, completion_tokens=1, total_tokens=21),
+                    token_budget=TokenBudget(input_max_tokens=10),
+                )
+            ]
+        )
+    finally:
+        otel_logger.removeHandler(sink)
+        otel_logger.setLevel(prior)
+
+    breaches = [r for r in captured if "token budget exceeded" in r.getMessage()]
+    assert len(breaches) == 1, f"expected the breach warning; got {[r.getMessage() for r in captured]}"
+    assert event_name_of(breaches[0]) == TOKEN_BUDGET_EXCEEDED
+
+
+def test_event_name_bridge_degrades_when_the_upstream_seam_is_gone() -> None:
+    # The lift subclasses the OTel handler's `_translate`, which is its private
+    # surface. Once that method no longer exists, `super()._translate(...)`
+    # inside an override raises AttributeError and breaks logging, so the
+    # subclass is only used while the seam is there.
+    #
+    # Driven against stand-in bases, because the real handler still exposes the
+    # seam and so cannot exercise either fallback.
+    from openarmature.observability.diagnostics import EVENT_NAME_ATTR
+    from openarmature.observability.otel.logs import _event_name_handler_class
+
+    class _WithSeam(logging.Handler):
+        def _translate(self, record: logging.LogRecord) -> Any:
+            return type("R", (), {"event_name": None})()
+
+    class _WithoutSeam(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            return None
+
+    class _ChangedSeam(logging.Handler):
+        # The seam kept its name and grew a parameter, which the hard-coded
+        # `super()._translate(record)` cannot supply.
+        def _translate(self, record: logging.LogRecord, context: object) -> Any:
+            return None
+
+        def emit(self, record: logging.LogRecord) -> None:
+            return None
+
+    # Seam present: a subclass that lifts the name.
+    lifted = _event_name_handler_class(_WithSeam)
+    assert lifted is not _WithSeam
+    record = logging.LogRecord("x", logging.WARNING, __file__, 0, "m", None, None)
+    setattr(record, EVENT_NAME_ATTR, "openarmature.test.event")
+    assert lifted()._translate(record).event_name == "openarmature.test.event"
+
+    # Seam gone: the upstream class unchanged, so emitting still works rather
+    # than raising.
+    assert _event_name_handler_class(_WithoutSeam) is _WithoutSeam
+    _WithoutSeam().emit(record)
+
+    # Seam renamed in shape rather than in name. A name check alone would build
+    # the subclass here and raise TypeError out of every logging call, this
+    # handler being on the root logger.
+    assert _event_name_handler_class(_ChangedSeam) is _ChangedSeam
+    _ChangedSeam().emit(record)
+
+
+@pytest.mark.filterwarnings("ignore::openarmature.observability.otel.LoggingSetupModified")
+def test_log_bridge_lifts_the_event_name_on_an_already_attached_handler() -> None:
+    # An application that wired its own OTel logs handler gets no second one,
+    # and without the retrofit it also gets no lift: the field stays unset and
+    # the name survives only as an attribute. That is the documented typical
+    # setup, so the §7 field obligation would go unmet there with no signal.
+    #
+    # Re-classing rather than replacing, so the application's level, filters and
+    # formatter are kept.
+    from opentelemetry.sdk._logs import LoggerProvider, LoggingHandler
+    from opentelemetry.sdk._logs.export import (
+        InMemoryLogRecordExporter,
+        SimpleLogRecordProcessor,
+    )
+
+    from openarmature.observability.diagnostics import (
+        LANGFUSE_PAYLOAD_SUPPRESSED,
+        diagnostic,
+    )
+
+    root = logging.getLogger()
+    prior_handlers = list(root.handlers)
+    prior_level = root.level
+    prior_factory = logging.getLogRecordFactory()
+    exporter = InMemoryLogRecordExporter()
+    provider = LoggerProvider()
+    provider.add_log_record_processor(SimpleLogRecordProcessor(exporter))
+    try:
+        theirs = LoggingHandler(logger_provider=provider)
+        theirs.setLevel(logging.WARNING)
+        root.addHandler(theirs)
+        root.setLevel(logging.WARNING)
+
+        retrofit_warnings: list[str] = []
+
+        class _Cap(logging.Handler):
+            def emit(self, record: logging.LogRecord) -> None:
+                retrofit_warnings.append(record.getMessage())
+
+        cap = _Cap()
+        oa_logger = logging.getLogger("openarmature.observability")
+        oa_logger.addHandler(cap)
+        try:
+            install_log_bridge(provider)
+        finally:
+            oa_logger.removeHandler(cap)
+        assert len(root.handlers) == len(prior_handlers) + 1, "a duplicate handler was added"
+
+        logging.getLogger("openarmature.observability").warning(
+            "suppressing payload", extra=diagnostic(LANGFUSE_PAYLOAD_SUPPRESSED)
+        )
+        provider.force_flush()
+
+        emitted = [d.log_record for d in exporter.get_finished_logs()]
+        tagged = [r for r in emitted if "suppressing payload" in str(r.body)]
+        assert len(tagged) == 1, f"expected the tagged record; got {[str(r.body) for r in emitted]}"
+        assert tagged[0].event_name == LANGFUSE_PAYLOAD_SUPPRESSED, (
+            "an already-attached handler must still carry the name on the field"
+        )
+        # The application's own configuration survives the re-class.
+        assert theirs.level == logging.WARNING
+        # And the caller is told their object was modified, since nothing else
+        # would reveal it: `type()` on their handler now reports a class they
+        # did not write.
+        assert any("re-classed" in m for m in retrofit_warnings), (
+            f"re-classing a caller's handler must not be silent; got {retrofit_warnings}"
+        )
+
+        # Repeat calls are a no-op on an already-lifted handler. A name check
+        # cannot see that: the lifted class has `_translate`, being ours, so
+        # each pass would subclass again and grow the MRO for good.
+        before = type(theirs).__mro__
+        install_log_bridge(provider)
+        assert type(theirs).__mro__ == before, (
+            f"a repeat call stacked another subclass: {[k.__name__ for k in type(theirs).__mro__]}"
+        )
+    finally:
+        root.handlers[:] = prior_handlers
+        root.setLevel(prior_level)
+        logging.setLogRecordFactory(prior_factory)
+        provider.shutdown()
+
+
+def test_log_bridge_leaves_a_foreign_providers_handler_alone() -> None:
+    # The retrofit is provider-scoped, like the dedup check that routes to it.
+    # A handler feeding a different LoggerProvider is a separate pipeline OA was
+    # not asked to touch, and leaving it alone is what makes "attach yours to a
+    # different provider" an actual remedy rather than advice that does nothing.
+    from opentelemetry.sdk._logs import LoggerProvider, LoggingHandler
+
+    root = logging.getLogger()
+    prior_handlers = list(root.handlers)
+    prior_level = root.level
+    prior_factory = logging.getLogRecordFactory()
+    oa_provider = LoggerProvider()
+    audit_provider = LoggerProvider()
+    try:
+        ours = LoggingHandler(logger_provider=oa_provider)
+        theirs = LoggingHandler(logger_provider=audit_provider)
+        root.addHandler(ours)
+        root.addHandler(theirs)
+
+        with warnings.catch_warnings(record=True):
+            warnings.simplefilter("always")
+            install_log_bridge(oa_provider)
+
+        assert type(ours).__name__ != "LoggingHandler", "the OA-provider handler was not lifted"
+        assert type(theirs) is LoggingHandler, "a handler on a different LoggerProvider must not be modified"
+    finally:
+        root.handlers[:] = prior_handlers
+        root.setLevel(prior_level)
+        logging.setLogRecordFactory(prior_factory)
+        oa_provider.shutdown()
+        audit_provider.shutdown()
+
+
+def test_the_re_class_announcement_survives_a_raised_handler_level() -> None:
+    # The log record travels through the very handler being modified, so a
+    # handler capped at ERROR (a normal way to limit OTLP volume) swallows it
+    # and the caller's object is mutated in silence. `warnings` does not depend
+    # on the logging configuration under change.
+    from opentelemetry.sdk._logs import LoggerProvider, LoggingHandler
+
+    root = logging.getLogger()
+    prior_handlers = list(root.handlers)
+    prior_level = root.level
+    prior_factory = logging.getLogRecordFactory()
+    provider = LoggerProvider()
+    try:
+        theirs = LoggingHandler(logger_provider=provider)
+        theirs.setLevel(logging.ERROR)
+        root.addHandler(theirs)
+        root.setLevel(logging.WARNING)
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            install_log_bridge(provider)
+            announced = [(w.category, str(w.message)) for w in caught]
+
+        assert type(theirs).__name__ != "LoggingHandler", "the handler was not re-classed"
+        # By category, not by message: the category is the caller's handle for
+        # silencing or escalating this, so it is the contractual half. Matching
+        # the prose instead would keep passing if the category were dropped.
+        assert any(issubclass(cat, LoggingSetupModified) and "re-classed" in msg for cat, msg in announced), (
+            f"the mutation must be announced on a channel the handler cannot swallow; got {announced}"
+        )
+    finally:
+        root.handlers[:] = prior_handlers
+        root.setLevel(prior_level)
+        logging.setLogRecordFactory(prior_factory)
+        provider.shutdown()
+
+
+def test_the_retrofit_decline_is_announced_and_changes_nothing() -> None:
+    # The decline arm: a handler whose translation seam is gone or resignatured
+    # is left alone and the names ride as attributes only. Without an assertion
+    # the whole arm could be deleted and nothing would notice, while the docs
+    # and CHANGELOG both promise it warns.
+    from openarmature.observability.otel import logs as logs_mod
+
+    class _ResignaturedHandler(logging.Handler):
+        # Same name, one more required parameter, which the hard-coded
+        # `super()._translate(record)` cannot supply.
+        def _translate(self, record: logging.LogRecord, context: object) -> Any:
+            return None
+
+        def emit(self, record: logging.LogRecord) -> None:
+            return None
+
+    root = logging.getLogger()
+    prior_handlers = list(root.handlers)
+    original_classes = logs_mod._otel_logs_handler_classes
+    try:
+        theirs = _ResignaturedHandler()
+        theirs._logger_provider = "sentinel-provider"  # type: ignore[attr-defined]
+        root.addHandler(theirs)
+        logs_mod._otel_logs_handler_classes = lambda: (_ResignaturedHandler,)  # type: ignore[assignment]
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            logs_mod._retrofit_event_name_lift(root, "sentinel-provider")  # type: ignore[arg-type]
+            announced = [str(w.message) for w in caught]
+
+        assert type(theirs) is _ResignaturedHandler, "a handler it cannot lift must be left alone"
+        assert any("cannot carry" in m for m in announced), (
+            f"declining to lift must be announced, not silent; got {announced}"
+        )
+    finally:
+        logs_mod._otel_logs_handler_classes = original_classes  # type: ignore[assignment]
+        root.handlers[:] = prior_handlers

@@ -10,6 +10,7 @@ enough to accept a dict that doesn't actually round-trip cleanly).
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 import pytest
@@ -723,3 +724,157 @@ def test_fixture_round_trips(case: tuple[str, Path]) -> None:
 
     reparsed = _FIXTURE_ADAPTER.validate_python(dumped)
     assert parsed == reparsed, f"round-trip mismatch for {path}"
+
+
+def test_otel_observer_directive_and_the_bare_key_select_the_same_flag() -> None:
+    # §5.5 (0121) moves the OTel observer's construction knobs under an
+    # `otel_observer:` directive. Twelve fixtures carry the new spelling at
+    # v0.118.0 while the pinned copy still uses the bare case-level key, so the
+    # harness reads both and the directive wins where both appear.
+    #
+    # Without this a fixture that moved to the directive would silently fall
+    # back to the observer's default (payloads OFF), and a case asserting a
+    # payload is ABSENT would keep passing for the wrong reason.
+    from tests.conformance.test_observability import _observer_kwargs_for_case
+
+    directive_only = _observer_kwargs_for_case({"otel_observer": {"disable_provider_payload": False}})
+    bare_only = _observer_kwargs_for_case({"disable_provider_payload": False})
+    assert directive_only.get("disable_provider_payload") is False
+    assert bare_only.get("disable_provider_payload") is False
+
+    # The directive wins over a bare key, so a half-migrated fixture cannot
+    # resolve to the stale value.
+    both = _observer_kwargs_for_case(
+        {"disable_provider_payload": True, "otel_observer": {"disable_provider_payload": False}}
+    )
+    assert both.get("disable_provider_payload") is False
+
+    # Neither spelling present leaves the flag unset, so the observer default
+    # applies rather than a harness-invented one.
+    assert "disable_provider_payload" not in _observer_kwargs_for_case({})
+
+
+def test_expected_log_record_matcher_uses_the_event_name_when_declared() -> None:
+    # The harness branch that reads a fixture's `event_name` is unreachable at
+    # the current pin: no fixture at v0.112.0 declares one, and the six that do
+    # arrive at v0.118.0. Verified by mutation, forcing the branch never to fire
+    # left the whole suite green.
+    #
+    # So the matcher is driven directly here. Without this the branch ships
+    # untested and a regression to level-only matching, the exact looseness 0121
+    # closes, goes unnoticed until the pin bump.
+    from openarmature.observability.diagnostics import (
+        EVENT_NAME_ATTR,
+        LANGFUSE_PAYLOAD_SUPPRESSED,
+        LANGFUSE_SHARED_PROVIDER_ACCEPTED,
+    )
+    from tests.conformance.test_observability_langfuse import match_expected_log_record
+
+    def _record(msg: str, name: str | None, func: str) -> logging.LogRecord:
+        rec = logging.LogRecord("openarmature.observability", logging.WARNING, __file__, 0, msg, None, None)
+        rec.funcName = func
+        # The matcher asserts the OTel field, which the capture helper stitches
+        # onto the record as `otel_event_name` after the case runs.
+        rec.otel_event_name = name  # type: ignore[attr-defined]
+        if name is not None:
+            setattr(rec, EVENT_NAME_ATTR, name)
+        return rec
+
+    records = [
+        # An unrelated warning on the same logger: the record that made a
+        # level-only assertion pass for the wrong reason.
+        _record("cached client notice", None, "from_credentials"),
+        _record("suppressing payloads", LANGFUSE_PAYLOAD_SUPPRESSED, "_apply_isolation_policy"),
+    ]
+
+    matched = match_expected_log_record(
+        {"level": "WARNING", "event_name": LANGFUSE_PAYLOAD_SUPPRESSED}, records
+    )
+    assert len(matched) == 1
+    assert "suppressing" in matched[0].getMessage()
+
+    # A name the run never emitted matches nothing, so a fixture asserting it
+    # fails rather than being satisfied by a neighbour at the same level.
+    assert not match_expected_log_record(
+        {"level": "WARNING", "event_name": LANGFUSE_SHARED_PROVIDER_ACCEPTED}, records
+    )
+
+    # With no name declared, the pre-0121 fallback still discriminates on the
+    # emitting call site rather than matching the unrelated warning.
+    fallback = match_expected_log_record({"level": "WARNING"}, records)
+    assert len(fallback) == 1
+    assert "suppressing" in fallback[0].getMessage()
+
+
+def test_nested_directives_reject_sub_keys_the_harness_does_not_apply() -> None:
+    # A case-level unknown-key guard does not descend into a nested mapping, so
+    # a sub-key the harness never reads would be dropped in silence and the case
+    # would pass with the knob at its default. Both nested directives 0121 adds
+    # raise instead.
+    from tests.conformance.test_observability import _observer_kwargs_for_case
+    from tests.conformance.test_observability_langfuse import match_expected_log_record
+
+    # §5.5 defines payload_byte_cap on this directive; the harness does not
+    # apply it, so a fixture using it must fail rather than pass vacuously.
+    with pytest.raises(AssertionError, match="does not apply"):
+        _observer_kwargs_for_case({"otel_observer": {"payload_byte_cap": 512}})
+
+    # A non-mapping directive degrades to a substring or membership test if
+    # unchecked, silently resolving to the observer default.
+    with pytest.raises(AssertionError, match="must be a mapping"):
+        _observer_kwargs_for_case({"otel_observer": "disable_provider_payload=false"})
+
+    # Same shape on the log_records entry: a `body` claim this matcher never
+    # checks would otherwise pass against any record at the same level.
+    with pytest.raises(AssertionError, match="does not assert"):
+        match_expected_log_record({"level": "WARNING", "body": "suppressing"}, [])
+
+    # And an entry with no level is a fixture error, not a bare KeyError.
+    with pytest.raises(AssertionError, match="declares no `level`"):
+        match_expected_log_record({"event_name": "openarmature.x"}, [])
+
+
+async def test_capture_helper_stitches_the_otel_event_name_field() -> None:
+    # `match_expected_log_record` asserts the OTel `EventName` FIELD, which the
+    # capture helper stitches onto each stdlib record as it exits. No fixture at
+    # the current pin declares `event_name`, so nothing else reaches this path
+    # and the whole bridge-install-and-pair mechanism could break unnoticed.
+    from openarmature.observability.diagnostics import (
+        LANGFUSE_PAYLOAD_SUPPRESSED,
+        diagnostic,
+    )
+    from tests.conformance.test_observability_langfuse import (
+        _caplog_at_warning,
+        match_expected_log_record,
+    )
+
+    logger = logging.getLogger("openarmature.observability")
+    with _caplog_at_warning() as records:
+        logger.warning("suppressing payload", extra=diagnostic(LANGFUSE_PAYLOAD_SUPPRESSED))
+        logger.warning("an unrelated notice")
+
+    assert len(records) == 2
+    # Stitched from the exported record, not read back off the stdlib attribute.
+    matched = match_expected_log_record(
+        {"level": "WARNING", "event_name": LANGFUSE_PAYLOAD_SUPPRESSED}, records
+    )
+    assert len(matched) == 1
+    assert "suppressing" in matched[0].getMessage()
+    # The untagged record carries no name, so a fixture naming it finds nothing.
+    assert not match_expected_log_record(
+        {"level": "WARNING", "event_name": "openarmature.never.emitted"}, records
+    )
+
+    # Two records sharing a message must not both take the last one's name.
+    # Pairing through a message-keyed dict would do exactly that, and a fixture
+    # asserting the FIRST emission's name would match the second's.
+    from openarmature.observability.diagnostics import LANGFUSE_SHARED_PROVIDER_ACCEPTED
+
+    with _caplog_at_warning() as duplicates:
+        logger.warning("same text", extra=diagnostic(LANGFUSE_PAYLOAD_SUPPRESSED))
+        logger.warning("same text", extra=diagnostic(LANGFUSE_SHARED_PROVIDER_ACCEPTED))
+
+    assert [r.otel_event_name for r in duplicates] == [
+        LANGFUSE_PAYLOAD_SUPPRESSED,
+        LANGFUSE_SHARED_PROVIDER_ACCEPTED,
+    ], "records sharing a message must keep their own event names, in emission order"

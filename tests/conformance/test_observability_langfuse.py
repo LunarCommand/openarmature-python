@@ -34,6 +34,7 @@ from pydantic import SecretStr
 from openarmature.graph import END, BranchSpec, ExplicitMapping, GraphBuilder
 from openarmature.llm import OpenAIProvider
 from openarmature.llm.response import RuntimeConfig
+from openarmature.observability.diagnostics import event_name_of as _event_name_of
 from openarmature.observability.langfuse import (
     InMemoryLangfuseClient,
     LangfuseObservation,
@@ -49,6 +50,7 @@ from openarmature.prompts import (
     TokenBudget,
 )
 from openarmature.prompts.context import with_active_prompt
+from tests.conformance.test_observability import _observer_kwargs_for_case
 
 from .adapter import build_graph, build_state_cls
 from .harness.capabilities import (
@@ -2689,8 +2691,11 @@ _EXPECTED_DIRECTIVES = frozenset(
 # nested spelling under `langfuse_observer` that `_run_case` reads and a case-level
 # one that only this runner reads; granting the case-level name file-wide would let
 # a fixture on the generic path declare it and have it silently dropped.
+# `otel_observer` is the §5.5 (0121) spelling of the OTel observer's knobs;
+# the bare `disable_provider_payload` is the pre-0121 one the pinned fixtures
+# still use. Both are read, so a case resolves the same way across the bump.
 _ISOLATION_CASE_DIRECTIVES = _CASE_DIRECTIVES | frozenset(
-    {"disable_provider_payload", "expected_construction_error"}
+    {"disable_provider_payload", "otel_observer", "expected_construction_error"}
 )
 
 _EXPECTED_ISOLATION = _IMPLEMENTED_LEAK_ASSERTIONS | frozenset({"langfuse_trace", "log_records"})
@@ -3045,10 +3050,51 @@ class _IsolationCapture:
     isolated_exporter: Any | None  # the provider openarmature built for Langfuse
 
 
-# The observer method that emits the isolation-decision WARNINGs §6 mandates.
-# `from_credentials` emits its own, unrelated, WARNINGs on the same logger, so the
-# `log_records` assertion discriminates on this rather than on level alone.
+# The fallback discriminator, used only for a fixture that declares no
+# `event_name`. `from_credentials` emits unrelated WARNINGs on the same logger,
+# so level alone matches an incidental record; the emitting call site is not
+# portable to another implementation, which is why 0121 added the name.
 _ISOLATION_DECISION_FUNC = "_apply_isolation_policy"
+
+
+# The `expected.log_records` entry keys this harness asserts. §5.5 defines more
+# (`body`, `attributes`); an unlisted one raises rather than being dropped.
+_LOG_RECORD_ENTRY_KEYS = ("level", "event_name")
+
+
+def match_expected_log_record(wanted: Mapping[str, Any], records: Sequence[Any]) -> list[Any]:
+    """The captured records satisfying one ``expected.log_records`` entry."""
+    # §5.5 (0121) gives a fixture an `event_name` to discriminate on. Where it
+    # declares one, match on that: the name is portable, unlike the emitting
+    # call site this falls back to. Level alone is satisfied by any warning on
+    # the same logger, which is the looseness 0121 exists to close.
+    if "level" not in wanted:
+        raise AssertionError(f"`expected.log_records` entry declares no `level`: {dict(wanted)}")
+    # An unread sub-key would be dropped in silence, so an entry declaring a
+    # `body` claim this matcher never checks would pass against any record at
+    # the same level. The case-level unknown-key guard does not descend here.
+    unknown = sorted(set(wanted) - set(_LOG_RECORD_ENTRY_KEYS))
+    if unknown:
+        raise AssertionError(
+            f"`expected.log_records` entry carries key(s) this harness does not "
+            f"assert: {unknown}. Wire them or defer the fixture."
+        )
+    level = cast("str", wanted["level"])
+    wanted_name = cast("str | None", wanted.get("event_name"))
+    if wanted_name is not None:
+        # The OTel field, per §5.5, not the stdlib attribute it rides on.
+        return [
+            r for r in records if r.levelname == level and getattr(r, "otel_event_name", None) == wanted_name
+        ]
+    _assert_isolation_decision_emitter_exists()
+    return [r for r in records if r.levelname == level and r.funcName == _ISOLATION_DECISION_FUNC]
+
+
+def _log_record_mismatch_message(wanted: Mapping[str, Any], records: Sequence[Any]) -> str:
+    name = wanted.get("event_name")
+    discriminator = f"event_name {name!r}" if name else f"the isolation decision ({_ISOLATION_DECISION_FUNC})"
+    seen = [(r.levelname, _event_name_of(r), r.funcName, r.getMessage()[:40]) for r in records]
+    return f"expected a {wanted['level']} log record from {discriminator}; captured {seen}"
 
 
 def _assert_isolation_decision_emitter_exists() -> None:
@@ -3063,7 +3109,26 @@ def _assert_isolation_decision_emitter_exists() -> None:
 
 @contextlib.contextmanager
 def _caplog_at_warning() -> Iterator[list[Any]]:
-    """Capture openarmature's observability WARNING records for the case."""
+    """Capture openarmature's observability WARNING records for the case.
+
+    Each captured record carries an ``otel_event_name`` attribute holding the
+    OTel ``LogRecord``'s ``EventName`` field for that emission.
+    """
+    # §5.5 measures a fixture's `event_name` against the OTel LogRecord's
+    # EventName FIELD, not the stdlib attribute the name rides on in-process.
+    # Reading the stdlib one would pass for any adapter that merely set an
+    # attribute, which is the assertion this is meant to make impossible.
+    #
+    # So the bridge runs for the duration of the case and the exported record's
+    # field is stitched back onto the stdlib record the matcher sees.
+    from opentelemetry.sdk._logs import LoggerProvider
+    from opentelemetry.sdk._logs.export import (
+        InMemoryLogRecordExporter,
+        SimpleLogRecordProcessor,
+    )
+
+    from openarmature.observability.otel.logs import install_log_bridge
+
     records: list[Any] = []
 
     class _Sink(logging.Handler):
@@ -3071,14 +3136,46 @@ def _caplog_at_warning() -> Iterator[list[Any]]:
             records.append(record)
 
     logger = logging.getLogger("openarmature.observability")
-    handler = _Sink(level=logging.WARNING)
+    # INFO, not WARNING: the no-payload isolation diagnostic is emitted at INFO
+    # (nothing is leaking on that arm), and a WARNING-only window cannot see it,
+    # so a fixture asserting it would fail on the window rather than the code.
+    handler = _Sink(level=logging.INFO)
     previous = logger.level
-    logger.addHandler(handler)
-    logger.setLevel(logging.WARNING)
+    root = logging.getLogger()
+    prior_root_handlers = list(root.handlers)
+    prior_root_level = root.level
+    prior_factory = logging.getLogRecordFactory()
+    exporter = InMemoryLogRecordExporter()
+    provider = LoggerProvider()
+    provider.add_log_record_processor(SimpleLogRecordProcessor(exporter))
     try:
+        # Inside the try: `install_log_bridge` mutating root before a failure
+        # would otherwise leak the sink and the raised levels for the session.
+        logger.addHandler(handler)
+        logger.setLevel(logging.INFO)
+        install_log_bridge(provider)
+        root.setLevel(logging.INFO)
         yield records
     finally:
         logger.removeHandler(handler)
+        provider.force_flush()
+        # Pair each captured record with its exported counterpart IN ORDER, so
+        # the matcher asserts the OTel field rather than the in-process
+        # attribute. Keying by message would give two records sharing a message
+        # the same name; the exporter preserves emission order, and the sink
+        # sees the same records in the same order.
+        exported = [d.log_record for d in exporter.get_finished_logs()]
+        by_message: dict[str, list[Any]] = {}
+        for emitted in exported:
+            by_message.setdefault(str(emitted.body), []).append(emitted)
+        for record in records:
+            queue = by_message.get(record.getMessage())
+            emitted = queue.pop(0) if queue else None
+            record.otel_event_name = getattr(emitted, "event_name", None) if emitted else None
+        root.handlers[:] = prior_root_handlers
+        root.setLevel(prior_root_level)
+        logging.setLogRecordFactory(prior_factory)
+        provider.shutdown()
         logger.setLevel(previous)
 
 
@@ -3217,17 +3314,9 @@ def _assert_isolation_expectations(
         # the mandated emitter on its own then leaves the case green -- verified as
         # a surviving mutant before this was narrowed.
         assert log_records is not None, "log_records was declared but nothing captured logs"
-        _assert_isolation_decision_emitter_exists()
         for wanted in cast("list[dict[str, Any]]", expected_logs):
-            level = cast("str", wanted["level"])
-            matched = [
-                r for r in log_records if r.levelname == level and r.funcName == _ISOLATION_DECISION_FUNC
-            ]
-            assert matched, (
-                f"expected a {level} log record from the isolation decision "
-                f"({_ISOLATION_DECISION_FUNC}); captured "
-                f"{[(r.levelname, r.funcName, r.getMessage()[:50]) for r in log_records]}"
-            )
+            matched = match_expected_log_record(wanted, log_records)
+            assert matched, _log_record_mismatch_message(wanted, log_records)
 
     expected_trace = expected.get("langfuse_trace")
     if isinstance(expected_trace, dict):
@@ -3352,24 +3441,31 @@ async def _run_langfuse_157(case: Mapping[str, Any]) -> None:
             # `expected_construction_error` early return and never executed for the
             # only case that declares it, so the case was indistinguishable from its
             # sibling. Deleting the whole block left the suite green.
-            otel_kwargs: dict[str, Any] = {}
-            if "disable_provider_payload" in case:
-                otel_kwargs["disable_provider_payload"] = bool(case["disable_provider_payload"])
+            # Same reader as the OTel harness, so a case migrated onto the
+            # `otel_observer:` directive resolves identically here. Fixture 158
+            # carries the directive at v0.118.0.
+            otel_kwargs: dict[str, Any] = _observer_kwargs_for_case(case)
             otel_observer = OTelObserver(span_processor=SimpleSpanProcessor(private_exporter), **otel_kwargs)
-            if "disable_provider_payload" in case:
-                # Asserted, not merely passed. Under `expected_construction_error`
-                # the raise happens before anything is emitted, so no conforming run
-                # can OBSERVE this flag's effect -- which is what a negative control
-                # is, and why dropping the wiring above left the suite green. Pinning
-                # the resulting config is the part that can be checked: it proves the
-                # directive was read and honoured rather than accepted and dropped,
-                # which is what `_ISOLATION_CASE_DIRECTIVES` vouches for.
-                assert otel_observer.disable_provider_payload == bool(case["disable_provider_payload"]), (
-                    "the case-level disable_provider_payload did not reach the OTel "
+            # Asserted, not merely passed. Under `expected_construction_error` the
+            # raise happens before anything is emitted, so no conforming run can
+            # OBSERVE this flag's effect, which is what a negative control is.
+            # Pinning the resulting config is the part that can be checked: it
+            # proves the knob was read and honoured rather than accepted and
+            # dropped, which is what `_ISOLATION_CASE_DIRECTIVES` vouches for.
+            #
+            # Gated on the RESOLVED value, not on a case-level key: a fixture
+            # moving to the `otel_observer:` directive would otherwise stop
+            # running this assertion at the moment it started mattering.
+            if "disable_provider_payload" in otel_kwargs:
+                assert otel_observer.disable_provider_payload == otel_kwargs["disable_provider_payload"], (
+                    "the resolved disable_provider_payload did not reach the OTel "
                     "observer, so the case cannot show the two suppressions are independent"
                 )
             graph.attach_observer(otel_observer)
             expected_construction = cast("dict[str, Any] | None", case.get("expected_construction_error"))
+            construction_only = False
+            langfuse_observer: Any = None
+            isolated_exporter: Any = None
             with _caplog_at_warning() as records:
                 if expected_construction is not None:
                     # Setup-scope assertion: construction itself is the behaviour
@@ -3382,16 +3478,22 @@ async def _run_langfuse_157(case: Mapping[str, Any]) -> None:
                         f"construction error category: expected "
                         f"{expected_construction['category']!r}, got {category!r}"
                     )
-                    _assert_isolation_expectations(
-                        cast("dict[str, Any]", case.get("expected") or {}),
-                        _IsolationCapture(global_exporter, private_exporter, None),
-                        list(private_exporter.get_finished_spans()),
-                        log_records=records,
+                    construction_only = True
+                else:
+                    langfuse_observer, isolated_exporter = _build_isolation_observer(
+                        case, observer_kwargs, global_provider
                     )
-                    return
-                langfuse_observer, isolated_exporter = _build_isolation_observer(
-                    case, observer_kwargs, global_provider
+            # Outside the capture block on purpose: the OTel `EventName` field is
+            # stitched onto each record as the block exits, so asserting inside
+            # it would compare against a field that is not there yet.
+            if construction_only:
+                _assert_isolation_expectations(
+                    cast("dict[str, Any]", case.get("expected") or {}),
+                    _IsolationCapture(global_exporter, private_exporter, None),
+                    list(private_exporter.get_finished_spans()),
+                    log_records=records,
                 )
+                return
             graph.attach_observer(langfuse_observer)
 
             await graph.invoke(state_cls(**cast("dict[str, Any]", case.get("initial_state") or {})))

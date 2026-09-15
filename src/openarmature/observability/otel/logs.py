@@ -16,11 +16,26 @@ the correlation_id from the ContextVar.
 
 from __future__ import annotations
 
+import inspect
 import logging
-from typing import TYPE_CHECKING, Any
+import warnings
+from typing import TYPE_CHECKING, Any, cast
+
+from ..diagnostics import EVENT_NAME_ATTR as _EVENT_NAME_ATTR
 
 if TYPE_CHECKING:
     from opentelemetry.sdk._logs import LoggerProvider
+
+
+class LoggingSetupModified(UserWarning):
+    """``install_log_bridge`` changed a logging object the caller built.
+
+    Subclasses a plain ``UserWarning`` so the stdlib filter vocabulary
+    (``warnings.simplefilter``, ``-W`` flags, pytest's ``filterwarnings``)
+    applies unchanged: a caller who accepts the change can silence it by
+    category, and one who wants it fatal can opt in with
+    ``warnings.simplefilter("error", LoggingSetupModified)``.
+    """
 
 
 # Marker attribute used to detect "this is the OA-installed
@@ -123,8 +138,15 @@ def install_log_bridge(
     )
 
     root = logging.getLogger()
-    if not _otel_logs_handler_already_bridges(root, provider):
-        handler = _InstrLoggingHandler(level=level, logger_provider=provider)
+    if _otel_logs_handler_already_bridges(root, provider):
+        # An application that wired its own OTel handler gets no second one, but
+        # it still needs the event-name lift: without this the field is never
+        # populated in the setup this module documents as typical, and the name
+        # survives only as an attribute.
+        _retrofit_event_name_lift(root, provider)
+    else:
+        handler_cls = _event_name_handler_class(_InstrLoggingHandler)
+        handler = handler_cls(level=level, logger_provider=provider)
         # Direct assignment isn't typed on LoggingHandler; route
         # through ``object.__setattr__`` to avoid pyright's strict
         # attribute-access check without losing the idempotency-
@@ -133,6 +155,147 @@ def install_log_bridge(
         root.addHandler(handler)
     # Idempotency #2: don't stack the LogRecord factory.
     _install_correlation_id_factory()
+
+
+def _accepts_one_record(method: Any) -> bool:
+    """True iff ``method`` still takes just ``self`` and the record."""
+    # A name check alone is not enough. The override hard-codes
+    # `super()._translate(record)`, so a seam that grew a parameter raises
+    # TypeError out of every `logging` call in the process, this handler being
+    # on the root logger. Shape-check it and decline the subclass instead.
+    #
+    # Two positionals, because the lookup is on the CLASS and so includes
+    # `self`. A keyword-only required parameter fails the check for the same
+    # reason a second positional does: the hard-coded call cannot supply it.
+    try:
+        params = list(inspect.signature(method).parameters.values())
+    except (TypeError, ValueError):
+        return False
+    required = [p for p in params if p.default is inspect.Parameter.empty]
+    positional = [p for p in required if p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD)]
+    return len(required) == len(positional) == 2
+
+
+_logger = logging.getLogger("openarmature.observability")
+
+
+# Set on a generated handler class so a repeat call recognises its own work.
+# `hasattr(base, "_translate")` cannot: a lifted class has one, being ours.
+_LIFT_MARKER = "_openarmature_event_name_lift"
+
+
+def _otel_logs_handler_classes() -> tuple[type[Any], ...]:
+    """The OTel logs handler classes a root-logger handler may be one of."""
+    # Two classes named LoggingHandler exist in the OTel Python tree, the SDK's
+    # and the instrumentation package's, and an application may have attached
+    # either.
+    from opentelemetry.instrumentation.logging.handler import (
+        LoggingHandler as _InstrLoggingHandler,
+    )
+    from opentelemetry.sdk._logs import LoggingHandler as _SDKLoggingHandler
+
+    return (_SDKLoggingHandler, _InstrLoggingHandler)
+
+
+def _announce(message: str) -> None:
+    """Tell the caller about a change openarmature made to their logging setup."""
+    # Both channels on purpose. The log record is the one a trace pipeline sees,
+    # but it travels through the very handler being modified: a handler capped
+    # at ERROR, which is a normal way to limit OTLP volume, swallows it and the
+    # mutation happens in silence. `warnings` does not depend on the logging
+    # configuration under change, and surfaces under pytest and `-W error`.
+    warnings.warn(message, LoggingSetupModified, stacklevel=3)
+    _logger.warning("%s", message)
+
+
+def _retrofit_event_name_lift(root: logging.Logger, provider: LoggerProvider) -> None:
+    """Give an already-attached OTel logs handler the event-name lift."""
+    # Re-classing rather than replacing: the handler is the application's, with
+    # its own level, filters and formatter, and swapping it would discard them.
+    #
+    # This modifies an object the caller constructed, so it says so. The
+    # alternatives are worse: adding a second handler double-exports every log
+    # record to the same pipeline, and doing nothing leaves §7's field unset in
+    # the setup this module documents as typical, with no signal at all.
+    for handler in list(root.handlers):
+        if not isinstance(handler, _otel_logs_handler_classes()):
+            continue
+        # Provider-scoped, like the dedup check that routed us here. A handler
+        # feeding a different LoggerProvider is a separate pipeline openarmature
+        # was not asked to touch, and leaving it alone is what makes "attach
+        # yours to a different provider" an actual remedy.
+        if getattr(handler, "_logger_provider", None) is not provider:
+            continue
+        original = type(handler)
+        if getattr(original, _LIFT_MARKER, False):
+            # Already lifted by an earlier call. Nothing to do and nothing to
+            # say: the caller was told the first time.
+            continue
+        lifted = _event_name_handler_class(original)
+        if lifted is original:
+            # The seam is gone or has changed shape. Nothing is modified, and
+            # the names ride as attributes only.
+            _announce(
+                f"{original.__name__} on the root logger cannot carry openarmature's "
+                f"diagnostic event names: its record-translation hook is missing or has "
+                f"changed shape. The names are still set as log-record attributes, but not "
+                f"on the OTel LogRecord's EventName field"
+            )
+            continue
+        handler.__class__ = lifted
+        _announce(
+            f"openarmature re-classed the {original.__name__} you attached to the root "
+            f"logger, so its records carry openarmature's diagnostic event names on the OTel "
+            f"LogRecord's EventName field. Your handler's level, filters and formatter are "
+            f"unchanged; only its class is, and `type()` on it now reports "
+            f"{lifted.__name__}. To avoid this, call install_log_bridge before attaching "
+            f"your own handler, or attach yours to a different LoggerProvider"
+        )
+
+
+def _event_name_handler_class(base: type[Any]) -> type[Any]:
+    """The handler class to bridge with, lifting a record's event name.
+
+    Returns ``base`` unchanged where the upstream handler no longer exposes the
+    seam this needs.
+    """
+    # §7 wants a diagnostic's event name on the OTel LogRecord's `event_name`
+    # FIELD. Neither OTel logging handler populates it: both map every stdlib
+    # record attribute into `attributes` and leave the field unset, so a name
+    # passed via `extra=` arrives as an attribute and the field stays empty.
+    #
+    # `_translate` is the handlers' own private surface, so subclassing it
+    # reaches past the public API. Guarded on the method still existing, because
+    # `super()._translate(...)` inside an override raises AttributeError once it
+    # does not, which would break logging rather than degrade. Without the
+    # subclass the name rides as an attribute only.
+    if getattr(base, _LIFT_MARKER, False):
+        # Already lifted. Subclassing again would work, since the outer override
+        # finds the field set and skips, but each pass adds an MRO entry that
+        # never goes away.
+        return base
+    inherited = getattr(base, "_translate", None)
+    if inherited is None or not _accepts_one_record(inherited):
+        return base
+
+    class _EventNameHandler(base):  # type: ignore[misc, valid-type]
+        def _translate(self, record: logging.LogRecord) -> Any:
+            # `base` is `type[Any]` so the checker cannot see through `super()`;
+            # the seam is checked for both name and shape above.
+            raw = super()._translate(record)  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
+            translated = cast("Any", raw)
+            name = getattr(record, _EVENT_NAME_ATTR, None)
+            if isinstance(name, str) and getattr(translated, "event_name", None) is None:
+                try:
+                    translated.event_name = name
+                except AttributeError:
+                    # A LogRecord with no such field: the name still rides as an
+                    # attribute, so nothing that was there before is lost.
+                    pass
+            return translated
+
+    setattr(_EventNameHandler, _LIFT_MARKER, True)
+    return _EventNameHandler
 
 
 def _otel_logs_handler_already_bridges(root: logging.Logger, provider: LoggerProvider) -> bool:
@@ -150,12 +313,7 @@ def _otel_logs_handler_already_bridges(root: logging.Logger, provider: LoggerPro
     "doesn't bridge", falling back to adding our own handler. Worst
     case is the pre-fix behavior (potential dup); we never crash.
     """
-    from opentelemetry.instrumentation.logging.handler import (
-        LoggingHandler as _InstrLoggingHandler,
-    )
-    from opentelemetry.sdk._logs import LoggingHandler as _SDKLoggingHandler
-
-    handler_classes = (_SDKLoggingHandler, _InstrLoggingHandler)
+    handler_classes = _otel_logs_handler_classes()
     for handler in root.handlers:
         if not isinstance(handler, handler_classes):
             continue
@@ -167,5 +325,6 @@ def _otel_logs_handler_already_bridges(root: logging.Logger, provider: LoggerPro
 
 
 __all__ = [
+    "LoggingSetupModified",
     "install_log_bridge",
 ]

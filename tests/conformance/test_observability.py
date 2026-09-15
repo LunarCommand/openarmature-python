@@ -4211,6 +4211,51 @@ async def _run_llm_payload_fixture(spec: Mapping[str, Any]) -> None:
             raise AssertionError(f"case {case.get('name')!r}: {e}") from e
 
 
+# The `otel_observer:` sub-keys this harness applies. §5.5 defines more (notably
+# `payload_byte_cap`); an unlisted one raises rather than being dropped, since a
+# dropped knob and an honoured one look identical from the assertion.
+_OTEL_OBSERVER_DIRECTIVE_KEYS = (
+    "disable_provider_payload",
+    "disable_genai_semconv",
+)
+# Read from the bare case-level key only. §5.5 does not define it on the
+# `otel_observer:` directive, so accepting it there would invent a spelling no
+# fixture can rely on.
+_BARE_ONLY_OBSERVER_KEYS = ("disable_llm_spans",)
+
+
+def _observer_kwargs_for_case(case: Mapping[str, Any]) -> dict[str, Any]:
+    """The OTel observer construction knobs a fixture case declares."""
+    # §5.5 (0121): the knobs arrive under an `otel_observer:` directive. The
+    # bare case-level key is the pre-0121 spelling, still read so the harness
+    # works either side of the pin bump; the directive wins where both appear,
+    # so a half-migrated fixture cannot resolve to the stale value.
+    raw = case.get("otel_observer")
+    if raw is not None and not isinstance(raw, Mapping):
+        raise AssertionError(f"fixture `otel_observer:` must be a mapping; got {type(raw).__name__}")
+    directive = cast("Mapping[str, Any]", raw or {})
+    # A sub-key this harness does not read would otherwise be dropped in
+    # silence, leaving a case that asserts the knob's effect passing with the
+    # observer at its default. The case-level unknown-key guard does not descend
+    # into a nested directive.
+    unknown = sorted(set(directive) - set(_OTEL_OBSERVER_DIRECTIVE_KEYS))
+    if unknown:
+        raise AssertionError(
+            f"fixture `otel_observer:` carries sub-key(s) this harness does not "
+            f"apply: {unknown}. Wire them or defer the fixture."
+        )
+    kwargs: dict[str, Any] = {}
+    for key in _OTEL_OBSERVER_DIRECTIVE_KEYS:
+        if key in directive:
+            kwargs[key] = bool(directive[key])
+        elif key in case:
+            kwargs[key] = bool(case[key])
+    for key in _BARE_ONLY_OBSERVER_KEYS:
+        if key in case:
+            kwargs[key] = bool(case[key])
+    return kwargs
+
+
 async def _run_llm_payload_case(case: Mapping[str, Any]) -> None:
     """Build + invoke the graph, then walk the expected span tree
     asserting via the LLM-attribute helpers (parse-shape, truncation,
@@ -4339,13 +4384,10 @@ async def _run_llm_payload_case(case: Mapping[str, Any]) -> None:
 
     # ---- Observer
     exporter = InMemorySpanExporter()
-    observer_kwargs: dict[str, Any] = {"span_processor": SimpleSpanProcessor(exporter)}
-    if "disable_provider_payload" in case:
-        observer_kwargs["disable_provider_payload"] = bool(case["disable_provider_payload"])
-    if "disable_genai_semconv" in case:
-        observer_kwargs["disable_genai_semconv"] = bool(case["disable_genai_semconv"])
-    if "disable_llm_spans" in case:
-        observer_kwargs["disable_llm_spans"] = bool(case["disable_llm_spans"])
+    observer_kwargs: dict[str, Any] = {
+        "span_processor": SimpleSpanProcessor(exporter),
+        **_observer_kwargs_for_case(case),
+    }
     observer = OTelObserver(**observer_kwargs)
     graph.attach_observer(observer)
 
@@ -5129,9 +5171,15 @@ async def _run_structured_output_error_span_case(case: Mapping[str, Any]) -> Non
     exporter = InMemorySpanExporter()
     # disable_provider_payload defaults to True per observability §5.5.4; case 1
     # sets it false to keep output.content, case 2 relies on the default to redact.
+    # Payload off unless the case says otherwise, which is this runner's own
+    # default rather than the observer's. Every other knob the case resolves is
+    # applied too: keeping only one would let a fixture set a knob that passes
+    # the directive allowlist and then silently does nothing.
+    structured_kwargs: dict[str, Any] = {"disable_provider_payload": True}
+    structured_kwargs.update(_observer_kwargs_for_case(case))
     observer = OTelObserver(
         span_processor=SimpleSpanProcessor(exporter),
-        disable_provider_payload=bool(case.get("disable_provider_payload", True)),
+        **structured_kwargs,
     )
     graph.attach_observer(observer)
     state = _make_state_instance(case, state_cls)
@@ -5487,9 +5535,10 @@ async def _run_tool_case(case: Mapping[str, Any]) -> None:
             graph.attach_observer(collector)
     if "span_tree" in expected:
         exporter = InMemorySpanExporter()
-        otel_kwargs: dict[str, Any] = {"span_processor": SimpleSpanProcessor(exporter)}
-        if "disable_provider_payload" in case:
-            otel_kwargs["disable_provider_payload"] = bool(case["disable_provider_payload"])
+        otel_kwargs: dict[str, Any] = {
+            "span_processor": SimpleSpanProcessor(exporter),
+            **_observer_kwargs_for_case(case),
+        }
         otel_observer = OTelObserver(**otel_kwargs)
         graph.attach_observer(otel_observer)
     if "langfuse_trace" in expected:
@@ -5769,9 +5818,10 @@ async def _run_embedding_case(case: Mapping[str, Any]) -> None:
             graph.attach_observer(collector)
     if "span_tree" in expected:
         exporter = InMemorySpanExporter()
-        otel_kwargs: dict[str, Any] = {"span_processor": SimpleSpanProcessor(exporter)}
-        if "disable_provider_payload" in case:
-            otel_kwargs["disable_provider_payload"] = bool(case["disable_provider_payload"])
+        otel_kwargs: dict[str, Any] = {
+            "span_processor": SimpleSpanProcessor(exporter),
+            **_observer_kwargs_for_case(case),
+        }
         otel_observer = OTelObserver(**otel_kwargs)
         graph.attach_observer(otel_observer)
     if "langfuse_trace" in expected:
@@ -6062,9 +6112,10 @@ async def _run_rerank_case(case: Mapping[str, Any]) -> None:
             graph.attach_observer(collector)
     if "span_tree" in expected:
         exporter = InMemorySpanExporter()
-        otel_kwargs: dict[str, Any] = {"span_processor": SimpleSpanProcessor(exporter)}
-        if "disable_provider_payload" in case:
-            otel_kwargs["disable_provider_payload"] = bool(case["disable_provider_payload"])
+        otel_kwargs: dict[str, Any] = {
+            "span_processor": SimpleSpanProcessor(exporter),
+            **_observer_kwargs_for_case(case),
+        }
         otel_observer = OTelObserver(**otel_kwargs)
         graph.attach_observer(otel_observer)
     if "langfuse_trace" in expected:

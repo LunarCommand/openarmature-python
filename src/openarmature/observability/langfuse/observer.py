@@ -49,6 +49,12 @@ from openarmature.graph.events import (
     ToolCallFailedEvent,
 )
 from openarmature.graph.observer import ObserverEvent
+from openarmature.observability.diagnostics import (
+    LANGFUSE_PAYLOAD_SUPPRESSED,
+    LANGFUSE_SHARED_PROVIDER_ACCEPTED,
+    LANGFUSE_SHARED_PROVIDER_NO_PAYLOAD,
+    diagnostic,
+)
 from openarmature.observability.lineage import (
     BranchDispatchKey as _BranchDispatchKey,
 )
@@ -445,7 +451,8 @@ class LangfuseObserver:
                 _logger.warning(
                     "cannot establish the Langfuse client's TracerProvider binding; "
                     "suppressing the provider and state payloads you enabled, to avoid "
-                    "a possible leak to a shared provider"
+                    "a possible leak to a shared provider",
+                    extra=diagnostic(LANGFUSE_PAYLOAD_SUPPRESSED),
                 )
             self.disable_provider_payload = True
             self.disable_state_payload = True
@@ -460,14 +467,16 @@ class LangfuseObserver:
                 "OA's Langfuse client is bound to a TracerProvider it did not isolate; "
                 "no payload channel is enabled, so nothing is being exported to it; "
                 "enabling one fails closed (the payload is withheld, or construction is "
-                "refused) until OA's client is constructed before any other for this key"
+                "refused) until OA's client is constructed before any other for this key",
+                extra=diagnostic(LANGFUSE_SHARED_PROVIDER_NO_PAYLOAD),
             )
         elif status == ISOLATION_SHARED_ACCEPTED:
             # A provider-binding decision, not a payload one, so it is reported
             # whatever the payload knobs say.
             _logger.warning(
                 "accept_shared_provider=True: OA's Langfuse observations may reach a "
-                "TracerProvider shared with the application (acknowledged)"
+                "TracerProvider shared with the application (acknowledged)",
+                extra=diagnostic(LANGFUSE_SHARED_PROVIDER_ACCEPTED),
             )
 
     def _construction_channels_live(self) -> bool:

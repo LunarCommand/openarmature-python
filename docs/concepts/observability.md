@@ -628,6 +628,26 @@ correlation:
 - Log records emitted during node execution carry the active span's
   `trace_id` / `span_id` plus an `openarmature.correlation_id`
   attribute, so the join key survives the OTel boundary.
+- A log record OA emits to signal a condition the spec defines also
+  carries a stable **event name** on the OTel `LogRecord`'s `EventName`
+  field, so you can alert on the specific diagnostic rather than on a
+  severity shared with every other warning. Names never change once
+  shipped; the human-readable message is free to.
+
+| Event name | Severity | Emitted when |
+| --- | --- | --- |
+| `openarmature.langfuse.payload_suppressed` | `WARNING` | OA cannot establish the Langfuse client's provider binding and suppresses every harvested-payload channel |
+| `openarmature.langfuse.shared_provider_accepted` | `WARNING` | You accepted a shared provider and OA proceeded onto it |
+| `openarmature.langfuse.shared_provider_no_payload` | `INFO` | OA's client is on a provider it did not isolate, but no payload channel is live, so nothing is exported to it |
+| `openarmature.token_budget.exceeded` | `WARNING` | An active prompt's token budget was exceeded |
+
+  The no-payload one is `INFO` because nothing is leaking on that arm: it
+  tells you the binding is latent, not that anything went wrong. Filter at
+  `INFO` if you want to see it.
+
+  The constants are importable from `openarmature.observability`
+  (`LANGFUSE_PAYLOAD_SUPPRESSED` and siblings), so an alert rule can
+  reference the name rather than repeat the string.
 
 ### TracerProvider isolation
 

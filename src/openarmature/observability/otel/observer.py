@@ -117,6 +117,10 @@ from openarmature.graph.events import (
     ToolCallFailedEvent,
 )
 from openarmature.graph.observer import ObserverEvent
+from openarmature.observability.diagnostics import (
+    TOKEN_BUDGET_EXCEEDED,
+    diagnostic,
+)
 from openarmature.observability.lineage import (
     BranchDispatchKey as _BranchDispatchKey,
 )
@@ -1670,7 +1674,12 @@ class OTelObserver:
         if active_prompt is not None and active_prompt.version is not None:
             prompt_ident = f"{active_prompt.name} {active_prompt.version}"
         breaches = ", ".join(f"{ev['kind']} {ev['actual']} > {ev['max']}" for ev in breached)
-        logger.warning("token budget exceeded for prompt %r: %s", prompt_ident, breaches)
+        logger.warning(
+            "token budget exceeded for prompt %r: %s",
+            prompt_ident,
+            breaches,
+            extra=diagnostic(TOKEN_BUDGET_EXCEEDED),
+        )
 
     def _handle_typed_llm_retry_attempt(self, event: LlmRetryAttemptEvent) -> None:
         """Open + close one ``openarmature.llm.complete`` span from a

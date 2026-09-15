@@ -33,6 +33,16 @@ from .correlation import (
     current_namespace_prefix,
 )
 
+# Re-exported because the names are the public surface: a consumer alerts on
+# them, and a constant is what stops an alert rule repeating the string.
+from .diagnostics import (
+    LANGFUSE_PAYLOAD_SUPPRESSED,
+    LANGFUSE_SHARED_PROVIDER_ACCEPTED,
+    LANGFUSE_SHARED_PROVIDER_NO_PAYLOAD,
+    TOKEN_BUDGET_EXCEEDED,
+    event_name_of,
+)
+
 # v0.17.0 (proposal 0024 / friction-roundup #9): publish the LLM event
 # contract so third-party Provider implementations and custom observers
 # can interoperate against a stable shape. Both names live in
@@ -62,8 +72,12 @@ from .metadata import (
 from .tool_call import ToolCallScope, with_tool_call
 
 __all__ = [
+    "LANGFUSE_PAYLOAD_SUPPRESSED",
+    "LANGFUSE_SHARED_PROVIDER_ACCEPTED",
+    "LANGFUSE_SHARED_PROVIDER_NO_PAYLOAD",
     "LLM_NAMESPACE",
     "LlmEventPayload",
+    "TOKEN_BUDGET_EXCEEDED",
     "ToolCallScope",
     "current_active_observers",
     "current_attempt_index",
@@ -73,6 +87,7 @@ __all__ = [
     "current_invocation_id",
     "current_invocation_metadata",
     "current_namespace_prefix",
+    "event_name_of",
     "get_invocation_metadata",
     "set_invocation_metadata",
     "with_tool_call",

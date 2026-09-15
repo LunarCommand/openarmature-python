@@ -88,3 +88,34 @@ query-filters:
   # type-check time, so dropping the CodeQL rule doesn't lose signal.
   - exclude:
       id: py/cyclic-import
+  # ``py/inheritance/signature-mismatch`` fires on a class that is
+  # generated over a dynamic base, where the analysis binds the base
+  # parameter to every class passed at any call site and infers an
+  # override from that binding:
+  #
+  # - ``observability/otel/logs.py``'s ``_event_name_handler_class(base)``
+  #   builds ``_EventNameHandler(base)`` to lift a diagnostic's event
+  #   name onto the OTel ``LogRecord`` field. Its ``_translate``
+  #   override hard-codes ``super()._translate(record)``, so the factory
+  #   shape-checks the seam first (``_accepts_one_record``) and returns
+  #   ``base`` untouched when it takes anything else. CodeQL reports the
+  #   override against ``_ChangedSeam``, a test double that exists to
+  #   assert exactly that decline (``tests/unit/test_observability_otel.py``),
+  #   so the override it describes is never constructed.
+  #
+  # Widening the override to ``*args, **kwargs`` as the rule advises
+  # would let the subclass be built over a seam whose arguments cannot
+  # be supplied, then recover ``record`` by guessing which positional
+  # holds it -- the failure the shape check exists to prevent.
+  #
+  # Pyright's ``reportIncompatibleMethodOverride`` (error under this
+  # repo's ``typeCheckingMode = "strict"``) catches the genuine
+  # Liskov violations, verified against a probe override with a
+  # mismatched parameter count. Its coverage is narrower than
+  # CodeQL's: ``[tool.pyright] include`` is ``src`` / ``tests`` /
+  # ``examples``, so the two modules under ``scripts/`` lose the
+  # check entirely rather than trading one checker for another.
+  # They define no class hierarchies today; widen ``include``
+  # before that changes.
+  - exclude:
+      id: py/inheritance/signature-mismatch
