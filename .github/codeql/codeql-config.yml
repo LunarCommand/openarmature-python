@@ -111,7 +111,11 @@ query-filters:
   # Pyright's ``reportIncompatibleMethodOverride`` (error under this
   # repo's ``typeCheckingMode = "strict"``) catches the genuine
   # Liskov violations, verified against a probe override with a
-  # mismatched parameter count, so dropping the CodeQL rule doesn't
-  # lose signal.
+  # mismatched parameter count. Its coverage is narrower than
+  # CodeQL's: ``[tool.pyright] include`` is ``src`` / ``tests`` /
+  # ``examples``, so the two modules under ``scripts/`` lose the
+  # check entirely rather than trading one checker for another.
+  # They define no class hierarchies today; widen ``include``
+  # before that changes.
   - exclude:
       id: py/inheritance/signature-mismatch

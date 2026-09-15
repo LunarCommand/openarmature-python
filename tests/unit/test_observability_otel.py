@@ -2438,7 +2438,7 @@ def test_install_log_bridge_is_idempotent() -> None:
         logging.setLogRecordFactory(prior_factory)
 
 
-@pytest.mark.filterwarnings("ignore::openarmature.observability.otel.logs.LoggingSetupModified")
+@pytest.mark.filterwarnings("ignore::openarmature.observability.otel.LoggingSetupModified")
 def test_install_log_bridge_skips_when_sdk_handler_already_attached() -> None:
     """Downstream report (HyperDX integration): if an application's
     own logging setup attached
@@ -6616,7 +6616,7 @@ def test_event_name_bridge_degrades_when_the_upstream_seam_is_gone() -> None:
     _ChangedSeam().emit(record)
 
 
-@pytest.mark.filterwarnings("ignore::openarmature.observability.otel.logs.LoggingSetupModified")
+@pytest.mark.filterwarnings("ignore::openarmature.observability.otel.LoggingSetupModified")
 def test_log_bridge_lifts_the_event_name_on_an_already_attached_handler() -> None:
     # An application that wired its own OTel logs handler gets no second one,
     # and without the retrofit it also gets no lift: the field stays unset and
