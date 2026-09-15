@@ -10,6 +10,7 @@ enough to accept a dict that doesn't actually round-trip cleanly).
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 import pytest
@@ -833,3 +834,49 @@ def test_nested_directives_reject_sub_keys_the_harness_does_not_apply() -> None:
     # And an entry with no level is a fixture error, not a bare KeyError.
     with pytest.raises(AssertionError, match="declares no `level`"):
         match_expected_log_record({"event_name": "openarmature.x"}, [])
+
+
+async def test_capture_helper_stitches_the_otel_event_name_field() -> None:
+    # `match_expected_log_record` asserts the OTel `EventName` FIELD, which the
+    # capture helper stitches onto each stdlib record as it exits. No fixture at
+    # the current pin declares `event_name`, so nothing else reaches this path
+    # and the whole bridge-install-and-pair mechanism could break unnoticed.
+    from openarmature.observability.diagnostics import (
+        LANGFUSE_PAYLOAD_SUPPRESSED,
+        diagnostic,
+    )
+    from tests.conformance.test_observability_langfuse import (
+        _caplog_at_warning,
+        match_expected_log_record,
+    )
+
+    logger = logging.getLogger("openarmature.observability")
+    with _caplog_at_warning() as records:
+        logger.warning("suppressing payload", extra=diagnostic(LANGFUSE_PAYLOAD_SUPPRESSED))
+        logger.warning("an unrelated notice")
+
+    assert len(records) == 2
+    # Stitched from the exported record, not read back off the stdlib attribute.
+    matched = match_expected_log_record(
+        {"level": "WARNING", "event_name": LANGFUSE_PAYLOAD_SUPPRESSED}, records
+    )
+    assert len(matched) == 1
+    assert "suppressing" in matched[0].getMessage()
+    # The untagged record carries no name, so a fixture naming it finds nothing.
+    assert not match_expected_log_record(
+        {"level": "WARNING", "event_name": "openarmature.never.emitted"}, records
+    )
+
+    # Two records sharing a message must not both take the last one's name.
+    # Pairing through a message-keyed dict would do exactly that, and a fixture
+    # asserting the FIRST emission's name would match the second's.
+    from openarmature.observability.diagnostics import LANGFUSE_SHARED_PROVIDER_ACCEPTED
+
+    with _caplog_at_warning() as duplicates:
+        logger.warning("same text", extra=diagnostic(LANGFUSE_PAYLOAD_SUPPRESSED))
+        logger.warning("same text", extra=diagnostic(LANGFUSE_SHARED_PROVIDER_ACCEPTED))
+
+    assert [r.otel_event_name for r in duplicates] == [
+        LANGFUSE_PAYLOAD_SUPPRESSED,
+        LANGFUSE_SHARED_PROVIDER_ACCEPTED,
+    ], "records sharing a message must keep their own event names, in emission order"

@@ -4217,8 +4217,11 @@ async def _run_llm_payload_fixture(spec: Mapping[str, Any]) -> None:
 _OTEL_OBSERVER_DIRECTIVE_KEYS = (
     "disable_provider_payload",
     "disable_genai_semconv",
-    "disable_llm_spans",
 )
+# Read from the bare case-level key only. §5.5 does not define it on the
+# `otel_observer:` directive, so accepting it there would invent a spelling no
+# fixture can rely on.
+_BARE_ONLY_OBSERVER_KEYS = ("disable_llm_spans",)
 
 
 def _observer_kwargs_for_case(case: Mapping[str, Any]) -> dict[str, Any]:
@@ -4246,6 +4249,9 @@ def _observer_kwargs_for_case(case: Mapping[str, Any]) -> dict[str, Any]:
         if key in directive:
             kwargs[key] = bool(directive[key])
         elif key in case:
+            kwargs[key] = bool(case[key])
+    for key in _BARE_ONLY_OBSERVER_KEYS:
+        if key in case:
             kwargs[key] = bool(case[key])
     return kwargs
 
@@ -5166,10 +5172,14 @@ async def _run_structured_output_error_span_case(case: Mapping[str, Any]) -> Non
     # disable_provider_payload defaults to True per observability §5.5.4; case 1
     # sets it false to keep output.content, case 2 relies on the default to redact.
     # Payload off unless the case says otherwise, which is this runner's own
-    # default rather than the observer's.
+    # default rather than the observer's. Every other knob the case resolves is
+    # applied too: keeping only one would let a fixture set a knob that passes
+    # the directive allowlist and then silently does nothing.
+    structured_kwargs: dict[str, Any] = {"disable_provider_payload": True}
+    structured_kwargs.update(_observer_kwargs_for_case(case))
     observer = OTelObserver(
         span_processor=SimpleSpanProcessor(exporter),
-        disable_provider_payload=bool(_observer_kwargs_for_case(case).get("disable_provider_payload", True)),
+        **structured_kwargs,
     )
     graph.attach_observer(observer)
     state = _make_state_instance(case, state_cls)

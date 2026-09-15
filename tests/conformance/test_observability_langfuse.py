@@ -3136,7 +3136,10 @@ def _caplog_at_warning() -> Iterator[list[Any]]:
             records.append(record)
 
     logger = logging.getLogger("openarmature.observability")
-    handler = _Sink(level=logging.WARNING)
+    # INFO, not WARNING: the no-payload isolation diagnostic is emitted at INFO
+    # (nothing is leaking on that arm), and a WARNING-only window cannot see it,
+    # so a fixture asserting it would fail on the window rather than the code.
+    handler = _Sink(level=logging.INFO)
     previous = logger.level
     root = logging.getLogger()
     prior_root_handlers = list(root.handlers)
@@ -3145,20 +3148,29 @@ def _caplog_at_warning() -> Iterator[list[Any]]:
     exporter = InMemoryLogRecordExporter()
     provider = LoggerProvider()
     provider.add_log_record_processor(SimpleLogRecordProcessor(exporter))
-    logger.addHandler(handler)
-    logger.setLevel(logging.WARNING)
-    install_log_bridge(provider)
-    root.setLevel(logging.WARNING)
     try:
+        # Inside the try: `install_log_bridge` mutating root before a failure
+        # would otherwise leak the sink and the raised levels for the session.
+        logger.addHandler(handler)
+        logger.setLevel(logging.INFO)
+        install_log_bridge(provider)
+        root.setLevel(logging.INFO)
         yield records
     finally:
         logger.removeHandler(handler)
         provider.force_flush()
-        # Pair each stdlib record with the exported one by message, so the
-        # matcher asserts the field rather than the in-process attribute.
-        exported = {str(d.log_record.body): d.log_record for d in exporter.get_finished_logs()}
+        # Pair each captured record with its exported counterpart IN ORDER, so
+        # the matcher asserts the OTel field rather than the in-process
+        # attribute. Keying by message would give two records sharing a message
+        # the same name; the exporter preserves emission order, and the sink
+        # sees the same records in the same order.
+        exported = [d.log_record for d in exporter.get_finished_logs()]
+        by_message: dict[str, list[Any]] = {}
+        for emitted in exported:
+            by_message.setdefault(str(emitted.body), []).append(emitted)
         for record in records:
-            emitted = exported.get(record.getMessage())
+            queue = by_message.get(record.getMessage())
+            emitted = queue.pop(0) if queue else None
             record.otel_event_name = getattr(emitted, "event_name", None) if emitted else None
         root.handlers[:] = prior_root_handlers
         root.setLevel(prior_root_level)
@@ -3434,20 +3446,26 @@ async def _run_langfuse_157(case: Mapping[str, Any]) -> None:
             # carries the directive at v0.118.0.
             otel_kwargs: dict[str, Any] = _observer_kwargs_for_case(case)
             otel_observer = OTelObserver(span_processor=SimpleSpanProcessor(private_exporter), **otel_kwargs)
-            if "disable_provider_payload" in case:
-                # Asserted, not merely passed. Under `expected_construction_error`
-                # the raise happens before anything is emitted, so no conforming run
-                # can OBSERVE this flag's effect -- which is what a negative control
-                # is, and why dropping the wiring above left the suite green. Pinning
-                # the resulting config is the part that can be checked: it proves the
-                # directive was read and honoured rather than accepted and dropped,
-                # which is what `_ISOLATION_CASE_DIRECTIVES` vouches for.
-                assert otel_observer.disable_provider_payload == bool(case["disable_provider_payload"]), (
-                    "the case-level disable_provider_payload did not reach the OTel "
+            # Asserted, not merely passed. Under `expected_construction_error` the
+            # raise happens before anything is emitted, so no conforming run can
+            # OBSERVE this flag's effect, which is what a negative control is.
+            # Pinning the resulting config is the part that can be checked: it
+            # proves the knob was read and honoured rather than accepted and
+            # dropped, which is what `_ISOLATION_CASE_DIRECTIVES` vouches for.
+            #
+            # Gated on the RESOLVED value, not on a case-level key: a fixture
+            # moving to the `otel_observer:` directive would otherwise stop
+            # running this assertion at the moment it started mattering.
+            if "disable_provider_payload" in otel_kwargs:
+                assert otel_observer.disable_provider_payload == otel_kwargs["disable_provider_payload"], (
+                    "the resolved disable_provider_payload did not reach the OTel "
                     "observer, so the case cannot show the two suppressions are independent"
                 )
             graph.attach_observer(otel_observer)
             expected_construction = cast("dict[str, Any] | None", case.get("expected_construction_error"))
+            construction_only = False
+            langfuse_observer: Any = None
+            isolated_exporter: Any = None
             with _caplog_at_warning() as records:
                 if expected_construction is not None:
                     # Setup-scope assertion: construction itself is the behaviour
@@ -3460,16 +3478,22 @@ async def _run_langfuse_157(case: Mapping[str, Any]) -> None:
                         f"construction error category: expected "
                         f"{expected_construction['category']!r}, got {category!r}"
                     )
-                    _assert_isolation_expectations(
-                        cast("dict[str, Any]", case.get("expected") or {}),
-                        _IsolationCapture(global_exporter, private_exporter, None),
-                        list(private_exporter.get_finished_spans()),
-                        log_records=records,
+                    construction_only = True
+                else:
+                    langfuse_observer, isolated_exporter = _build_isolation_observer(
+                        case, observer_kwargs, global_provider
                     )
-                    return
-                langfuse_observer, isolated_exporter = _build_isolation_observer(
-                    case, observer_kwargs, global_provider
+            # Outside the capture block on purpose: the OTel `EventName` field is
+            # stitched onto each record as the block exits, so asserting inside
+            # it would compare against a field that is not there yet.
+            if construction_only:
+                _assert_isolation_expectations(
+                    cast("dict[str, Any]", case.get("expected") or {}),
+                    _IsolationCapture(global_exporter, private_exporter, None),
+                    list(private_exporter.get_finished_spans()),
+                    log_records=records,
                 )
+                return
             graph.attach_observer(langfuse_observer)
 
             await graph.invoke(state_cls(**cast("dict[str, Any]", case.get("initial_state") or {})))

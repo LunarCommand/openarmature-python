@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import warnings
 from pathlib import Path
 
 import pytest
@@ -6694,3 +6695,109 @@ def test_log_bridge_lifts_the_event_name_on_an_already_attached_handler() -> Non
         root.setLevel(prior_level)
         logging.setLogRecordFactory(prior_factory)
         provider.shutdown()
+
+
+def test_log_bridge_leaves_a_foreign_providers_handler_alone() -> None:
+    # The retrofit is provider-scoped, like the dedup check that routes to it.
+    # A handler feeding a different LoggerProvider is a separate pipeline OA was
+    # not asked to touch, and leaving it alone is what makes "attach yours to a
+    # different provider" an actual remedy rather than advice that does nothing.
+    from opentelemetry.sdk._logs import LoggerProvider, LoggingHandler
+
+    root = logging.getLogger()
+    prior_handlers = list(root.handlers)
+    prior_level = root.level
+    prior_factory = logging.getLogRecordFactory()
+    oa_provider = LoggerProvider()
+    audit_provider = LoggerProvider()
+    try:
+        ours = LoggingHandler(logger_provider=oa_provider)
+        theirs = LoggingHandler(logger_provider=audit_provider)
+        root.addHandler(ours)
+        root.addHandler(theirs)
+
+        with warnings.catch_warnings(record=True):
+            warnings.simplefilter("always")
+            install_log_bridge(oa_provider)
+
+        assert type(ours).__name__ != "LoggingHandler", "the OA-provider handler was not lifted"
+        assert type(theirs) is LoggingHandler, "a handler on a different LoggerProvider must not be modified"
+    finally:
+        root.handlers[:] = prior_handlers
+        root.setLevel(prior_level)
+        logging.setLogRecordFactory(prior_factory)
+        oa_provider.shutdown()
+        audit_provider.shutdown()
+
+
+def test_the_re_class_announcement_survives_a_raised_handler_level() -> None:
+    # The log record travels through the very handler being modified, so a
+    # handler capped at ERROR (a normal way to limit OTLP volume) swallows it
+    # and the caller's object is mutated in silence. `warnings` does not depend
+    # on the logging configuration under change.
+    from opentelemetry.sdk._logs import LoggerProvider, LoggingHandler
+
+    root = logging.getLogger()
+    prior_handlers = list(root.handlers)
+    prior_level = root.level
+    prior_factory = logging.getLogRecordFactory()
+    provider = LoggerProvider()
+    try:
+        theirs = LoggingHandler(logger_provider=provider)
+        theirs.setLevel(logging.ERROR)
+        root.addHandler(theirs)
+        root.setLevel(logging.WARNING)
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            install_log_bridge(provider)
+            announced = [str(w.message) for w in caught]
+
+        assert type(theirs).__name__ != "LoggingHandler", "the handler was not re-classed"
+        assert any("re-classed" in m for m in announced), (
+            f"the mutation must be announced on a channel the handler cannot swallow; got {announced}"
+        )
+    finally:
+        root.handlers[:] = prior_handlers
+        root.setLevel(prior_level)
+        logging.setLogRecordFactory(prior_factory)
+        provider.shutdown()
+
+
+def test_the_retrofit_decline_is_announced_and_changes_nothing() -> None:
+    # The decline arm: a handler whose translation seam is gone or resignatured
+    # is left alone and the names ride as attributes only. Without an assertion
+    # the whole arm could be deleted and nothing would notice, while the docs
+    # and CHANGELOG both promise it warns.
+    from openarmature.observability.otel import logs as logs_mod
+
+    class _ResignaturedHandler(logging.Handler):
+        # Same name, one more required parameter, which the hard-coded
+        # `super()._translate(record)` cannot supply.
+        def _translate(self, record: logging.LogRecord, context: object) -> Any:
+            return None
+
+        def emit(self, record: logging.LogRecord) -> None:
+            return None
+
+    root = logging.getLogger()
+    prior_handlers = list(root.handlers)
+    original_classes = logs_mod._otel_logs_handler_classes
+    try:
+        theirs = _ResignaturedHandler()
+        theirs._logger_provider = "sentinel-provider"  # type: ignore[attr-defined]
+        root.addHandler(theirs)
+        logs_mod._otel_logs_handler_classes = lambda: (_ResignaturedHandler,)  # type: ignore[assignment]
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            logs_mod._retrofit_event_name_lift(root, "sentinel-provider")  # type: ignore[arg-type]
+            announced = [str(w.message) for w in caught]
+
+        assert type(theirs) is _ResignaturedHandler, "a handler it cannot lift must be left alone"
+        assert any("cannot carry" in m for m in announced), (
+            f"declining to lift must be announced, not silent; got {announced}"
+        )
+    finally:
+        logs_mod._otel_logs_handler_classes = original_classes  # type: ignore[assignment]
+        root.handlers[:] = prior_handlers

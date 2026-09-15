@@ -2833,18 +2833,19 @@ async def test_the_tool_observation_carries_caller_metadata_like_the_others() ->
 
 
 def test_the_mandated_isolation_diagnostics_carry_their_event_names() -> None:
-    # §7 (0121): the two §6 isolation decisions are MUST-carry diagnostics, so
-    # each record carries its stable event name. A fixture asserting on level
-    # alone cannot tell them apart from any other warning on the same logger,
-    # which is what the names exist to fix.
+    # §7 (0121): each of the three §6 isolation decisions carries its stable
+    # event name. A fixture asserting on level alone cannot tell them apart from
+    # any other record on the same logger, which is what the names exist to fix.
     import logging as _logging
 
     from openarmature.observability.diagnostics import (
         LANGFUSE_PAYLOAD_SUPPRESSED,
         LANGFUSE_SHARED_PROVIDER_ACCEPTED,
+        LANGFUSE_SHARED_PROVIDER_NO_PAYLOAD,
         event_name_of,
     )
     from openarmature.observability.langfuse.client import (
+        ISOLATION_LEAKED,
         ISOLATION_SHARED_ACCEPTED,
         ISOLATION_UNDETECTABLE,
     )
@@ -2867,6 +2868,11 @@ def test_the_mandated_isolation_diagnostics_carry_their_event_names() -> None:
             client = InMemoryLangfuseClient()
             client._isolation_status = status  # type: ignore[attr-defined]
             LangfuseObserver(client=client, disable_provider_payload=False)
+        # The leaked arm needs payloads OFF to be reached: with a channel live
+        # the observer raises instead. It is emitted at INFO, not WARNING.
+        leaked_client = InMemoryLangfuseClient()
+        leaked_client._isolation_status = ISOLATION_LEAKED  # type: ignore[attr-defined]
+        LangfuseObserver(client=leaked_client, disable_provider_payload=True)
     finally:
         observer_logger.removeHandler(sink)
         observer_logger.setLevel(prior)
@@ -2877,6 +2883,9 @@ def test_the_mandated_isolation_diagnostics_carry_their_event_names() -> None:
     )
     assert LANGFUSE_SHARED_PROVIDER_ACCEPTED in names, (
         f"the shared-provider decision must carry its event name; got {names}"
+    )
+    assert LANGFUSE_SHARED_PROVIDER_NO_PAYLOAD in names, (
+        f"the no-payload decision must carry its event name; got {names}"
     )
     # Each name lands on the record that means it, not on whichever fired last.
     for record in captured:

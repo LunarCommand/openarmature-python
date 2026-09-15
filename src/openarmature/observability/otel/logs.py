@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import inspect
 import logging
+import warnings
 from typing import TYPE_CHECKING, Any, cast
 
 from ..diagnostics import EVENT_NAME_ATTR as _EVENT_NAME_ATTR
@@ -131,7 +132,7 @@ def install_log_bridge(
         # it still needs the event-name lift: without this the field is never
         # populated in the setup this module documents as typical, and the name
         # survives only as an attribute.
-        _retrofit_event_name_lift(root)
+        _retrofit_event_name_lift(root, provider)
     else:
         handler_cls = _event_name_handler_class(_InstrLoggingHandler)
         handler = handler_cls(level=level, logger_provider=provider)
@@ -185,7 +186,18 @@ def _otel_logs_handler_classes() -> tuple[type[Any], ...]:
     return (_SDKLoggingHandler, _InstrLoggingHandler)
 
 
-def _retrofit_event_name_lift(root: logging.Logger) -> None:
+def _announce(message: str) -> None:
+    """Tell the caller about a change openarmature made to their logging setup."""
+    # Both channels on purpose. The log record is the one a trace pipeline sees,
+    # but it travels through the very handler being modified: a handler capped
+    # at ERROR, which is a normal way to limit OTLP volume, swallows it and the
+    # mutation happens in silence. `warnings` does not depend on the logging
+    # configuration under change, and surfaces under pytest and `-W error`.
+    warnings.warn(message, stacklevel=3)
+    _logger.warning("%s", message)
+
+
+def _retrofit_event_name_lift(root: logging.Logger, provider: LoggerProvider) -> None:
     """Give an already-attached OTel logs handler the event-name lift."""
     # Re-classing rather than replacing: the handler is the application's, with
     # its own level, filters and formatter, and swapping it would discard them.
@@ -197,28 +209,36 @@ def _retrofit_event_name_lift(root: logging.Logger) -> None:
     for handler in list(root.handlers):
         if not isinstance(handler, _otel_logs_handler_classes()):
             continue
+        # Provider-scoped, like the dedup check that routed us here. A handler
+        # feeding a different LoggerProvider is a separate pipeline openarmature
+        # was not asked to touch, and leaving it alone is what makes "attach
+        # yours to a different provider" an actual remedy.
+        if getattr(handler, "_logger_provider", None) is not provider:
+            continue
         original = type(handler)
+        if getattr(original, _LIFT_MARKER, False):
+            # Already lifted by an earlier call. Nothing to do and nothing to
+            # say: the caller was told the first time.
+            continue
         lifted = _event_name_handler_class(original)
         if lifted is original:
             # The seam is gone or has changed shape. Nothing is modified, and
             # the names ride as attributes only.
-            _logger.warning(
-                "%s on the root logger cannot carry openarmature's diagnostic event names: "
-                "its record-translation hook is missing or has changed shape. The names are "
-                "still set as log-record attributes, but not on the OTel LogRecord's "
-                "EventName field",
-                original.__name__,
+            _announce(
+                f"{original.__name__} on the root logger cannot carry openarmature's "
+                f"diagnostic event names: its record-translation hook is missing or has "
+                f"changed shape. The names are still set as log-record attributes, but not "
+                f"on the OTel LogRecord's EventName field"
             )
             continue
         handler.__class__ = lifted
-        _logger.warning(
-            "openarmature re-classed the %s you attached to the root logger, so its records "
-            "carry openarmature's diagnostic event names on the OTel LogRecord's EventName "
-            "field. Your handler's level, filters and formatter are unchanged; only its class "
-            "is, and `type()` on it now reports %s. To avoid this, call install_log_bridge "
-            "before attaching your own handler, or attach yours to a different LoggerProvider",
-            original.__name__,
-            lifted.__name__,
+        _announce(
+            f"openarmature re-classed the {original.__name__} you attached to the root "
+            f"logger, so its records carry openarmature's diagnostic event names on the OTel "
+            f"LogRecord's EventName field. Your handler's level, filters and formatter are "
+            f"unchanged; only its class is, and `type()` on it now reports "
+            f"{lifted.__name__}. To avoid this, call install_log_bridge before attaching "
+            f"your own handler, or attach yours to a different LoggerProvider"
         )
 
 

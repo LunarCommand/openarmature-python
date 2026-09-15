@@ -634,12 +634,16 @@ correlation:
   severity shared with every other warning. Names never change once
   shipped; the human-readable message is free to.
 
-| Event name | Emitted when |
-| --- | --- |
-| `openarmature.langfuse.payload_suppressed` | OA cannot establish the Langfuse client's provider binding and suppresses every harvested-payload channel |
-| `openarmature.langfuse.shared_provider_accepted` | You accepted a shared provider and OA proceeded onto it |
-| `openarmature.langfuse.shared_provider_no_payload` | OA's client is on a provider it did not isolate, but no payload channel is live, so nothing is exported to it |
-| `openarmature.token_budget.exceeded` | An active prompt's token budget was exceeded |
+| Event name | Severity | Emitted when |
+| --- | --- | --- |
+| `openarmature.langfuse.payload_suppressed` | `WARNING` | OA cannot establish the Langfuse client's provider binding and suppresses every harvested-payload channel |
+| `openarmature.langfuse.shared_provider_accepted` | `WARNING` | You accepted a shared provider and OA proceeded onto it |
+| `openarmature.langfuse.shared_provider_no_payload` | `INFO` | OA's client is on a provider it did not isolate, but no payload channel is live, so nothing is exported to it |
+| `openarmature.token_budget.exceeded` | `WARNING` | An active prompt's token budget was exceeded |
+
+  The no-payload one is `INFO` because nothing is leaking on that arm: it
+  tells you the binding is latent, not that anything went wrong. Filter at
+  `INFO` if you want to see it.
 
   The constants are importable from `openarmature.observability`
   (`LANGFUSE_PAYLOAD_SUPPRESSED` and siblings), so an alert rule can
