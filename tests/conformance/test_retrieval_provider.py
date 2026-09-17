@@ -430,6 +430,7 @@ def _assert_one_wire_request(
     expected_path: str,
     expected_headers: Mapping[str, str] | None = None,
     expected_base_url: str | None = None,
+    expected_url: str | None = None,
 ) -> None:
     """Assert a single captured request against one expected_wire_request body.
 
@@ -443,9 +444,19 @@ def _assert_one_wire_request(
     the base_url-override fixtures actually verify routing, since MockTransport
     intercepts every host and the path alone would pass a hardcoded-origin
     regression.
+
+    ``expected_url`` (``expected_wire_url``) is the fully-resolved route the
+    fixture itself declares. The path and origin checks above compare against
+    harness-side values -- ``_EMBED_PATHS[mapping]`` and the provider's own bound
+    ``base_url`` -- so neither reads what the fixture claims. Asserting the
+    resolved URL is what holds the mapping to the fixture's statement of it.
     """
     assert request.method == "POST", f"expected POST, got {request.method}"
     assert request.url.path == expected_path, f"wire path {request.url.path!r} != {expected_path!r}"
+    if expected_url is not None:
+        assert str(request.url) == expected_url, (
+            f"wire request went to {str(request.url)!r}, expected_wire_url declares {expected_url!r}"
+        )
     if expected_base_url is not None:
         want_origin = httpx.URL(expected_base_url)
         got_origin = (request.url.scheme, request.url.host, request.url.port)
@@ -491,6 +502,9 @@ def _assert_wire_requests(
     count = cast("int | None", case.get("expected_wire_request_count"))
     absent_keys = cast("list[str]", case.get("expected_wire_request_absent_keys") or [])
     headers = cast("Mapping[str, str] | None", case.get("expected_wire_headers"))
+    # Every request a case captures goes to the same route, so one declared URL
+    # applies to each of them rather than pairing with a body by position.
+    wire_url = cast("str | None", case.get("expected_wire_url"))
     if isinstance(expected, list):
         bodies = cast("list[Mapping[str, Any]]", expected)
         if count is not None:
@@ -499,13 +513,17 @@ def _assert_wire_requests(
             f"captured {len(captured)} requests, expected_wire_request lists {len(bodies)}"
         )
         for request, want in zip(captured, bodies, strict=True):
-            _assert_one_wire_request(request, want, absent_keys, expected_path, headers, expected_base_url)
+            _assert_one_wire_request(
+                request, want, absent_keys, expected_path, headers, expected_base_url, wire_url
+            )
     else:
         want = cast("Mapping[str, Any]", expected)
         if count is not None:
             assert len(captured) == count, f"expected {count} requests, captured {len(captured)}"
         assert len(captured) == 1, f"single-body form expects exactly one request, captured {len(captured)}"
-        _assert_one_wire_request(captured[0], want, absent_keys, expected_path, headers, expected_base_url)
+        _assert_one_wire_request(
+            captured[0], want, absent_keys, expected_path, headers, expected_base_url, wire_url
+        )
 
 
 # -- typed-observer assertion (contains_event on the dispatched typed events) --
