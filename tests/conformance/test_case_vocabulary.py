@@ -1,282 +1,483 @@
-# Spec: conformance-adapter §8.2 + §5 *Definition homes* (proposal 0120, spec
-# v0.113.0). §9 requires the adapter to raise rather than skip, and to surface
-# the offending directive and its location; the token itself is not observable
-# surface, per the ruling in coord thread
+# Spec: conformance-adapter section 8.2 + section 5 *Definition homes* (proposal
+# 0120, spec v0.113.0). Section 9 requires the adapter to raise rather than skip,
+# and to surface the offending directive and its location; the token itself is
+# not observable surface, per the ruling in coord thread
 # `proposal-0120-0123-adapter-obligations`.
 
-"""Every case-level directive is recognized, and every recognized one is read.
+"""Every directive is recognized, and every recognized one is actually read.
 
 `extra="forbid"` cannot carry this. It applies at the fixture's document root,
 while `CaseSpec` and `SubgraphDefinition` both allow extras, and the runners
 read raw YAML rather than the typed model at all -- so the model's config does
-not reach the behaviour §8.2 is about. These are repository checks over the
-corpus instead, which no runner can forget to call.
+not reach the behaviour section 8.2 is about. These are repository checks over
+the corpus instead, which no runner can forget to call.
+
+Three things each check has to get right, and only the first is about the
+assertion:
+
+* the ASSERTION fires when its claim is false;
+* the INPUT is complete, since a walk that silently skips a container reports a
+  clean result from partial data;
+* the EVIDENCE means what it claims -- "this key is read" must not be satisfied
+  by a literal in a comment, by a different capability's runner, or by a key
+  that merely appears in a file.
 """
 
 from __future__ import annotations
 
 import ast
+import importlib
 import inspect
+from collections import defaultdict
 from pathlib import Path
 from typing import Any, cast
 
 import pytest
 import yaml
 
+from .harness import fixtures as fixture_models
 from .harness.fixtures import CaseSpec, SubgraphDefinition
 from .harness.vocabulary import (
-    RECOGNIZED_CASE_KEYS,
+    READ_VIA,
+    RECOGNIZED_DIRECTIVES,
     UNAPPLIED_PENDING_CASE_DEFERRAL,
     UNAPPLIED_PENDING_DEFERRAL,
     UNIMPLEMENTED_CAPABILITIES,
 )
 
 _SPEC_ROOT = Path(__file__).resolve().parents[2] / "openarmature-spec" / "spec"
+_RUNNER_DIR = Path(__file__).resolve().parent
+_REPO_ROOT = Path(__file__).resolve().parents[2]
 
-# Directories with a runner. Wider than `loader.CAPABILITIES`, which enumerates
-# only what the shared `discover_fixtures` yields: retrieval-provider has its own
-# `CONFORMANCE_DIR` and glob, so its 53 fixtures execute without appearing there.
-_RUN_DIRS = (
-    "graph-engine",
-    "llm-provider",
-    "pipeline-utilities",
-    "observability",
-    "prompt-management",
-    "retrieval-provider",
+# Capability directories with a runner, and which modules execute each.
+#
+# Wider than `loader.CAPABILITIES`, which enumerates only what the shared
+# `discover_fixtures` yields: several capabilities are driven by a module with
+# its own `CONFORMANCE_DIR` and glob, and llm-provider fixtures 056-058 are
+# driven from `tests/unit`. Ownership is what scopes the read check -- a
+# directive read by one capability's runner is not read for a fixture whose own
+# runner ignores it.
+_RUNNER_OWNERS: dict[str, tuple[str, ...]] = {
+    "graph-engine": ("test_conformance.py",),
+    "llm-provider": ("test_llm_provider.py", "../unit/test_observability_otel.py"),
+    "pipeline-utilities": (
+        "test_pipeline_utilities.py",
+        "test_checkpoint.py",
+        "test_state_migration.py",
+    ),
+    "observability": (
+        "test_observability.py",
+        "test_observability_langfuse.py",
+        "test_typed_event_harness.py",
+        "../unit/test_observability_otel.py",
+    ),
+    "prompt-management": ("test_prompt_management.py",),
+    "retrieval-provider": ("test_retrieval_provider.py",),
+}
+_RUN_DIRS = tuple(_RUNNER_OWNERS)
+
+# Modules whose own `_fixture_paths()` is the authority on what they collect.
+# Paired with the capability each drives, so "runs" is computed from the
+# collection logic rather than pattern-matched on a registry's variable name --
+# a fixture can be held back by a deferral dict, by a different module's
+# registry, or by a numeric cutoff, and only the module itself knows which.
+# `(module, attributes that hold a fixture back, optional positive gate)`.
+#
+# Named explicitly, and every name is resolved with `getattr` so a rename fails
+# loudly rather than shrinking the held-back set in silence. A prefix guess is
+# what the previous version used, and it missed `_CONVENTION_ONLY_FIXTURES`
+# outright; `test_observability` alone skips through four registries and a
+# membership gate.
+_COLLECTORS: tuple[tuple[str, tuple[str, ...], str | None], ...] = (
+    ("test_conformance", ("_DEFERRED_FIXTURES",), None),
+    ("test_llm_provider", ("_DEFERRED_FIXTURES",), None),
+    ("test_pipeline_utilities", ("_DEFERRED_FIXTURES",), None),
+    ("test_prompt_management", ("_DEFERRED_FIXTURES",), None),
+    (
+        "test_observability",
+        (
+            "_DEFERRED_FIXTURES",
+            "_UNIT_TESTED_FIXTURES",
+            "_CONVENTION_ONLY_FIXTURES",
+            "_LANGFUSE_HARNESS_FIXTURES",
+        ),
+        "_SUPPORTED_FIXTURES",
+    ),
+    ("test_observability_langfuse", (), None),
+    ("test_retrieval_provider", ("_DEFERRED_FIXTURES",), None),
+    ("test_checkpoint", ("_DEFERRED_FIXTURES",), None),
+    ("test_state_migration", (), None),
 )
 
-_RUNNER_DIR = Path(__file__).resolve().parent
-
-
-def _case_keys() -> list[tuple[str, str, str]]:
-    """Every `(fixture, case, key)` a running fixture declares at case level."""
-    out: list[tuple[str, str, str]] = []
-    for name in _RUN_DIRS:
-        for path in sorted((_SPEC_ROOT / name / "conformance").glob("[0-9][0-9][0-9]-*.yaml")):
-            doc: Any = yaml.safe_load(path.read_text())
-            if not isinstance(doc, dict):
-                continue
-            cases: Any = cast("dict[str, Any]", doc).get("cases")
-            if not isinstance(cases, list):
-                continue
-            for raw in cast("list[Any]", cases):
-                if not isinstance(raw, dict):
-                    continue
-                case = cast("dict[str, Any]", raw)
-                case_name = str(case.get("name", "<unnamed>"))
-                for key in case:
-                    out.append((path.stem, case_name, key))
-    return out
-
-
+# This module and the registry it reads: scanning them would let a key count as
+# read because it is registered.
 _SELF = frozenset({"test_case_vocabulary.py", "vocabulary.py"})
+
+_BODY_KEYS = ("subgraph", "subgraph_with_idx", "subgraphs", "inner_subgraphs")
 
 
 def _runner_sources() -> dict[str, str]:
-    # Keyed by relative path rather than basename: `__init__.py` exists in both
-    # directories, so a dict keyed by name drops one of them. A check built to
-    # catch inputs vanishing silently must not do it to its own inputs.
-    files = [*sorted(_RUNNER_DIR.glob("*.py")), *sorted((_RUNNER_DIR / "harness").glob("*.py"))]
-    kept = [p for p in files if p.name not in _SELF]
-    sources = {str(p.relative_to(_RUNNER_DIR)): p.read_text() for p in kept}
+    """Every runner module's source, keyed by path relative to the repo root."""
+    # `rglob`, not `glob`: `harness/runtime/` exists and its README designates it
+    # the future home of the fixture-executing code, so a directive reader landing
+    # there would be invisible to the read check and to the collection scan. The
+    # unit-side llm-provider runner is included for the same reason -- it drives
+    # fixtures 056-058, which `test_llm_provider` defers to it by name.
+    paths = sorted(_RUNNER_DIR.rglob("*.py")) + [_REPO_ROOT / "tests/unit/test_observability_otel.py"]
+    kept = [p for p in paths if p.name not in _SELF]
+    sources = {str(p.relative_to(_REPO_ROOT)): p.read_text() for p in kept}
     assert len(sources) == len(kept), (
         f"walked {len(kept)} runner files and kept {len(sources)} sources; a path collided"
     )
     return sources
 
 
-def test_every_case_level_key_is_recognized() -> None:
-    # §8.2: a directive outside the recognized vocabulary must be rejected. The
-    # failure names the key and the fixture and case carrying it, which is what
-    # §9 asks of the raise.
-    modelled = set(CaseSpec.model_fields)
-    unrecognized = [
-        (fixture, case, key)
-        for fixture, case, key in _case_keys()
-        if key not in modelled and key not in RECOGNIZED_CASE_KEYS
-    ]
-    assert not unrecognized, (
-        "case-level directive(s) outside the recognized vocabulary:\n"
-        + "\n".join(f"  {f}::{c} carries {k!r}" for f, c, k in sorted(unrecognized))
-        + "\nEither wire the directive and add it to RECOGNIZED_CASE_KEYS, or defer the fixture."
-    )
+def _containers(doc: dict[str, Any]) -> list[dict[str, Any]]:
+    """The document root and each of its cases, as directive-bearing containers.
+
+    The root counts. 140 of the 448 fixtures in `_RUN_DIRS` carry their
+    directives there with no `cases:` list at all, and the document-root models
+    that would forbid an unknown key are applied only by `test_fixture_parsing`,
+    which skips retrieval-provider and its own deferrals.
+    """
+    out = [doc]
+    cases = doc.get("cases")
+    if isinstance(cases, list):
+        out.extend(cast("dict[str, Any]", c) for c in cast("list[Any]", cases) if isinstance(c, dict))
+    return out
 
 
-def test_every_recognized_key_is_read_by_some_runner() -> None:
-    # The state a corpus-derived allowlist cannot see: recognized, declared by a
-    # running fixture, and read by nothing, so the case passes with the knob at
-    # its default while counting as coverage.
-    sources = _runner_sources()
-    exempt = set(UNAPPLIED_PENDING_DEFERRAL) | set(UNAPPLIED_PENDING_CASE_DEFERRAL)
-    unread = sorted(
-        key
-        for key in RECOGNIZED_CASE_KEYS
-        if key not in exempt and not any(f'"{key}"' in src or f"'{key}'" in src for src in sources.values())
-    )
-    assert not unread, (
-        f"recognized case-level directive(s) no runner reads: {unread}. "
-        "A fixture declaring one passes with the knob at its default. Wire it, or record "
-        "it in UNAPPLIED_PENDING_DEFERRAL against the deferral that justifies it."
-    )
-
-
-# Module-level registries that hold back a fixture. Matched by name, and the
-# prefixes are listed rather than guessed at: a runner that grows a registry
-# under some other name makes this check report its fixtures as running, which
-# fails an exemption loudly instead of quietly accepting one.
-_DEFERRAL_REGISTRY_PREFIXES = ("_DEFERRED", "_CONVENTION_ONLY")
-
-
-def _deferred_fixture_ids() -> set[str]:
-    """Every fixture id some runner module holds back, read off its registries."""
-    # Read from the modules rather than re-listed here, so an un-deferral cannot
-    # leave a stale exemption standing.
-    ids: set[str] = set()
-    for src in _runner_sources().values():
-        for node in ast.walk(ast.parse(src)):
-            if not isinstance(node, ast.Assign | ast.AnnAssign):
-                continue
-            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
-            if not any(
-                isinstance(t, ast.Name) and t.id.startswith(_DEFERRAL_REGISTRY_PREFIXES) for t in targets
-            ):
-                continue
-            for sub in ast.walk(node):
-                if isinstance(sub, ast.Constant) and isinstance(sub.value, str):
-                    ids.add(sub.value)
-    return ids
-
-
-def test_deferral_exemptions_name_fixtures_that_are_actually_deferred() -> None:
-    # What ties an exemption to its justification. Without this the dict is a
-    # list of keys someone once decided to ignore, and un-deferring a fixture
-    # silently turns its directive dark again.
-    deferred = _deferred_fixture_ids()
-    stale = [
-        (key, fixture)
-        for key, fixtures in UNAPPLIED_PENDING_DEFERRAL.items()
-        for fixture in fixtures
-        if fixture not in deferred
-    ]
-    assert not stale, (
-        "UNAPPLIED_PENDING_DEFERRAL names fixture(s) that are no longer deferred:\n"
-        + "\n".join(f"  {k!r} cites {f}" for k, f in sorted(stale))
-        + "\nThose fixtures run now, so the directive must be wired or the entry removed."
-    )
-
-
-def _case_deferrals_in(function_name: str) -> set[str]:
-    """The case names a driver skips, read off its `_deferred_cases` literal."""
-    from . import test_observability  # noqa: PLC0415
-
-    tree = ast.parse(inspect.getsource(getattr(test_observability, function_name)))
-    names: set[str] = set()
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Assign | ast.AnnAssign):
-            continue
-        targets = node.targets if isinstance(node, ast.Assign) else [node.target]
-        if not any(isinstance(t, ast.Name) and t.id == "_deferred_cases" for t in targets):
-            continue
-        for sub in ast.walk(node):
-            if isinstance(sub, ast.Constant) and isinstance(sub.value, str):
-                names.add(sub.value)
-    return names
-
-
-@pytest.mark.parametrize(
-    ("key", "fixture", "case"),
-    [
-        (key, fixture, case)
-        for key, pairs in UNAPPLIED_PENDING_CASE_DEFERRAL.items()
-        for fixture, case in pairs
-    ],
-)
-def test_case_deferral_exemptions_name_cases_that_are_actually_skipped(
-    key: str, fixture: str, case: str
-) -> None:
-    # The per-case counterpart. `session_id` is carried by one case of a fixture
-    # that otherwise runs, so a fixture-level deferral check would not see it.
-    driver = "_run_fixture_" + fixture.split("-")[0]
-    skipped = _case_deferrals_in(driver)
-    assert case in skipped, (
-        f"{key!r} is exempted because {fixture}::{case} does not run, but {driver} "
-        f"skips only {sorted(skipped)}. Wire the directive or drop the exemption."
-    )
-
-
-def test_every_conformance_directory_is_run_or_declared_unimplemented() -> None:
-    # The coarse counterpart to the directive checks above: a whole capability
-    # can go unread the same way a directive can. This is what makes a new
-    # capability directory arriving at a pin bump an error rather than a silence.
-    with_fixtures = {
-        d.name
-        for d in sorted(_SPEC_ROOT.iterdir())
-        if d.is_dir() and any((d / "conformance").glob("[0-9][0-9][0-9]-*.yaml"))
-    }
-    accounted = set(_RUN_DIRS) | set(UNIMPLEMENTED_CAPABILITIES)
-    unaccounted = sorted(with_fixtures - accounted)
-    assert not unaccounted, (
-        f"capability directory/ies ship fixtures but are neither run nor declared "
-        f"unimplemented: {unaccounted}. Wire a runner, or record why not in "
-        "UNIMPLEMENTED_CAPABILITIES."
-    )
-    # The other direction: a declaration that has outlived its capability. Once a
-    # runner lands, the entry has to go or it understates what we claim.
-    stale = sorted(set(UNIMPLEMENTED_CAPABILITIES) & set(_RUN_DIRS))
-    assert not stale, (
-        f"UNIMPLEMENTED_CAPABILITIES still names {stale}, which now has a runner. Drop the entry."
-    )
-
-
-def _subgraph_definitions() -> list[tuple[str, str]]:
-    """Every `(fixture, key)` a running fixture declares inside a subgraph body."""
-    out: list[tuple[str, str]] = []
+def _fixture_docs() -> list[tuple[str, str, dict[str, Any]]]:
+    """`(capability, fixture, document)` for every fixture in a run directory."""
+    out: list[tuple[str, str, dict[str, Any]]] = []
     for name in _RUN_DIRS:
         for path in sorted((_SPEC_ROOT / name / "conformance").glob("[0-9][0-9][0-9]-*.yaml")):
             doc: Any = yaml.safe_load(path.read_text())
-            if not isinstance(doc, dict):
-                continue
-            root = cast("dict[str, Any]", doc)
-            cases: Any = root.get("cases")
-            containers = [root] + [
-                cast("dict[str, Any]", c) for c in cast("list[Any]", cases or []) if isinstance(c, dict)
-            ]
-            for container in containers:
-                bodies: list[dict[str, Any]] = []
-                for singular in ("subgraph", "subgraph_with_idx"):
-                    body: Any = container.get(singular)
-                    if isinstance(body, dict):
-                        bodies.append(cast("dict[str, Any]", body))
-                plural: Any = container.get("subgraphs")
-                if isinstance(plural, dict):
-                    bodies.extend(
-                        cast("dict[str, Any]", b)
-                        for b in cast("dict[str, Any]", plural).values()
-                        if isinstance(b, dict)
-                    )
-                for body in bodies:
-                    out.extend((path.stem, key) for key in body)
+            if isinstance(doc, dict):
+                out.append((name, path.stem, cast("dict[str, Any]", doc)))
+    return out
+
+
+def _root_model_fields() -> set[str]:
+    """Every field the document-root fixture models declare, as one set.
+
+    A root container is governed by whichever root variant the discriminator
+    picks, so the union is the right comparison: narrowing it per variant would
+    re-implement the discriminator here and get it wrong.
+    """
+    from pydantic import BaseModel  # noqa: PLC0415
+
+    models = [
+        cast("type[BaseModel]", getattr(fixture_models, name))
+        for name in dir(fixture_models)
+        if isinstance(getattr(fixture_models, name), type)
+        and issubclass(cast("type", getattr(fixture_models, name)), BaseModel)
+        and name.endswith("Fixture")
+    ]
+    assert len(models) >= 4, f"found only {len(models)} root fixture models; the scan is wrong"
+    fields: set[str] = set()
+    for model in models:
+        fields |= set(model.model_fields)
+    return fields
+
+
+def _declared_keys() -> list[tuple[str, str, str, str]]:
+    """`(capability, fixture, where, key)` for every directive the corpus declares."""
+    out: list[tuple[str, str, str, str]] = []
+    for capability, fixture, doc in _fixture_docs():
+        for container in _containers(doc):
+            where = "<root>" if container is doc else str(container.get("name", "<unnamed>"))
+            out.extend((capability, fixture, where, key) for key in container)
+    return out
+
+
+def _read_positions() -> dict[str, set[str]]:
+    """Where each directive name is used to READ a mapping, by source path.
+
+    A bare substring match cannot tell a read from a mention. `manager` occurs
+    twice in runner source and neither is a read of the case-level block -- both
+    concern a call's `target:` value -- so the scan it satisfies proves nothing.
+    Only subscript, ``.get`` / ``.pop``, and membership count here; anything
+    reached another way is declared in `READ_VIA` and verified there.
+    """
+    found: dict[str, set[str]] = defaultdict(set)
+    for path, src in _runner_sources().items():
+        try:
+            tree = ast.parse(src)
+        except SyntaxError:  # pragma: no cover - a runner that does not parse fails elsewhere
+            continue
+        for node in ast.walk(tree):
+            hits: list[Any] = []
+            if isinstance(node, ast.Subscript) and isinstance(node.slice, ast.Constant):
+                hits.append(node.slice.value)
+            elif (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr in {"get", "pop"}
+                and node.args
+                and isinstance(node.args[0], ast.Constant)
+            ):
+                hits.append(node.args[0].value)
+            elif isinstance(node, ast.Compare) and isinstance(node.left, ast.Constant):
+                hits.append(node.left.value)
+            for hit in hits:
+                if isinstance(hit, str):
+                    found[hit].add(path)
+    return found
+
+
+def _executed_fixture_ids() -> set[str]:
+    """Every fixture id some runner actually collects and does not defer.
+
+    Computed from each module's own `_fixture_paths()` rather than pattern-
+    matched on registry names. "In a `_DEFERRED` dict" does not mean "does not
+    run": four observability fixtures are deferred with reasons that name the
+    Langfuse runner, which executes them; three llm-provider fixtures are
+    deferred to `tests/unit`; `test_fixture_parsing`'s registry defers PARSING
+    only; and `test_pipeline_utilities` holds fixtures back with a numeric
+    cutoff and no registry at all.
+    """
+    runs: set[str] = set()
+    for name, held_back_attrs, gate_attr in _COLLECTORS:
+        module = importlib.import_module(f".{name}", __package__)
+        collected = {p.stem for p in cast("list[Path]", module._fixture_paths())}  # noqa: SLF001
+        held_back: set[str] = set()
+        for attr in held_back_attrs:
+            # No default: a renamed registry raises AttributeError here rather
+            # than quietly shrinking the held-back set. Empty is legitimate --
+            # retrieval-provider defers nothing at the moment.
+            held_back |= set(getattr(module, attr))
+        if gate_attr is not None:
+            gate = getattr(module, gate_attr)
+            assert gate, f"{name}.{gate_attr} is empty; the positive gate is not what it was"
+            collected &= set(gate)
+        runs |= collected - held_back
+    assert len(runs) > 200, f"computed only {len(runs)} executed fixtures; the collection scan is broken"
+    return runs
+
+
+def test_every_declared_key_is_recognized() -> None:
+    # Section 8.2: a directive outside the recognized vocabulary must be
+    # rejected. The failure names the key and the fixture and case carrying it,
+    # which is what section 9 asks of the raise.
+    case_fields = set(CaseSpec.model_fields)
+    root_fields = _root_model_fields()
+    declared = _declared_keys()
+    assert len({f for _, f, _, _ in declared}) > 400, (
+        f"walked only {len({f for _, f, _, _ in declared})} fixtures; the corpus walk is incomplete"
+    )
+    unrecognized = [
+        (cap, fixture, where, key)
+        for cap, fixture, where, key in declared
+        if key not in RECOGNIZED_DIRECTIVES and key not in (root_fields if where == "<root>" else case_fields)
+    ]
+    assert not unrecognized, (
+        "directive(s) outside the recognized vocabulary:\n"
+        + "\n".join(f"  {c}/{f} at {w} carries {k!r}" for c, f, w, k in sorted(unrecognized))
+        + "\nEither wire the directive and add it to RECOGNIZED_DIRECTIVES, or defer the fixture."
+    )
+
+
+def test_read_via_declarations_resolve() -> None:
+    # READ_VIA is the escape hatch for a directive reached by attribute access or
+    # through a key list, so it has to be verified rather than believed: a field
+    # that stops existing, or a key that leaves the collection, must fail here
+    # instead of quietly widening what counts as read.
+    for key, claim in sorted(READ_VIA.items()):
+        kind, _, target = claim.partition(":")
+        module_path, _, attr = target.rpartition(".")
+        if kind == "model":
+            model_mod, _, model_name = module_path.rpartition(".")
+            model = getattr(importlib.import_module(model_mod), model_name)
+            assert attr in model.model_fields, f"{key!r}: {model_name} has no field {attr!r}"
+        elif kind == "keylist":
+            collection = getattr(importlib.import_module(module_path), attr)
+            assert key in collection, f"{key!r}: not present in {attr}"
+        else:  # pragma: no cover - a typo in the claim form
+            pytest.fail(f"{key!r}: unknown READ_VIA form {kind!r}")
+
+
+def test_every_declared_key_is_read_by_a_runner_that_owns_it() -> None:
+    # The state a corpus-derived allowlist cannot see: a directive declared by a
+    # running fixture that nothing reads, so the case passes with the knob at its
+    # default while counting as coverage.
+    #
+    # Scoped per capability. A flat pool over every runner lets a key read by one
+    # capability's runner count for a fixture whose own runner ignores it, which
+    # is the same mis-routing defect one level up.
+    positions = _read_positions()
+    shared = {"harness/", "adapter.py", "middleware_seam.py"}
+    exempt = set(UNAPPLIED_PENDING_DEFERRAL) | set(UNAPPLIED_PENDING_CASE_DEFERRAL) | set(READ_VIA)
+    # Fields the fixture models declare are reached as attributes off the parsed
+    # model, which a read-position scan cannot see. They are out of scope here
+    # and tracked separately: covering them needs per-runner knowledge of which
+    # runners parse into the model and which take the raw mapping.
+    modelled = set(CaseSpec.model_fields) | _root_model_fields()
+    executed = _executed_fixture_ids()
+    unread: list[str] = []
+    for cap, fixture, where, key in _declared_keys():
+        # A dormant fixture declaring a directive its own runner ignores is not a
+        # vacuous pass, because nothing passes. Only a RUNNING declarer can hide
+        # one, and that is the whole claim.
+        if key in exempt or key in modelled or fixture not in executed:
+            continue
+        owners = _RUNNER_OWNERS[cap]
+        seen = positions.get(key, set())
+        if any(
+            any(src.endswith(owner.removeprefix("../")) for owner in owners)
+            or any(marker in src for marker in shared)
+            for src in seen
+        ):
+            continue
+        unread.append(f"  {cap}/{fixture} at {where} declares {key!r}; no owning runner reads it")
+    assert not unread, (
+        "directive(s) declared by a fixture whose own runner never reads them:\n"
+        + "\n".join(sorted(set(unread)))
+        + "\nWire the directive in that capability's runner, or record it against a deferral."
+    )
+
+
+def test_exempt_keys_are_declared_only_by_fixtures_that_do_not_run() -> None:
+    # The tie, derived rather than hand-listed. Naming a subset of a key's
+    # declarers exempts the key globally while leaving the unnamed declarers free
+    # to run, so the dict entry is documentation and the corpus is the input.
+    executed = _executed_fixture_ids()
+    declarers: dict[str, set[str]] = defaultdict(set)
+    for _, fixture, _, key in _declared_keys():
+        declarers[key].add(fixture)
+    live = [
+        (key, fixture)
+        for key in UNAPPLIED_PENDING_DEFERRAL
+        for fixture in sorted(declarers.get(key, set()) & executed)
+    ]
+    assert not live, (
+        "key(s) exempted as unread while a RUNNING fixture declares them:\n"
+        + "\n".join(f"  {k!r} declared by {f}, which executes" for k, f in sorted(live))
+        + "\nWire the directive, or the exemption is hiding a vacuous case."
+    )
+
+
+@pytest.mark.parametrize("key", sorted(UNAPPLIED_PENDING_DEFERRAL))
+def test_named_deferrals_are_real_declarers(key: str) -> None:
+    # The other half: an entry naming a fixture that does not declare the key is
+    # a stale citation, and it is the citation that makes the exemption readable.
+    declarers = {f for _, f, _, k in _declared_keys() if k == key}
+    named = set(UNAPPLIED_PENDING_DEFERRAL[key])
+    assert named <= declarers, f"{key!r} cites {sorted(named - declarers)}, which do not declare it"
+
+
+def test_case_deferral_exemptions_name_cases_that_are_actually_skipped() -> None:
+    # The per-case counterpart: `session_id` rides one case of a fixture that
+    # otherwise runs, so a fixture-level check cannot see it.
+    from . import test_observability  # noqa: PLC0415
+
+    for key, pairs in sorted(UNAPPLIED_PENDING_CASE_DEFERRAL.items()):
+        for fixture, case in pairs:
+            driver = "_run_fixture_" + fixture.split("-")[0]
+            tree = ast.parse(inspect.getsource(getattr(test_observability, driver)))
+            skipped = {
+                sub.value
+                for node in ast.walk(tree)
+                if isinstance(node, ast.Assign | ast.AnnAssign)
+                and any(
+                    isinstance(t, ast.Name) and t.id == "_deferred_cases"
+                    for t in (node.targets if isinstance(node, ast.Assign) else [node.target])
+                )
+                for sub in ast.walk(node)
+                if isinstance(sub, ast.Constant) and isinstance(sub.value, str)
+            }
+            assert case in skipped, (
+                f"{key!r} is exempted because {fixture}::{case} does not run, but {driver} "
+                f"skips only {sorted(skipped)}. Wire the directive or drop the exemption."
+            )
+
+
+def _subgraph_bodies() -> list[tuple[str, str]]:
+    """`(fixture, key)` for every subgraph body anywhere in a running fixture.
+
+    Recursive rather than two enumerated container levels. Bodies also sit under
+    a case's `inner_subgraphs` and inside its `graph:` wrapper, and
+    `inner_subgraphs` is the same shape by construction -- the Langfuse runner
+    renames it onto `subgraphs` before use.
+    """
+    out: list[tuple[str, str]] = []
+
+    def visit(fixture: str, node: Any) -> None:
+        if isinstance(node, list):
+            for item in cast("list[Any]", node):
+                visit(fixture, item)
+            return
+        if not isinstance(node, dict):
+            return
+        mapping = cast("dict[str, Any]", node)
+        for key, value in mapping.items():
+            if key in _BODY_KEYS and isinstance(value, dict):
+                body = cast("dict[str, Any]", value)
+                # Singular forms ARE a body; plural forms map name -> body.
+                bodies = (
+                    [body]
+                    if key in {"subgraph", "subgraph_with_idx"}
+                    else [cast("dict[str, Any]", b) for b in body.values() if isinstance(b, dict)]
+                )
+                for one in bodies:
+                    out.extend((fixture, k) for k in one)
+            visit(fixture, value)
+
+    for _, fixture, doc in _fixture_docs():
+        visit(fixture, doc)
     return out
 
 
 def test_every_subgraph_level_key_is_modelled() -> None:
     # `SubgraphDefinition` allows extras like `CaseSpec` does, so the same
-    # silent-accept path exists one level down. Unlike the case-level check this
-    # one finds nothing today: no fixture declares a subgraph key outside the
-    # model. It is here so the first one that does is rejected rather than
-    # dropped, which is the whole failure mode a day-one-green guard prevents.
-    modelled = set(SubgraphDefinition.model_fields)
-    observed = _subgraph_definitions()
-    # Non-vacuity on the INPUT. This check passes today with nothing to report,
-    # so a walk that silently visited no subgraph body would be indistinguishable
-    # from a clean result. 65 fixtures carry one.
-    assert len({f for f, _ in observed}) > 50, (
-        f"expected subgraph bodies across the corpus, walked {len(observed)} keys in "
-        f"{len({f for f, _ in observed})} fixtures -- the traversal is not reaching them"
+    # silent-accept path exists one level down. This finds nothing today: no
+    # fixture declares a subgraph key outside the model. It is here so the first
+    # one that does is rejected rather than dropped.
+    observed = _subgraph_bodies()
+    # Non-vacuity on the INPUT, at the post-fix count rather than a loose floor.
+    # A guard set well below what the walk reaches tolerates losing a whole
+    # container shape, which is how the two-level version passed while missing
+    # `inner_subgraphs` and `graph:` entirely.
+    assert len({f for f, _ in observed}) >= 71, (
+        f"walked {len(observed)} subgraph keys in {len({f for f, _ in observed})} fixtures; "
+        "the traversal is not reaching them all"
     )
+    modelled = set(SubgraphDefinition.model_fields)
     unknown = sorted({(f, k) for f, k in observed if k not in modelled})
     assert not unknown, (
         "subgraph-level key(s) outside SubgraphDefinition:\n"
         + "\n".join(f"  {f} declares {k!r}" for f, k in unknown)
         + "\nModel the field, or defer the fixture."
+    )
+
+
+def test_every_conformance_directory_is_run_or_declared_unimplemented() -> None:
+    # The coarse counterpart: a whole capability can go unread the same way a
+    # directive can. This is what makes a new capability directory arriving at a
+    # pin bump an error rather than a silence.
+    with_fixtures = {
+        d.name
+        for d in sorted(_SPEC_ROOT.iterdir())
+        if d.is_dir() and any((d / "conformance").glob("[0-9][0-9][0-9]-*.yaml"))
+    }
+    unaccounted = sorted(with_fixtures - set(_RUN_DIRS) - set(UNIMPLEMENTED_CAPABILITIES))
+    assert not unaccounted, (
+        f"capability directory/ies ship fixtures but are neither run nor declared "
+        f"unimplemented: {unaccounted}. Wire a runner, or record why not in "
+        "UNIMPLEMENTED_CAPABILITIES."
+    )
+    stale = sorted(set(UNIMPLEMENTED_CAPABILITIES) & set(_RUN_DIRS))
+    assert not stale, f"UNIMPLEMENTED_CAPABILITIES still names {stale}, which has a runner. Drop it."
+
+
+@pytest.mark.parametrize("capability", sorted(UNIMPLEMENTED_CAPABILITIES))
+def test_unimplemented_capabilities_are_not_referenced_by_any_runner(capability: str) -> None:
+    # Declaring a capability unimplemented drops its whole directory out of every
+    # walk above, so the claim has to be checked rather than taken. Without this,
+    # moving a live capability into that dict silently removes its fixtures from
+    # the corpus while every assertion stays green.
+    referencing = sorted(path for path, src in _runner_sources().items() if f'"{capability}"' in src)
+    assert not referencing, (
+        f"{capability!r} is declared unimplemented but is named in {referencing}. "
+        "Either it has a runner and belongs in _RUNNER_OWNERS, or the reference is stale."
     )

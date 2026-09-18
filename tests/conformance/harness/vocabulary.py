@@ -20,13 +20,14 @@ the resolved route, and read by nothing.
 
 from __future__ import annotations
 
-# Case-level keys the harness recognizes beyond `CaseSpec`'s modelled fields.
+# Directives the harness recognizes beyond what the fixture models declare, at
+# the document root and at case level both.
 #
 # Enumerated rather than derived from the corpus. A list built by walking the
 # fixtures is a transcription of what happens to be there, which cannot tell a
 # directive that is honoured from one that is merely present -- the same reason
 # `_DRIVER_EXPECTED_KEYS` is derived from driver bodies instead.
-RECOGNIZED_CASE_KEYS: frozenset[str] = frozenset(
+RECOGNIZED_DIRECTIVES: frozenset[str] = frozenset(
     {
         # Provider and mock wiring.
         "mock_provider",
@@ -80,10 +81,42 @@ RECOGNIZED_CASE_KEYS: frozenset[str] = frozenset(
         "expected_message_equal",
         "expected_shared_prefix",
         "first_run_expected",
-        # Capability gating (§5.5).
+        # Capability gating (section 5.5).
         "requires_capability",
+        # Document-root directives. retrieval-provider fixtures are validated
+        # against no typed model at all -- its runner is a bare yaml.safe_load --
+        # so this set is their only vocabulary.
+        "mapping",
+        "call",
+        "openai_embedding_provider",
+        "cohere_embedding_provider",
+        "jina_embedding_provider",
+        "tei_embedding_provider",
+        "cohere_rerank_provider",
+        "jina_rerank_provider",
+        "tei_rerank_provider",
+        "expected_wire_bytes_identical",
+        "sequential_invocations",
+        "informative",
     }
 )
+
+# Keys a runner reads by a route a read-position scan cannot see, each paired
+# with a machine-checkable justification rather than prose.
+#
+# `model:<Model>.<field>` -- consumed as an attribute off a typed fixture model,
+# so the literal never appears in a subscript. `keylist:<module>.<NAME>` -- the
+# harness iterates a collection of key names and subscripts with the loop
+# variable, so the literal sits in that collection instead.
+#
+# Both forms are verified by import: a field that stops existing, or a key that
+# leaves the collection, fails rather than sitting here as a stale claim.
+READ_VIA: dict[str, str] = {
+    "manager": "model:tests.conformance.harness.prompt_management.PromptManagementFixture.manager",
+    "backends": "model:tests.conformance.harness.prompt_management.PromptManagementFixture.backends",
+    "disable_genai_semconv": "keylist:tests.conformance.test_observability._OTEL_OBSERVER_DIRECTIVE_KEYS",
+}
+
 
 # Recognized keys no runner reads, each tied to what makes that acceptable.
 #
@@ -105,6 +138,12 @@ UNAPPLIED_PENDING_DEFERRAL: dict[str, tuple[str, ...]] = {
     ),
     "expected_message_equal": ("032-cross-variable-substring-stability",),
     "expected_shared_prefix": ("032-cross-variable-substring-stability",),
+    "expected_wire_bytes_identical": (
+        "054-openai-wire-byte-stability",
+        "055-anthropic-wire-byte-stability",
+    ),
+    "sequential_invocations": ("049-queryable-observer-lifecycle-drop",),
+    "informative": ("048-queryable-observer-async-safety",),
 }
 
 # Recognized keys carried only by a case its driver skips, rather than by a
