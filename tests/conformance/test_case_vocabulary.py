@@ -69,12 +69,20 @@ def _case_keys() -> list[tuple[str, str, str]]:
     return out
 
 
+_SELF = frozenset({"test_case_vocabulary.py", "vocabulary.py"})
+
+
 def _runner_sources() -> dict[str, str]:
-    return {
-        p.name: p.read_text()
-        for p in [*sorted(_RUNNER_DIR.glob("*.py")), *sorted((_RUNNER_DIR / "harness").glob("*.py"))]
-        if p.name not in {"test_case_vocabulary.py", "vocabulary.py"}
-    }
+    # Keyed by relative path rather than basename: `__init__.py` exists in both
+    # directories, so a dict keyed by name drops one of them. A check built to
+    # catch inputs vanishing silently must not do it to its own inputs.
+    files = [*sorted(_RUNNER_DIR.glob("*.py")), *sorted((_RUNNER_DIR / "harness").glob("*.py"))]
+    kept = [p for p in files if p.name not in _SELF]
+    sources = {str(p.relative_to(_RUNNER_DIR)): p.read_text() for p in kept}
+    assert len(sources) == len(kept), (
+        f"walked {len(kept)} runner files and kept {len(sources)} sources; a path collided"
+    )
+    return sources
 
 
 def test_every_case_level_key_is_recognized() -> None:
