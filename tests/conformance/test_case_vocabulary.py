@@ -49,32 +49,20 @@ _SPEC_ROOT = Path(__file__).resolve().parents[2] / "openarmature-spec" / "spec"
 _RUNNER_DIR = Path(__file__).resolve().parent
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 
-# Capability directories with a runner, and which modules execute each.
+# Capability directories this implementation runs fixtures from.
 #
 # Wider than `loader.CAPABILITIES`, which enumerates only what the shared
 # `discover_fixtures` yields: several capabilities are driven by a module with
-# its own `CONFORMANCE_DIR` and glob, and llm-provider fixtures 056-058 are
-# driven from `tests/unit`. Ownership is what scopes the read check -- a
-# directive read by one capability's runner is not read for a fixture whose own
-# runner ignores it.
-_RUNNER_OWNERS: dict[str, tuple[str, ...]] = {
-    "graph-engine": ("test_conformance.py",),
-    "llm-provider": ("test_llm_provider.py", "../unit/test_observability_otel.py"),
-    "pipeline-utilities": (
-        "test_pipeline_utilities.py",
-        "test_checkpoint.py",
-        "test_state_migration.py",
-    ),
-    "observability": (
-        "test_observability.py",
-        "test_observability_langfuse.py",
-        "test_typed_event_harness.py",
-        "../unit/test_observability_otel.py",
-    ),
-    "prompt-management": ("test_prompt_management.py",),
-    "retrieval-provider": ("test_retrieval_provider.py",),
-}
-_RUN_DIRS = tuple(_RUNNER_OWNERS)
+# its own conformance directory and glob, and some llm-provider fixtures are
+# driven from `tests/unit`.
+_RUN_DIRS: tuple[str, ...] = (
+    "graph-engine",
+    "llm-provider",
+    "pipeline-utilities",
+    "observability",
+    "prompt-management",
+    "retrieval-provider",
+)
 
 # Modules whose own `_fixture_paths()` is the authority on what they collect.
 # Paired with the capability each drives, so "runs" is computed from the
@@ -109,6 +97,19 @@ _COLLECTORS: tuple[tuple[str, tuple[str, ...], str | None], ...] = (
     ("test_state_migration", (), None),
 )
 
+# Fixtures a module outside `tests/conformance` drives, by the function whose
+# `parametrize` names them.
+#
+# `test_llm_provider` defers 056-058 and 061-066 with reasons pointing here, so
+# subtracting its deferrals without adding these back marks nine RUNNING fixtures
+# dormant -- and a dormant fixture is skipped by the read check, which is the
+# direction that hides a vacuous case. Read off the parametrize decorators so the
+# list cannot drift from what actually runs.
+_UNIT_DRIVEN: tuple[tuple[str, str], ...] = (
+    ("tests.unit.test_observability_otel", "test_call_level_retry_fixture_per_attempt_spans"),
+    ("tests.unit.test_observability_otel", "test_call_level_reask_retry_fixture"),
+)
+
 # This module and the registry it reads: scanning them would let a key count as
 # read because it is registered.
 _SELF = frozenset({"test_case_vocabulary.py", "vocabulary.py"})
@@ -130,6 +131,27 @@ def _runner_sources() -> dict[str, str]:
         f"walked {len(kept)} runner files and kept {len(sources)} sources; a path collided"
     )
     return sources
+
+
+def _runner_owners() -> dict[str, frozenset[str]]:
+    """Which runner sources execute each capability's fixtures.
+
+    Derived rather than hand-listed. A map maintained by hand claimed to
+    enumerate every execution path and was wrong three times in the same
+    direction -- `retrieval-provider` has its own glob outside
+    `loader.CAPABILITIES`, `tests/unit` drives llm-provider fixtures, and
+    `test_observability` reaches across into pipeline-utilities for fixture 031.
+    A module that names a capability directory is executing from it, so the
+    source is the map.
+    """
+    owners: dict[str, set[str]] = {cap: set() for cap in _RUN_DIRS}
+    for path, src in _runner_sources().items():
+        for cap in _RUN_DIRS:
+            if f'"{cap}"' in src:
+                owners[cap].add(path)
+    missing = sorted(cap for cap, paths in owners.items() if not paths)
+    assert not missing, f"no runner source names {missing}; the ownership scan is broken"
+    return {cap: frozenset(paths) for cap, paths in owners.items()}
 
 
 def _containers(doc: dict[str, Any]) -> list[dict[str, Any]]:
@@ -252,8 +274,26 @@ def _executed_fixture_ids() -> set[str]:
             assert gate, f"{name}.{gate_attr} is empty; the positive gate is not what it was"
             collected &= set(gate)
         runs |= collected - held_back
+    runs |= _unit_driven_fixture_ids()
     assert len(runs) > 200, f"computed only {len(runs)} executed fixtures; the collection scan is broken"
     return runs
+
+
+def _unit_driven_fixture_ids() -> set[str]:
+    """Fixture ids named by a `parametrize` on a unit-side conformance runner."""
+    ids: set[str] = set()
+    for module_path, func_name in _UNIT_DRIVEN:
+        module = importlib.import_module(module_path)
+        tree = ast.parse(inspect.getsource(getattr(module, func_name)))
+        named = {
+            node.value
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Constant) and isinstance(node.value, str)
+        }
+        found = {n for n in named if n[:3].isdigit() and n[3:4] == "-"}
+        assert found, f"{module_path}.{func_name} names no fixture ids; the scan is broken"
+        ids |= found
+    return ids
 
 
 def test_every_declared_key_is_recognized() -> None:
@@ -306,12 +346,26 @@ def test_every_declared_key_is_read_by_a_runner_that_owns_it() -> None:
     # capability's runner count for a fixture whose own runner ignores it, which
     # is the same mis-routing defect one level up.
     positions = _read_positions()
+    owners = _runner_owners()
     shared = {"harness/", "adapter.py", "middleware_seam.py"}
-    exempt = set(UNAPPLIED_PENDING_DEFERRAL) | set(UNAPPLIED_PENDING_CASE_DEFERRAL) | set(READ_VIA)
-    # Fields the fixture models declare are reached as attributes off the parsed
-    # model, which a read-position scan cannot see. They are out of scope here
-    # and tracked separately: covering them needs per-runner knowledge of which
-    # runners parse into the model and which take the raw mapping.
+    exempt = set(UNAPPLIED_PENDING_DEFERRAL) | set(READ_VIA)
+    # Matched on the whole triple, not the key. `UNAPPLIED_PENDING_CASE_DEFERRAL`
+    # is keyed by `(fixture, case)` exactly so the exemption stays narrow;
+    # collapsing it to the key would let one skipped case excuse every other
+    # declaration of that directive, including from cases that run.
+    case_exempt = {
+        (fixture, case, key)
+        for key, pairs in UNAPPLIED_PENDING_CASE_DEFERRAL.items()
+        for fixture, case in pairs
+    }
+    # Fields the fixture models declare are out of scope here, and the reason is
+    # weaker than "they are read through the model". Only `test_prompt_management`
+    # parses into a fixture model at all; every other runner takes the raw mapping
+    # from `yaml.safe_load`, so most modelled fields are not read through a model
+    # either. Some are genuinely inert -- `description` is prose, `initial_state`
+    # means nothing to a runner that drives a provider with no engine -- and some
+    # are live gaps. Telling those apart is the task this exclusion is tracked
+    # under; a half-classification here would grant the wrong ones a pass.
     modelled = set(CaseSpec.model_fields) | _root_model_fields()
     executed = _executed_fixture_ids()
     unread: list[str] = []
@@ -319,15 +373,15 @@ def test_every_declared_key_is_read_by_a_runner_that_owns_it() -> None:
         # A dormant fixture declaring a directive its own runner ignores is not a
         # vacuous pass, because nothing passes. Only a RUNNING declarer can hide
         # one, and that is the whole claim.
-        if key in exempt or key in modelled or fixture not in executed:
-            continue
-        owners = _RUNNER_OWNERS[cap]
-        seen = positions.get(key, set())
-        if any(
-            any(src.endswith(owner.removeprefix("../")) for owner in owners)
-            or any(marker in src for marker in shared)
-            for src in seen
+        if (
+            key in exempt
+            or (fixture, where, key) in case_exempt
+            or key in modelled
+            or fixture not in executed
         ):
+            continue
+        seen = positions.get(key, set())
+        if seen & owners[cap] or any(any(m in src for m in shared) for src in seen):
             continue
         unread.append(f"  {cap}/{fixture} at {where} declares {key!r}; no owning runner reads it")
     assert not unread, (
