@@ -4,7 +4,16 @@
 # not observable surface, per the ruling in coord thread
 # `proposal-0120-0123-adapter-obligations`.
 
-"""Every directive is recognized, and every recognized one is actually read.
+"""Every directive is recognized, and every one outside the models is read.
+
+Both halves are narrower than they sound, and the second is narrower than the
+first. Recognition covers every key the corpus declares. The read check covers
+only directives the fixture models do NOT declare: a field on `CaseSpec` or on a
+root model is skipped, and that exclusion is not the harmless one it looks like.
+`expected_wire_request`, `checkpointer` and `mock_llm` are modelled AND
+behavioural, so deleting every read of one from its owning runner passes here.
+Closing that needs the four-way classification tracked in
+`_tasks/modelled-field-read-check.md`, not a wider exclusion list.
 
 `extra="forbid"` cannot carry this. It applies at the fixture's document root,
 while `CaseSpec` and `SubgraphDefinition` both allow extras, and the runners
@@ -136,21 +145,51 @@ def _runner_sources() -> dict[str, str]:
 def _runner_owners() -> dict[str, frozenset[str]]:
     """Which runner sources execute each capability's fixtures.
 
-    Derived rather than hand-listed. A map maintained by hand claimed to
-    enumerate every execution path and was wrong three times in the same
-    direction -- `retrieval-provider` has its own glob outside
-    `loader.CAPABILITIES`, `tests/unit` drives llm-provider fixtures, and
-    `test_observability` reaches across into pipeline-utilities for fixture 031.
-    A module that names a capability directory is executing from it, so the
-    source is the map.
+    Derived from execution, not from mention. A hand-listed map was wrong three
+    times, each time too narrow; a scan for the capability name anywhere in a
+    source is wrong the other way, and worse, because it fails silently: it made
+    an owner of `loader.py`'s registry tuple and of a gate-wiring test that
+    builds a synthetic `tmp_path` tree and never opens the submodule. A too-broad
+    owner vouches for a read that the real runner never performs.
+
+    Two sources, both mechanical. The paths a collector's `_fixture_paths()`
+    actually returns, and module-level path constants rooted at the submodule --
+    which is what a cross-capability load looks like (`test_observability` reaches
+    into pipeline-utilities for fixture 031) and what a temp-directory tree does
+    not.
     """
     owners: dict[str, set[str]] = {cap: set() for cap in _RUN_DIRS}
+    by_module = {name: f"tests/conformance/{name}.py" for name, _, _ in _COLLECTORS}
+
+    for name, _, _ in _COLLECTORS:
+        module = importlib.import_module(f".{name}", __package__)
+        for path in cast("list[Path]", module._fixture_paths()):  # noqa: SLF001
+            cap = path.parent.parent.name
+            if cap in owners:
+                owners[cap].add(by_module[name])
+
     for path, src in _runner_sources().items():
-        for cap in _RUN_DIRS:
-            if f'"{cap}"' in src:
+        for node in ast.walk(ast.parse(src)):
+            # Any `/`-joined path expression, not only an assignment: a load can
+            # be written inline, and scanning assignments alone is the same
+            # partial-input mistake this module exists to catch.
+            if not isinstance(node, ast.BinOp) or not isinstance(node.op, ast.Div):
+                continue
+            literals = {
+                sub.value
+                for sub in ast.walk(node)
+                if isinstance(sub, ast.Constant) and isinstance(sub.value, str)
+            }
+            # Rooted at the submodule. A synthetic tree under `tmp_path` carries
+            # the same capability names and the same "conformance" segment, and
+            # is not a load -- `test_capability_gate_wiring` builds exactly that.
+            if "openarmature-spec" not in literals or "conformance" not in literals:
+                continue
+            for cap in literals & set(owners):
                 owners[cap].add(path)
+
     missing = sorted(cap for cap, paths in owners.items() if not paths)
-    assert not missing, f"no runner source names {missing}; the ownership scan is broken"
+    assert not missing, f"no runner executes {missing}; the ownership derivation is broken"
     return {cap: frozenset(paths) for cap, paths in owners.items()}
 
 
@@ -358,14 +397,16 @@ def test_every_declared_key_is_read_by_a_runner_that_owns_it() -> None:
         for key, pairs in UNAPPLIED_PENDING_CASE_DEFERRAL.items()
         for fixture, case in pairs
     }
-    # Fields the fixture models declare are out of scope here, and the reason is
-    # weaker than "they are read through the model". Only `test_prompt_management`
-    # parses into a fixture model at all; every other runner takes the raw mapping
-    # from `yaml.safe_load`, so most modelled fields are not read through a model
-    # either. Some are genuinely inert -- `description` is prose, `initial_state`
-    # means nothing to a runner that drives a provider with no engine -- and some
-    # are live gaps. Telling those apart is the task this exclusion is tracked
-    # under; a half-classification here would grant the wrong ones a pass.
+    # Fields the fixture models declare are out of scope, and the reason is weaker
+    # than "they are read through the model": only `test_prompt_management` parses
+    # into a fixture model at all, so most modelled fields are not read that way
+    # either. The exclusion is a real hole rather than a technicality --
+    # `expected_wire_request`, `checkpointer` and `mock_llm` are modelled and
+    # behavioural, and deleting every read of one would pass here. Some others
+    # are genuinely inert: `description` is prose, `initial_state` means nothing
+    # to a runner driving a provider with no engine. Separating the four
+    # categories is the tracked task; a half-classification here fails the inert
+    # ones and still misses the live ones.
     modelled = set(CaseSpec.model_fields) | _root_model_fields()
     executed = _executed_fixture_ids()
     unread: list[str] = []
@@ -533,5 +574,5 @@ def test_unimplemented_capabilities_are_not_referenced_by_any_runner(capability:
     referencing = sorted(path for path, src in _runner_sources().items() if f'"{capability}"' in src)
     assert not referencing, (
         f"{capability!r} is declared unimplemented but is named in {referencing}. "
-        "Either it has a runner and belongs in _RUNNER_OWNERS, or the reference is stale."
+        "Either it has a runner and belongs in _RUN_DIRS, or the reference is stale."
     )
