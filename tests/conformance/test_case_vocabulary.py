@@ -589,14 +589,29 @@ def test_every_conformance_directory_is_run_or_declared_unimplemented() -> None:
     )
 
 
-@pytest.mark.parametrize("capability", sorted(UNIMPLEMENTED_CAPABILITIES))
-def test_unimplemented_capabilities_are_not_referenced_by_any_runner(capability: str) -> None:
-    # Declaring a capability unimplemented drops its whole directory out of every
+@pytest.mark.parametrize("capability", sorted(set(UNIMPLEMENTED_CAPABILITIES) | set(PENDING_ADOPTION)))
+def test_capabilities_declared_as_not_running_are_not_referenced_by_any_runner(
+    capability: str,
+) -> None:
+    # Declaring a capability as not running drops its whole directory out of every
     # walk above, so the claim has to be checked rather than taken. Without this,
-    # moving a live capability into that dict silently removes its fixtures from
+    # moving a live capability into either dict silently removes its fixtures from
     # the corpus while every assertion stays green.
+    #
+    # Over BOTH registries, because the other two staleness checks have conditions
+    # a runner can land without meeting: `stale` needs the name in `_RUN_DIRS`, and
+    # `orphaned` needs the directory to ship no fixtures. Runner code arriving
+    # before its `_RUN_DIRS` entry satisfies neither, and this is the only guard
+    # that sees it. `PENDING_ADOPTION` is the one that will hit this, since its
+    # whole purpose is to name a capability whose runner is being written.
     referencing = sorted(path for path, src in _runner_sources().items() if f'"{capability}"' in src)
+    # Name the registry the entry is actually in: this runs over both, and
+    # telling someone their pending-adoption entry is "declared unimplemented"
+    # sends them to the wrong dict.
+    registry = (
+        "UNIMPLEMENTED_CAPABILITIES" if capability in UNIMPLEMENTED_CAPABILITIES else "PENDING_ADOPTION"
+    )
     assert not referencing, (
-        f"{capability!r} is declared unimplemented but is named in {referencing}. "
+        f"{capability!r} is declared in {registry} as not running, but is named in {referencing}. "
         "Either it has a runner and belongs in _RUN_DIRS, or the reference is stale."
     )
