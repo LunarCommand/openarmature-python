@@ -40,6 +40,9 @@ RECOGNIZED_DIRECTIVES: frozenset[str] = frozenset(
         "typed_observers",
         "queryable_observers",
         "langfuse_observer",
+        # Arrives in use at the v0.118.2 pin. The harness read it before any
+        # fixture declared it, which is what shipping 0121 ahead of the pin meant.
+        "otel_observer",
         "langfuse_observer_config",
         "langfuse_client",
         "caller_global_otel_active",
@@ -166,4 +169,21 @@ UNIMPLEMENTED_CAPABILITIES: dict[str, str] = {
     "harness-chat": "chat-loop sub-spec; rests on harness, sessions and suspension",
     "sessions": "proposal 0020 SessionStore / SessionState; scheduled for v0.19.0",
     "suspension": "node-side suspend/resume; no surface in src/openarmature",
+}
+
+
+# Capability directories whose fixtures have arrived at the current pin but whose
+# adoption has not landed.
+#
+# A third state, and it needs to be distinct from UNIMPLEMENTED_CAPABILITIES:
+# that dict says the capability does not exist here and nothing is coming, which
+# is a claim about the library. This says the fixtures are real, the adoption is
+# in flight, and the entry is expected to go away. Folding the two together would
+# let work in progress read as a permanent absence.
+PENDING_ADOPTION: dict[str, str] = {
+    "conformance-adapter": (
+        "proposal 0123. Fixture 001 arrived with spec v0.114.0 and spec ruled it in scope, "
+        "reported as adapter conformance distinct from the five runtime capabilities. "
+        "The runner lands with the 0123 adoption"
+    ),
 }

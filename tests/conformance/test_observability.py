@@ -408,6 +408,18 @@ _DEFERRED_FIXTURES: dict[str, str] = {
     # §11 token-usage metric (125) run here; the Langfuse failed-Generation
     # rendering (123) is driven in the dedicated test_observability_langfuse
     # harness (its langfuse_trace shape lives there, like 022-024).
+    # Proposals 0119 / 0125 (error_message cap, spec v0.116.0 / v0.118.2).
+    # The behaviour ships and is unit-tested; this is its conformance oracle and
+    # wiring it is a feature rather than a pin bump. Three directives it needs do
+    # not exist here: `metadata_truncation` on the assertion side, `message_repeat`
+    # on the mock side (it synthesizes a 102,400-byte message from a repeated
+    # multi-byte character, with the byte-boundary rounding of section 5.15), and
+    # retrieval node construction for two of the six cases, which is the gap 158
+    # already defers a case against.
+    "160-langfuse-error-message-truncation": (
+        "0119's conformance oracle; needs `metadata_truncation`, `message_repeat`, "
+        "and retrieval node support, none of which the harness has. Wired in its own PR"
+    ),
     "123-langfuse-failed-generation-renders-output-usage-finish-reason": (
         "Langfuse failed-Generation rendering; driven in test_observability_langfuse"
     ),
@@ -5554,12 +5566,16 @@ async def _run_tool_case(case: Mapping[str, Any]) -> None:
             lf_kwargs["disable_provider_payload"] = bool(lf_cfg["disable_provider_payload"])
         graph.attach_observer(LangfuseObserver(**lf_kwargs))
 
+    # Section 8.4.2 puts the caller set on every observation, Tool included.
+    # The observer maps it; without passing it here there is nothing to map,
+    # which is what fixture 098's caller-set assertions arrive to catch.
+    caller_metadata = cast("dict[str, Any] | None", case.get("caller_metadata"))
     try:
         if expected_error is not None:
             with pytest.raises(NodeException):
-                await graph.invoke(state)
+                await graph.invoke(state, metadata=caller_metadata)
         else:
-            await graph.invoke(state)
+            await graph.invoke(state, metadata=caller_metadata)
         await graph.drain()
     finally:
         for provider in providers:

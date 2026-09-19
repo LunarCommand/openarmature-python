@@ -47,6 +47,7 @@ import yaml
 from .harness import fixtures as fixture_models
 from .harness.fixtures import CaseSpec, SubgraphDefinition
 from .harness.vocabulary import (
+    PENDING_ADOPTION,
     READ_VIA,
     RECOGNIZED_DIRECTIVES,
     UNAPPLIED_PENDING_CASE_DEFERRAL,
@@ -555,14 +556,17 @@ def test_every_conformance_directory_is_run_or_declared_unimplemented() -> None:
         for d in sorted(_SPEC_ROOT.iterdir())
         if d.is_dir() and any((d / "conformance").glob("[0-9][0-9][0-9]-*.yaml"))
     }
-    unaccounted = sorted(with_fixtures - set(_RUN_DIRS) - set(UNIMPLEMENTED_CAPABILITIES))
+    declared = set(UNIMPLEMENTED_CAPABILITIES) | set(PENDING_ADOPTION)
+    unaccounted = sorted(with_fixtures - set(_RUN_DIRS) - declared)
     assert not unaccounted, (
-        f"capability directory/ies ship fixtures but are neither run nor declared "
-        f"unimplemented: {unaccounted}. Wire a runner, or record why not in "
-        "UNIMPLEMENTED_CAPABILITIES."
+        f"capability directory/ies ship fixtures but are neither run nor declared: "
+        f"{unaccounted}. Wire a runner, or record why not in UNIMPLEMENTED_CAPABILITIES "
+        "(the capability does not exist here) or PENDING_ADOPTION (its adoption is in flight)."
     )
-    stale = sorted(set(UNIMPLEMENTED_CAPABILITIES) & set(_RUN_DIRS))
-    assert not stale, f"UNIMPLEMENTED_CAPABILITIES still names {stale}, which has a runner. Drop it."
+    # Both declarations are claims about NOT running something, so both go stale
+    # the moment a runner lands and both have to say so.
+    stale = sorted(declared & set(_RUN_DIRS))
+    assert not stale, f"{stale} is declared as not running while a runner executes it. Drop the entry."
 
 
 @pytest.mark.parametrize("capability", sorted(UNIMPLEMENTED_CAPABILITIES))
