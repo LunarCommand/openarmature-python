@@ -556,6 +556,16 @@ def test_every_conformance_directory_is_run_or_declared_unimplemented() -> None:
         for d in sorted(_SPEC_ROOT.iterdir())
         if d.is_dir() and any((d / "conformance").glob("[0-9][0-9][0-9]-*.yaml"))
     }
+    # The two registries assert opposite things -- "does not exist here and
+    # nothing is coming" against "the fixtures are real and adoption is in
+    # flight" -- so naming a capability in both is a contradiction rather than
+    # redundancy. They are unioned below, which would absorb the pair in silence
+    # and fold back together the distinction they were split to keep.
+    both = sorted(set(UNIMPLEMENTED_CAPABILITIES) & set(PENDING_ADOPTION))
+    assert not both, (
+        f"{both} is declared both unimplemented and pending adoption, which cannot both "
+        "be true. Keep the one that describes the capability."
+    )
     declared = set(UNIMPLEMENTED_CAPABILITIES) | set(PENDING_ADOPTION)
     unaccounted = sorted(with_fixtures - set(_RUN_DIRS) - declared)
     assert not unaccounted, (
@@ -567,6 +577,16 @@ def test_every_conformance_directory_is_run_or_declared_unimplemented() -> None:
     # the moment a runner lands and both have to say so.
     stale = sorted(declared & set(_RUN_DIRS))
     assert not stale, f"{stale} is declared as not running while a runner executes it. Drop the entry."
+    # And both go stale the other way, which is the direction a subtraction
+    # cannot see: an entry naming a directory that ships no fixtures removes a
+    # name that was never in the set, so a misspelling declares nothing while
+    # reading as coverage. `PENDING_ADOPTION` is the more exposed of the two,
+    # being temporary by design.
+    orphaned = sorted(declared - with_fixtures)
+    assert not orphaned, (
+        f"{orphaned} is declared as not running, but no such capability directory ships "
+        "fixtures. Correct the spelling, or drop an entry whose capability is gone."
+    )
 
 
 @pytest.mark.parametrize("capability", sorted(UNIMPLEMENTED_CAPABILITIES))
