@@ -47,6 +47,7 @@ import yaml
 from .harness import fixtures as fixture_models
 from .harness.fixtures import CaseSpec, SubgraphDefinition
 from .harness.vocabulary import (
+    PENDING_ADOPTION,
     READ_VIA,
     RECOGNIZED_DIRECTIVES,
     UNAPPLIED_PENDING_CASE_DEFERRAL,
@@ -555,24 +556,62 @@ def test_every_conformance_directory_is_run_or_declared_unimplemented() -> None:
         for d in sorted(_SPEC_ROOT.iterdir())
         if d.is_dir() and any((d / "conformance").glob("[0-9][0-9][0-9]-*.yaml"))
     }
-    unaccounted = sorted(with_fixtures - set(_RUN_DIRS) - set(UNIMPLEMENTED_CAPABILITIES))
-    assert not unaccounted, (
-        f"capability directory/ies ship fixtures but are neither run nor declared "
-        f"unimplemented: {unaccounted}. Wire a runner, or record why not in "
-        "UNIMPLEMENTED_CAPABILITIES."
+    # The two registries assert opposite things -- "does not exist here and
+    # nothing is coming" against "the fixtures are real and adoption is in
+    # flight" -- so naming a capability in both is a contradiction rather than
+    # redundancy. They are unioned below, which would absorb the pair in silence
+    # and fold back together the distinction they were split to keep.
+    both = sorted(set(UNIMPLEMENTED_CAPABILITIES) & set(PENDING_ADOPTION))
+    assert not both, (
+        f"{both} is declared both unimplemented and pending adoption, which cannot both "
+        "be true. Keep the one that describes the capability."
     )
-    stale = sorted(set(UNIMPLEMENTED_CAPABILITIES) & set(_RUN_DIRS))
-    assert not stale, f"UNIMPLEMENTED_CAPABILITIES still names {stale}, which has a runner. Drop it."
+    declared = set(UNIMPLEMENTED_CAPABILITIES) | set(PENDING_ADOPTION)
+    unaccounted = sorted(with_fixtures - set(_RUN_DIRS) - declared)
+    assert not unaccounted, (
+        f"capability directory/ies ship fixtures but are neither run nor declared: "
+        f"{unaccounted}. Wire a runner, or record why not in UNIMPLEMENTED_CAPABILITIES "
+        "(the capability does not exist here) or PENDING_ADOPTION (its adoption is in flight)."
+    )
+    # Both declarations are claims about NOT running something, so both go stale
+    # the moment a runner lands and both have to say so.
+    stale = sorted(declared & set(_RUN_DIRS))
+    assert not stale, f"{stale} is declared as not running while a runner executes it. Drop the entry."
+    # And both go stale the other way, which is the direction a subtraction
+    # cannot see: an entry naming a directory that ships no fixtures removes a
+    # name that was never in the set, so a misspelling declares nothing while
+    # reading as coverage. `PENDING_ADOPTION` is the more exposed of the two,
+    # being temporary by design.
+    orphaned = sorted(declared - with_fixtures)
+    assert not orphaned, (
+        f"{orphaned} is declared as not running, but no such capability directory ships "
+        "fixtures. Correct the spelling, or drop an entry whose capability is gone."
+    )
 
 
-@pytest.mark.parametrize("capability", sorted(UNIMPLEMENTED_CAPABILITIES))
-def test_unimplemented_capabilities_are_not_referenced_by_any_runner(capability: str) -> None:
-    # Declaring a capability unimplemented drops its whole directory out of every
+@pytest.mark.parametrize("capability", sorted(set(UNIMPLEMENTED_CAPABILITIES) | set(PENDING_ADOPTION)))
+def test_capabilities_declared_as_not_running_are_not_referenced_by_any_runner(
+    capability: str,
+) -> None:
+    # Declaring a capability as not running drops its whole directory out of every
     # walk above, so the claim has to be checked rather than taken. Without this,
-    # moving a live capability into that dict silently removes its fixtures from
+    # moving a live capability into either dict silently removes its fixtures from
     # the corpus while every assertion stays green.
+    #
+    # Over BOTH registries, because the other two staleness checks have conditions
+    # a runner can land without meeting: `stale` needs the name in `_RUN_DIRS`, and
+    # `orphaned` needs the directory to ship no fixtures. Runner code arriving
+    # before its `_RUN_DIRS` entry satisfies neither, and this is the only guard
+    # that sees it. `PENDING_ADOPTION` is the one that will hit this, since its
+    # whole purpose is to name a capability whose runner is being written.
     referencing = sorted(path for path, src in _runner_sources().items() if f'"{capability}"' in src)
+    # Name the registry the entry is actually in: this runs over both, and
+    # telling someone their pending-adoption entry is "declared unimplemented"
+    # sends them to the wrong dict.
+    registry = (
+        "UNIMPLEMENTED_CAPABILITIES" if capability in UNIMPLEMENTED_CAPABILITIES else "PENDING_ADOPTION"
+    )
     assert not referencing, (
-        f"{capability!r} is declared unimplemented but is named in {referencing}. "
+        f"{capability!r} is declared in {registry} as not running, but is named in {referencing}. "
         "Either it has a runner and belongs in _RUN_DIRS, or the reference is stale."
     )

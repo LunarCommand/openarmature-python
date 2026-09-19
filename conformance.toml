@@ -32,7 +32,7 @@
 
 [manifest]
 implementation = "openarmature-python"
-spec_pin = "v0.112.0"
+spec_pin = "v0.118.2"
 
 # Adapter-level conformance capabilities (conformance-adapter §5.5, proposal
 # 0116). A fixture case may carry `requires_capability`, which selects the arm of
@@ -1168,3 +1168,37 @@ note = "0116 guarded only the provider-payload channel. A sweep of OA's Langfuse
 status = "implemented"
 since = "0.17.0"
 note = "disable_provider_payload now gates a failed provider call's harvested exception TEXT on all four provider observations, closing a hole in the flag's promise: a structured_output_invalid message commonly quotes the model output that failed validation, so a caller could set the flag, watch generation.output disappear as promised, and still receive that text in metadata.error_message. error_type is NOT gated: it is a classification token, so suppressing it buys no privacy while removing the only failure discriminator on a Tool observation, which has no error category at all; for the same reason it no longer counts toward the payload-bearing classification. The §8.4 exhaustive-mapping rule is honored too: the failure-isolation marker span carried the caught exception's message although no §8.4.x table maps it, which is non-conforming over-emission, and it now carries only error_category. Fixtures 098 / 137 / 138 are un-deferred and reconciled at this pin, and 159 is wired."
+
+# ---- v0.17.0 spec-pin bump v0.112.0 -> v0.118.2 (proposals 0119-0125).
+
+[proposals."0119"]
+status = "implemented"
+since = "0.17.0"
+note = "A failed observation's metadata.error_message is harvested exception text, so §5.5.4 classifies it as payload and §5.5.5's byte cap governs it. Nothing writes it to a span attribute, so §8.7's inheritance arm does not apply and the Langfuse observer applies the cap DIRECTLY when it writes the field, using its OWN configured payload_byte_cap rather than the OTel observer's. Capped at all four failed observation types (Generation, Embedding, Tool, Retriever) through a shared _capped_error_message helper. A failed Tool renders the harvested string twice, in metadata.error_message and in statusMessage, and both are capped; §8.7 names only the first, raised as a spec question and not blocking since the behavior matches the expected ruling. Also reserves openarmature_ as a NAMESPACE prefix alongside the four exact names, taking the reserved set from 29 to 33. Fixture 160 is its conformance oracle and is DEFERRED at this pin: wiring it needs a metadata_truncation assertion directive, a message_repeat mock directive, and retrieval node construction, none of which the harness has. The behavior is unit-tested meanwhile."
+
+[proposals."0120"]
+status = "implemented"
+since = "0.17.0"
+note = "conformance-adapter §5 gains a Definition homes rule naming exactly two: §5 itself, and a per-directory harness note. Together they are the recognized vocabulary, and §8.2's parsing obligation re-anchors to that phrase. Per the coord ruling the obligation is the REJECTION rather than the fixture_directive_unknown token, which no fixture can observe: the adapter must raise rather than skip, name the directive, and name the location. Adopting it exposed that this harness rejected an unknown directive at the document root only. CaseSpec and SubgraphDefinition both allow extras, and the runners read raw YAML rather than the typed model, so an unknown case-level key was accepted in silence by the whole suite. Implemented as repository checks over the corpus (tests/conformance/test_case_vocabulary.py) rather than model config, covering both obligations: a key nothing recognizes is rejected, and a key recognized by the harness that no owning runner reads is also rejected. Fields the fixture models declare are excluded from the second check and tracked separately."
+
+[proposals."0121"]
+status = "implemented"
+since = "0.17.0"
+note = "A log record signalling a condition the spec defines carries a stable event name in the openarmature. namespace, on the OTel LogRecord's event_name FIELD. Four are emitted: the three §6 isolation decisions and a §5.5.15 token-budget breach. The fifth, supplied_client_shared_provider, is a MAY and has no emitter here. Note that the spec's stated reason for making it a MAY does not apply to this implementation: it says reading a supplied client's bound provider may rest on non-portable SDK internals, and this adapter declares langfuse_bound_provider_detection = true because the v4 SDK exposes it via client._resources. So the binding IS determinable here and the emission is declined rather than unavailable, which is conformant on a MAY but is a choice rather than a constraint. Getting the name onto the field takes work neither OTel logging handler does: both map a stdlib record's attributes into the LogRecord's attributes and leave event_name unset, so install_log_bridge installs a handler that lifts it, and where the application already attached its own OTel handler it re-classes that one. That modifies an object the caller built, so it warns through warnings as well as the log, under its own LoggingSetupModified category; it is provider-scoped, and the upstream seam is checked for shape as well as existence. The otel_observer: directive that carries the observer's construction knobs is read in preference to the bare case-level key."
+
+[proposals."0122"]
+status = "implemented"
+since = "0.17.0"
+note = "The extras surface is a container: an undeclared field lives in a mapping named extras rather than being flattened alongside declared fields, so a declared field and a same-named extras key coexist and address separately. Both response types and the runtime configs carry it under extra=\"forbid\", the Cohere embedding_types gate is removed as over-strict, and the prompt backends field-filter an unrecognized sidecar key onto the container rather than dropping it. Fixtures 054 / 055 / 056 (declared-field collisions) arrive with this pin."
+
+[proposals."0123"]
+status = "not-yet"
+note = "conformance-adapter §5.4 gains a Subgraph declaration placement rule (three sites: document top level, case, and a case's graph: block; innermost in scope wins, with the subgraphs: mapping governing where both forms meet at one site) and §4.2 gains the graph: container, which an adapter MUST execute when the case asserts a runtime outcome. Not yet adopted: subgraph resolution here reads two of the three sites, implements no tie-break, and a container case carrying a runtime graph parses without executing. Fixture 001 arrives with this pin in the new conformance-adapter/conformance/ directory; spec ruled it in scope, reported as adapter conformance distinct from the five runtime capabilities, and it is recorded as PENDING_ADOPTION until the runner lands."
+
+[proposals."0124"]
+status = "not-yet"
+note = "An orphan provider span's parent is resolved structurally: the enclosing wrapper is determined by the call's position in the graph rather than by which spans an observer has materialized, and §6's synthesis trigger moves from the first inner started event to the first event that needs the span. Not yet adopted. The await_event_delivery directive it ships carries no proposal behind it, having been written entirely under review and deliberately diverging from what 0124 prescribed, including the rename from yield_after_call because §5.1 states a scheduler yield is insufficient and a yield-shaped name invites the implementation the prose forbids. Fixtures 133 / 134 / 152 / 153 are modified by this pin and continue to run against the existing resolution, and they now declare `await_event_delivery` inside `calls_llm_from_wrapper` while nothing in this harness reads it. All four PASS in that state, so their green says nothing about the barrier: the adapter proceeds past the call site without waiting for delivery through that call's provider event, which is the behavior the directive exists to force. PR #277 implemented the yield-shaped form that section 5.1 now calls insufficient. The directive is nested rather than case-level, so the recognized-vocabulary check added by 0120 cannot see it; that gap is tracked. Wiring it is this proposal's adoption, not a pin-bump change."
+
+[proposals."0125"]
+status = "not-yet"
+note = "Conformance coverage only, no normative spec change: fixture 160 gains a sixth case closing §8.7's fourth direct-application arm on a Tool observation, and fixture 098's success case gains caller_metadata asserting §8.4.2's scope there. 098 passes at this pin and caught a real gap in doing so: the harness drove its tool cases without passing the case's caller_metadata to invoke(), so the observation carried none and the mapping had nothing to render. 160 is deferred with 0119."
