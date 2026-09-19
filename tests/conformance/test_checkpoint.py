@@ -55,6 +55,7 @@ from openarmature.graph import (
     RuntimeGraphError,
     State,
 )
+from openarmature.llm import TRANSIENT_CATEGORIES
 
 from .adapter import build_graph
 
@@ -736,6 +737,57 @@ async def _run_one_case(spec: Mapping[str, Any], *, top_level: Mapping[str, Any]
     else:
         initial_state = built.initial_state(spec.get("initial_state", {}))
 
+    # ----- checkpoint_not_found expected (fixture 030) -----
+    #
+    # Read as a SIBLING of `expected:` first. conformance-adapter section 5.8's
+    # preamble says the `expected_*` directives sit inside that block, and the
+    # corpus puts `expected_error` there twice against 106 at case level; spec
+    # has confirmed the corpus is right and the preamble wrong (coord thread
+    # release-v0.17.0 msg 58). The nested read stays as the compatibility form
+    # for the two fixtures that follow the preamble, and goes when they move.
+    #
+    # It is a MAPPING, not a bare category string. Reading it as a string meant
+    # this arm never fired: fixture 030 ran, asserted nothing, and stayed green
+    # with the engine's `raise CheckpointNotFound` removed entirely.
+    # Both positions resolved here rather than reusing the `expected` block,
+    # which is built further down: this arm now runs BEFORE the first invoke,
+    # because its premise is about what the store contains.
+    nested_expected = cast("Mapping[str, Any]", spec.get("expected") or {})
+    raw_not_found = spec.get("expected_error") or nested_expected.get("expected_error")
+    declared = cast("Mapping[str, Any]", raw_not_found or {})
+    if declared.get("category") == "checkpoint_not_found":
+        invoke_with = cast("Mapping[str, Any]", spec.get("invoke_with") or {})
+        ghost = cast("str", invoke_with.get("resume_invocation", "ghost"))
+        # Without this the store is empty and case 2 becomes case 1. Its name
+        # says `when_other_records_exist`: the point is that a fabricated id
+        # misses even when the checkpointer HAS records, so not-found is a
+        # lookup miss rather than an empty-store artefact.
+        populate = cast("int", spec.get("populate_checkpointer_via_runs", 0))
+        for _ in range(populate):
+            await compiled.invoke(initial_state)
+        # Non-vacuity on the setup: the assertion below is identical whether the
+        # store holds records or not, so a populate loop that wrote nothing
+        # would leave this case silently testing the empty-store path again.
+        assert len(await capturing.list()) == populate, (
+            f"populate_checkpointer_via_runs={populate} left "
+            f"{len(await capturing.list())} records; the setup did not take"
+        )
+        with pytest.raises(CheckpointNotFound) as excinfo:
+            await compiled.invoke(initial_state, resume_invocation=ghost)
+        assert excinfo.value.category == declared["category"], (
+            f"expected category {declared['category']!r}, got {excinfo.value.category!r}"
+        )
+        if "transient" in declared:
+            # Assertable rather than documentary: retry classifies on category
+            # membership, so `transient: false` says this category must not be
+            # in the set a retry would re-run on.
+            actual_transient = excinfo.value.category in TRANSIENT_CATEGORIES
+            assert actual_transient == declared["transient"], (
+                f"{excinfo.value.category!r} transient={actual_transient}, "
+                f"fixture declares {declared['transient']}"
+            )
+        return
+
     # Run #1 — first invocation. May succeed or fail per fixture.
     first_run_expected_error = spec.get("first_run_expected_error")
     # crash_injection (proposal 0070): a simulated crash at a checkpoint
@@ -885,13 +937,6 @@ async def _run_one_case(spec: Mapping[str, Any], *, top_level: Mapping[str, Any]
                     f"every_save_assertions: save[{save_idx}].{key} mismatch — "
                     f"actual={actual_value!r}, expected={expected_value!r}"
                 )
-
-    # ----- checkpoint_not_found expected (fixture 030) -----
-    if expected.get("expected_error") == "checkpoint_not_found":
-        ghost = cast("str", expected.get("resume_invocation_id", "ghost"))
-        with pytest.raises(CheckpointNotFound):
-            await compiled.invoke(initial_state, resume_invocation=ghost)
-        return
 
     # ----- Resume path (fixtures 025, 029, 031, 048-054, 056) -----
     resume_block = spec.get("resume")
