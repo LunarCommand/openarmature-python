@@ -44,6 +44,7 @@ from openarmature.graph.middleware import (
 )
 
 from .adapter import ObserverFixture, build_graph, make_observer_fn
+from .harness.subgraph_placement import resolve_subgraph_mappings
 from .middleware_seam import (
     ErrorRaiserMiddleware,
     ErrorRecoveryMiddleware,
@@ -576,6 +577,14 @@ async def test_pipeline_utility_fixture(
                 merged = {**graph_block, **merged}
             for k, v in shared_subgraph_blocks.items():
                 merged.setdefault(k, v)
+            # Section 5.4 ranks per NAME. `setdefault` keeps the case's whole
+            # block when it has one, dropping a name the document declares and
+            # the case omits. The singular forms stay with the setdefault above:
+            # this runner consumes them separately, so folding them into the
+            # mapping would build the same subgraph twice.
+            ranked = resolve_subgraph_mappings(spec, case)
+            if ranked:
+                merged["subgraphs"] = ranked
             try:
                 await _run_one(merged, monkeypatch)
             except AssertionError as e:

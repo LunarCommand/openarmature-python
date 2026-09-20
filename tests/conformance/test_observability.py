@@ -52,6 +52,7 @@ pytest.importorskip("opentelemetry.sdk.trace")
 from openarmature.observability.otel import OTelObserver  # noqa: E402
 
 from .adapter import build_graph  # noqa: E402
+from .harness.subgraph_placement import resolve_subgraphs  # noqa: E402
 
 if TYPE_CHECKING:
     from opentelemetry.sdk.trace import ReadableSpan
@@ -7072,16 +7073,11 @@ def _assert_orphan_fallback_invariants(
 
 
 def _merged_subgraph_specs(case: Mapping[str, Any], spec: Mapping[str, Any]) -> dict[str, Any]:
-    """Subgraph declarations, from either level the corpus uses."""
-    # conformance-adapter §5.4 documents `subgraphs:` as a FIXTURE TOP-LEVEL
-    # block and 153 puts it there, while 152 uses the case-level form that
-    # eighteen fixtures across four capabilities use and none of which also
-    # carries a top-level block. Spec has confirmed the case-level form is
-    # sanctioned and that §5.4 is what needs correcting, so accept both.
-    merged: dict[str, Any] = {}
-    for source in (spec, case):
-        merged.update(cast("dict[str, Any]", source.get("subgraphs") or {}))
-    return merged
+    """Subgraph declarations in scope for this case, per section 5.4."""
+    # Delegated so the three sites, the innermost-wins ranking and the same-site
+    # tie-break are stated once. This read two of the three and had no tie-break,
+    # which conformance-adapter fixture 001 exists to catch.
+    return cast("dict[str, Any]", resolve_subgraphs(spec, case))
 
 
 def _subgraph_refs(node_spec: Mapping[str, Any]) -> set[str]:

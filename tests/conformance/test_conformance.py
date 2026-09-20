@@ -41,6 +41,7 @@ from .adapter import (
     make_observer_fn,
     normalize_expected_event,
 )
+from .harness.subgraph_placement import resolve_subgraph_mappings
 
 CONFORMANCE_DIR = (
     Path(__file__).resolve().parents[2] / "openarmature-spec" / "spec" / "graph-engine" / "conformance"
@@ -218,6 +219,14 @@ async def test_runtime_fixture(fixture_path: Path) -> None:
         shared = {k: spec[k] for k in ("subgraph", "subgraphs") if k in spec}
         for case in cast("list[dict[str, Any]]", spec["cases"]):
             merged = {**shared, **case} if shared else case
+            # Section 5.4 ranks per NAME. The key-level fold above replaces the
+            # document's whole block when a case declares any, dropping a name
+            # the document declares and the case omits. The singular form is
+            # left to the fold: this runner consumes it separately, so folding
+            # it in here would build the same subgraph twice.
+            ranked = resolve_subgraph_mappings(spec, case)
+            if ranked:
+                merged = {**merged, "subgraphs": ranked}
             try:
                 await _run_runtime_case(merged, fixture_path.stem)
             except AssertionError as e:
