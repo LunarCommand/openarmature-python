@@ -12,7 +12,7 @@ these the fix for it is asserted by nothing.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, cast
 
 from .harness.subgraph_placement import (
     graph_spec_for,
@@ -86,3 +86,46 @@ def test_the_graph_container_replaces_only_the_graph_half() -> None:
     # A case carrying the specification directly reads back as itself.
     direct: dict[str, Any] = {"name": "c", "entry": "b", "nodes": {}}
     assert graph_spec_for(direct)["entry"] == "b"
+
+
+_INNER: dict[str, Any] = {
+    "state": {"fields": {"which": {"type": "string", "default": ""}}},
+    "entry": "mark",
+    "nodes": {"mark": {"update": {"which": "inner"}}},
+    "edges": [{"from": "mark", "to": "END"}],
+}
+
+
+async def test_a_container_case_declaring_subgraphs_runs_through_the_dispatcher() -> None:
+    # The seam neither half covered: the unit tests above drive the resolver and
+    # the fixtures drive the runners, so a container case going THROUGH a routed
+    # runner was exercised by nothing. It raised a duplicate-name ValueError
+    # before the case could run, because the ranked map was hoisted alongside the
+    # container's own declarations rather than replacing them, and the runner
+    # collects from both when a container is present.
+    #
+    # No graph-engine fixture declares subgraphs inside a container today, which
+    # is why the corpus stayed green. It is site 3 of the three section 5.4
+    # sanctions, so it is precisely what this adoption exists to enable.
+    from . import test_conformance as runtime_runner
+
+    case: dict[str, Any] = {
+        "name": "container_with_subgraphs",
+        "graph": {
+            "state": {"fields": {"resolved": {"type": "string", "default": ""}}},
+            "entry": "run",
+            "nodes": {"run": {"subgraph": "pick", "outputs": {"resolved": "which"}}},
+            "edges": [{"from": "run", "to": "END"}],
+            "subgraphs": {"pick": _INNER},
+        },
+        "initial_state": {},
+        "expected": {"final_state": {"resolved": "inner"}},
+    }
+    merged = dict(case)
+    ranked = resolve_subgraph_mappings({"cases": [case]}, case)
+    assert ranked, "the container's declaration must reach the ranked map"
+    merged["subgraphs"] = ranked
+    container = cast("dict[str, Any]", merged["graph"])
+    merged["graph"] = {k: v for k, v in container.items() if k != "subgraphs"}
+
+    await runtime_runner._run_runtime_case(merged, "synthetic")  # noqa: SLF001

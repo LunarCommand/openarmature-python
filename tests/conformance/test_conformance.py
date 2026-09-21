@@ -227,6 +227,16 @@ async def test_runtime_fixture(fixture_path: Path) -> None:
             ranked = resolve_subgraph_mappings(spec, case)
             if ranked:
                 merged = {**merged, "subgraphs": ranked}
+                # The ranked map REPLACES the declarations rather than joining
+                # them. `_run_runtime_case` collects from the case and from the
+                # `graph:` block when a container is present, so leaving the
+                # container's own map beside the hoisted one registers every
+                # inner name twice and raises before the case ever runs.
+                container = merged.get("graph")
+                if isinstance(container, dict) and "subgraphs" in container:
+                    merged["graph"] = {
+                        k: v for k, v in cast("dict[str, Any]", container).items() if k != "subgraphs"
+                    }
             try:
                 await _run_runtime_case(merged, fixture_path.stem)
             except AssertionError as e:
