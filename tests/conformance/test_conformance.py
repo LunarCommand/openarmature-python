@@ -41,6 +41,7 @@ from .adapter import (
     make_observer_fn,
     normalize_expected_event,
 )
+from .harness.subgraph_placement import resolve_subgraphs
 
 CONFORMANCE_DIR = (
     Path(__file__).resolve().parents[2] / "openarmature-spec" / "spec" / "graph-engine" / "conformance"
@@ -218,6 +219,24 @@ async def test_runtime_fixture(fixture_path: Path) -> None:
         shared = {k: spec[k] for k in ("subgraph", "subgraphs") if k in spec}
         for case in cast("list[dict[str, Any]]", spec["cases"]):
             merged = {**shared, **case} if shared else case
+            # Section 5.4 ranks per NAME. The key-level fold above replaces the
+            # document's whole block when a case declares any, dropping a name
+            # the document declares and the case omits. The singular form is
+            # left to the fold: this runner consumes it separately, so folding
+            # it in here would build the same subgraph twice.
+            ranked = resolve_subgraphs(spec, case)
+            if ranked:
+                merged = {**merged, "subgraphs": ranked}
+                # The ranked map REPLACES the declarations rather than joining
+                # them. `_run_runtime_case` collects from the case and from the
+                # `graph:` block when a container is present, so leaving the
+                # container's own map beside the hoisted one registers every
+                # inner name twice and raises before the case ever runs.
+                container = merged.get("graph")
+                if isinstance(container, dict) and "subgraphs" in container:
+                    merged["graph"] = {
+                        k: v for k, v in cast("dict[str, Any]", container).items() if k != "subgraphs"
+                    }
             try:
                 await _run_runtime_case(merged, fixture_path.stem)
             except AssertionError as e:
@@ -260,15 +279,16 @@ async def _run_runtime_case(spec: Mapping[str, Any], fixture_id: str) -> None:
     # fixtures (040-042) declare theirs at the fixture top level (threaded into
     # the case by the dispatcher) or inside the wrapped graph spec, so collect
     # from both.
+    # One winning declaration per name, resolved once (section 5.4), then compiled
+    # once here. Collecting the singular form separately cannot rank against a
+    # mapping at another site: whichever the caller happens to apply last wins,
+    # which inverts site-before-form wherever the two forms sit at different
+    # sites. Every singular declaration in the corpus carries a `name`, so the
+    # resolved mapping holds them all.
     subgraphs: dict[str, Any] = {}
-    sources = [spec] if graph_spec is spec else [spec, graph_spec]
-    for source in sources:
-        if "subgraph" in source:
-            sub_spec = source["subgraph"]
-            sub_built = build_graph(sub_spec, model_name=f"{sub_spec['name'].title()}State")
-            subgraphs[sub_spec["name"]] = sub_built.builder.compile()
-        if "subgraphs" in source:
-            _compile_subgraphs_map(source["subgraphs"], subgraphs)
+    declared = resolve_subgraphs(spec, None if graph_spec is spec else {"graph": graph_spec})
+    if declared:
+        _compile_subgraphs_map(declared, subgraphs)
 
     built = build_graph(graph_spec, subgraphs=subgraphs)
 

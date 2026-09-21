@@ -72,6 +72,7 @@ _RUN_DIRS: tuple[str, ...] = (
     "observability",
     "prompt-management",
     "retrieval-provider",
+    "conformance-adapter",
 )
 
 # Modules whose own `_fixture_paths()` is the authority on what they collect.
@@ -105,6 +106,7 @@ _COLLECTORS: tuple[tuple[str, tuple[str, ...], str | None], ...] = (
     ("test_retrieval_provider", ("_DEFERRED_FIXTURES",), None),
     ("test_checkpoint", ("_DEFERRED_FIXTURES",), None),
     ("test_state_migration", (), None),
+    ("test_conformance_adapter", ("_DEFERRED_FIXTURES",), None),
 )
 
 # Fixtures a module outside `tests/conformance` drives, by the function whose

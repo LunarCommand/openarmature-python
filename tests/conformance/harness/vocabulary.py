@@ -180,10 +180,4 @@ UNIMPLEMENTED_CAPABILITIES: dict[str, str] = {
 # is a claim about the library. This says the fixtures are real, the adoption is
 # in flight, and the entry is expected to go away. Folding the two together would
 # let work in progress read as a permanent absence.
-PENDING_ADOPTION: dict[str, str] = {
-    "conformance-adapter": (
-        "proposal 0123. Fixture 001 arrived with spec v0.114.0 and spec ruled it in scope, "
-        "reported as adapter conformance distinct from the five runtime capabilities. "
-        "The runner lands with the 0123 adoption"
-    ),
-}
+PENDING_ADOPTION: dict[str, str] = {}

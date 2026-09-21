@@ -58,6 +58,7 @@ from openarmature.graph import (
 from openarmature.llm import TRANSIENT_CATEGORIES
 
 from .adapter import build_graph
+from .harness.subgraph_placement import resolve_subgraphs
 
 CONFORMANCE_DIR = (
     Path(__file__).resolve().parents[2] / "openarmature-spec" / "spec" / "pipeline-utilities" / "conformance"
@@ -1108,8 +1109,17 @@ def _build_subgraphs_for(
     source values that inner-leaf ``update_from_field`` bodies read, so the
     resume driver can tell which inner instances re-ran vs. skipped.
     """
+    # Section 5.4 ranks per NAME. The merge below replaces the document's whole
+    # block when the case declares any, dropping a name the document declares
+    # and the case omits. The singular form is left in the merge: `_build_subgraphs`
+    # reads it separately, so folding it into the mapping would build the same
+    # subgraph twice.
+    merged = {**dict(top_level), **dict(spec)}
+    ranked = resolve_subgraphs(top_level, spec)
+    if ranked:
+        merged["subgraphs"] = ranked
     return _build_subgraphs(
-        {**dict(top_level), **dict(spec)},
+        merged,
         flaky_per_index_recorders=flaky_per_index_recorders,
         instance_execution_recorders=instance_execution_recorders,
         leaf_value_recorder=leaf_value_recorder,

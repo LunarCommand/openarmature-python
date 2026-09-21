@@ -73,6 +73,7 @@ from .harness.langfuse_real_client import (
     langfuse_sdk_without_egress,
     prime_credential_on,
 )
+from .harness.subgraph_placement import resolve_subgraphs
 from .test_observability import _reset_otel_global_tracer_provider
 
 CONFORMANCE_DIR = (
@@ -653,7 +654,6 @@ async def test_langfuse_fixture(fixture_path: Path) -> None:
         # 030 declares its branch subgraphs at fixture-level (alongside
         # ``cases:``); without this fold the per-case build can't
         # resolve ``branches.fraud_check.subgraph: fraud_check``.
-        fixture_subgraphs = cast("dict[str, Any] | None", spec.get("subgraphs"))
         fixture_inner_subgraphs = cast("dict[str, Any] | None", spec.get("inner_subgraphs"))
         cases = cast("list[dict[str, Any]]", spec["cases"])
         # Why a case was left out, for the failure message below. The load-bearing
@@ -679,8 +679,13 @@ async def test_langfuse_fixture(fixture_path: Path) -> None:
                 report_recognized_skip(fixture_stem, case_name, gate)
                 continue
             ran += 1
-            if fixture_subgraphs is not None and "subgraphs" not in case:
-                case["subgraphs"] = fixture_subgraphs
+            # Section 5.4 ranks per NAME, not per site wholesale. Propagating the
+            # document block only when the case declares none drops any name the
+            # document declares and the case does not; no fixture relies on that
+            # today, which is exactly why it would have gone unnoticed.
+            resolved_subgraphs = resolve_subgraphs(spec, case)
+            if resolved_subgraphs:
+                case["subgraphs"] = resolved_subgraphs
             if fixture_inner_subgraphs is not None and "inner_subgraphs" not in case:
                 case["inner_subgraphs"] = fixture_inner_subgraphs
             try:
