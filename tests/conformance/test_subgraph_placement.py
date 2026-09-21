@@ -129,3 +129,34 @@ async def test_a_container_case_declaring_subgraphs_runs_through_the_dispatcher(
     merged["graph"] = {k: v for k, v in container.items() if k != "subgraphs"}
 
     await runtime_runner._run_runtime_case(merged, "synthetic")  # noqa: SLF001
+
+
+def test_only_a_runner_that_ignores_the_singular_form_uses_the_folding_resolver() -> None:
+    # Which entry point a runner takes is a decision made by reading its code,
+    # and reading a seam is what let the container double-registration through.
+    # `resolve_subgraphs` folds a named singular declaration into its mapping,
+    # so a runner that also consumes `subgraph:` itself processes that body
+    # twice. It survived only because the operations happened to be idempotent.
+    #
+    # Pinned rather than documented: the rule lives in the resolver's docstring
+    # and was violated by two runners the day it was written.
+    import pathlib
+
+    here = pathlib.Path(__file__).resolve().parent
+    folding: set[str] = set()
+    mapping_only: set[str] = set()
+    for path in sorted(here.glob("test_*.py")):
+        if path.name == pathlib.Path(__file__).name:
+            continue
+        src = path.read_text()
+        if "resolve_subgraph_mappings" in src:
+            mapping_only.add(path.name)
+        elif "resolve_subgraphs" in src:
+            folding.add(path.name)
+
+    assert mapping_only, "no runner uses the mapping-only resolver; the scan is broken"
+    assert folding == {"test_conformance_adapter.py"}, (
+        f"the folding resolver is for a runner that does NOT read a site-level `subgraph:` "
+        f"declaration. Used by {sorted(folding)}; only test_conformance_adapter qualifies. "
+        "A runner that consumes the singular form wants resolve_subgraph_mappings."
+    )

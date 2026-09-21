@@ -52,7 +52,7 @@ pytest.importorskip("opentelemetry.sdk.trace")
 from openarmature.observability.otel import OTelObserver  # noqa: E402
 
 from .adapter import build_graph  # noqa: E402
-from .harness.subgraph_placement import resolve_subgraphs  # noqa: E402
+from .harness.subgraph_placement import resolve_subgraph_mappings  # noqa: E402
 
 if TYPE_CHECKING:
     from opentelemetry.sdk.trace import ReadableSpan
@@ -7077,7 +7077,7 @@ def _merged_subgraph_specs(case: Mapping[str, Any], spec: Mapping[str, Any]) -> 
     # Delegated so the three sites, the innermost-wins ranking and the same-site
     # tie-break are stated once. This read two of the three and had no tie-break,
     # which conformance-adapter fixture 001 exists to catch.
-    return cast("dict[str, Any]", resolve_subgraphs(spec, case))
+    return cast("dict[str, Any]", resolve_subgraph_mappings(spec, case))
 
 
 def _subgraph_refs(node_spec: Mapping[str, Any]) -> set[str]:
