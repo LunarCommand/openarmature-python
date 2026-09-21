@@ -73,7 +73,7 @@ from .harness.langfuse_real_client import (
     langfuse_sdk_without_egress,
     prime_credential_on,
 )
-from .harness.subgraph_placement import resolve_subgraph_mappings
+from .harness.subgraph_placement import resolve_subgraphs
 from .test_observability import _reset_otel_global_tracer_provider
 
 CONFORMANCE_DIR = (
@@ -683,7 +683,7 @@ async def test_langfuse_fixture(fixture_path: Path) -> None:
             # document block only when the case declares none drops any name the
             # document declares and the case does not; no fixture relies on that
             # today, which is exactly why it would have gone unnoticed.
-            resolved_subgraphs = resolve_subgraph_mappings(spec, case)
+            resolved_subgraphs = resolve_subgraphs(spec, case)
             if resolved_subgraphs:
                 case["subgraphs"] = resolved_subgraphs
             if fixture_inner_subgraphs is not None and "inner_subgraphs" not in case:

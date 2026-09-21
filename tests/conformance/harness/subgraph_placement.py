@@ -69,6 +69,14 @@ def resolve_subgraphs(document: Any, case: Any = None) -> dict[str, dict[str, An
     application order rather than as a search. A name declared only at an outer
     site survives, since a top-level declaration stays in scope and is merely
     shadowed where an inner site rebinds it.
+
+    This is the ONLY entry point on purpose. A narrower one that ranked the
+    plural form alone, leaving each caller its own singular handling, cannot
+    express site-before-form: the resolver sees only mappings, the caller sees
+    only its own inline declaration, and nothing ranks across the two. A
+    document-level mapping then beats a case-level inline declaration, which
+    inverts the rule. One winning declaration per name, resolved here, compiled
+    once by the caller.
     """
     resolved: dict[str, dict[str, Any]] = {}
     resolved.update(_bodies_at(document))
@@ -76,34 +84,6 @@ def resolve_subgraphs(document: Any, case: Any = None) -> dict[str, dict[str, An
         resolved.update(_bodies_at(case))
         if isinstance(case, dict):
             resolved.update(_bodies_at(cast("dict[str, Any]", case).get("graph")))
-    return resolved
-
-
-def resolve_subgraph_mappings(document: Any, case: Any = None) -> dict[str, dict[str, Any]]:
-    """The ``subgraphs:`` mappings in scope for ``case``, ranked by site.
-
-    The same site ranking as :func:`resolve_subgraphs`, over the plural form
-    only. For a caller that consumes the singular ``subgraph:`` itself: folding
-    that body into the returned mapping would hand it back a second time under
-    its declared name, and it would build the same subgraph twice.
-
-    The same-site tie-break is not expressible here and does not need to be. It
-    decides between the two forms at one site, and a caller using this function
-    is resolving one form; no site in the corpus declares both anyway.
-    """
-    resolved: dict[str, dict[str, Any]] = {}
-    for site in (
-        document,
-        case,
-        cast("dict[str, Any]", case).get("graph") if isinstance(case, dict) else None,
-    ):
-        if not isinstance(site, dict):
-            continue
-        plural = cast("dict[str, Any]", site).get("subgraphs")
-        if isinstance(plural, dict):
-            for name, body in cast("dict[str, Any]", plural).items():
-                if isinstance(body, dict):
-                    resolved[name] = cast("dict[str, Any]", body)
     return resolved
 
 

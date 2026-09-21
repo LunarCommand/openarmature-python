@@ -44,7 +44,7 @@ from openarmature.graph.middleware import (
 )
 
 from .adapter import ObserverFixture, build_graph, make_observer_fn
-from .harness.subgraph_placement import resolve_subgraph_mappings
+from .harness.subgraph_placement import resolve_subgraphs
 from .middleware_seam import (
     ErrorRaiserMiddleware,
     ErrorRecoveryMiddleware,
@@ -582,7 +582,7 @@ async def test_pipeline_utility_fixture(
             # the case omits. The singular forms stay with the setdefault above:
             # this runner consumes them separately, so folding them into the
             # mapping would build the same subgraph twice.
-            ranked = resolve_subgraph_mappings(spec, case)
+            ranked = resolve_subgraphs(spec, case)
             if ranked:
                 merged["subgraphs"] = ranked
             try:

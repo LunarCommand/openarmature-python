@@ -58,7 +58,7 @@ from openarmature.graph import (
 from openarmature.llm import TRANSIENT_CATEGORIES
 
 from .adapter import build_graph
-from .harness.subgraph_placement import resolve_subgraph_mappings
+from .harness.subgraph_placement import resolve_subgraphs
 
 CONFORMANCE_DIR = (
     Path(__file__).resolve().parents[2] / "openarmature-spec" / "spec" / "pipeline-utilities" / "conformance"
@@ -1115,7 +1115,7 @@ def _build_subgraphs_for(
     # reads it separately, so folding it into the mapping would build the same
     # subgraph twice.
     merged = {**dict(top_level), **dict(spec)}
-    ranked = resolve_subgraph_mappings(top_level, spec)
+    ranked = resolve_subgraphs(top_level, spec)
     if ranked:
         merged["subgraphs"] = ranked
     return _build_subgraphs(
