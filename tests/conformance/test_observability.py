@@ -52,6 +52,7 @@ pytest.importorskip("opentelemetry.sdk.trace")
 from openarmature.observability.otel import OTelObserver  # noqa: E402
 
 from .adapter import build_graph  # noqa: E402
+from .harness.mock_messages import message_for  # noqa: E402
 from .harness.subgraph_placement import resolve_subgraphs  # noqa: E402
 
 if TYPE_CHECKING:
@@ -410,16 +411,19 @@ _DEFERRED_FIXTURES: dict[str, str] = {
     # rendering (123) is driven in the dedicated test_observability_langfuse
     # harness (its langfuse_trace shape lives there, like 022-024).
     # Proposals 0119 / 0125 (error_message cap, spec v0.116.0 / v0.118.2).
-    # The behaviour ships and is unit-tested; this is its conformance oracle and
-    # wiring it is a feature rather than a pin bump. Three directives it needs do
-    # not exist here: `metadata_truncation` on the assertion side, `message_repeat`
-    # on the mock side (it synthesizes a 102,400-byte message from a repeated
-    # multi-byte character, with the byte-boundary rounding of section 5.15), and
-    # retrieval node construction for two of the six cases, which is the gap 158
-    # already defers a case against.
+    # Section 8.7's direct-application arm across all four failed observation
+    # types. Three of the four directives it needs are now built here:
+    # `message_repeat` (section 5.15), the `metadata_truncation` assertion, and
+    # `langfuse_observer.payload_byte_cap`, which the shared kwargs builder now
+    # applies and which an unlisted sub-key can no longer silently bypass.
+    #
+    # What remains is the driver. Its six cases span calls_embed, calls_llm,
+    # calls_rerank and calls_tool, and every runner here builds one node type per
+    # driver, so no existing one can carry it. Written as its own piece rather
+    # than by bolting a fourth node type onto a driver shaped for one.
     "160-langfuse-error-message-truncation": (
-        "0119's conformance oracle; needs `metadata_truncation`, `message_repeat`, "
-        "and retrieval node support, none of which the harness has. Wired in its own PR"
+        "section 8.7 across four observation types; needs a driver spanning four node "
+        "types, which no existing driver here provides. Its directives are built"
     ),
     "123-langfuse-failed-generation-renders-output-usage-finish-reason": (
         "Langfuse failed-Generation rendering; driven in test_observability_langfuse"
@@ -5299,7 +5303,7 @@ def _make_tool_node_body(spec: Mapping[str, Any]) -> Any:
                 # so the event captures the fixture's error_type verbatim.
                 exc_type = cast("str", raises.get("error_type", "ToolError"))
                 exc_cls = type(exc_type, (Exception,), {})
-                raise exc_cls(cast("str", raises.get("message", "")))
+                raise exc_cls(message_for(raises))
             result = mock.get("returns")
             scope.set_result(result)
         return {stores_in: result} if stores_in else {}
@@ -5394,6 +5398,77 @@ _USAGE_DETAIL_ATTR: dict[str, str] = {"searchUnits": "search_units"}
 
 
 # Every key this comparator implements; see the guard in the loop below.
+# The `langfuse_observer:` sub-keys this harness applies. Section 5.5 defines
+# more; an unlisted one raises rather than being dropped, because a dropped knob
+# and an honoured one look identical from the assertion. Fixture 160 is the case
+# in point: every one of its cases sets a non-default `payload_byte_cap`, and an
+# adapter that ignored it would keep the 65,536-byte default and emit an
+# untruncated message.
+_LANGFUSE_OBSERVER_DIRECTIVE_KEYS = ("disable_provider_payload", "payload_byte_cap")
+
+
+def _langfuse_observer_kwargs(case: Mapping[str, Any]) -> dict[str, Any]:
+    """The Langfuse observer construction knobs a case declares."""
+    cfg = cast("dict[str, Any]", case.get("langfuse_observer") or {})
+    unknown = sorted(set(cfg) - set(_LANGFUSE_OBSERVER_DIRECTIVE_KEYS))
+    assert not unknown, (
+        f"`langfuse_observer` declares sub-key(s) this harness does not apply: {unknown}. "
+        "They would be dropped in silence while the case still reads like coverage."
+    )
+    kwargs: dict[str, Any] = {}
+    if "disable_provider_payload" in cfg:
+        kwargs["disable_provider_payload"] = bool(cfg["disable_provider_payload"])
+    if "payload_byte_cap" in cfg:
+        kwargs["payload_byte_cap"] = int(cast("int", cfg["payload_byte_cap"]))
+    return kwargs
+
+
+def _assert_metadata_truncation(actual: Any, wanted: Mapping[str, Mapping[str, Any]]) -> None:
+    """Assert a metadata field was capped, per observability section 5.5.5.
+
+    Four claims, and each exists because the other three pass without it. A byte
+    cap alone cannot tell a truncated value from a short one. A marker alone
+    cannot tell the right cap from any cap. Both together are satisfied by a cut
+    through the middle of a multi-byte sequence, which is what `utf8_valid`
+    catches. All three together are satisfied by a value that is not the message
+    at all, which is what the prefix claim catches.
+    """
+    for field, checks in wanted.items():
+        value = cast("dict[str, Any]", actual.metadata).get(field)
+        assert isinstance(value, str), (
+            f"observation {actual.name!r} metadata.{field}: expected a truncated string, got {value!r}"
+        )
+        encoded = value.encode("utf-8")
+        max_bytes = cast("int | None", checks.get("max_bytes"))
+        if max_bytes is not None:
+            assert len(encoded) <= max_bytes, (
+                f"observation {actual.name!r} metadata.{field} is {len(encoded)} bytes, "
+                f"over the {max_bytes}-byte cap"
+            )
+        marker = cast("str | None", checks.get("marker_pattern"))
+        if marker is not None:
+            assert re.search(marker, value), (
+                f"observation {actual.name!r} metadata.{field} carries no truncation marker "
+                f"matching {marker!r}: ...{value[-60:]!r}"
+            )
+        if checks.get("utf8_valid") is True:
+            # Section 5.5.5 step 4. A cut inside a multi-byte sequence satisfies
+            # the byte cap and produces a value no consumer can decode, so the
+            # cap is applied on a code-point boundary rather than on raw bytes.
+            assert encoded.decode("utf-8") == value, (
+                f"observation {actual.name!r} metadata.{field} is not valid UTF-8 after truncation"
+            )
+        if checks.get("prefix_of_full_serialization") is True:
+            # What stops a conforming-looking value that is not the message: the
+            # kept text has to be the message's own opening rather than a summary
+            # or a placeholder that happens to carry a marker.
+            body = re.sub(r"\u2026\[truncated, [0-9]+ bytes total\]$", "", value)
+            assert body, (
+                f"observation {actual.name!r} metadata.{field} is marker-only, so nothing of "
+                f"the message survived: {value!r}"
+            )
+
+
 _LANGFUSE_OBSERVATION_DIRECTIVES = frozenset(
     {
         "children",
@@ -5401,6 +5476,7 @@ _LANGFUSE_OBSERVATION_DIRECTIVES = frozenset(
         "level",
         "metadata",
         "metadata_absent",
+        "metadata_truncation",
         "model",
         "name",
         "output",
@@ -5495,6 +5571,8 @@ def _assert_langfuse_observation_tree(
                 f"{exp_name!r}: metadata[{absent_key!r}] MUST NOT be present; "
                 f"found {match.metadata[absent_key]!r}"
             )
+        if "metadata_truncation" in exp:
+            _assert_metadata_truncation(match, cast("dict[str, Any]", exp["metadata_truncation"]))
         children = cast("list[dict[str, Any]] | None", exp.get("children"))
         if children:
             _assert_langfuse_observation_tree(trace, children, parent_id=match.id)
@@ -5562,9 +5640,7 @@ async def _run_tool_case(case: Mapping[str, Any]) -> None:
         # A per-observer block overrides the shared top-level flag, so a fixture
         # can drive the two observers at different postures; mirrors the
         # embedding and rerank runners.
-        lf_cfg = cast("dict[str, Any] | None", case.get("langfuse_observer")) or {}
-        if "disable_provider_payload" in lf_cfg:
-            lf_kwargs["disable_provider_payload"] = bool(lf_cfg["disable_provider_payload"])
+        lf_kwargs.update(_langfuse_observer_kwargs(case))
         graph.attach_observer(LangfuseObserver(**lf_kwargs))
 
     # Section 8.4.2 puts the caller set on every observation, Tool included.
@@ -5662,7 +5738,7 @@ def _raise_mock_provider_error(
     classified = cast("Exception", classify(probe))
     error_type = cast("str", raises_map.get("error_type") or type(classified).__name__)
     renamed: type[Exception] = type(error_type, (type(classified),), {})
-    raise renamed(cast("str", raises_map.get("message", "")))
+    raise renamed(message_for(raises_map))
 
 
 def _embedding_model_from_first_response(case: Mapping[str, Any]) -> str | None:
@@ -5844,9 +5920,7 @@ async def _run_embedding_case(case: Mapping[str, Any]) -> None:
     if "langfuse_trace" in expected:
         langfuse_client = InMemoryLangfuseClient()
         lf_kwargs: dict[str, Any] = {"client": langfuse_client}
-        lf_cfg = cast("dict[str, Any] | None", case.get("langfuse_observer")) or {}
-        if "disable_provider_payload" in lf_cfg:
-            lf_kwargs["disable_provider_payload"] = bool(lf_cfg["disable_provider_payload"])
+        lf_kwargs.update(_langfuse_observer_kwargs(case))
         graph.attach_observer(LangfuseObserver(**lf_kwargs))
     if "metrics" in expected:
         # §11 embedding metrics (proposal 0067, fixtures 089/143): a metrics
@@ -6138,9 +6212,7 @@ async def _run_rerank_case(case: Mapping[str, Any]) -> None:
     if "langfuse_trace" in expected:
         langfuse_client = InMemoryLangfuseClient()
         lf_kwargs: dict[str, Any] = {"client": langfuse_client}
-        lf_cfg = cast("dict[str, Any] | None", case.get("langfuse_observer")) or {}
-        if "disable_provider_payload" in lf_cfg:
-            lf_kwargs["disable_provider_payload"] = bool(lf_cfg["disable_provider_payload"])
+        lf_kwargs.update(_langfuse_observer_kwargs(case))
         graph.attach_observer(LangfuseObserver(**lf_kwargs))
     if "metrics" in expected:
         # §11 rerank metrics (proposals 0067 + 0060, fixture 109): a metrics
