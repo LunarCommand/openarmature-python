@@ -5469,7 +5469,18 @@ def _assert_metadata_truncation(actual: Any, wanted: Mapping[str, Mapping[str, A
         assert isinstance(value, str), (
             f"observation {actual.name!r} metadata.{field}: expected a truncated string, got {value!r}"
         )
-        encoded = value.encode("utf-8")
+        # Encoding is where the section 5.5.5 step 4 failure actually surfaces in
+        # a Python adapter. A `str` cannot hold invalid UTF-8, so a cut through a
+        # multi-byte sequence does not arrive here as a malformed value; it
+        # arrives as a surrogate-bearing string that will not encode. Catching
+        # that is what makes `utf8_valid` falsifiable rather than a claim the
+        # language satisfies for free.
+        try:
+            encoded = value.encode("utf-8")
+        except UnicodeEncodeError as exc:
+            raise AssertionError(
+                f"observation {actual.name!r} metadata.{field} is not valid UTF-8 after truncation: {exc}"
+            ) from exc
         max_bytes = cast("int | None", checks.get("max_bytes"))
         if max_bytes is not None:
             assert len(encoded) <= max_bytes, (
