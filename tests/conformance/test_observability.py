@@ -417,13 +417,19 @@ _DEFERRED_FIXTURES: dict[str, str] = {
     # `langfuse_observer.payload_byte_cap`, which the shared kwargs builder now
     # applies and which an unlisted sub-key can no longer silently bypass.
     #
-    # What remains is the driver. Its six cases span calls_embed, calls_llm,
-    # calls_rerank and calls_tool, and every runner here builds one node type per
-    # driver, so no existing one can carry it. Written as its own piece rather
-    # than by bolting a fourth node type onto a driver shaped for one.
+    # What remains is the driver, and one claim that rides with it. Its six cases
+    # span calls_embed, calls_llm, calls_rerank and calls_tool, and every runner
+    # here builds one node type per driver, so no existing one can carry it.
+    #
+    # `prefix_of_full_serialization` lands with that driver too. Deciding whether
+    # the kept text is the message's own opening needs the pre-truncation
+    # message, which is known where the case is built; the tree comparator sees
+    # only the emitted observation. It raises there rather than asserting
+    # something weaker under a name that promises more.
     "160-langfuse-error-message-truncation": (
         "section 8.7 across four observation types; needs a driver spanning four node "
-        "types, which no existing driver here provides. Its directives are built"
+        "types, which no existing driver here provides, and that driver is where "
+        "`prefix_of_full_serialization` gets its input. Its other directives are built"
     ),
     "123-langfuse-failed-generation-renders-output-usage-finish-reason": (
         "Langfuse failed-Generation rendering; driven in test_observability_langfuse"
@@ -5409,7 +5415,15 @@ _LANGFUSE_OBSERVER_DIRECTIVE_KEYS = ("disable_provider_payload", "payload_byte_c
 
 def _langfuse_observer_kwargs(case: Mapping[str, Any]) -> dict[str, Any]:
     """The Langfuse observer construction knobs a case declares."""
-    cfg = cast("dict[str, Any]", case.get("langfuse_observer") or {})
+    raw = case.get("langfuse_observer")
+    # Shape first, and named as a shape problem. A string here would otherwise
+    # reach the unknown-key check below, which iterates it into CHARACTERS and
+    # reports them as sub-keys, sending a reader to look for a directive spelling
+    # that was never the issue.
+    assert raw is None or isinstance(raw, Mapping), (
+        f"`langfuse_observer` must be a mapping of construction knobs, got {type(raw).__name__}: {raw!r}"
+    )
+    cfg = cast("dict[str, Any]", raw or {})
     unknown = sorted(set(cfg) - set(_LANGFUSE_OBSERVER_DIRECTIVE_KEYS))
     assert not unknown, (
         f"`langfuse_observer` declares sub-key(s) this harness does not apply: {unknown}. "
@@ -5419,19 +5433,36 @@ def _langfuse_observer_kwargs(case: Mapping[str, Any]) -> dict[str, Any]:
     if "disable_provider_payload" in cfg:
         kwargs["disable_provider_payload"] = bool(cfg["disable_provider_payload"])
     if "payload_byte_cap" in cfg:
-        kwargs["payload_byte_cap"] = int(cast("int", cfg["payload_byte_cap"]))
+        cap = cfg["payload_byte_cap"]
+        # A cap at or below zero cannot produce a truncated value at all, so a
+        # case declaring one passes or fails for reasons unrelated to the rule it
+        # is testing. No floor at section 5.5.5's 256 is enforced: that is stated
+        # as the smallest cap an implementation must ACCEPT, not as a bound on
+        # what a fixture may declare.
+        assert isinstance(cap, int) and not isinstance(cap, bool) and cap > 0, (
+            f"`langfuse_observer.payload_byte_cap` must be a positive integer, got {cap!r}"
+        )
+        kwargs["payload_byte_cap"] = cap
     return kwargs
+
+
+# The claims this comparator can evaluate from the emitted value alone.
+_METADATA_TRUNCATION_CLAIMS = frozenset({"max_bytes", "marker_pattern", "utf8_valid"})
 
 
 def _assert_metadata_truncation(actual: Any, wanted: Mapping[str, Mapping[str, Any]]) -> None:
     """Assert a metadata field was capped, per observability section 5.5.5.
 
-    Four claims, and each exists because the other three pass without it. A byte
+    Three claims, and each exists because the other two pass without it. A byte
     cap alone cannot tell a truncated value from a short one. A marker alone
     cannot tell the right cap from any cap. Both together are satisfied by a cut
     through the middle of a multi-byte sequence, which is what `utf8_valid`
-    catches. All three together are satisfied by a value that is not the message
-    at all, which is what the prefix claim catches.
+    catches.
+
+    All three together are still satisfied by a value that is not the message at
+    all. `prefix_of_full_serialization` is the claim for that, and it is NOT
+    implemented here: answering it needs the pre-truncation message, which this
+    comparator does not receive.
     """
     for field, checks in wanted.items():
         value = cast("dict[str, Any]", actual.metadata).get(field)
@@ -5458,15 +5489,20 @@ def _assert_metadata_truncation(actual: Any, wanted: Mapping[str, Mapping[str, A
             assert encoded.decode("utf-8") == value, (
                 f"observation {actual.name!r} metadata.{field} is not valid UTF-8 after truncation"
             )
-        if checks.get("prefix_of_full_serialization") is True:
-            # What stops a conforming-looking value that is not the message: the
-            # kept text has to be the message's own opening rather than a summary
-            # or a placeholder that happens to carry a marker.
-            body = re.sub(r"\u2026\[truncated, [0-9]+ bytes total\]$", "", value)
-            assert body, (
-                f"observation {actual.name!r} metadata.{field} is marker-only, so nothing of "
-                f"the message survived: {value!r}"
-            )
+        unimplemented = sorted(set(checks) - _METADATA_TRUNCATION_CLAIMS)
+        # `prefix_of_full_serialization` is the one this cannot answer. Deciding
+        # whether the kept text is the message's own opening needs the
+        # pre-truncation message, which is known where the CASE is built and not
+        # here, where only the emitted observation is in scope. Stripping the
+        # marker and checking the remainder is non-empty is not that claim: a
+        # placeholder carrying a marker passes it, which is the substitution the
+        # claim exists to catch. It raises rather than asserting something
+        # weaker under a name that promises more.
+        assert not unimplemented, (
+            f"observation {actual.name!r} metadata.{field} declares truncation claim(s) this "
+            f"harness cannot evaluate: {unimplemented}. They would otherwise pass on a weaker "
+            "check than their name states."
+        )
 
 
 _LANGFUSE_OBSERVATION_DIRECTIVES = frozenset(
