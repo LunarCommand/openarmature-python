@@ -14,22 +14,28 @@ from collections.abc import Mapping
 from typing import Any, cast
 
 
+# Section 9: the category an adapter MUST raise for a malformed directive, or
+# for a violated co-occurrence constraint between two known ones.
 class FixtureSchemaInvalid(ValueError):
-    """A fixture directive the spec requires an adapter to reject (section 9)."""
+    """A fixture directive that is malformed, or that contradicts another."""
 
 
+# Section 5.15: whole repetitions rather than a byte slice is the normative
+# half. These directives feed the section 5.5.5 truncation contract, where the
+# value under test is whether an implementation backtracks to a code-point
+# boundary; a synthesizer that itself cut mid-sequence would hand the assertion
+# an invalid string and hide the defect `utf8_valid` exists to catch.
 def message_for(raises: Mapping[str, Any]) -> str:
     """The message a ``raises`` entry specifies, literal or synthesized.
 
-    Section 5.15: repeat ``char`` to the largest whole number of repetitions
-    whose UTF-8 encoding is at most ``bytes``. Never longer than ``bytes``,
-    possibly shorter when ``char`` is multi-byte, and always valid UTF-8.
+    A ``message_repeat`` of ``{char, bytes}`` repeats ``char`` the largest whole
+    number of times whose UTF-8 encoding is at most ``bytes``: never longer than
+    ``bytes``, possibly shorter when ``char`` is multi-byte, and always valid
+    UTF-8. A caller needing an exact byte count uses a single-byte ``char``.
 
-    Whole repetitions rather than a byte slice is the normative half. These
-    directives feed the section 5.5.5 truncation contract, where the value under
-    test is whether an implementation backtracks to a code-point boundary; a
-    synthesizer that itself cut mid-sequence would hand the assertion an invalid
-    string and hide the defect `utf8_valid` exists to catch.
+    Raises:
+        FixtureSchemaInvalid: the entry carries both ``message`` and
+            ``message_repeat``, or its ``message_repeat`` is malformed.
     """
     # Keyed on presence, not on value: a bare `message_repeat:` in YAML reads
     # back as None, which is the directive supplied rather than omitted.

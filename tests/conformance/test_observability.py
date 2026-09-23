@@ -5403,7 +5403,6 @@ def _build_tool_graph(case: Mapping[str, Any]) -> tuple[Any, type[Any], list[Any
 _USAGE_DETAIL_ATTR: dict[str, str] = {"searchUnits": "search_units"}
 
 
-# Every key this comparator implements; see the guard in the loop below.
 # The `langfuse_observer:` sub-keys this harness applies. Section 5.5 defines
 # more; an unlisted one raises rather than being dropped, because a dropped knob
 # and an honoured one look identical from the assertion. Fixture 160 is the case
@@ -5450,17 +5449,18 @@ def _langfuse_observer_kwargs(case: Mapping[str, Any]) -> dict[str, Any]:
 _METADATA_TRUNCATION_CLAIMS = frozenset({"max_bytes", "marker_pattern", "utf8_valid"})
 
 
+# Observability section 5.5.5. Three claims, and each exists because the other
+# two pass without it. A byte cap alone cannot tell a truncated value from a
+# short one. A marker alone cannot tell the right cap from any cap. Both
+# together are satisfied by a cut through the middle of a multi-byte sequence,
+# which is what `utf8_valid` catches.
 def _assert_metadata_truncation(actual: Any, wanted: Mapping[str, Mapping[str, Any]]) -> None:
-    """Assert a metadata field was capped, per observability section 5.5.5.
+    """Assert a metadata field was capped.
 
-    Three claims, and each exists because the other two pass without it. A byte
-    cap alone cannot tell a truncated value from a short one. A marker alone
-    cannot tell the right cap from any cap. Both together are satisfied by a cut
-    through the middle of a multi-byte sequence, which is what `utf8_valid`
-    catches.
+    Checks each field in ``wanted`` against the claims that field declares.
 
     All three together are still satisfied by a value that is not the message at
-    all. `prefix_of_full_serialization` is the claim for that, and it is NOT
+    all. ``prefix_of_full_serialization`` is the claim for that, and it is not
     implemented here: answering it needs the pre-truncation message, which this
     comparator does not receive.
     """
