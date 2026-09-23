@@ -50,6 +50,40 @@ def test_message_repeat_and_message_are_mutually_exclusive() -> None:
         message_for({"message": "a", "message_repeat": {"char": "b", "bytes": 4}})
 
 
+def test_a_null_valued_message_repeat_still_collides_with_a_literal_message() -> None:
+    # The shape a value-keyed check waves through. YAML writes a bare
+    # `message_repeat:` as None, so reading the VALUE makes the directive
+    # indistinguishable from an omitted one and the mutual-exclusion raise above
+    # never fires. Both keys are supplied; section 5.15 rejects that.
+    with pytest.raises(FixtureSchemaInvalid):
+        message_for({"message": "a", "message_repeat": None})
+
+
+def test_a_malformed_message_repeat_is_rejected_rather_than_defaulted() -> None:
+    # Section 9: `fixture_schema_invalid` covers a malformed type for a known
+    # directive, and the adapter MUST raise rather than infer a default. A
+    # null-valued directive alone read back as the empty message before this,
+    # which is that inference.
+    with pytest.raises(FixtureSchemaInvalid):
+        message_for({"message_repeat": None})
+    with pytest.raises(FixtureSchemaInvalid):
+        message_for({"message_repeat": {"char": "a"}})
+    # A scalar where the directive wants a mapping. `message_repeat: boom` is
+    # the shape a fixture author writes when reaching for the literal form, and
+    # it is the only one the mapping check alone still answers: a null value is
+    # already caught downstream.
+    with pytest.raises(FixtureSchemaInvalid):
+        message_for({"message_repeat": "boom"})
+
+
+def test_an_empty_char_is_rejected_as_a_schema_error_not_a_zero_division() -> None:
+    # `char: ""` measures zero bytes wide, so it reaches `budget // width` and
+    # dies on the division. The raise has to carry section 9's category for a
+    # fixture author to read it as their error rather than ours.
+    with pytest.raises(FixtureSchemaInvalid):
+        message_for({"message_repeat": {"char": "", "bytes": 4}})
+
+
 def test_a_literal_message_passes_through() -> None:
     assert message_for({"message": "boom"}) == "boom"
     assert message_for({}) == ""
