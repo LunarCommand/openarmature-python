@@ -79,7 +79,7 @@ import logging
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Any, Protocol, cast
+from typing import Any, cast
 
 from opentelemetry import context as otel_context
 from opentelemetry import metrics as otel_metrics
@@ -127,6 +127,7 @@ from openarmature.observability.lineage import (
 from openarmature.observability.lineage import (
     DispatchKey as _DispatchKey,
 )
+from openarmature.observability.lineage import LineageEvent as _LineageEvent
 from openarmature.observability.lineage import (
     branch_dispatch_key as _branch_dispatch_key,
 )
@@ -262,31 +263,6 @@ def _read_implementation_version() -> str:
     from openarmature import __version__
 
     return __version__
-
-
-class _LineageEvent(Protocol):
-    """The lineage an event must carry to place a span in the trace tree."""
-
-    # A Protocol rather than `Any`, which is what let a `FailureIsolatedEvent`
-    # reach an opener annotated `event: NodeEvent` and raise on a field it does
-    # not declare. Structural rather than a union, so a new event kind carrying
-    # these fields works without editing a list here.
-    #
-    # `correlation_id`, `subgraph_identities` and `caller_invocation_metadata`
-    # are deliberately absent and read defensively: a Protocol cannot express
-    # "may be absent", and a conforming event may not carry them.
-    @property
-    def namespace(self) -> tuple[str, ...]: ...
-    @property
-    def attempt_index(self) -> int: ...
-    @property
-    def fan_out_index(self) -> int | None: ...
-    @property
-    def branch_name(self) -> str | None: ...
-    @property
-    def fan_out_index_chain(self) -> tuple[int | None, ...]: ...
-    @property
-    def branch_name_chain(self) -> tuple[str | None, ...]: ...
 
 
 def _event_caller_metadata(event: object) -> Mapping[str, Any] | None:

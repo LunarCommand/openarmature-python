@@ -394,6 +394,7 @@ class CallsLlmFromWrapperSpec(_AllowExtras):
 
     phase: Literal["pre", "post"] = "pre"
     messages: list[dict[str, Any]] | None = None
+    await_event_delivery: bool = False
 
 
 class MockToolSpec(_AllowExtras):

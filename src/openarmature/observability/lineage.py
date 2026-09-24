@@ -25,6 +25,7 @@ from typing import Protocol
 
 __all__ = [
     "AugmentationLineage",
+    "LineageEvent",
     "BranchDispatchKey",
     "DispatchKey",
     "branch_dispatch_key",
@@ -43,6 +44,31 @@ def is_strict_prefix(prefix: tuple[str, ...], full: tuple[str, ...]) -> bool:
 def is_prefix_or_equal(prefix: tuple[str, ...], full: tuple[str, ...]) -> bool:
     """True iff ``prefix`` is a prefix of (or equal to) ``full``."""
     return len(prefix) <= len(full) and full[: len(prefix)] == prefix
+
+
+class LineageEvent(Protocol):
+    """The lineage an event must carry to place its observation in the tree."""
+
+    # A Protocol rather than `Any`, which is what let a `FailureIsolatedEvent`
+    # reach an opener annotated `event: NodeEvent` and raise on a field it does
+    # not declare. Structural rather than a union, so a new event kind carrying
+    # these fields works without editing a list here.
+    #
+    # `correlation_id`, `subgraph_identities` and `caller_invocation_metadata`
+    # are deliberately absent and read defensively: a Protocol cannot express
+    # "may be absent", and a conforming event may not carry them.
+    @property
+    def namespace(self) -> tuple[str, ...]: ...
+    @property
+    def attempt_index(self) -> int: ...
+    @property
+    def fan_out_index(self) -> int | None: ...
+    @property
+    def branch_name(self) -> str | None: ...
+    @property
+    def fan_out_index_chain(self) -> tuple[int | None, ...]: ...
+    @property
+    def branch_name_chain(self) -> tuple[str | None, ...]: ...
 
 
 class AugmentationLineage(Protocol):

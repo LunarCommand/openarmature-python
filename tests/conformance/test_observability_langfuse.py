@@ -19,6 +19,7 @@ import contextlib
 import copy
 import json
 import logging
+import uuid
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -1674,7 +1675,9 @@ def _build_134_outer_graph(case: Mapping[str, Any], leaf_sg: Any, *, suffix: str
     return graph, outer_state_cls
 
 
-async def _run_134_and_capture(graph: Any, outer_state_cls: Any) -> tuple[InMemoryLangfuseClient, list[Any]]:
+async def _run_134_and_capture(
+    graph: Any, outer_state_cls: Any, barrier: dict[str, Any] | None = None
+) -> tuple[InMemoryLangfuseClient, list[Any]]:
     # Attach BOTH observers to the SAME invocation so the
     # langfuse_parent_matches_otel_parent invariant can compare the two backends'
     # actually-resolved parents on one workload, not re-assert a Langfuse-only
@@ -1690,7 +1693,10 @@ async def _run_134_and_capture(graph: Any, outer_state_cls: Any) -> tuple[InMemo
     exporter = InMemorySpanExporter()
     graph.attach_observer(LangfuseObserver(client=client))
     graph.attach_observer(OTelObserver(span_processor=SimpleSpanProcessor(exporter)))
-    await graph.invoke(outer_state_cls())
+    invocation_id = str(uuid.uuid4())
+    if barrier is not None:
+        barrier.update(graph=graph, invocation_id=invocation_id)
+    await graph.invoke(outer_state_cls(), invocation_id=invocation_id)
     await graph.drain()
     return client, list(exporter.get_finished_spans())
 
@@ -1871,6 +1877,10 @@ async def _run_langfuse_134_case2(case: Mapping[str, Any]) -> None:
     update_map = dict(cast("dict[str, Any]", guard_spec["update"]))
     wrapper_spec = cast("dict[str, Any]", guard_spec["calls_llm_from_wrapper"])
     messages_in = _materialize_messages(cast("list[dict[str, Any]]", wrapper_spec.get("messages") or []))
+    phase = cast("str", wrapper_spec.get("phase", "pre"))
+    awaits_delivery = bool(wrapper_spec.get("await_event_delivery", False))
+    # Filled by `_run_134_and_capture` below; the wrapper closure is built first.
+    barrier: dict[str, Any] = {}
     rendezvous, gate, total_asks = _build_134_rendezvous(case)
 
     async def _fire_orphan_call() -> None:
@@ -1886,14 +1896,36 @@ async def _run_langfuse_134_case2(case: Mapping[str, Any]) -> None:
             pass
         # Wrapper-issued side call: fire exactly one completion and DISCARD it.
         await provider.complete(cast("Sequence[Any]", messages_in))
+        await _await_delivery()
+
+    async def _await_delivery() -> None:
+        # Section 5.1: delivery through THIS call's provider event completes
+        # before the wrapper proceeds past the call site. The event is dispatched
+        # before `complete()` returns, so the snapshot `drain_events_for` takes
+        # at entry already contains it.
+        if not awaits_delivery:
+            return
+        assert barrier, (
+            "`await_event_delivery` is set but the harness has no barrier wired; "
+            "section 5.1 requires the case to fail rather than run without one"
+        )
+        await barrier["graph"].drain_events_for(barrier["invocation_id"])
 
     async def _guard_body(_s: Any) -> Mapping[str, Any]:
         return dict(update_map)
 
     async def _wrapper_mw(state: Any, next_call: Any) -> Mapping[str, Any]:
-        # POST phase: fire AFTER next() (the inner subgraph `guard` has run and its
-        # observation has closed), so the orphan Generation falls back to the inner
-        # fan-out INSTANCE Span observation (see the realization note above).
+        # The phase comes from the fixture: at `pre` the inner subgraph `guard`
+        # has not run, at `post` its observation has closed, and either way the
+        # orphan Generation falls back to the inner fan-out INSTANCE Span
+        # observation (see the realization note above).
+        #
+        # Section 5.1's barrier only bites at `pre`: at `post` the node body has
+        # already run and its `started` event has synthesized the dispatch
+        # observation, so no ordering is left for the barrier to pin.
+        if phase == "pre":
+            await _fire_orphan_call()
+            return await next_call(state)
         result = await next_call(state)
         await _fire_orphan_call()
         return result
@@ -1953,7 +1985,7 @@ async def _run_langfuse_134_case2(case: Mapping[str, Any]) -> None:
         .compile()
     )
     try:
-        client, otel_spans = await _run_134_and_capture(graph, outer_state_cls)
+        client, otel_spans = await _run_134_and_capture(graph, outer_state_cls, barrier)
     finally:
         await provider.aclose()
 

@@ -34,6 +34,7 @@ from __future__ import annotations
 import copy
 import functools
 import re
+import uuid
 from collections.abc import Callable, Mapping, Sequence
 from collections.abc import Set as AbstractSet
 from pathlib import Path
@@ -3062,6 +3063,10 @@ async def _run_fixture_133_case(case: Mapping[str, Any], spec: Mapping[str, Any]
     guard_spec = cast("dict[str, Any]", leaf_spec["nodes"]["guard"])
     update_map = dict(cast("dict[str, Any]", guard_spec["update"]))
     wrapper_spec = cast("dict[str, Any]", guard_spec["calls_llm_from_wrapper"])
+    phase = cast("str", wrapper_spec.get("phase", "pre"))
+    awaits_delivery = bool(wrapper_spec.get("await_event_delivery", False))
+    # Filled once the graph is compiled, below; the wrapper closure is built first.
+    barrier: dict[str, Any] = {}
     messages_in: tuple[Any, ...] = tuple(
         UserMessage(content=m["content"])
         for m in cast("list[dict[str, str]]", wrapper_spec.get("messages", []))
@@ -3105,15 +3110,36 @@ async def _run_fixture_133_case(case: Mapping[str, Any], spec: Mapping[str, Any]
         # Wrapper-issued side call: fire exactly one completion and DISCARD it
         # (never written to state), modelling a guardrail / classifier check.
         await provider.complete(list(messages_in))
+        await _await_delivery()
+
+    async def _await_delivery() -> None:
+        # Section 5.1: delivery through THIS call's provider event completes
+        # before the wrapper proceeds past the call site. The event is dispatched
+        # before `complete()` returns, so the snapshot `drain_events_for` takes
+        # at entry already contains it.
+        if not awaits_delivery:
+            return
+        assert barrier, (
+            "`await_event_delivery` is set but the harness has no barrier wired; "
+            "section 5.1 requires the case to fail rather than run without one"
+        )
+        await barrier["graph"].drain_events_for(barrier["invocation_id"])
 
     async def _guard_body(_s: Any) -> Mapping[str, Any]:
         return dict(update_map)
 
     async def _wrapper_mw(state: Any, next_call: Any) -> Mapping[str, Any]:
-        # Instance middleware on the inner fan-out, POST phase: fire AFTER next()
-        # (the inner subgraph, i.e. `guard`, has run and its span has closed), so
-        # the calling-node span is not open and the orphan provider span falls
-        # back to the nearest enclosing wrapper: the inner fan-out INSTANCE span.
+        # Instance middleware on the inner fan-out. The phase comes from the
+        # fixture: at `pre` the calling node's span is not yet open, at `post` it
+        # has already closed, and either way the orphan provider span falls back
+        # to the nearest enclosing wrapper, the inner fan-out INSTANCE span.
+        #
+        # Section 5.1's barrier only bites at `pre`: at `post` the node body has
+        # already run and its `started` event has synthesized the dispatch span,
+        # so no ordering is left for the barrier to pin.
+        if phase == "pre":
+            await _fire_orphan_call()
+            return await next_call(state)
         result = await next_call(state)
         await _fire_orphan_call()
         return result
@@ -3175,8 +3201,10 @@ async def _run_fixture_133_case(case: Mapping[str, Any], spec: Mapping[str, Any]
     exporter = InMemorySpanExporter()
     observer = OTelObserver(span_processor=SimpleSpanProcessor(exporter))
     graph.attach_observer(observer)
+    invocation_id = str(uuid.uuid4())
+    barrier.update(graph=graph, invocation_id=invocation_id)
     try:
-        await graph.invoke(outer_state_cls())
+        await graph.invoke(outer_state_cls(), invocation_id=invocation_id)
         await graph.drain()
     finally:
         observer.shutdown()
@@ -7307,7 +7335,6 @@ async def _run_orphan_fallback_fixture(spec: Mapping[str, Any]) -> None:
 
 
 async def _run_orphan_fallback_case(case: Mapping[str, Any], spec: Mapping[str, Any]) -> None:
-    import asyncio  # noqa: PLC0415
     import json  # noqa: PLC0415
 
     import httpx  # noqa: PLC0415
@@ -7349,20 +7376,36 @@ async def _run_orphan_fallback_case(case: Mapping[str, Any], spec: Mapping[str, 
     )
     observer, exporter = _build_observer()
     try:
+        # Filled in below, once the graph is compiled: `_make_orphan_mw` runs
+        # before there is a graph to name, and the barrier needs both.
+        barrier: dict[str, Any] = {}
 
         def _make_orphan_mw(wrapper_spec: Mapping[str, Any]) -> Any:
             messages = (UserMessage(content=_wrapper_request_content(wrapper_spec)),)
             phase = cast("str", wrapper_spec.get("phase", "pre"))
+            awaits_delivery = bool(wrapper_spec.get("await_event_delivery", False))
+
+            async def _await_delivery() -> None:
+                # Section 5.1: delivery through THIS call's provider event must
+                # complete before the wrapper proceeds past the call site. The
+                # event is dispatched before `complete()` returns, so the
+                # snapshot `drain_events_for` takes at entry already contains it.
+                if not awaits_delivery:
+                    return
+                assert barrier, (
+                    "`await_event_delivery` is set but the harness has no barrier wired; "
+                    "section 5.1 requires the case to fail rather than run without one"
+                )
+                await barrier["graph"].drain_events_for(barrier["invocation_id"])
 
             async def _mw(state: Any, next_call: Any) -> Any:
                 if phase == "pre":
                     await provider.complete(list(messages))
-                    # See the note above the driver: the yield is the assertion.
-                    await asyncio.sleep(0)
+                    await _await_delivery()
                     return await next_call(state)
                 result = await next_call(state)
                 await provider.complete(list(messages))
-                await asyncio.sleep(0)
+                await _await_delivery()
                 return result
 
             return _mw
@@ -7446,7 +7489,12 @@ async def _run_orphan_fallback_case(case: Mapping[str, Any], spec: Mapping[str, 
         built = build_graph(case, subgraphs=compiled, trace=[], parallel_branches_branch_middleware=branch_mw)
         graph = built.builder.compile()
         graph.attach_observer(observer)
-        await graph.invoke(built.initial_state(cast("dict[str, Any]", case.get("initial_state") or {})))
+        invocation_id = str(uuid.uuid4())
+        barrier.update(graph=graph, invocation_id=invocation_id)
+        await graph.invoke(
+            built.initial_state(cast("dict[str, Any]", case.get("initial_state") or {})),
+            invocation_id=invocation_id,
+        )
         await graph.drain()
     finally:
         await provider.aclose()
