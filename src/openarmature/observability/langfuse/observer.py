@@ -72,6 +72,9 @@ from openarmature.observability.lineage import (
 from openarmature.observability.lineage import (
     dispatch_key as _dispatch_key,
 )
+from openarmature.observability.lineage import (
+    fan_out_identity_key as _fan_out_identity_key,
+)
 from openarmature.observability.llm_event import _token_budget_evaluations
 
 from .client import (
@@ -277,6 +280,12 @@ class _InvState:
     # fan-out node's own Span observation; inner-node observations
     # parent under this dispatch instead of the shared fan-out node
     # span. Closed when the fan-out node's completed event fires.
+    # Declared subgraph identity per fan-out DISPATCH, cached off the node's own
+    # started event. Mirrors the OTel observer's cache and exists for the same
+    # reason: a per-instance observation synthesized from a provider event has no
+    # `subgraph_identities` to read, and when the instance middleware
+    # short-circuits no inner node event ever arrives to backfill it.
+    fan_out_subgraph_identity: dict[_DispatchKey, str] = field(default_factory=dict[_DispatchKey, str])
     fan_out_instance_observations: dict[_DispatchKey, _OpenObservation] = field(
         default_factory=dict[_DispatchKey, _OpenObservation]
     )
@@ -675,6 +684,15 @@ class LangfuseObserver:
         # carries the OUTER instance index on its own event.
         if event.fan_out_config is not None:
             inv_state.fan_out_parent_node_name[event.namespace] = event.fan_out_config.parent_node_name
+            # The fan-out NODE's own started event always precedes its instances,
+            # so this is populated before any instance observation opens. Keyed by
+            # the lineage-aware key rather than the namespace: branch names never
+            # enter the namespace, so two sibling branches each holding a fan-out
+            # of the same name would otherwise share one entry.
+            if event.fan_out_config.subgraph_identity is not None:
+                inv_state.fan_out_subgraph_identity[
+                    _fan_out_identity_key(event.namespace, event.fan_out_index_chain, event.branch_name_chain)
+                ] = event.fan_out_config.subgraph_identity
 
         # Per proposal 0045: mirror cache for parallel-branches NODE
         # identification (used by the augmentation shared-parent
@@ -1459,7 +1477,16 @@ class LangfuseObserver:
             "attempt_index": 0,
             "fan_out_parent_node_name": parent_node_name,
             "fan_out_index": fan_out_index,
-            "subgraph_name": _subgraph_identity_at(event, len(prefix)),
+            # The event's own identities first; they are authoritative and
+            # per-depth. An event carrying none (a provider event, or any kind
+            # without the field) falls back to the identity the fan-out NODE
+            # declared. Without it a short-circuiting instance middleware leaves
+            # an empty name with nothing able to repair it, since the backfill
+            # needs an inner node event that never arrives.
+            "subgraph_name": _subgraph_identity_at(event, len(prefix))
+            or inv_state.fan_out_subgraph_identity.get(
+                _fan_out_identity_key(prefix, event.fan_out_index_chain, event.branch_name_chain), ""
+            ),
         }
         if correlation_id is not None:
             metadata["correlation_id"] = correlation_id

@@ -3123,7 +3123,12 @@ async def _run_fixture_133_case(case: Mapping[str, Any], spec: Mapping[str, Any]
             "`await_event_delivery` is set but the harness has no barrier wired; "
             "section 5.1 requires the case to fail rather than run without one"
         )
-        await barrier["graph"].drain_events_for(barrier["invocation_id"])
+        summary = await barrier["graph"].drain_events_for(barrier["invocation_id"])
+        assert not summary.timeout_reached, (
+            f"`await_event_delivery` barrier timed out with {summary.undelivered_count} events "
+            "undelivered; section 5.1 requires the case to fail rather than proceed past the "
+            "call site without delivery"
+        )
 
     async def _guard_body(_s: Any) -> Mapping[str, Any]:
         return dict(update_map)
@@ -7396,7 +7401,12 @@ async def _run_orphan_fallback_case(case: Mapping[str, Any], spec: Mapping[str, 
                     "`await_event_delivery` is set but the harness has no barrier wired; "
                     "section 5.1 requires the case to fail rather than run without one"
                 )
-                await barrier["graph"].drain_events_for(barrier["invocation_id"])
+                summary = await barrier["graph"].drain_events_for(barrier["invocation_id"])
+                assert not summary.timeout_reached, (
+                    f"`await_event_delivery` barrier timed out with "
+                    f"{summary.undelivered_count} events undelivered; section 5.1 requires the "
+                    "case to fail rather than proceed past the call site without delivery"
+                )
 
             async def _mw(state: Any, next_call: Any) -> Any:
                 if phase == "pre":

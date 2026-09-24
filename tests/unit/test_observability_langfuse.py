@@ -2894,3 +2894,159 @@ def test_the_mandated_isolation_diagnostics_carry_their_event_names() -> None:
             assert "suppressing" in record.getMessage()
         elif name == LANGFUSE_SHARED_PROVIDER_ACCEPTED:
             assert "accept_shared_provider" in record.getMessage()
+
+
+# Mirrors of the two OTel tests guarding the same cache
+# (`test_orphan_synthesis_recovers_a_declared_subgraph_identity` and
+# `test_sibling_branches_do_not_share_a_fan_out_subgraph_identity`). The Langfuse
+# observer gained the cache later, so without these the fallback is an
+# uncovered line: mutating it away leaves the whole suite green.
+
+
+async def test_orphan_synthesis_recovers_a_declared_subgraph_identity_on_langfuse() -> None:
+    # A fan-out declares `subgraph_identity`. Its instance middleware issues a
+    # call and returns WITHOUT calling `next_`, so no inner node event arrives
+    # and the backfill never runs. The identity has to come from the fan-out
+    # node's own started event instead.
+    from openarmature.observability.metadata import set_invocation_metadata
+    from openarmature.observability.tool_call import with_tool_call
+
+    class _Top(State):
+        items: list[int] = [0]
+        results: list[int] = []
+
+    class _Leaf(State):
+        item: int = 0
+        result: int = 0
+
+    async def _inner(s: _Leaf) -> dict[str, Any]:
+        return {"result": s.item + 1}
+
+    async def _wrapper(_state: Any, _next: Any) -> dict[str, Any]:
+        set_invocation_metadata(from_wrapper="yes")
+        with with_tool_call(tool_name="probe", arguments={}) as rec:
+            rec.set_result("r")
+        return {"result": -1}
+
+    leaf = GraphBuilder(_Leaf).add_node("g", _inner).add_edge("g", END).set_entry("g").compile()
+    graph = (
+        GraphBuilder(_Top)
+        .add_fan_out_node(
+            "fo",
+            subgraph=leaf,
+            items_field="items",
+            item_field="item",
+            collect_field="result",
+            target_field="results",
+            subgraph_identity="leaf_identity",
+            instance_middleware=(_wrapper,),
+        )
+        .add_edge("fo", END)
+        .set_entry("fo")
+        .compile()
+    )
+    client = InMemoryLangfuseClient()
+    graph.attach_observer(LangfuseObserver(client=client))
+    await graph.invoke(_Top())
+    await graph.drain()
+
+    assert len(client.traces) == 1, f"expected one trace, got {list(client.traces)}"
+    trace = next(iter(client.traces.values()))
+    dispatch = [o for o in trace.observations if "fan_out_parent_node_name" in (o.metadata or {})]
+    assert dispatch, "expected the orphan path to synthesize an instance dispatch observation"
+    md = dispatch[0].metadata or {}
+    # Non-vacuity: the caller metadata DOES arrive, because the tool event
+    # declares and carries it. Only the identity is sourced differently, which is
+    # what separates this from a general "nothing reaches the observation".
+    assert md.get("from_wrapper") == "yes", (
+        "non-vacuity: the tool event declares and carries caller metadata, so it "
+        "MUST reach the observation. Only the subgraph identity is at issue here."
+    )
+    assert md.get("subgraph_name") == "leaf_identity", (
+        f"the declared identity must reach the observation even when no inner node "
+        f"event ever arrives, got {md.get('subgraph_name')!r}"
+    )
+
+
+async def test_sibling_branches_do_not_share_a_fan_out_subgraph_identity_on_langfuse() -> None:
+    # The identity cache is keyed lineage-aware, not by namespace. Branch names
+    # never enter the namespace, so two sibling parallel branches each holding a
+    # fan-out node of the same name share one entry: keyed on the namespace
+    # alone, whichever branch's started event landed second overwrites the
+    # other's declared identity and every instance observation in both branches
+    # reads the survivor.
+    from openarmature.graph import CompiledGraph
+    from openarmature.graph.parallel_branches import BranchSpec
+    from openarmature.observability.tool_call import with_tool_call
+
+    class _Top(State):
+        a: list[int] = []
+        b: list[int] = []
+
+    class _Branch(State):
+        seeds: list[int] = [0]
+        out: list[int] = []
+
+    class _Leaf(State):
+        seed: int = 0
+        marker: int = 0
+
+    async def _leaf(s: _Leaf) -> dict[str, Any]:
+        return {"marker": s.seed + 1}
+
+    async def _wrapper(_state: Any, _next: Any) -> dict[str, Any]:
+        # Short-circuits: issues a call and returns without calling `next_`, so no
+        # inner node event arrives. That is what forces the identity to come from
+        # the cache rather than the event's own `subgraph_identities`, which the
+        # `or` in the opener would otherwise satisfy first. Without this the test
+        # never reaches the cache and passes against the collision.
+        with with_tool_call(tool_name="probe", arguments={}) as rec:
+            rec.set_result("r")
+        return {"marker": -1}
+
+    def _sub(identity: str) -> CompiledGraph[Any]:
+        leaf = GraphBuilder(_Leaf).add_node("g", _leaf).add_edge("g", END).set_entry("g").compile()
+        return (
+            GraphBuilder(_Branch)
+            .add_fan_out_node(
+                "fo",
+                subgraph=leaf,
+                items_field="seeds",
+                item_field="seed",
+                collect_field="marker",
+                target_field="out",
+                subgraph_identity=identity,
+                instance_middleware=(_wrapper,),
+            )
+            .add_edge("fo", END)
+            .set_entry("fo")
+            .compile()
+        )
+
+    graph = (
+        GraphBuilder(_Top)
+        .add_parallel_branches_node(
+            "pb",
+            branches={
+                "a": BranchSpec(subgraph=_sub("identity_a"), outputs={"a": "out"}),
+                "b": BranchSpec(subgraph=_sub("identity_b"), outputs={"b": "out"}),
+            },
+        )
+        .add_edge("pb", END)
+        .set_entry("pb")
+        .compile()
+    )
+    client = InMemoryLangfuseClient()
+    graph.attach_observer(LangfuseObserver(client=client))
+    await graph.invoke(_Top())
+    await graph.drain()
+
+    identities = sorted(
+        str((o.metadata or {}).get("subgraph_name"))
+        for t in client.traces.values()
+        for o in t.observations
+        if "fan_out_parent_node_name" in (o.metadata or {})
+    )
+    assert identities == ["identity_a", "identity_b"], (
+        f"each branch's fan-out must keep its OWN declared identity, got {identities}"
+    )

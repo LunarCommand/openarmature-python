@@ -134,6 +134,7 @@ from openarmature.observability.lineage import (
 from openarmature.observability.lineage import (
     dispatch_key as _dispatch_key,
 )
+from openarmature.observability.lineage import fan_out_identity_key as _fan_out_identity_key
 from openarmature.observability.lineage import (
     is_outermost_serial,
     is_strict_prefix,
@@ -304,29 +305,6 @@ def _apply_caller_metadata(attrs: dict[str, Any], metadata: Mapping[str, Any] | 
         return
     for key, value in metadata.items():
         attrs[f"openarmature.user.{key}"] = value
-
-
-def _fan_out_identity_key(
-    namespace: tuple[str, ...],
-    fan_out_index_chain: tuple[int | None, ...],
-    branch_name_chain: tuple[str | None, ...],
-) -> _DispatchKey:
-    """Identity key for a fan-out NODE's declared subgraph identity."""
-    # The ENCLOSING lineage only, sliced to the depth ABOVE the fan-out itself.
-    # Two sides build this key and they see different events: the write side has
-    # the fan-out NODE's own started event, whose chains carry no instance index
-    # at its own depth, while the read side has an inner or orphan event whose
-    # chains do. Including the fan-out's own axis would make them disagree.
-    #
-    # The enclosing entries are what actually disambiguate: branch names never
-    # enter the namespace, so two sibling branches each holding a fan-out of the
-    # same name share one, and only the branch chain tells them apart.
-    depth = len(namespace) - 1
-    return (
-        namespace,
-        tuple(fan_out_index_chain[:depth]),
-        tuple(branch_name_chain[:depth]),
-    )
 
 
 def _subgraph_identity_at(event: object, depth: int) -> str:
