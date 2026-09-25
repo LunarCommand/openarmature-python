@@ -722,32 +722,6 @@ class LangfuseObserver:
         # closes dispatch observations whose subtree we've left.
         self._sync_subgraph_observations(inv_state, correlation_id, event)
 
-        # Proposal 0075 (observability section 5.7): a callable parallel-branch
-        # emits its started/completed pair at the pb NODE's own namespace, tagged
-        # with branch_name and no parallel_branches_config. It IS the unit, so it
-        # renders as the branch's per-branch dispatch observation with NO leaf,
-        # which is what the OTel observer has always done.
-        #
-        # Storing a leaf here instead made the branch's parent depend on delivery
-        # order once the section 5.5 call-site synthesis landed: an orphan call
-        # from the branch's own middleware found the leaf when this event had
-        # drained and synthesized a dispatch observation when it had not, so the
-        # same run produced two different parents. A subgraph branch's inner-node
-        # events are always one level deeper, so this never misfires for them.
-        if (
-            event.branch_name is not None
-            and event.parallel_branches_config is None
-            and event.namespace in inv_state.parallel_branches_parent_node_name
-        ):
-            branch_key = _branch_dispatch_key(
-                event.namespace, event.fan_out_index_chain, event.branch_name_chain, event.branch_name
-            )
-            if branch_key not in inv_state.parallel_branches_branch_spans:
-                self._open_parallel_branches_branch_dispatch_observation(
-                    inv_state, correlation_id, event.namespace, event
-                )
-            return
-
         parent_observation_id = self._resolve_parent_observation_id(inv_state, event)
         metadata = self._observation_metadata(event, correlation_id)
         target_trace_id = self._trace_id_for(inv_state, event.namespace, event.fan_out_index)
@@ -795,15 +769,16 @@ class LangfuseObserver:
         # Per spec proposal 0013 (v0.10.0): when the fan-out node's
         # own completion fires, close all per-instance dispatch
         # observations synthesized for it. Children-before-parents.
-        # No `fan_out_index is None` filter: `fan_out_config` is populated only
-        # on the NODE's own events, so the presence check alone is sufficient,
-        # and when a fan-out is nested inside another fan-out's instance or a
-        # pb's branch its own completion carries the OUTER axis values. Filtering
-        # on the scalar skipped the whole block for a nested fan-out, leaving its
-        # per-instance dispatch observations open past their parent and its
-        # `fan_out_parent_node_name` entry un-popped, which the call-site
-        # synthesizer reads as a guard. Mirrors the OTel observer.
-        if event.fan_out_config is not None:
+        # The `fan_out_index is None` filter is WRONG in the OTel mirror's own
+        # terms (a nested fan-out's completion carries the OUTER index, so this
+        # skips it) and is kept anyway, because dropping it is worse: the loop
+        # below matches on namespace alone and never compares the key's lineage
+        # chains, so one outer instance's completion closes every sibling
+        # instance's dispatch observations and pops the shared
+        # `fan_out_parent_node_name` entry they still need. Removing the filter
+        # needs the match scoped to the completing event's own lineage first, in
+        # both observers. See `_tasks/dispatch-close-scoping.md`.
+        if event.fan_out_index is None and event.fan_out_config is not None:
             ns = event.namespace
             for key in list(inv_state.fan_out_instance_observations.keys()):
                 anchor_ns = key[0]
@@ -1173,6 +1148,19 @@ class LangfuseObserver:
             for key, observation in inv_state.open_observations.items():
                 if key[0] == prefix:
                     return observation.handle.id
+        # Proposal 0075: a callable parallel-branch's event sits at the pb
+        # NODE's own namespace (branch_name set, no parallel_branches_config),
+        # so it IS the unit — render it as a single observation parented under
+        # the NODE observation. The strict-ancestor fallback above misses the
+        # same-namespace NODE, so resolve it explicitly here.
+        if (
+            event.branch_name is not None
+            and event.parallel_branches_config is None
+            and event.namespace in inv_state.parallel_branches_parent_node_name
+        ):
+            for key, observation in inv_state.open_observations.items():
+                if key[0] == event.namespace and key[3] is None:
+                    return observation.handle.id
         return None
 
     def _resolve_enclosing_wrapper_observation_id(
@@ -1315,6 +1303,7 @@ class LangfuseObserver:
                 and prefix in inv_state.fan_out_parent_node_name
             ):
                 self._open_fan_out_instance_dispatch_observation(inv_state, correlation_id, prefix, event)
+                continue
             # Per proposal 0044: synthesize a per-branch dispatch observation
             # under the pb NODE for an inner branch event, so inner branch
             # nodes parent under it rather than the shared pb NODE span. Mirror
