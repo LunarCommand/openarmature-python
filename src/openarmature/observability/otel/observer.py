@@ -139,6 +139,7 @@ from openarmature.observability.lineage import (
     is_outermost_serial,
     is_strict_prefix,
 )
+from openarmature.observability.lineage import stored_lineage as _stored_lineage
 from openarmature.observability.llm_event import _token_budget_evaluations, serialize_tool_calls
 
 # §7 (proposal 0083): the vendor-neutral token-budget WARNING log surface.
@@ -329,38 +330,6 @@ def _subgraph_identity_at(event: object, depth: int) -> str:
         if identity is not None:
             return identity
     return ""
-
-
-def _stored_lineage(
-    event: _LineageEvent, chain_len: int, *, own_branch: str | None = None
-) -> tuple[tuple[int | None, ...], tuple[str | None, ...]]:
-    """The lineage chains an `_OpenSpan` records, normalized to `chain_len`."""
-    # Truncated when longer, PADDED with None when shorter -- the same
-    # normalization `_branch_dispatch_key` already does for the lookup key, for
-    # the same reason. A wrapper-issued event runs in the enclosing node's own
-    # ContextVar scope, so its chains are one entry short of what an inner node
-    # event carries. Storing the short chain made `_span_chain_on_path` treat the
-    # span as an ancestor of every sibling, because it returns True
-    # unconditionally for a zero-length stored chain -- so caller metadata set
-    # inside one branch was written onto its SIBLING's dispatch span, across the
-    # boundary that function's own docstring says must not be crossed.
-    fan_out = tuple(event.fan_out_index_chain[:chain_len]) + (None,) * max(
-        0, chain_len - len(event.fan_out_index_chain)
-    )
-    if own_branch is None:
-        branches = tuple(event.branch_name_chain[:chain_len]) + (None,) * max(
-            0, chain_len - len(event.branch_name_chain)
-        )
-        return fan_out, branches
-    # A per-branch dispatch span records its OWN branch as the last entry. A
-    # wrapper-issued event carries that name only on the scalar `branch_name`
-    # (it never extended the chain), so padding alone would store None there and
-    # exclude the branch's own augmenter from its own dispatch span -- the
-    # opposite over-correction to the sibling leak, and just as wrong.
-    enclosing = tuple(event.branch_name_chain[: chain_len - 1]) + (None,) * max(
-        0, (chain_len - 1) - len(event.branch_name_chain)
-    )
-    return fan_out, enclosing + (own_branch,)
 
 
 def _backfill_subgraph_identity(open_span: Any, event: object, depth: int) -> None:

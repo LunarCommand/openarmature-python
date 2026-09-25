@@ -50,6 +50,9 @@ import yaml
 # ``tests/unit/test_observability_otel.py``.
 pytest.importorskip("opentelemetry.sdk.trace")
 
+from openarmature.observability.correlation import (  # noqa: E402
+    current_invocation_id,
+)
 from openarmature.observability.otel import OTelObserver  # noqa: E402
 
 from .adapter import build_graph  # noqa: E402
@@ -3067,6 +3070,8 @@ async def _run_fixture_133_case(case: Mapping[str, Any], spec: Mapping[str, Any]
     awaits_delivery = bool(wrapper_spec.get("await_event_delivery", False))
     # Filled once the graph is compiled, below; the wrapper closure is built first.
     barrier: dict[str, Any] = {}
+    # One entry per barrier attempt: None for held, a reason string otherwise.
+    barrier_log: list[str | None] = []
     messages_in: tuple[Any, ...] = tuple(
         UserMessage(content=m["content"])
         for m in cast("list[dict[str, str]]", wrapper_spec.get("messages", []))
@@ -3117,18 +3122,44 @@ async def _run_fixture_133_case(case: Mapping[str, Any], spec: Mapping[str, Any]
         # before the wrapper proceeds past the call site. The event is dispatched
         # before `complete()` returns, so the snapshot `drain_events_for` takes
         # at entry already contains it.
+        #
+        # Outcomes are RECORDED, not asserted here. This runs inside middleware,
+        # and a fan-out declared `error_policy: collect` turns a raise into a
+        # dropped error record rather than a failure, so an assertion at this
+        # point cannot fail the case. `_assert_barrier_held` runs it after the
+        # invocation instead.
         if not awaits_delivery:
             return
-        assert barrier, (
-            "`await_event_delivery` is set but the harness has no barrier wired; "
-            "section 5.1 requires the case to fail rather than run without one"
-        )
+        if not barrier:
+            barrier_log.append("no barrier wired")
+            return
+        # `drain_events_for` returns a clean, non-timed-out summary for an
+        # invocation_id no active worker matches, which is byte-identical to a
+        # satisfied barrier. Without this the whole thing degrades to a no-op the
+        # moment the id stops matching, and every fixture still passes.
+        if current_invocation_id() != barrier["invocation_id"]:
+            barrier_log.append(
+                f"barrier bound to {barrier['invocation_id']!r} but the live invocation is "
+                f"{current_invocation_id()!r}, so the drain resolved no worker"
+            )
+            return
         summary = await barrier["graph"].drain_events_for(barrier["invocation_id"])
-        assert not summary.timeout_reached, (
-            f"`await_event_delivery` barrier timed out with {summary.undelivered_count} events "
-            "undelivered; section 5.1 requires the case to fail rather than proceed past the "
-            "call site without delivery"
+        if summary.timeout_reached:
+            barrier_log.append(f"timed out, {summary.undelivered_count} events undelivered")
+        else:
+            barrier_log.append(None)
+
+    def _assert_barrier_held() -> None:
+        # Section 5.1: an adapter that cannot provide the barrier MUST fail the
+        # case rather than run it without one.
+        if not awaits_delivery:
+            return
+        assert barrier_log, (
+            "`await_event_delivery` is set but the barrier never ran, so the case "
+            "executed with pre-0124 behaviour while still counting as coverage"
         )
+        problems = [p for p in barrier_log if p is not None]
+        assert not problems, f"`await_event_delivery` barrier did not hold: {problems}"
 
     async def _guard_body(_s: Any) -> Mapping[str, Any]:
         return dict(update_map)
@@ -3211,6 +3242,7 @@ async def _run_fixture_133_case(case: Mapping[str, Any], spec: Mapping[str, Any]
     try:
         await graph.invoke(outer_state_cls(), invocation_id=invocation_id)
         await graph.drain()
+        _assert_barrier_held()
     finally:
         observer.shutdown()
         await provider.aclose()
@@ -7384,29 +7416,61 @@ async def _run_orphan_fallback_case(case: Mapping[str, Any], spec: Mapping[str, 
         # Filled in below, once the graph is compiled: `_make_orphan_mw` runs
         # before there is a graph to name, and the barrier needs both.
         barrier: dict[str, Any] = {}
+        # One entry per barrier attempt: None for held, a reason string otherwise.
+        barrier_log: list[str | None] = []
+
+        # One entry per wrapper that DECLARED the directive, so the count below
+        # can tell a barrier that ran from one that was never reached.
+        barrier_expected: list[str] = []
+
+        def _assert_barrier_held() -> None:
+            # Section 5.1: an adapter that cannot provide the barrier MUST fail
+            # the case rather than run it without one. Asserted here rather than
+            # inside the middleware, whose raises the engine's error policy may
+            # absorb.
+            assert len(barrier_log) == len(barrier_expected), (
+                f"{len(barrier_expected)} wrapper(s) declared `await_event_delivery` but the "
+                f"barrier ran {len(barrier_log)} time(s); a skipped barrier means the case ran "
+                "with pre-0124 behaviour while still counting as coverage"
+            )
+            problems = [x for x in barrier_log if x is not None]
+            assert not problems, f"`await_event_delivery` barrier did not hold: {problems}"
 
         def _make_orphan_mw(wrapper_spec: Mapping[str, Any]) -> Any:
             messages = (UserMessage(content=_wrapper_request_content(wrapper_spec)),)
             phase = cast("str", wrapper_spec.get("phase", "pre"))
             awaits_delivery = bool(wrapper_spec.get("await_event_delivery", False))
+            if awaits_delivery:
+                barrier_expected.append(_wrapper_request_content(wrapper_spec))
 
             async def _await_delivery() -> None:
                 # Section 5.1: delivery through THIS call's provider event must
                 # complete before the wrapper proceeds past the call site. The
                 # event is dispatched before `complete()` returns, so the
                 # snapshot `drain_events_for` takes at entry already contains it.
+                #
+                # Recorded rather than asserted: this runs inside middleware, so
+                # the engine's error policy decides whether a raise here reaches
+                # the case at all. `_assert_barrier_held` checks after the run.
                 if not awaits_delivery:
                     return
-                assert barrier, (
-                    "`await_event_delivery` is set but the harness has no barrier wired; "
-                    "section 5.1 requires the case to fail rather than run without one"
-                )
+                if not barrier:
+                    barrier_log.append("no barrier wired")
+                    return
+                # A clean summary comes back for an invocation_id no active
+                # worker matches, indistinguishable from a satisfied barrier, so
+                # bind-liveness is checked rather than assumed.
+                if current_invocation_id() != barrier["invocation_id"]:
+                    barrier_log.append(
+                        f"barrier bound to {barrier['invocation_id']!r} but the live "
+                        f"invocation is {current_invocation_id()!r}"
+                    )
+                    return
                 summary = await barrier["graph"].drain_events_for(barrier["invocation_id"])
-                assert not summary.timeout_reached, (
-                    f"`await_event_delivery` barrier timed out with "
-                    f"{summary.undelivered_count} events undelivered; section 5.1 requires the "
-                    "case to fail rather than proceed past the call site without delivery"
-                )
+                if summary.timeout_reached:
+                    barrier_log.append(f"timed out, {summary.undelivered_count} events undelivered")
+                else:
+                    barrier_log.append(None)
 
             async def _mw(state: Any, next_call: Any) -> Any:
                 if phase == "pre":
@@ -7506,6 +7570,7 @@ async def _run_orphan_fallback_case(case: Mapping[str, Any], spec: Mapping[str, 
             invocation_id=invocation_id,
         )
         await graph.drain()
+        _assert_barrier_held()
     finally:
         await provider.aclose()
         observer.shutdown()

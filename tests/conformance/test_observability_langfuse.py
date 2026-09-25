@@ -35,6 +35,7 @@ from pydantic import SecretStr
 from openarmature.graph import END, BranchSpec, ExplicitMapping, GraphBuilder
 from openarmature.llm import OpenAIProvider
 from openarmature.llm.response import RuntimeConfig
+from openarmature.observability.correlation import current_invocation_id
 from openarmature.observability.diagnostics import event_name_of as _event_name_of
 from openarmature.observability.langfuse import (
     InMemoryLangfuseClient,
@@ -1881,6 +1882,8 @@ async def _run_langfuse_134_case2(case: Mapping[str, Any]) -> None:
     awaits_delivery = bool(wrapper_spec.get("await_event_delivery", False))
     # Filled by `_run_134_and_capture` below; the wrapper closure is built first.
     barrier: dict[str, Any] = {}
+    # One entry per barrier attempt: None for held, a reason string otherwise.
+    barrier_log: list[str | None] = []
     rendezvous, gate, total_asks = _build_134_rendezvous(case)
 
     async def _fire_orphan_call() -> None:
@@ -1903,18 +1906,44 @@ async def _run_langfuse_134_case2(case: Mapping[str, Any]) -> None:
         # before the wrapper proceeds past the call site. The event is dispatched
         # before `complete()` returns, so the snapshot `drain_events_for` takes
         # at entry already contains it.
+        #
+        # Outcomes are RECORDED, not asserted here. This runs inside middleware,
+        # and a fan-out declared `error_policy: collect` turns a raise into a
+        # dropped error record rather than a failure, so an assertion at this
+        # point cannot fail the case. `_assert_barrier_held` runs it after the
+        # invocation instead.
         if not awaits_delivery:
             return
-        assert barrier, (
-            "`await_event_delivery` is set but the harness has no barrier wired; "
-            "section 5.1 requires the case to fail rather than run without one"
-        )
+        if not barrier:
+            barrier_log.append("no barrier wired")
+            return
+        # `drain_events_for` returns a clean, non-timed-out summary for an
+        # invocation_id no active worker matches, which is byte-identical to a
+        # satisfied barrier. Without this the whole thing degrades to a no-op the
+        # moment the id stops matching, and every fixture still passes.
+        if current_invocation_id() != barrier["invocation_id"]:
+            barrier_log.append(
+                f"barrier bound to {barrier['invocation_id']!r} but the live invocation is "
+                f"{current_invocation_id()!r}, so the drain resolved no worker"
+            )
+            return
         summary = await barrier["graph"].drain_events_for(barrier["invocation_id"])
-        assert not summary.timeout_reached, (
-            f"`await_event_delivery` barrier timed out with {summary.undelivered_count} events "
-            "undelivered; section 5.1 requires the case to fail rather than proceed past the "
-            "call site without delivery"
+        if summary.timeout_reached:
+            barrier_log.append(f"timed out, {summary.undelivered_count} events undelivered")
+        else:
+            barrier_log.append(None)
+
+    def _assert_barrier_held() -> None:
+        # Section 5.1: an adapter that cannot provide the barrier MUST fail the
+        # case rather than run it without one.
+        if not awaits_delivery:
+            return
+        assert barrier_log, (
+            "`await_event_delivery` is set but the barrier never ran, so the case "
+            "executed with pre-0124 behaviour while still counting as coverage"
         )
+        problems = [p for p in barrier_log if p is not None]
+        assert not problems, f"`await_event_delivery` barrier did not hold: {problems}"
 
     async def _guard_body(_s: Any) -> Mapping[str, Any]:
         return dict(update_map)
@@ -1991,6 +2020,7 @@ async def _run_langfuse_134_case2(case: Mapping[str, Any]) -> None:
     )
     try:
         client, otel_spans = await _run_134_and_capture(graph, outer_state_cls, barrier)
+        _assert_barrier_held()
     finally:
         await provider.aclose()
 

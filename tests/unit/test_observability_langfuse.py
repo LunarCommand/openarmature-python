@@ -3050,3 +3050,290 @@ async def test_sibling_branches_do_not_share_a_fan_out_subgraph_identity_on_lang
     assert identities == ["identity_a", "identity_b"], (
         f"each branch's fan-out must keep its OWN declared identity, got {identities}"
     )
+
+
+async def test_a_callable_branch_renders_as_one_observation_not_a_leaf_plus_dispatch() -> None:
+    # Proposal 0075: a callable parallel-branch IS the unit, so it renders as the
+    # branch's per-branch dispatch observation with no leaf, which is what the
+    # OTel observer has always done.
+    #
+    # Storing a leaf instead gave an orphan call from the branch's own middleware
+    # two possible parents once the section 5.5 call-site synthesis landed: the
+    # leaf when the branch's started event had drained, a freshly synthesized
+    # dispatch observation when it had not. Two observations for one branch is
+    # the observable half of that, and it does not depend on winning a race.
+    from openarmature.graph.parallel_branches import BranchSpec
+
+    class _Top(State):
+        a: str = ""
+
+    async def _leg(_s: Any) -> dict[str, Any]:
+        return {"a": "done"}
+
+    graph = (
+        GraphBuilder(_Top)
+        .add_parallel_branches_node("pb", branches={"only": BranchSpec(call=_leg)})
+        .add_edge("pb", END)
+        .set_entry("pb")
+        .compile()
+    )
+    client = InMemoryLangfuseClient()
+    graph.attach_observer(LangfuseObserver(client=client))
+    await graph.invoke(_Top())
+    await graph.drain()
+
+    trace = next(iter(client.traces.values()))
+    named = [o for o in trace.observations if o.name == "only"]
+    assert len(named) == 1, (
+        "a callable branch must render as exactly one observation; two means the leaf "
+        f"and the dispatch both exist, got {[(o.name, o.metadata) for o in named]}"
+    )
+    # Non-vacuity: it is the DISPATCH, identified by the key only that opener
+    # writes, not a leaf that happens to carry the branch's name.
+    assert "parallel_branches_parent_node_name" in (named[0].metadata or {}), (
+        "the surviving observation must be the per-branch dispatch, not a leaf; "
+        f"got metadata {named[0].metadata!r}"
+    )
+
+
+def _end_order_recording_client() -> tuple[InMemoryLangfuseClient, list[str]]:
+    """An in-memory client that also records the ORDER observations are ended in.
+
+    ``LangfuseObservation.ended`` cannot distinguish "closed by its own owner" from
+    "swept up by close_invocation", because both leave it True. The order can.
+    """
+    order: list[str] = []
+    client = InMemoryLangfuseClient()
+    inner_span = client.span
+
+    def _span(**kwargs: Any) -> Any:
+        handle = inner_span(**kwargs)
+        real_end = handle.end
+
+        def _end(**end_kwargs: Any) -> None:
+            if handle.id not in order:
+                order.append(handle.id)
+            real_end(**end_kwargs)
+
+        handle.end = _end  # type: ignore[method-assign]
+        return handle
+
+    client.span = _span  # type: ignore[method-assign]
+    return client, order
+
+
+async def test_a_nested_fan_out_closes_its_instance_dispatch_observations() -> None:
+    # The close path was gated on `event.fan_out_index is None`, which the OTel
+    # mirror documents as wrong: a fan-out nested inside another fan-out's
+    # instance carries the OUTER index on its own completion, so the guard was
+    # False and the whole block was skipped. Its per-instance dispatch
+    # observations then stayed open past their own parent, and its
+    # `fan_out_parent_node_name` entry was never popped, which the call-site
+    # synthesizer now reads as a guard.
+    class _Top(State):
+        outer: list[int] = [0]
+        got: list[str] = []
+
+    class _Mid(State):
+        seed: int = 0
+        inner: list[int] = [0]
+        out: list[str] = []
+        rolled: str = ""
+
+    class _Leaf(State):
+        item: int = 0
+        mark: str = ""
+
+    async def _leaf(s: _Leaf) -> dict[str, Any]:
+        return {"mark": f"m{s.item}"}
+
+    async def _roll(s: _Mid) -> dict[str, Any]:
+        return {"rolled": ",".join(s.out)}
+
+    leaf = GraphBuilder(_Leaf).add_node("g", _leaf).add_edge("g", END).set_entry("g").compile()
+    mid = (
+        GraphBuilder(_Mid)
+        .add_fan_out_node(
+            "inner_fo",
+            subgraph=leaf,
+            items_field="inner",
+            item_field="item",
+            collect_field="mark",
+            target_field="out",
+        )
+        .add_node("roll", _roll)
+        .add_edge("inner_fo", "roll")
+        .add_edge("roll", END)
+        .set_entry("inner_fo")
+        .compile()
+    )
+    graph = (
+        GraphBuilder(_Top)
+        .add_fan_out_node(
+            "outer_fo",
+            subgraph=mid,
+            items_field="outer",
+            item_field="seed",
+            collect_field="rolled",
+            target_field="got",
+        )
+        .add_edge("outer_fo", END)
+        .set_entry("outer_fo")
+        .compile()
+    )
+    client, end_order = _end_order_recording_client()
+    graph.attach_observer(LangfuseObserver(client=client))
+    await graph.invoke(_Top())
+    await graph.drain()
+
+    trace = next(iter(client.traces.values()))
+    dispatches = [
+        o for o in trace.observations if (o.metadata or {}).get("fan_out_parent_node_name") == "inner_fo"
+    ]
+    assert dispatches, "expected the inner fan-out to open a per-instance dispatch observation"
+    # `ended` is True either way, because close_invocation ends everything still
+    # open at the end. What the guard decides is WHEN, so the order is the probe:
+    # a per-instance dispatch must close before the leaf observation of the node
+    # that follows its fan-out, not get swept up at invocation teardown.
+    order = end_order
+    dispatch_ids = {o.id for o in dispatches}
+    assert dispatch_ids <= set(order), "every dispatch observation must have been ended"
+    roll = next(o for o in trace.observations if o.name == "roll")
+    assert roll.id in order, "the trailing node observation must have been ended"
+    last_dispatch = max(order.index(i) for i in dispatch_ids)
+    assert last_dispatch < order.index(roll.id), (
+        "the inner fan-out's per-instance dispatch observations must close on its own "
+        "completion, before the node that runs after it; closing them later means they "
+        f"were swept up by close_invocation. end order: {order}"
+    )
+
+
+async def test_a_synthesized_dispatch_observation_shares_its_child_start_time() -> None:
+    # A dispatch observation synthesized from a provider event is created when
+    # that event drains, while the observation it parents is back-dated by the
+    # call's own measured latency. Stamping the parent "now" puts the child's
+    # whole interval before its parent begins.
+    #
+    # This also guards the plumbing: threading `start_time` through the
+    # synthesizer is inert unless the provider handlers actually pass it, and a
+    # first pass at this fix added the parameter without connecting the source.
+    from openarmature.observability.tool_call import with_tool_call
+
+    class _Top(State):
+        items: list[int] = [0]
+        results: list[int] = []
+
+    class _Leaf(State):
+        item: int = 0
+        result: int = 0
+
+    async def _inner(s: _Leaf) -> dict[str, Any]:
+        return {"result": s.item + 1}
+
+    async def _wrapper(_state: Any, _next: Any) -> dict[str, Any]:
+        # Short-circuits, so the tool event is the only thing that can synthesize
+        # the instance dispatch observation.
+        with with_tool_call(tool_name="probe", arguments={}) as rec:
+            rec.set_result("r")
+        return {"result": -1}
+
+    leaf = GraphBuilder(_Leaf).add_node("g", _inner).add_edge("g", END).set_entry("g").compile()
+    graph = (
+        GraphBuilder(_Top)
+        .add_fan_out_node(
+            "fo",
+            subgraph=leaf,
+            items_field="items",
+            item_field="item",
+            collect_field="result",
+            target_field="results",
+            instance_middleware=(_wrapper,),
+        )
+        .add_edge("fo", END)
+        .set_entry("fo")
+        .compile()
+    )
+    client = InMemoryLangfuseClient()
+    graph.attach_observer(LangfuseObserver(client=client))
+    await graph.invoke(_Top())
+    await graph.drain()
+
+    trace = next(iter(client.traces.values()))
+    dispatch = next(o for o in trace.observations if "fan_out_parent_node_name" in (o.metadata or {}))
+    tool = next(o for o in trace.observations if o.type == "tool")
+    assert tool.start_time is not None, (
+        "non-vacuity: the tool observation must itself be back-dated, or this test "
+        "compares two unset timestamps and cannot fail"
+    )
+    assert dispatch.start_time is not None, (
+        "the synthesized dispatch observation must carry the caller's back-dated start, "
+        "not be stamped at delivery time"
+    )
+    assert dispatch.start_time <= tool.start_time, (
+        f"a child must not begin before its parent: dispatch starts {dispatch.start_time}, "
+        f"the observation it parents starts {tool.start_time}"
+    )
+
+
+async def test_the_failure_isolation_marker_parents_under_a_synthesized_dispatch() -> None:
+    # The marker took a bare enclosing-wrapper walk while the five provider
+    # handlers gained the section 5.5 call-site synthesis, so a marker raised
+    # from instance middleware before any inner node event had landed found
+    # nothing and went to the Trace root, while the OTel twin parented it under
+    # the synthesized per-instance dispatch span. Same run, two parents.
+    from openarmature.graph import FailureIsolationMiddleware
+
+    class _Top(State):
+        items: list[int] = [0]
+        results: list[int] = []
+
+    class _Leaf(State):
+        item: int = 0
+        result: int = 0
+
+    async def _inner(s: _Leaf) -> dict[str, Any]:
+        return {"result": s.item + 1}
+
+    async def _explode(_state: Any, _next: Any) -> dict[str, Any]:
+        # Raises BEFORE calling next_, so no inner node event ever fires and
+        # nothing else can materialize the instance dispatch observation.
+        raise RuntimeError("boom")
+
+    isolate = FailureIsolationMiddleware(degraded_update={"result": -1}, event_name="probe_failed")
+    leaf = GraphBuilder(_Leaf).add_node("g", _inner).add_edge("g", END).set_entry("g").compile()
+    graph = (
+        GraphBuilder(_Top)
+        .add_fan_out_node(
+            "fo",
+            subgraph=leaf,
+            items_field="items",
+            item_field="item",
+            collect_field="result",
+            target_field="results",
+            instance_middleware=(isolate, _explode),
+        )
+        .add_edge("fo", END)
+        .set_entry("fo")
+        .compile()
+    )
+    client = InMemoryLangfuseClient()
+    graph.attach_observer(LangfuseObserver(client=client))
+    await graph.invoke(_Top())
+    await graph.drain()
+
+    trace = next(iter(client.traces.values()))
+    marker = next(o for o in trace.observations if o.name == "openarmature.failure_isolated")
+    dispatch = next(
+        (o for o in trace.observations if "fan_out_parent_node_name" in (o.metadata or {})),
+        None,
+    )
+    assert dispatch is not None, (
+        "the marker's own event must synthesize the per-instance dispatch observation; "
+        "without the synthesis nothing opens one, because the wrapper raised before "
+        "any inner node event could"
+    )
+    assert marker.parent_observation_id == dispatch.id, (
+        "the marker must parent under the synthesized per-instance dispatch, not the "
+        f"Trace root; parent was {marker.parent_observation_id!r} and the dispatch is "
+        f"{dispatch.id!r}"
+    )

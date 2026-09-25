@@ -548,16 +548,36 @@ class LangfuseSDKAdapter:
         parent_observation_id: str | None = None,
         level: ObservationLevel = "DEFAULT",
         status_message: str | None = None,
+        start_time: datetime | None = None,
     ) -> LangfuseSpanHandle:
-        obs = self._start_observation(
-            as_type="span",
-            trace_id=trace_id,
-            name=name,
-            metadata=metadata,
-            parent_observation_id=parent_observation_id,
-            level=level,
-            status_message=status_message,
-        )
+        if start_time is not None:
+            # Back-date through the private OTel tracer, exactly as generation()
+            # and tool() do. A dispatch observation synthesized from a provider
+            # event is created when that event drains, while the Generation it
+            # parents is back-dated by its own latency, so without this the child
+            # opens before the parent it hangs from.
+            from langfuse._client.span import LangfuseSpan
+
+            obs = self._start_back_dated_observation(
+                LangfuseSpan,
+                trace_id=trace_id,
+                name=name,
+                metadata=metadata,
+                parent_observation_id=parent_observation_id,
+                level=level,
+                status_message=status_message,
+                start_time=start_time,
+            )
+        else:
+            obs = self._start_observation(
+                as_type="span",
+                trace_id=trace_id,
+                name=name,
+                metadata=metadata,
+                parent_observation_id=parent_observation_id,
+                level=level,
+                status_message=status_message,
+            )
         return _SpanHandle(obs)
 
     def generation(
