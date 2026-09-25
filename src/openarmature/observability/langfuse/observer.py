@@ -1567,6 +1567,12 @@ class LangfuseObserver:
         branch_key = _branch_dispatch_key(
             prefix, event.fan_out_index_chain, event.branch_name_chain, branch_name
         )
+        # Normalized the same way the fan-out opener above does, and for the
+        # same reason, but INERT here today: the metadata-augmentation walk has
+        # no loop over `parallel_branches_branch_spans`, so nothing reads a
+        # branch dispatch's stored chains. Kept rather than dropped because the
+        # OTel twin's equivalent is live and the chains are what that loop needs
+        # when it lands. See `_tasks/langfuse-augmentation-skips-branch-dispatches.md`.
         _stored_fan_out, _stored_branches = _stored_lineage(event, chain_len, own_branch=branch_name)
         inv_state.parallel_branches_branch_spans[branch_key] = _OpenObservation(
             handle=handle,
