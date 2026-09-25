@@ -25,11 +25,14 @@ from typing import Protocol
 
 __all__ = [
     "AugmentationLineage",
+    "LineageEvent",
     "BranchDispatchKey",
     "DispatchKey",
     "branch_dispatch_key",
     "dispatch_key",
+    "fan_out_identity_key",
     "is_outermost_serial",
+    "stored_lineage",
     "is_prefix_or_equal",
     "is_strict_prefix",
 ]
@@ -43,6 +46,31 @@ def is_strict_prefix(prefix: tuple[str, ...], full: tuple[str, ...]) -> bool:
 def is_prefix_or_equal(prefix: tuple[str, ...], full: tuple[str, ...]) -> bool:
     """True iff ``prefix`` is a prefix of (or equal to) ``full``."""
     return len(prefix) <= len(full) and full[: len(prefix)] == prefix
+
+
+class LineageEvent(Protocol):
+    """The lineage an event must carry to place its observation in the tree."""
+
+    # A Protocol rather than `Any`, which is what let a `FailureIsolatedEvent`
+    # reach an opener annotated `event: NodeEvent` and raise on a field it does
+    # not declare. Structural rather than a union, so a new event kind carrying
+    # these fields works without editing a list here.
+    #
+    # `correlation_id`, `subgraph_identities` and `caller_invocation_metadata`
+    # are deliberately absent and read defensively: a Protocol cannot express
+    # "may be absent", and a conforming event may not carry them.
+    @property
+    def namespace(self) -> tuple[str, ...]: ...
+    @property
+    def attempt_index(self) -> int: ...
+    @property
+    def fan_out_index(self) -> int | None: ...
+    @property
+    def branch_name(self) -> str | None: ...
+    @property
+    def fan_out_index_chain(self) -> tuple[int | None, ...]: ...
+    @property
+    def branch_name_chain(self) -> tuple[str | None, ...]: ...
 
 
 class AugmentationLineage(Protocol):
@@ -90,6 +118,65 @@ DispatchKey = tuple[tuple[str, ...], tuple[int | None, ...], tuple[str | None, .
 
 # As above, plus the branch's own name at that position.
 BranchDispatchKey = tuple[tuple[str, ...], tuple[int | None, ...], tuple[str | None, ...], str]
+
+
+def stored_lineage(
+    event: LineageEvent, chain_len: int, *, own_branch: str | None = None
+) -> tuple[tuple[int | None, ...], tuple[str | None, ...]]:
+    """The lineage chains an `_OpenSpan` records, normalized to `chain_len`."""
+    # Truncated when longer, PADDED with None when shorter -- the same
+    # normalization `_branch_dispatch_key` already does for the lookup key, for
+    # the same reason. A wrapper-issued event runs in the enclosing node's own
+    # ContextVar scope, so its chains are one entry short of what an inner node
+    # event carries. Storing the short chain made `_span_chain_on_path` treat the
+    # span as an ancestor of every sibling, because it returns True
+    # unconditionally for a zero-length stored chain -- so caller metadata set
+    # inside one branch was written onto its SIBLING's dispatch span, across the
+    # boundary that function's own docstring says must not be crossed.
+    fan_out = tuple(event.fan_out_index_chain[:chain_len]) + (None,) * max(
+        0, chain_len - len(event.fan_out_index_chain)
+    )
+    if own_branch is None:
+        branches = tuple(event.branch_name_chain[:chain_len]) + (None,) * max(
+            0, chain_len - len(event.branch_name_chain)
+        )
+        return fan_out, branches
+    # A per-branch dispatch span records its OWN branch as the last entry. A
+    # wrapper-issued event carries that name only on the scalar `branch_name`
+    # (it never extended the chain), so padding alone would store None there and
+    # exclude the branch's own augmenter from its own dispatch span -- the
+    # opposite over-correction to the sibling leak, and just as wrong.
+    enclosing = tuple(event.branch_name_chain[: chain_len - 1]) + (None,) * max(
+        0, (chain_len - 1) - len(event.branch_name_chain)
+    )
+    return fan_out, enclosing + (own_branch,)
+
+
+def fan_out_identity_key(
+    namespace: tuple[str, ...],
+    fan_out_index_chain: tuple[int | None, ...],
+    branch_name_chain: tuple[str | None, ...],
+) -> DispatchKey:
+    """Identity key for a fan-out NODE's declared subgraph identity."""
+    # The ENCLOSING lineage only, sliced to the depth ABOVE the fan-out itself.
+    # Two sides build this key and they see different events: the write side has
+    # the fan-out NODE's own started event, whose chains carry no instance index
+    # at its own depth, while the read side has an inner or orphan event whose
+    # chains do. Including the fan-out's own axis would make them disagree.
+    #
+    # The enclosing entries are what actually disambiguate: branch names never
+    # enter the namespace, so two sibling branches each holding a fan-out of the
+    # same name share one, and only the branch chain tells them apart.
+    # Pads as well as slices, like both siblings above. Slicing alone made the
+    # two sides agree only through an unstated invariant that every caller
+    # supplies a chain at least `depth` long; a caller one entry short builds a
+    # shorter tuple, misses the cache, and the identity silently reads empty.
+    depth = max(0, len(namespace) - 1)
+    return (
+        namespace,
+        tuple(fan_out_index_chain[:depth]) + (None,) * max(0, depth - len(fan_out_index_chain)),
+        tuple(branch_name_chain[:depth]) + (None,) * max(0, depth - len(branch_name_chain)),
+    )
 
 
 def branch_dispatch_key(

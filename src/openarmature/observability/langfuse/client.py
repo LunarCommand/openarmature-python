@@ -246,6 +246,7 @@ class LangfuseClient(Protocol):
         parent_observation_id: str | None = None,
         level: ObservationLevel = "DEFAULT",
         status_message: str | None = None,
+        start_time: datetime | None = None,
     ) -> LangfuseSpanHandle: ...
 
     def generation(
@@ -523,6 +524,7 @@ class InMemoryLangfuseClient:
         parent_observation_id: str | None = None,
         level: ObservationLevel = "DEFAULT",
         status_message: str | None = None,
+        start_time: datetime | None = None,
     ) -> LangfuseSpanHandle:
         trace = self._get_trace(trace_id)
         observation = LangfuseObservation(
@@ -533,6 +535,7 @@ class InMemoryLangfuseClient:
             parent_observation_id=parent_observation_id,
             level=level,
             status_message=status_message,
+            start_time=start_time,
         )
         trace.observations.append(observation)
         return _InMemorySpanHandle(observation=observation)

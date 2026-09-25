@@ -34,6 +34,7 @@ from __future__ import annotations
 import copy
 import functools
 import re
+import uuid
 from collections.abc import Callable, Mapping, Sequence
 from collections.abc import Set as AbstractSet
 from pathlib import Path
@@ -49,6 +50,9 @@ import yaml
 # ``tests/unit/test_observability_otel.py``.
 pytest.importorskip("opentelemetry.sdk.trace")
 
+from openarmature.observability.correlation import (  # noqa: E402
+    current_invocation_id,
+)
 from openarmature.observability.otel import OTelObserver  # noqa: E402
 
 from .adapter import build_graph  # noqa: E402
@@ -267,8 +271,10 @@ _SUPPORTED_FIXTURES = frozenset(
         "149-malformed-wire-counter-nulled-through-mapping-to-event-and-span",
         # 152 / 153 (proposal 0084): where a provider span emitted from a
         # WRAPPER lands when the calling node's span is not open. Their driver
-        # yields inside the wrapper on purpose; passing without that yield was
-        # the schedule-dependence, not the fix.
+        # holds a section 5.1 `await_event_delivery` barrier at the call site,
+        # which is what makes the case discriminate: it used to concede a
+        # scheduler turn instead, and section 5.1 now states that a yield is
+        # insufficient because nothing binds the turn to this call's event.
         "152-otel-parallel-branch-orphan-llm-fallback",
         "153-otel-mixed-nesting-orphan-llm-fallback",
         # v0.69.0 — proposal 0063 (tool-execution observability). A
@@ -3030,9 +3036,9 @@ async def _run_fixture_133_case(case: Mapping[str, Any], spec: Mapping[str, Any]
     # modelling a guardrail / classifier side call.
     #
     # Realization note (this harness deviates from the fixture's literal
-    # "per-node `guard` middleware, phase: pre" on two axes, both forced by the
-    # observers' real timing; the orphan SEMANTIC -- no open calling-node span --
-    # and the oracle span_tree are preserved):
+    # "per-node `guard` middleware" on ONE axis, forced by the observers' real
+    # timing; the orphan SEMANTIC -- no open calling-node span -- and the oracle
+    # span_tree are preserved):
     #
     #   1. INSTANCE middleware on the inner fan-out, not per-node middleware on
     #      `guard`. A per-node wrapper's call carries guard's own lineage, so the
@@ -3045,15 +3051,18 @@ async def _run_fixture_133_case(case: Mapping[str, Any], spec: Mapping[str, Any]
     #      intends, a sibling of the later `guard` node span. `leaf_sg` is the
     #      single `guard` node, so the instance wrapper IS guard's wrapper; the
     #      `calls_llm_from_wrapper` directive is read from the `guard` node spec.
-    #   2. POST phase (fire AFTER next()), matching the sibling Langfuse 134
-    #      harness for a single realization across both backends. The Langfuse
-    #      observer creates the inner instance OBSERVATION lazily when guard's
-    #      started event drains on the serial worker, so a pre-phase orphan
-    #      (enqueued first) resolves to the OUTER instance there; post guarantees
-    #      the inner instance exists at resolution time. OTel resolves to the
-    #      inner instance in either phase. The fixture declares phase: pre; its .md
-    #      notes either phase exercises the same fallback (in post, guard has
-    #      closed, so the calling-node span is still not open at emit).
+    #
+    # The phase is the fixture's, not the harness's. This driver used to hardcode
+    # POST because the Langfuse observer created the inner instance observation
+    # lazily, so a pre-phase orphan resolved to the OUTER instance there. Proposal
+    # 0124 removed that: the parent resolves structurally, so the inner instance
+    # is materialized on demand and PRE resolves correctly on both backends.
+    #
+    # Honouring the declared `phase: pre` is what makes the case discriminate.
+    # At POST the node body has already run and its `started` event has
+    # synthesized the dispatch span, so no ordering is left for section 5.1's
+    # barrier to pin: with the barrier in place at POST, disabling the structural
+    # synthesis still passes. At PRE it fails, which is the point.
     subgraphs_spec = cast("dict[str, Any]", spec["subgraphs"])
     leaf_spec = cast("dict[str, Any]", subgraphs_spec["leaf_sg"])
     leaf_state_cls = build_state_cls(
@@ -3062,6 +3071,12 @@ async def _run_fixture_133_case(case: Mapping[str, Any], spec: Mapping[str, Any]
     guard_spec = cast("dict[str, Any]", leaf_spec["nodes"]["guard"])
     update_map = dict(cast("dict[str, Any]", guard_spec["update"]))
     wrapper_spec = cast("dict[str, Any]", guard_spec["calls_llm_from_wrapper"])
+    phase = cast("str", wrapper_spec.get("phase", "pre"))
+    awaits_delivery = bool(wrapper_spec.get("await_event_delivery", False))
+    # Filled once the graph is compiled, below; the wrapper closure is built first.
+    barrier: dict[str, Any] = {}
+    # One entry per barrier attempt: None for held, a reason string otherwise.
+    barrier_log: list[str | None] = []
     messages_in: tuple[Any, ...] = tuple(
         UserMessage(content=m["content"])
         for m in cast("list[dict[str, str]]", wrapper_spec.get("messages", []))
@@ -3105,15 +3120,67 @@ async def _run_fixture_133_case(case: Mapping[str, Any], spec: Mapping[str, Any]
         # Wrapper-issued side call: fire exactly one completion and DISCARD it
         # (never written to state), modelling a guardrail / classifier check.
         await provider.complete(list(messages_in))
+        await _await_delivery()
+
+    async def _await_delivery() -> None:
+        # Section 5.1: delivery through THIS call's provider event completes
+        # before the wrapper proceeds past the call site. The event is dispatched
+        # before `complete()` returns, so the snapshot `drain_events_for` takes
+        # at entry already contains it.
+        #
+        # Outcomes are RECORDED, not asserted here. This runs inside middleware,
+        # and a fan-out declared `error_policy: collect` turns a raise into a
+        # dropped error record rather than a failure, so an assertion at this
+        # point cannot fail the case. `_assert_barrier_held` runs it after the
+        # invocation instead.
+        if not awaits_delivery:
+            return
+        if not barrier:
+            barrier_log.append("no barrier wired")
+            return
+        # `drain_events_for` returns a clean, non-timed-out summary for an
+        # invocation_id no active worker matches, which is byte-identical to a
+        # satisfied barrier. Without this the whole thing degrades to a no-op the
+        # moment the id stops matching, and every fixture still passes.
+        if current_invocation_id() != barrier["invocation_id"]:
+            barrier_log.append(
+                f"barrier bound to {barrier['invocation_id']!r} but the live invocation is "
+                f"{current_invocation_id()!r}, so the drain resolved no worker"
+            )
+            return
+        summary = await barrier["graph"].drain_events_for(barrier["invocation_id"])
+        if summary.timeout_reached:
+            barrier_log.append(f"timed out, {summary.undelivered_count} events undelivered")
+        else:
+            barrier_log.append(None)
+
+    def _assert_barrier_held() -> None:
+        # Section 5.1: an adapter that cannot provide the barrier MUST fail the
+        # case rather than run it without one.
+        if not awaits_delivery:
+            return
+        assert barrier_log, (
+            "`await_event_delivery` is set but the barrier never ran, so the case "
+            "executed with pre-0124 behaviour while still counting as coverage"
+        )
+        problems = [p for p in barrier_log if p is not None]
+        assert not problems, f"`await_event_delivery` barrier did not hold: {problems}"
 
     async def _guard_body(_s: Any) -> Mapping[str, Any]:
         return dict(update_map)
 
     async def _wrapper_mw(state: Any, next_call: Any) -> Mapping[str, Any]:
-        # Instance middleware on the inner fan-out, POST phase: fire AFTER next()
-        # (the inner subgraph, i.e. `guard`, has run and its span has closed), so
-        # the calling-node span is not open and the orphan provider span falls
-        # back to the nearest enclosing wrapper: the inner fan-out INSTANCE span.
+        # Instance middleware on the inner fan-out. The phase comes from the
+        # fixture: at `pre` the calling node's span is not yet open, at `post` it
+        # has already closed, and either way the orphan provider span falls back
+        # to the nearest enclosing wrapper, the inner fan-out INSTANCE span.
+        #
+        # Section 5.1's barrier only bites at `pre`: at `post` the node body has
+        # already run and its `started` event has synthesized the dispatch span,
+        # so no ordering is left for the barrier to pin.
+        if phase == "pre":
+            await _fire_orphan_call()
+            return await next_call(state)
         result = await next_call(state)
         await _fire_orphan_call()
         return result
@@ -3175,9 +3242,12 @@ async def _run_fixture_133_case(case: Mapping[str, Any], spec: Mapping[str, Any]
     exporter = InMemorySpanExporter()
     observer = OTelObserver(span_processor=SimpleSpanProcessor(exporter))
     graph.attach_observer(observer)
+    invocation_id = str(uuid.uuid4())
+    barrier.update(graph=graph, invocation_id=invocation_id)
     try:
-        await graph.invoke(outer_state_cls())
+        await graph.invoke(outer_state_cls(), invocation_id=invocation_id)
         await graph.drain()
+        _assert_barrier_held()
     finally:
         observer.shutdown()
         await provider.aclose()
@@ -7307,7 +7377,6 @@ async def _run_orphan_fallback_fixture(spec: Mapping[str, Any]) -> None:
 
 
 async def _run_orphan_fallback_case(case: Mapping[str, Any], spec: Mapping[str, Any]) -> None:
-    import asyncio  # noqa: PLC0415
     import json  # noqa: PLC0415
 
     import httpx  # noqa: PLC0415
@@ -7349,20 +7418,73 @@ async def _run_orphan_fallback_case(case: Mapping[str, Any], spec: Mapping[str, 
     )
     observer, exporter = _build_observer()
     try:
+        # Filled in below, once the graph is compiled: `_make_orphan_mw` runs
+        # before there is a graph to name, and the barrier needs both.
+        barrier: dict[str, Any] = {}
+        # One entry per barrier attempt: None for held, a reason string otherwise.
+        barrier_log: list[str | None] = []
+
+        # One entry per wrapper that DECLARED the directive, so the count below
+        # can tell a barrier that ran from one that was never reached.
+        barrier_expected: list[str] = []
+
+        def _assert_barrier_held() -> None:
+            # Section 5.1: an adapter that cannot provide the barrier MUST fail
+            # the case rather than run it without one. Asserted here rather than
+            # inside the middleware, whose raises the engine's error policy may
+            # absorb.
+            assert len(barrier_log) == len(barrier_expected), (
+                f"{len(barrier_expected)} wrapper(s) declared `await_event_delivery` but the "
+                f"barrier ran {len(barrier_log)} time(s); a skipped barrier means the case ran "
+                "with pre-0124 behaviour while still counting as coverage"
+            )
+            problems = [x for x in barrier_log if x is not None]
+            assert not problems, f"`await_event_delivery` barrier did not hold: {problems}"
 
         def _make_orphan_mw(wrapper_spec: Mapping[str, Any]) -> Any:
             messages = (UserMessage(content=_wrapper_request_content(wrapper_spec)),)
             phase = cast("str", wrapper_spec.get("phase", "pre"))
+            awaits_delivery = bool(wrapper_spec.get("await_event_delivery", False))
+            if awaits_delivery:
+                barrier_expected.append(_wrapper_request_content(wrapper_spec))
+
+            async def _await_delivery() -> None:
+                # Section 5.1: delivery through THIS call's provider event must
+                # complete before the wrapper proceeds past the call site. The
+                # event is dispatched before `complete()` returns, so the
+                # snapshot `drain_events_for` takes at entry already contains it.
+                #
+                # Recorded rather than asserted: this runs inside middleware, so
+                # the engine's error policy decides whether a raise here reaches
+                # the case at all. `_assert_barrier_held` checks after the run.
+                if not awaits_delivery:
+                    return
+                if not barrier:
+                    barrier_log.append("no barrier wired")
+                    return
+                # A clean summary comes back for an invocation_id no active
+                # worker matches, indistinguishable from a satisfied barrier, so
+                # bind-liveness is checked rather than assumed.
+                if current_invocation_id() != barrier["invocation_id"]:
+                    barrier_log.append(
+                        f"barrier bound to {barrier['invocation_id']!r} but the live "
+                        f"invocation is {current_invocation_id()!r}"
+                    )
+                    return
+                summary = await barrier["graph"].drain_events_for(barrier["invocation_id"])
+                if summary.timeout_reached:
+                    barrier_log.append(f"timed out, {summary.undelivered_count} events undelivered")
+                else:
+                    barrier_log.append(None)
 
             async def _mw(state: Any, next_call: Any) -> Any:
                 if phase == "pre":
                     await provider.complete(list(messages))
-                    # See the note above the driver: the yield is the assertion.
-                    await asyncio.sleep(0)
+                    await _await_delivery()
                     return await next_call(state)
                 result = await next_call(state)
                 await provider.complete(list(messages))
-                await asyncio.sleep(0)
+                await _await_delivery()
                 return result
 
             return _mw
@@ -7446,8 +7568,14 @@ async def _run_orphan_fallback_case(case: Mapping[str, Any], spec: Mapping[str, 
         built = build_graph(case, subgraphs=compiled, trace=[], parallel_branches_branch_middleware=branch_mw)
         graph = built.builder.compile()
         graph.attach_observer(observer)
-        await graph.invoke(built.initial_state(cast("dict[str, Any]", case.get("initial_state") or {})))
+        invocation_id = str(uuid.uuid4())
+        barrier.update(graph=graph, invocation_id=invocation_id)
+        await graph.invoke(
+            built.initial_state(cast("dict[str, Any]", case.get("initial_state") or {})),
+            invocation_id=invocation_id,
+        )
         await graph.drain()
+        _assert_barrier_held()
     finally:
         await provider.aclose()
         observer.shutdown()

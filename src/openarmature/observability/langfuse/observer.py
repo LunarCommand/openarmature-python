@@ -62,14 +62,21 @@ from openarmature.observability.lineage import (
     DispatchKey as _DispatchKey,
 )
 from openarmature.observability.lineage import (
+    LineageEvent,
+    is_outermost_serial,
+    is_strict_prefix,
+)
+from openarmature.observability.lineage import (
     branch_dispatch_key as _branch_dispatch_key,
 )
 from openarmature.observability.lineage import (
     dispatch_key as _dispatch_key,
 )
 from openarmature.observability.lineage import (
-    is_outermost_serial,
-    is_strict_prefix,
+    fan_out_identity_key as _fan_out_identity_key,
+)
+from openarmature.observability.lineage import (
+    stored_lineage as _stored_lineage,
 )
 from openarmature.observability.llm_event import _token_budget_evaluations
 
@@ -214,7 +221,7 @@ def _promoted_user_id(metadata: Mapping[str, Any]) -> str | None:
     return str(value) if value is not None else None
 
 
-def _subgraph_identity_at(event: NodeEvent, depth: int) -> str:
+def _subgraph_identity_at(event: object, depth: int) -> str:
     """Return the compiled-subgraph identity for the wrapper at the
     given 1-based namespace depth, or the empty string when no
     identity is tracked at that depth.
@@ -227,13 +234,28 @@ def _subgraph_identity_at(event: NodeEvent, depth: int) -> str:
     failing those fixtures.
     """
     # §5.3: the empty-string fallback is conformant for callers that do not
-    # track a subgraph identity.
+    # track a subgraph identity. `getattr` because a dispatch observation may be
+    # synthesized from a provider event, which carries the lineage chains but no
+    # identities; `_backfill_subgraph_identity` repairs it from the first node event.
+    identities = cast("tuple[str | None, ...]", getattr(event, "subgraph_identities", ()))
     idx = depth - 1
-    if 0 <= idx < len(event.subgraph_identities):
-        identity = event.subgraph_identities[idx]
+    if 0 <= idx < len(identities):
+        identity = identities[idx]
         if identity is not None:
             return identity
     return ""
+
+
+def _backfill_subgraph_identity(open_obs: _OpenObservation, event: object, depth: int) -> None:
+    """Set ``subgraph_name`` on an already-open dispatch observation."""
+    # Dispatch observations can now be synthesized by a provider event, which
+    # carries the lineage chains but no `subgraph_identities`, so the field would
+    # otherwise read empty whenever a wrapper-issued call happened to arrive
+    # first. That is the same schedule-dependence the on-demand synthesis exists
+    # to remove, one field down. Mirror of the OTel observer's helper.
+    identity = _subgraph_identity_at(event, depth)
+    if identity:
+        open_obs.handle.update(metadata={"subgraph_name": identity})
 
 
 @dataclass
@@ -261,6 +283,12 @@ class _InvState:
     # fan-out node's own Span observation; inner-node observations
     # parent under this dispatch instead of the shared fan-out node
     # span. Closed when the fan-out node's completed event fires.
+    # Declared subgraph identity per fan-out DISPATCH, cached off the node's own
+    # started event. Mirrors the OTel observer's cache and exists for the same
+    # reason: a per-instance observation synthesized from a provider event has no
+    # `subgraph_identities` to read, and when the instance middleware
+    # short-circuits no inner node event ever arrives to backfill it.
+    fan_out_subgraph_identity: dict[_DispatchKey, str] = field(default_factory=dict[_DispatchKey, str])
     fan_out_instance_observations: dict[_DispatchKey, _OpenObservation] = field(
         default_factory=dict[_DispatchKey, _OpenObservation]
     )
@@ -659,6 +687,15 @@ class LangfuseObserver:
         # carries the OUTER instance index on its own event.
         if event.fan_out_config is not None:
             inv_state.fan_out_parent_node_name[event.namespace] = event.fan_out_config.parent_node_name
+            # The fan-out NODE's own started event always precedes its instances,
+            # so this is populated before any instance observation opens. Keyed by
+            # the lineage-aware key rather than the namespace: branch names never
+            # enter the namespace, so two sibling branches each holding a fan-out
+            # of the same name would otherwise share one entry.
+            if event.fan_out_config.subgraph_identity is not None:
+                inv_state.fan_out_subgraph_identity[
+                    _fan_out_identity_key(event.namespace, event.fan_out_index_chain, event.branch_name_chain)
+                ] = event.fan_out_config.subgraph_identity
 
         # Per proposal 0045: mirror cache for parallel-branches NODE
         # identification (used by the augmentation shared-parent
@@ -732,6 +769,15 @@ class LangfuseObserver:
         # Per spec proposal 0013 (v0.10.0): when the fan-out node's
         # own completion fires, close all per-instance dispatch
         # observations synthesized for it. Children-before-parents.
+        # The `fan_out_index is None` filter is WRONG in the OTel mirror's own
+        # terms (a nested fan-out's completion carries the OUTER index, so this
+        # skips it) and is kept anyway, because dropping it is worse: the loop
+        # below matches on namespace alone and never compares the key's lineage
+        # chains, so one outer instance's completion closes every sibling
+        # instance's dispatch observations and pops the shared
+        # `fan_out_parent_node_name` entry they still need. Removing the filter
+        # needs the match scoped to the completing event's own lineage first, in
+        # both observers. See `_tasks/dispatch-close-scoping.md`.
         if event.fan_out_index is None and event.fan_out_config is not None:
             ns = event.namespace
             for key in list(inv_state.fan_out_instance_observations.keys()):
@@ -875,31 +921,23 @@ class LangfuseObserver:
         if inv_state is None:
             return
         # FailureIsolatedEvent is not a NodeEvent but carries the same lineage
-        # fields (proposal 0084), so build the 6-tuple key inline rather than via
-        # _key_for (typed for NodeEvent).
-        key: _StackKey = (
-            event.namespace,
-            event.attempt_index,
-            event.fan_out_index,
-            event.branch_name,
-            event.fan_out_index_chain,
-            event.branch_name_chain,
+        # fields (proposal 0084), so it goes through the same resolver the five
+        # provider handlers use rather than a hand-built key plus a bare
+        # enclosing-wrapper walk. Passing `event` is what matters: the walk alone
+        # skips the section 5.5 call-site synthesis, so a marker raised from
+        # instance middleware before any inner node event landed at the Trace
+        # root here while the OTel twin parented it under the synthesized
+        # per-instance dispatch span.
+        parent_observation_id = self._resolve_llm_parent_observation_id(
+            inv_state,
+            calling_namespace_prefix=event.namespace,
+            calling_attempt_index=event.attempt_index,
+            calling_fan_out_index=event.fan_out_index,
+            calling_branch_name=event.branch_name,
+            calling_fan_out_index_chain=event.fan_out_index_chain,
+            calling_branch_name_chain=event.branch_name_chain,
+            event=event,
         )
-        parent = inv_state.open_observations.get(key)
-        if parent is not None:
-            parent_observation_id = parent.handle.id
-        else:
-            # Calling node observation not open (the typical case): parent under
-            # the nearest enclosing wrapper, the same orphan resolution the LLM /
-            # tool Generations use, so OTel and Langfuse agree on the marker's
-            # parent.
-            parent_observation_id = self._resolve_enclosing_wrapper_observation_id(
-                inv_state,
-                namespace=event.namespace,
-                branch_name=event.branch_name,
-                fan_out_index_chain=event.fan_out_index_chain,
-                branch_name_chain=event.branch_name_chain,
-            )
         # No exception message: no §8.4.x table maps this span, so harvested
         # content on it is over-emission. It rides the OTel span instead.
         #
@@ -1230,9 +1268,14 @@ class LangfuseObserver:
             # ones. Runs at ANY depth (nested fan-out / subgraph wrapper).
             if (
                 fi_axis is not None
-                and _dispatch_key(prefix, event.fan_out_index_chain, event.branch_name_chain)
-                in inv_state.fan_out_instance_observations
+                and (
+                    already := inv_state.fan_out_instance_observations.get(
+                        _dispatch_key(prefix, event.fan_out_index_chain, event.branch_name_chain)
+                    )
+                )
+                is not None
             ):
+                _backfill_subgraph_identity(already, event, len(prefix))
                 continue
             # Detached subgraph: kept top-level (depth == 1). _trace_id_for routes
             # detached events by namespace[:1], so a nested detached unit would
@@ -1276,15 +1319,17 @@ class LangfuseObserver:
                 # orphan the first observation and split the branch's nodes).
                 # event.branch_name (not bn_axis) so callable branches -- which
                 # don't extend branch_name_chain -- still synthesize.
-                if (
+                open_branch = inv_state.parallel_branches_branch_spans.get(
                     _branch_dispatch_key(
                         prefix, event.fan_out_index_chain, event.branch_name_chain, event.branch_name
                     )
-                    not in inv_state.parallel_branches_branch_spans
-                ):
+                )
+                if open_branch is None:
                     self._open_parallel_branches_branch_dispatch_observation(
                         inv_state, correlation_id, prefix, event
                     )
+                else:
+                    _backfill_subgraph_identity(open_branch, event, len(prefix))
                 continue
             # A fan-out or parallel-branches NODE already has its own leaf
             # observation, unlike a transparent subgraph wrapper, so
@@ -1329,7 +1374,10 @@ class LangfuseObserver:
         }
         if correlation_id is not None:
             metadata["correlation_id"] = correlation_id
-        _apply_caller_metadata(metadata, event.caller_invocation_metadata)
+        # Read defensively: a synthesizing event need not declare the field.
+        _apply_caller_metadata(
+            metadata, cast("Mapping[str, Any] | None", getattr(event, "caller_invocation_metadata", None))
+        )
         handle = self.client.span(
             trace_id=inv_state.trace_id,
             name=prefix[-1],
@@ -1344,12 +1392,70 @@ class LangfuseObserver:
             branch_name_chain=event.branch_name_chain[:chain_len],
         )
 
+    def _synthesize_call_site_wrapper_observations(
+        self,
+        inv_state: _InvState,
+        event: LineageEvent,
+        start_time: datetime | None = None,
+    ) -> None:
+        """Open any dispatch observation the CALLING lineage sits inside that
+        has not been synthesized yet."""
+        # §5.5: the parent resolves STRUCTURALLY. A call from branch or instance
+        # middleware is inside that wrapper, so its enclosing wrapper is that
+        # dispatch observation whether or not this observer has materialized it.
+        # Resolving it dynamically made the parent depend on drain scheduling.
+        #
+        # Mirror of the OTel observer's `_synthesize_call_site_wrapper_spans`.
+        # Walks the FULL namespace rather than proper ancestors, because a
+        # branch-middleware call sits AT the parallel-branches namespace. Opens
+        # dispatch observations only and closes nothing: a provider event is not
+        # a position change.
+        #
+        # The detached arms are deliberately not mirrored, matching OTel: the
+        # detached openers assume a Trace already exists, which holds from the
+        # node path and not from this one. So for a wrapper-issued call inside a
+        # detached wrapper the enclosing observation still depends on drain
+        # scheduling.
+        from openarmature.observability.correlation import (  # noqa: PLC0415
+            current_correlation_id,
+        )
+
+        correlation_id = current_correlation_id()
+        namespace = event.namespace
+        fan_out_index_chain = event.fan_out_index_chain
+        branch_name_chain = event.branch_name_chain
+        branch_name = event.branch_name
+        for depth in range(1, len(namespace) + 1):
+            prefix = namespace[:depth]
+            fi_axis = fan_out_index_chain[depth - 1] if depth - 1 < len(fan_out_index_chain) else None
+            if (
+                fi_axis is not None
+                and prefix[-1] not in self.detached_fan_outs
+                and prefix in inv_state.fan_out_parent_node_name
+                and _dispatch_key(prefix, fan_out_index_chain, branch_name_chain)
+                not in inv_state.fan_out_instance_observations
+            ):
+                self._open_fan_out_instance_dispatch_observation(
+                    inv_state, correlation_id, prefix, event, start_time
+                )
+            if (
+                branch_name is not None
+                and prefix in inv_state.parallel_branches_parent_node_name
+                and branch_name in inv_state.parallel_branches_branch_names.get(prefix, frozenset())
+                and _branch_dispatch_key(prefix, fan_out_index_chain, branch_name_chain, branch_name)
+                not in inv_state.parallel_branches_branch_spans
+            ):
+                self._open_parallel_branches_branch_dispatch_observation(
+                    inv_state, correlation_id, prefix, event, start_time
+                )
+
     def _open_fan_out_instance_dispatch_observation(
         self,
         inv_state: _InvState,
         correlation_id: str | None,
         prefix: tuple[str, ...],
-        event: NodeEvent,
+        event: LineageEvent,
+        start_time: datetime | None = None,
     ) -> None:
         # Non-detached per-instance dispatch lives in the parent
         # Trace under the fan-out node's own Span observation.
@@ -1370,28 +1476,47 @@ class LangfuseObserver:
         )
         metadata: dict[str, Any] = {
             "namespace": list(prefix),
-            "step": event.step,
+            # A provider event carries no `step`, and since section 5.5's
+            # structural resolution lets one trigger this synthesis the field
+            # has to survive its absence. No fixture asserts `step` on a
+            # dispatch observation, and 0 is this observation's own position
+            # rather than a node's.
+            "step": getattr(event, "step", 0),
             "attempt_index": 0,
             "fan_out_parent_node_name": parent_node_name,
             "fan_out_index": fan_out_index,
-            "subgraph_name": _subgraph_identity_at(event, len(prefix)),
+            # The event's own identities first; they are authoritative and
+            # per-depth. An event carrying none (a provider event, or any kind
+            # without the field) falls back to the identity the fan-out NODE
+            # declared. Without it a short-circuiting instance middleware leaves
+            # an empty name with nothing able to repair it, since the backfill
+            # needs an inner node event that never arrives.
+            "subgraph_name": _subgraph_identity_at(event, len(prefix))
+            or inv_state.fan_out_subgraph_identity.get(
+                _fan_out_identity_key(prefix, event.fan_out_index_chain, event.branch_name_chain), ""
+            ),
         }
         if correlation_id is not None:
             metadata["correlation_id"] = correlation_id
-        _apply_caller_metadata(metadata, event.caller_invocation_metadata)
+        # Read defensively: a synthesizing event need not declare the field.
+        _apply_caller_metadata(
+            metadata, cast("Mapping[str, Any] | None", getattr(event, "caller_invocation_metadata", None))
+        )
         handle = self.client.span(
             trace_id=inv_state.trace_id,
             name=prefix[-1],
             metadata=metadata,
             parent_observation_id=parent_observation_id,
+            start_time=start_time,
         )
         # Lineage-aware key (proposal 0045): the namespace plus the full instance
         # / branch chain, so nested instances don't collide across outer ones.
         instance_key = _dispatch_key(prefix, event.fan_out_index_chain, event.branch_name_chain)
+        _stored_fan_out, _stored_branches = _stored_lineage(event, chain_len)
         inv_state.fan_out_instance_observations[instance_key] = _OpenObservation(
             handle=handle,
-            fan_out_index_chain=event.fan_out_index_chain[:chain_len],
-            branch_name_chain=event.branch_name_chain[:chain_len],
+            fan_out_index_chain=_stored_fan_out,
+            branch_name_chain=_stored_branches,
         )
 
     def _open_parallel_branches_branch_dispatch_observation(
@@ -1399,7 +1524,8 @@ class LangfuseObserver:
         inv_state: _InvState,
         correlation_id: str | None,
         prefix: tuple[str, ...],
-        event: NodeEvent,
+        event: LineageEvent,
+        start_time: datetime | None = None,
     ) -> None:
         # Per-branch dispatch lives under the parallel-branches NODE's own Span
         # observation (mirror of the fan-out per-instance dispatch).
@@ -1415,7 +1541,8 @@ class LangfuseObserver:
         branch_name = cast("str", event.branch_name)
         metadata: dict[str, Any] = {
             "namespace": list(prefix),
-            "step": event.step,
+            # See the fan-out opener: a provider-triggered synthesis has no step.
+            "step": getattr(event, "step", 0),
             "attempt_index": 0,
             "parallel_branches_parent_node_name": parent_node_name,
             "branch_name": branch_name,
@@ -1423,12 +1550,16 @@ class LangfuseObserver:
         }
         if correlation_id is not None:
             metadata["correlation_id"] = correlation_id
-        _apply_caller_metadata(metadata, event.caller_invocation_metadata)
+        # Read defensively: a synthesizing event need not declare the field.
+        _apply_caller_metadata(
+            metadata, cast("Mapping[str, Any] | None", getattr(event, "caller_invocation_metadata", None))
+        )
         handle = self.client.span(
             trace_id=inv_state.trace_id,
             name=branch_name,
             metadata=metadata,
             parent_observation_id=parent_observation_id,
+            start_time=start_time,
         )
         # Lineage-aware key (proposal 0045): the enclosing fan-out instance /
         # branch chain plus the explicit branch name, so a branch nested inside
@@ -1436,10 +1567,17 @@ class LangfuseObserver:
         branch_key = _branch_dispatch_key(
             prefix, event.fan_out_index_chain, event.branch_name_chain, branch_name
         )
+        # Normalized the same way the fan-out opener above does, and for the
+        # same reason, but INERT here today: the metadata-augmentation walk has
+        # no loop over `parallel_branches_branch_spans`, so nothing reads a
+        # branch dispatch's stored chains. Kept rather than dropped because the
+        # OTel twin's equivalent is live and the chains are what that loop needs
+        # when it lands. See `_tasks/langfuse-augmentation-skips-branch-dispatches.md`.
+        _stored_fan_out, _stored_branches = _stored_lineage(event, chain_len, own_branch=branch_name)
         inv_state.parallel_branches_branch_spans[branch_key] = _OpenObservation(
             handle=handle,
-            fan_out_index_chain=event.fan_out_index_chain[:chain_len],
-            branch_name_chain=event.branch_name_chain[:chain_len],
+            fan_out_index_chain=_stored_fan_out,
+            branch_name_chain=_stored_branches,
         )
 
     def _open_detached_subgraph_trace(
@@ -1622,7 +1760,7 @@ class LangfuseObserver:
         observation.handle.end()
 
     def _find_node_observation(
-        self, inv_state: _InvState, prefix: tuple[str, ...], event: NodeEvent
+        self, inv_state: _InvState, prefix: tuple[str, ...], event: LineageEvent
     ) -> _OpenObservation | None:
         # Matched on the enclosing lineage, not the namespace alone: when this
         # node is itself nested, several instances of the same namespace are
@@ -1788,6 +1926,8 @@ class LangfuseObserver:
             calling_branch_name=event.branch_name,
             calling_fan_out_index_chain=event.fan_out_index_chain,
             calling_branch_name_chain=event.branch_name_chain,
+            event=event,
+            start_time=start_time,
         )
         metadata = self._typed_event_metadata(event, correlation_id)
         model_parameters: dict[str, Any] = dict(event.request_params or {})
@@ -1868,6 +2008,8 @@ class LangfuseObserver:
             calling_branch_name=event.branch_name,
             calling_fan_out_index_chain=event.fan_out_index_chain,
             calling_branch_name_chain=event.branch_name_chain,
+            event=event,
+            start_time=start_time,
         )
         metadata = self._typed_event_metadata(event, correlation_id)
         # error_type is a classification token, not harvested content, so it is
@@ -1956,6 +2098,8 @@ class LangfuseObserver:
             calling_branch_name=event.branch_name,
             calling_fan_out_index_chain=event.fan_out_index_chain,
             calling_branch_name_chain=event.branch_name_chain,
+            event=event,
+            start_time=start_time,
         )
         # §8.4.6 metadata. Caller set first, as in every handler, so an
         # OA-emitted key wins a collision; §8.4.2 puts it on every observation.
@@ -2056,6 +2200,8 @@ class LangfuseObserver:
             calling_branch_name=event.branch_name,
             calling_fan_out_index_chain=event.fan_out_index_chain,
             calling_branch_name_chain=event.branch_name_chain,
+            event=event,
+            start_time=start_time,
         )
         # §8.4.5 metadata: input_count always; dimensions / response_id are
         # response-derived (success-only). correlation_id + caller metadata
@@ -2169,6 +2315,8 @@ class LangfuseObserver:
             calling_branch_name=event.branch_name,
             calling_fan_out_index_chain=event.fan_out_index_chain,
             calling_branch_name_chain=event.branch_name_chain,
+            event=event,
+            start_time=start_time,
         )
         # §8.4.7 request-side identity metadata (present on both variants):
         # query_length (UTF-8 byte length), document_count, top_k (when
@@ -2256,6 +2404,8 @@ class LangfuseObserver:
         calling_branch_name: str | None,
         calling_fan_out_index_chain: tuple[int | None, ...],
         calling_branch_name_chain: tuple[str | None, ...],
+        event: LineageEvent | None = None,
+        start_time: datetime | None = None,
     ) -> str | None:
         # Exact-match the calling node's observation first. If it is not open
         # (a middleware or wrapper call) take the §5.5 orphan fallback: parent
@@ -2272,6 +2422,16 @@ class LangfuseObserver:
         observation = inv_state.open_observations.get(key)
         if observation is not None:
             return observation.handle.id
+        # ORPHAN PATH ONLY: the calling node's observation is not open, so this
+        # is a call from a wrapper. Materialize any dispatch observation the
+        # calling lineage sits inside before walking for it, so the answer does
+        # not depend on whether the wrapper's first inner node has drained.
+        if event is not None:
+            # Same back-dating as the observation being parented: a dispatch
+            # synthesized here is created when the provider event drains, while
+            # its child is back-dated by the call's own latency, so stamping it
+            # "now" would open the child before its parent.
+            self._synthesize_call_site_wrapper_observations(inv_state, event, start_time)
         return self._resolve_enclosing_wrapper_observation_id(
             inv_state,
             namespace=calling_namespace_prefix,

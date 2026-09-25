@@ -192,7 +192,16 @@ def test_both_observers_share_one_branch_dispatch_key_implementation() -> None:
     # diff-scoped reviewer would see one side of it.
     from openarmature.observability import lineage
 
-    shared = {"_branch_dispatch_key": lineage.branch_dispatch_key, "_dispatch_key": lineage.dispatch_key}
+    # Every symbol the module owns, not just the two that were shared first.
+    # `_fan_out_identity_key`, `_stored_lineage` and the `LineageEvent` Protocol
+    # were each a local copy in the OTel observer until they were lifted here,
+    # and a local `_LineageEvent` Protocol is literally how the drift started.
+    shared = {
+        "_branch_dispatch_key": lineage.branch_dispatch_key,
+        "_dispatch_key": lineage.dispatch_key,
+        "_fan_out_identity_key": lineage.fan_out_identity_key,
+        "_stored_lineage": lineage.stored_lineage,
+    }
     modules = [(label, pytest.importorskip(name)) for label, name in _BRANCH_KEY_MODULES]
     assert len(modules) == 2, "expected both backends' observer modules to be importable"
     for label, module in modules:
@@ -201,6 +210,13 @@ def test_both_observers_share_one_branch_dispatch_key_implementation() -> None:
                 f"{label}.{attr} no longer uses the shared `lineage` implementation; "
                 "a local copy has been reintroduced and can drift from the other observer"
             )
+        # The Protocol is aliased rather than imported under one name, so it is
+        # checked by identity against whichever spelling the module uses.
+        protocol = getattr(module, "_LineageEvent", None) or getattr(module, "LineageEvent", None)
+        assert protocol is lineage.LineageEvent, (
+            f"{label} no longer uses the shared `LineageEvent` Protocol; a local copy "
+            "has been reintroduced, which is how the original drift started"
+        )
 
 
 def test_branch_dispatch_key_shape_over_the_edge_cases() -> None:
@@ -226,3 +242,35 @@ def test_branch_dispatch_key_shape_over_the_edge_cases() -> None:
         ("x",),
         "a",
     )
+
+
+def test_fan_out_identity_key_shape_over_the_edge_cases() -> None:
+    # The behavioural spec its two siblings already have. The key exists so the
+    # write side (the fan-out NODE's own started event) and the read side (an
+    # inner or orphan event, whose chains carry the fan-out's own axis) agree,
+    # which is only true because both slice to the depth ABOVE the fan-out.
+    from openarmature.observability.lineage import fan_out_identity_key as key
+
+    # Top level: nothing encloses it, so both chain slots are empty.
+    assert key(("fo",), (None,), (None,)) == (("fo",), (), ())
+    # The fan-out's OWN axis is excluded: the read side carries an instance index
+    # at its own depth and the write side does not, so including it would make
+    # the two sides disagree, which is the whole reason for the slice.
+    assert key(("outer", "fo"), (0, 3), (None, None)) == (("outer", "fo"), (0,), (None,))
+    # Sibling branches holding a fan-out of the same name are told apart ONLY by
+    # the branch chain: branch names never enter the namespace.
+    assert key(("pb", "fo"), (None, None), ("a", None)) != key(("pb", "fo"), (None, None), ("b", None))
+
+
+def test_fan_out_identity_key_pads_a_short_chain_like_its_siblings() -> None:
+    # A caller one entry short must still build the same key, not a shorter tuple
+    # that misses the cache and silently reads the identity as empty. Slicing
+    # alone made the two sides agree only through an unstated invariant.
+    from openarmature.observability.lineage import fan_out_identity_key as key
+
+    assert key(("outer", "fo"), (), ()) == (("outer", "fo"), (None,), (None,))
+    # And padding agrees with a caller who supplied the None explicitly.
+    assert key(("outer", "fo"), (), ()) == key(("outer", "fo"), (None,), (None,))
+    # An empty namespace has no enclosing depth at all; `len - 1` must not wrap
+    # to -1 and slice the chain from the end.
+    assert key((), (7,), ("x",)) == ((), (), ())

@@ -79,7 +79,7 @@ import logging
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Any, Protocol, cast
+from typing import Any, cast
 
 from opentelemetry import context as otel_context
 from opentelemetry import metrics as otel_metrics
@@ -127,16 +127,19 @@ from openarmature.observability.lineage import (
 from openarmature.observability.lineage import (
     DispatchKey as _DispatchKey,
 )
+from openarmature.observability.lineage import LineageEvent as _LineageEvent
 from openarmature.observability.lineage import (
     branch_dispatch_key as _branch_dispatch_key,
 )
 from openarmature.observability.lineage import (
     dispatch_key as _dispatch_key,
 )
+from openarmature.observability.lineage import fan_out_identity_key as _fan_out_identity_key
 from openarmature.observability.lineage import (
     is_outermost_serial,
     is_strict_prefix,
 )
+from openarmature.observability.lineage import stored_lineage as _stored_lineage
 from openarmature.observability.llm_event import _token_budget_evaluations, serialize_tool_calls
 
 # §7 (proposal 0083): the vendor-neutral token-budget WARNING log surface.
@@ -264,31 +267,6 @@ def _read_implementation_version() -> str:
     return __version__
 
 
-class _LineageEvent(Protocol):
-    """The lineage an event must carry to place a span in the trace tree."""
-
-    # A Protocol rather than `Any`, which is what let a `FailureIsolatedEvent`
-    # reach an opener annotated `event: NodeEvent` and raise on a field it does
-    # not declare. Structural rather than a union, so a new event kind carrying
-    # these fields works without editing a list here.
-    #
-    # `correlation_id`, `subgraph_identities` and `caller_invocation_metadata`
-    # are deliberately absent and read defensively: a Protocol cannot express
-    # "may be absent", and a conforming event may not carry them.
-    @property
-    def namespace(self) -> tuple[str, ...]: ...
-    @property
-    def attempt_index(self) -> int: ...
-    @property
-    def fan_out_index(self) -> int | None: ...
-    @property
-    def branch_name(self) -> str | None: ...
-    @property
-    def fan_out_index_chain(self) -> tuple[int | None, ...]: ...
-    @property
-    def branch_name_chain(self) -> tuple[str | None, ...]: ...
-
-
 def _event_caller_metadata(event: object) -> Mapping[str, Any] | None:
     """Caller metadata from any event kind, absent field included."""
     # Three spellings of "no metadata" reach here: a mapping, None, and the
@@ -330,29 +308,6 @@ def _apply_caller_metadata(attrs: dict[str, Any], metadata: Mapping[str, Any] | 
         attrs[f"openarmature.user.{key}"] = value
 
 
-def _fan_out_identity_key(
-    namespace: tuple[str, ...],
-    fan_out_index_chain: tuple[int | None, ...],
-    branch_name_chain: tuple[str | None, ...],
-) -> _DispatchKey:
-    """Identity key for a fan-out NODE's declared subgraph identity."""
-    # The ENCLOSING lineage only, sliced to the depth ABOVE the fan-out itself.
-    # Two sides build this key and they see different events: the write side has
-    # the fan-out NODE's own started event, whose chains carry no instance index
-    # at its own depth, while the read side has an inner or orphan event whose
-    # chains do. Including the fan-out's own axis would make them disagree.
-    #
-    # The enclosing entries are what actually disambiguate: branch names never
-    # enter the namespace, so two sibling branches each holding a fan-out of the
-    # same name share one, and only the branch chain tells them apart.
-    depth = len(namespace) - 1
-    return (
-        namespace,
-        tuple(fan_out_index_chain[:depth]),
-        tuple(branch_name_chain[:depth]),
-    )
-
-
 def _subgraph_identity_at(event: object, depth: int) -> str:
     """Return the compiled-subgraph identity for the wrapper at the
     given 1-based namespace depth, or the empty string when no
@@ -375,38 +330,6 @@ def _subgraph_identity_at(event: object, depth: int) -> str:
         if identity is not None:
             return identity
     return ""
-
-
-def _stored_lineage(
-    event: _LineageEvent, chain_len: int, *, own_branch: str | None = None
-) -> tuple[tuple[int | None, ...], tuple[str | None, ...]]:
-    """The lineage chains an `_OpenSpan` records, normalized to `chain_len`."""
-    # Truncated when longer, PADDED with None when shorter -- the same
-    # normalization `_branch_dispatch_key` already does for the lookup key, for
-    # the same reason. A wrapper-issued event runs in the enclosing node's own
-    # ContextVar scope, so its chains are one entry short of what an inner node
-    # event carries. Storing the short chain made `_span_chain_on_path` treat the
-    # span as an ancestor of every sibling, because it returns True
-    # unconditionally for a zero-length stored chain -- so caller metadata set
-    # inside one branch was written onto its SIBLING's dispatch span, across the
-    # boundary that function's own docstring says must not be crossed.
-    fan_out = tuple(event.fan_out_index_chain[:chain_len]) + (None,) * max(
-        0, chain_len - len(event.fan_out_index_chain)
-    )
-    if own_branch is None:
-        branches = tuple(event.branch_name_chain[:chain_len]) + (None,) * max(
-            0, chain_len - len(event.branch_name_chain)
-        )
-        return fan_out, branches
-    # A per-branch dispatch span records its OWN branch as the last entry. A
-    # wrapper-issued event carries that name only on the scalar `branch_name`
-    # (it never extended the chain), so padding alone would store None there and
-    # exclude the branch's own augmenter from its own dispatch span -- the
-    # opposite over-correction to the sibling leak, and just as wrong.
-    enclosing = tuple(event.branch_name_chain[: chain_len - 1]) + (None,) * max(
-        0, (chain_len - 1) - len(event.branch_name_chain)
-    )
-    return fan_out, enclosing + (own_branch,)
 
 
 def _backfill_subgraph_identity(open_span: Any, event: object, depth: int) -> None:

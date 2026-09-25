@@ -19,6 +19,7 @@ import contextlib
 import copy
 import json
 import logging
+import uuid
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -34,6 +35,7 @@ from pydantic import SecretStr
 from openarmature.graph import END, BranchSpec, ExplicitMapping, GraphBuilder
 from openarmature.llm import OpenAIProvider
 from openarmature.llm.response import RuntimeConfig
+from openarmature.observability.correlation import current_invocation_id
 from openarmature.observability.diagnostics import event_name_of as _event_name_of
 from openarmature.observability.langfuse import (
     InMemoryLangfuseClient,
@@ -1674,7 +1676,9 @@ def _build_134_outer_graph(case: Mapping[str, Any], leaf_sg: Any, *, suffix: str
     return graph, outer_state_cls
 
 
-async def _run_134_and_capture(graph: Any, outer_state_cls: Any) -> tuple[InMemoryLangfuseClient, list[Any]]:
+async def _run_134_and_capture(
+    graph: Any, outer_state_cls: Any, barrier: dict[str, Any] | None = None
+) -> tuple[InMemoryLangfuseClient, list[Any]]:
     # Attach BOTH observers to the SAME invocation so the
     # langfuse_parent_matches_otel_parent invariant can compare the two backends'
     # actually-resolved parents on one workload, not re-assert a Langfuse-only
@@ -1690,7 +1694,10 @@ async def _run_134_and_capture(graph: Any, outer_state_cls: Any) -> tuple[InMemo
     exporter = InMemorySpanExporter()
     graph.attach_observer(LangfuseObserver(client=client))
     graph.attach_observer(OTelObserver(span_processor=SimpleSpanProcessor(exporter)))
-    await graph.invoke(outer_state_cls())
+    invocation_id = str(uuid.uuid4())
+    if barrier is not None:
+        barrier.update(graph=graph, invocation_id=invocation_id)
+    await graph.invoke(outer_state_cls(), invocation_id=invocation_id)
     await graph.drain()
     return client, list(exporter.get_finished_spans())
 
@@ -1840,11 +1847,10 @@ async def _run_langfuse_134_case1(case: Mapping[str, Any]) -> None:
 async def _run_langfuse_134_case2(case: Mapping[str, Any]) -> None:
     # Case 2 (mirrors OTel 133): the `guard` node's BODY returns marker=1; a
     # WRAPPER issues one orphan provider.complete and DISCARDS the response. The
-    # harness realizes the fixture's "per-node `guard` middleware, phase: pre" as
-    # INSTANCE middleware on the inner fan-out, POST phase -- the same realization
-    # as the OTel 133 harness (see the note there). Two axes, both forced by the
-    # observers' real timing; the orphan SEMANTIC and the oracle observation tree
-    # are preserved:
+    # harness realizes the fixture's "per-node `guard` middleware" as INSTANCE
+    # middleware on the inner fan-out -- the same realization as the OTel 133
+    # harness (see the note there). ONE axis, forced by the observers' real
+    # timing; the orphan SEMANTIC and the oracle observation tree are preserved:
     #   1. Instance middleware, not per-node middleware on `guard`: a per-node
     #      wrapper's call carries guard's lineage and binds to guard's own
     #      observation, not orphaned. The fan-out instance wrapper keeps the
@@ -1853,12 +1859,14 @@ async def _run_langfuse_134_case2(case: Mapping[str, Any]) -> None:
     #      observation -- a sibling of the `guard` Span. `leaf_sg` is the single
     #      `guard` node, so the instance wrapper IS guard's wrapper; the directive
     #      is read from the `guard` node spec.
-    #   2. POST phase (fire AFTER next()): the LangfuseObserver creates the inner
-    #      instance observation lazily when guard's started event drains on the
-    #      serial worker, so a pre-phase orphan (enqueued first) resolves to the
-    #      OUTER instance. Post guarantees the inner instance observation exists at
-    #      resolution time. In post `guard` has closed, so the calling-node
-    #      observation is still not open at emit (the orphan semantic holds).
+    #
+    # The phase is the fixture's. This driver used to hardcode POST because the
+    # observer created the inner instance observation lazily, so a pre-phase
+    # orphan resolved to the OUTER instance. Proposal 0124 removed that: the
+    # parent resolves structurally, so the instance observation is materialized on
+    # demand and the declared `phase: pre` resolves correctly. Honouring it is
+    # what makes the case discriminate, since at POST the node body has already
+    # synthesized the dispatch and no ordering is left for the barrier to pin.
     import asyncio  # noqa: PLC0415
 
     provider = _build_134_provider(case)
@@ -1871,6 +1879,12 @@ async def _run_langfuse_134_case2(case: Mapping[str, Any]) -> None:
     update_map = dict(cast("dict[str, Any]", guard_spec["update"]))
     wrapper_spec = cast("dict[str, Any]", guard_spec["calls_llm_from_wrapper"])
     messages_in = _materialize_messages(cast("list[dict[str, Any]]", wrapper_spec.get("messages") or []))
+    phase = cast("str", wrapper_spec.get("phase", "pre"))
+    awaits_delivery = bool(wrapper_spec.get("await_event_delivery", False))
+    # Filled by `_run_134_and_capture` below; the wrapper closure is built first.
+    barrier: dict[str, Any] = {}
+    # One entry per barrier attempt: None for held, a reason string otherwise.
+    barrier_log: list[str | None] = []
     rendezvous, gate, total_asks = _build_134_rendezvous(case)
 
     async def _fire_orphan_call() -> None:
@@ -1886,14 +1900,67 @@ async def _run_langfuse_134_case2(case: Mapping[str, Any]) -> None:
             pass
         # Wrapper-issued side call: fire exactly one completion and DISCARD it.
         await provider.complete(cast("Sequence[Any]", messages_in))
+        await _await_delivery()
+
+    async def _await_delivery() -> None:
+        # Section 5.1: delivery through THIS call's provider event completes
+        # before the wrapper proceeds past the call site. The event is dispatched
+        # before `complete()` returns, so the snapshot `drain_events_for` takes
+        # at entry already contains it.
+        #
+        # Outcomes are RECORDED, not asserted here. This runs inside middleware,
+        # and a fan-out declared `error_policy: collect` turns a raise into a
+        # dropped error record rather than a failure, so an assertion at this
+        # point cannot fail the case. `_assert_barrier_held` runs it after the
+        # invocation instead.
+        if not awaits_delivery:
+            return
+        if not barrier:
+            barrier_log.append("no barrier wired")
+            return
+        # `drain_events_for` returns a clean, non-timed-out summary for an
+        # invocation_id no active worker matches, which is byte-identical to a
+        # satisfied barrier. Without this the whole thing degrades to a no-op the
+        # moment the id stops matching, and every fixture still passes.
+        if current_invocation_id() != barrier["invocation_id"]:
+            barrier_log.append(
+                f"barrier bound to {barrier['invocation_id']!r} but the live invocation is "
+                f"{current_invocation_id()!r}, so the drain resolved no worker"
+            )
+            return
+        summary = await barrier["graph"].drain_events_for(barrier["invocation_id"])
+        if summary.timeout_reached:
+            barrier_log.append(f"timed out, {summary.undelivered_count} events undelivered")
+        else:
+            barrier_log.append(None)
+
+    def _assert_barrier_held() -> None:
+        # Section 5.1: an adapter that cannot provide the barrier MUST fail the
+        # case rather than run it without one.
+        if not awaits_delivery:
+            return
+        assert barrier_log, (
+            "`await_event_delivery` is set but the barrier never ran, so the case "
+            "executed with pre-0124 behaviour while still counting as coverage"
+        )
+        problems = [p for p in barrier_log if p is not None]
+        assert not problems, f"`await_event_delivery` barrier did not hold: {problems}"
 
     async def _guard_body(_s: Any) -> Mapping[str, Any]:
         return dict(update_map)
 
     async def _wrapper_mw(state: Any, next_call: Any) -> Mapping[str, Any]:
-        # POST phase: fire AFTER next() (the inner subgraph `guard` has run and its
-        # observation has closed), so the orphan Generation falls back to the inner
-        # fan-out INSTANCE Span observation (see the realization note above).
+        # The phase comes from the fixture: at `pre` the inner subgraph `guard`
+        # has not run, at `post` its observation has closed, and either way the
+        # orphan Generation falls back to the inner fan-out INSTANCE Span
+        # observation (see the realization note above).
+        #
+        # Section 5.1's barrier only bites at `pre`: at `post` the node body has
+        # already run and its `started` event has synthesized the dispatch
+        # observation, so no ordering is left for the barrier to pin.
+        if phase == "pre":
+            await _fire_orphan_call()
+            return await next_call(state)
         result = await next_call(state)
         await _fire_orphan_call()
         return result
@@ -1953,7 +2020,8 @@ async def _run_langfuse_134_case2(case: Mapping[str, Any]) -> None:
         .compile()
     )
     try:
-        client, otel_spans = await _run_134_and_capture(graph, outer_state_cls)
+        client, otel_spans = await _run_134_and_capture(graph, outer_state_cls, barrier)
+        _assert_barrier_held()
     finally:
         await provider.aclose()
 
