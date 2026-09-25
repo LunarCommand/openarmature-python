@@ -1847,11 +1847,10 @@ async def _run_langfuse_134_case1(case: Mapping[str, Any]) -> None:
 async def _run_langfuse_134_case2(case: Mapping[str, Any]) -> None:
     # Case 2 (mirrors OTel 133): the `guard` node's BODY returns marker=1; a
     # WRAPPER issues one orphan provider.complete and DISCARDS the response. The
-    # harness realizes the fixture's "per-node `guard` middleware, phase: pre" as
-    # INSTANCE middleware on the inner fan-out, POST phase -- the same realization
-    # as the OTel 133 harness (see the note there). Two axes, both forced by the
-    # observers' real timing; the orphan SEMANTIC and the oracle observation tree
-    # are preserved:
+    # harness realizes the fixture's "per-node `guard` middleware" as INSTANCE
+    # middleware on the inner fan-out -- the same realization as the OTel 133
+    # harness (see the note there). ONE axis, forced by the observers' real
+    # timing; the orphan SEMANTIC and the oracle observation tree are preserved:
     #   1. Instance middleware, not per-node middleware on `guard`: a per-node
     #      wrapper's call carries guard's lineage and binds to guard's own
     #      observation, not orphaned. The fan-out instance wrapper keeps the
@@ -1860,12 +1859,14 @@ async def _run_langfuse_134_case2(case: Mapping[str, Any]) -> None:
     #      observation -- a sibling of the `guard` Span. `leaf_sg` is the single
     #      `guard` node, so the instance wrapper IS guard's wrapper; the directive
     #      is read from the `guard` node spec.
-    #   2. POST phase (fire AFTER next()): the LangfuseObserver creates the inner
-    #      instance observation lazily when guard's started event drains on the
-    #      serial worker, so a pre-phase orphan (enqueued first) resolves to the
-    #      OUTER instance. Post guarantees the inner instance observation exists at
-    #      resolution time. In post `guard` has closed, so the calling-node
-    #      observation is still not open at emit (the orphan semantic holds).
+    #
+    # The phase is the fixture's. This driver used to hardcode POST because the
+    # observer created the inner instance observation lazily, so a pre-phase
+    # orphan resolved to the OUTER instance. Proposal 0124 removed that: the
+    # parent resolves structurally, so the instance observation is materialized on
+    # demand and the declared `phase: pre` resolves correctly. Honouring it is
+    # what makes the case discriminate, since at POST the node body has already
+    # synthesized the dispatch and no ordering is left for the barrier to pin.
     import asyncio  # noqa: PLC0415
 
     provider = _build_134_provider(case)

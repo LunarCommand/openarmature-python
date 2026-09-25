@@ -447,3 +447,66 @@ def test_generation_usage_details_omit_unreported_counters(
     assert captured["usage_details"] == expected, (
         f"usage_details must carry exactly the reported counters; got {captured.get('usage_details')!r}"
     )
+
+
+def test_adapter_span_routes_back_dated_calls_via_otel_tracer(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Proposal 0124: a dispatch observation synthesized from a provider event is
+    # created when that event drains, while the observation it parents is
+    # back-dated by the call's own latency, so `span()` gained the optional
+    # `start_time` `generation()` and `tool()` already had. It is the third
+    # back-dated route and takes the same private-tracer path.
+    #
+    # Mirrors the generation / tool back-dating tests for the reason they exist:
+    # a private SDK constructor can differ between wrapper classes, and the
+    # observer-level test uses `InMemoryLangfuseClient`, which never touches
+    # `LangfuseSpan` at all. Without this a constructor or signature drift
+    # surfaces as a swallowed observer warning rather than a failure.
+    from datetime import UTC, datetime
+    from unittest.mock import MagicMock
+
+    client = _dummy_client()
+    captured_otel_kwargs: dict[str, Any] = {}
+
+    def _otel_spy(**kwargs: Any) -> MagicMock:
+        captured_otel_kwargs.update(kwargs)
+        span = MagicMock()
+        span.get_span_context.return_value = MagicMock(
+            trace_id=int("a" * 32, 16),
+            span_id=int("b" * 16, 16),
+        )
+        return span
+
+    def _start_observation_should_not_be_called(**_kwargs: Any) -> None:
+        raise AssertionError(
+            "start_observation MUST NOT be called on the back-dated span path; "
+            "v4 SDK rejects start_time= and the adapter should route via _otel_tracer"
+        )
+
+    monkeypatch.setattr(client._otel_tracer, "start_span", _otel_spy)  # noqa: SLF001
+    monkeypatch.setattr(client, "start_observation", _start_observation_should_not_be_called)
+    adapter = LangfuseSDKAdapter(client)
+    adapter.trace(id="trace-span-ts", name="t")
+
+    start = datetime(2026, 6, 8, 12, 0, 0, tzinfo=UTC)
+    adapter.span(
+        trace_id="trace-span-ts",
+        name="inner_fan_out",
+        metadata={"fan_out_parent_node_name": "inner_fan_out"},
+        start_time=start,
+    )
+
+    expected_ns = int(start.timestamp() * 1_000_000_000)
+    assert captured_otel_kwargs.get("start_time") == expected_ns
+    assert captured_otel_kwargs.get("name") == "inner_fan_out"
+
+
+def test_adapter_span_without_start_time_uses_the_public_start_observation() -> None:
+    # The non-back-dated path must NOT take the private tracer: a dispatch
+    # observation opened from a node event has no caller timestamp, and routing
+    # it through `_otel_tracer` would swap a supported call for a private one
+    # for no gain.
+    client = _dummy_client()
+    adapter = LangfuseSDKAdapter(client)
+    adapter.trace(id="trace-span-plain", name="t")
+    handle = adapter.span(trace_id="trace-span-plain", name="plain")
+    assert handle is not None

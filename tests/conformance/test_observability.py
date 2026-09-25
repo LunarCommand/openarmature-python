@@ -271,8 +271,10 @@ _SUPPORTED_FIXTURES = frozenset(
         "149-malformed-wire-counter-nulled-through-mapping-to-event-and-span",
         # 152 / 153 (proposal 0084): where a provider span emitted from a
         # WRAPPER lands when the calling node's span is not open. Their driver
-        # yields inside the wrapper on purpose; passing without that yield was
-        # the schedule-dependence, not the fix.
+        # holds a section 5.1 `await_event_delivery` barrier at the call site,
+        # which is what makes the case discriminate: it used to concede a
+        # scheduler turn instead, and section 5.1 now states that a yield is
+        # insufficient because nothing binds the turn to this call's event.
         "152-otel-parallel-branch-orphan-llm-fallback",
         "153-otel-mixed-nesting-orphan-llm-fallback",
         # v0.69.0 — proposal 0063 (tool-execution observability). A
@@ -3034,9 +3036,9 @@ async def _run_fixture_133_case(case: Mapping[str, Any], spec: Mapping[str, Any]
     # modelling a guardrail / classifier side call.
     #
     # Realization note (this harness deviates from the fixture's literal
-    # "per-node `guard` middleware, phase: pre" on two axes, both forced by the
-    # observers' real timing; the orphan SEMANTIC -- no open calling-node span --
-    # and the oracle span_tree are preserved):
+    # "per-node `guard` middleware" on ONE axis, forced by the observers' real
+    # timing; the orphan SEMANTIC -- no open calling-node span -- and the oracle
+    # span_tree are preserved):
     #
     #   1. INSTANCE middleware on the inner fan-out, not per-node middleware on
     #      `guard`. A per-node wrapper's call carries guard's own lineage, so the
@@ -3049,15 +3051,18 @@ async def _run_fixture_133_case(case: Mapping[str, Any], spec: Mapping[str, Any]
     #      intends, a sibling of the later `guard` node span. `leaf_sg` is the
     #      single `guard` node, so the instance wrapper IS guard's wrapper; the
     #      `calls_llm_from_wrapper` directive is read from the `guard` node spec.
-    #   2. POST phase (fire AFTER next()), matching the sibling Langfuse 134
-    #      harness for a single realization across both backends. The Langfuse
-    #      observer creates the inner instance OBSERVATION lazily when guard's
-    #      started event drains on the serial worker, so a pre-phase orphan
-    #      (enqueued first) resolves to the OUTER instance there; post guarantees
-    #      the inner instance exists at resolution time. OTel resolves to the
-    #      inner instance in either phase. The fixture declares phase: pre; its .md
-    #      notes either phase exercises the same fallback (in post, guard has
-    #      closed, so the calling-node span is still not open at emit).
+    #
+    # The phase is the fixture's, not the harness's. This driver used to hardcode
+    # POST because the Langfuse observer created the inner instance observation
+    # lazily, so a pre-phase orphan resolved to the OUTER instance there. Proposal
+    # 0124 removed that: the parent resolves structurally, so the inner instance
+    # is materialized on demand and PRE resolves correctly on both backends.
+    #
+    # Honouring the declared `phase: pre` is what makes the case discriminate.
+    # At POST the node body has already run and its `started` event has
+    # synthesized the dispatch span, so no ordering is left for section 5.1's
+    # barrier to pin: with the barrier in place at POST, disabling the structural
+    # synthesis still passes. At PRE it fails, which is the point.
     subgraphs_spec = cast("dict[str, Any]", spec["subgraphs"])
     leaf_spec = cast("dict[str, Any]", subgraphs_spec["leaf_sg"])
     leaf_state_cls = build_state_cls(
