@@ -147,21 +147,24 @@ no-op on symmetric OpenAI, meaningful on asymmetric providers), mapping
 
 #### [`structured-output-reask/`](./structured-output-reask/main.py)
 
-Extracting one structured mission record per lunar-landing report, and
-correcting the model when it answers in the wrong shape. A strict JSON
-schema asks for a numeric `mass_kg`, which is the constraint a model most
-often breaks by echoing `"1,340 kg"` straight out of the prose. Rather than
-failing the run or retrying an identical prompt that reproduces the
-identical mistake, a caller-supplied builder quotes the model's own reply
-and the validator's objection back to it and asks again. Demonstrates:
-`complete(response_schema=...)` raising `StructuredOutputInvalid` instead
-of returning a half-built object, `LlmRetryConfig(reask=...)` making that
-failure retryable for one call, a builder reading `exc.output_content` and
-`exc.error_message` to compose the correction, the framework appending the
-model's reply and the correction as an alternating transcript while
-authoring no prompt of its own, and reask sharing the `max_attempts`
-budget with transient retries. `MODE=off` omits the builder so the first
-invalid reply is terminal, which shows what the builder buys.
+Extracting one structured mission record per lunar-landing report, under an
+output-token cap that is too tight for a complete record. The model stops
+mid-object, and the fragment that arrives is rejected at the schema boundary
+exactly as a wrong-typed field would be. Recovery needs two different changes:
+a caller-supplied builder quotes the model's own fragment and the reader's
+objection back to it, and a per-attempt override raises the ceiling so the
+retry has somewhere to put the answer. Demonstrates:
+`complete(response_schema=...)` raising `StructuredOutputInvalid` instead of
+returning a half-built object, `LlmRetryConfig(reask=...)` making that failure
+retryable for one call, a builder reading `exc.output_content` and
+`exc.error_message` and branching on which failure it got,
+`LlmRetryConfig(per_attempt_override=...)` applying a config schedule to
+retries only, the framework appending the model's reply and the correction as
+an alternating transcript while authoring no prompt of its own, and reask
+sharing the `max_attempts` budget with transient retries. Three postures:
+`MODE=off` supplies neither and ends on the first unusable reply, `MODE=nocap`
+supplies the correction but not the raised ceiling so every attempt is cut off
+at the same place, and the default supplies both.
 
 #### [`checkpointing-and-migration/`](./checkpointing-and-migration/main.py)
 

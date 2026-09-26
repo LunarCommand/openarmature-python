@@ -1,54 +1,74 @@
 """openarmature demo: pull a structured mission record out of a prose
-lunar-landing report, and correct the model when it answers in the wrong
-shape.
+lunar-landing report, and recover when the reply arrives unusable.
 
 **Use case:** A feed delivers lunar-landing reports as free prose. You want
 one row per report: mission, operator, landing site, outcome, and the mass
 delivered in kilograms. A JSON schema says exactly that, and the provider is
 asked to honour it.
 
-Models miss. They wrap JSON in a markdown fence, answer in prose because the
-report was ambiguous, invent a field, or send ``"1,340 kg"`` where the schema
-says a number. The useful move is not to fail the run and not to retry the
-identical prompt, which reproduces the identical mistake. It is to show the
-model what it returned, say what was wrong with it, and ask again.
+You also cap output tokens, because the records are small and you pay by the
+token. That cap is a guess about the longest record you will ever need, and
+the guess is sometimes wrong. When it is, the model stops mid-object and the
+reply that arrives is a fragment: valid so far, parseable as nothing. The
+schema boundary rejects it exactly as it rejects a model that answered in
+prose or sent ``"1,340 kg"`` where a number was required.
 
-That is what ``reask`` is: you supply the corrective message, because only you
-know how to talk to your model about your schema. The framework supplies the
-loop, the transcript, and the budget.
+Retrying the identical request reproduces the identical fragment, because
+nothing about the request changed. Two things have to change, and they are
+different kinds of thing:
+
+- **What you say.** Show the model what came back and what was wrong with it.
+  That is ``reask``: you supply the corrective message, because only you know
+  how to talk to your model about your schema.
+- **What it is allowed to spend.** A correction cannot help a reply that gets
+  cut off at the same place. That is ``per_attempt_override``: the retry runs
+  under a raised ceiling.
+
+Supply only the first and the retry is better informed and still truncated.
+This demo shows both arms so the difference is visible.
 
 **What's interesting in the implementation:**
 
 - ``complete(response_schema=...)`` asks the provider for a shape. When the
   reply cannot be parsed or does not validate, the call raises
   ``StructuredOutputInvalid`` rather than handing back a half-built object.
+  A truncated reply and a wrong-typed field arrive through the same door.
 - ``LlmRetryConfig(reask=...)`` makes that failure retryable FOR THIS CALL.
   Without a builder it is terminal, which is the right default: a schema the
   model cannot satisfy is usually a bug in the schema, not a transient.
 - The builder receives the exception and returns the correction as a string.
-  It reads ``exc.output_content`` (verbatim, what the model actually sent) and
-  ``exc.error_message`` (what the validator objected to). Quoting both back is
-  what makes the second attempt different from the first.
+  It reads ``exc.output_content`` (verbatim, what the model actually sent),
+  ``exc.error_message`` (what the reader objected to), and
+  ``exc.finish_reason`` (``"length"`` when the ceiling ended the reply). This
+  one branches on that last signal and says something different about a
+  truncation than about a model that simply answered wrongly, which is the
+  kind of judgement only the caller can make.
+- ``LlmRetryConfig(per_attempt_override=...)`` is a schedule of partial
+  configs applied to retries only. Attempt 0 runs the caller's config
+  untouched; each retry merges the next entry over it. A schedule shorter
+  than the retry count carries its last entry forward.
 - The framework appends the model's own reply as an ``assistant`` turn and the
   builder's string as a ``user`` turn, so the conversation stays
-  role-alternating and the model sees its own mistake in context. It authors no
-  prompt of its own; every word sent is yours.
+  role-alternating and the model sees its own fragment in context. It authors
+  no prompt of its own; every word sent is yours.
 - Reask shares the ``max_attempts`` budget with transient retries. A call that
-  burns two attempts on malformed output has one left for a rate limit.
-- ``MODE`` selects the posture. ``"reask"`` (default) supplies the builder.
-  ``"off"`` omits it, so the first invalid reply ends the call and you can see
-  what the builder is buying.
+  burns two attempts on unusable output has one left for a rate limit.
 
 **Run it:**
 
     export LLM_API_KEY=sk-...
     uv run python examples/structured-output-reask/main.py
 
-    MODE=off uv run python examples/structured-output-reask/main.py
+    MODE=nocap uv run python examples/structured-output-reask/main.py
+    MODE=off   uv run python examples/structured-output-reask/main.py
 
-Point ``LLM_BASE_URL`` at any OpenAI-compatible endpoint. ``LLM_MODEL``
-defaults to a small fast model; a weaker one makes the reask path fire more
-often, which is the interesting case to watch.
+Three postures. ``reask`` (default) supplies the builder and raises the cap.
+``nocap`` supplies the builder and leaves the cap alone, so every attempt is
+cut off at the same place and the budget drains. ``off`` supplies neither, so
+the first unusable reply ends the call.
+
+Point ``LLM_BASE_URL`` at any OpenAI-compatible endpoint (the host root, not
+its ``/v1`` path). ``LLM_MODEL`` defaults to a small fast model.
 """
 
 from __future__ import annotations
@@ -93,9 +113,8 @@ REPORTS: list[str] = [
     ),
 ]
 
-# The shape we want back. Deliberately strict: `mass_kg` is a number, not a
-# string, which is the constraint a model is most likely to break by sending
-# "1,340 kg" verbatim from the prose.
+# The shape we want back. `mass_kg` is a number rather than a string, which is
+# the constraint a model breaks by copying "1,340 kg" out of the prose.
 MISSION_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
@@ -113,6 +132,12 @@ _EXTRACT_SYSTEM = (
     "You extract one structured mission record from a lunar-landing report. Answer with a JSON object only."
 )
 
+# The cap the app runs under, and the one a retry is allowed to climb to. The
+# tight cap sits below what a complete record of this shape needs, so it is
+# the ceiling rather than the model that makes the first reply unusable.
+TIGHT_MAX_TOKENS = 32
+ROOMY_MAX_TOKENS = 256
+
 
 # ---------------------------------------------------------------------------
 # The reask builder. This is the whole point of the example.
@@ -120,20 +145,35 @@ _EXTRACT_SYSTEM = (
 
 
 def build_correction(exc: StructuredOutputInvalid) -> str:
-    """Compose the corrective message sent after an invalid reply.
+    """Compose the corrective message sent after an unusable reply.
 
     Receives the failure and returns what to say about it. The framework
     appends the model's own reply before this, so it reads as a conversation:
     the model answered, you point at the problem, it answers again.
     """
-    # Both halves matter. The verbatim output lets the model see what it
-    # actually sent rather than what it meant to send, and the validator's
-    # complaint names the constraint it missed. A correction carrying neither
-    # is just the original prompt again, which reproduces the original answer.
+    # Both halves of the exception matter. The verbatim output lets the model
+    # see what it actually sent rather than what it meant to send, and the
+    # validator's complaint names the constraint it missed. A correction
+    # carrying neither is the original prompt again, which earns the original
+    # answer.
+    raw = exc.output_content.strip()
+    # A reply that stops mid-object is a spend problem, not a comprehension
+    # problem, and saying "that did not match the schema" about it would be
+    # misleading. `finish_reason` is how the framework reports which one
+    # happened: "length" means the ceiling ended the reply, so the model was
+    # never given the chance to be wrong.
+    if exc.finish_reason == "length":
+        return (
+            "That reply stopped before the object closed, so it could not be "
+            f"read. The reader said: {exc.error_message}\n\n"
+            f"You sent:\n{raw}\n\n"
+            "Send the whole object this time. Keep every value as short as "
+            "the report allows and add nothing beyond the required fields."
+        )
     return (
-        f"That reply did not match the required schema. The validator said: "
+        "That reply did not match the required schema. The validator said: "
         f"{exc.error_message}\n\n"
-        f"You sent:\n{exc.output_content}\n\n"
+        f"You sent:\n{raw}\n\n"
         "Send the JSON object again, corrected. Return only the object, with "
         "no surrounding prose and no markdown fence. `mass_kg` must be a bare "
         'number in kilograms, so write 1340 rather than "1,340 kg". '
@@ -159,6 +199,14 @@ def _get_provider() -> OpenAIProvider:
     return _provider_instance
 
 
+async def _close_provider() -> None:
+    # Only close what was built. Calling the constructor here to obtain
+    # something to close would mask whatever failure kept the run from
+    # building one.
+    if _provider_instance is not None:
+        await _provider_instance.aclose()
+
+
 class FeedState(State):
     reports: list[str] = []
     records: list[dict[str, Any]] = []
@@ -167,17 +215,22 @@ class FeedState(State):
 
 def _retry_config(mode: str) -> LlmRetryConfig:
     # `reask` is what makes a schema failure retryable at all. Omit it and the
-    # first invalid reply is terminal, which is the useful default: retrying an
-    # unchanged prompt against an unchanged model gets the same answer.
+    # first unusable reply is terminal, which is the useful default: retrying
+    # an unchanged prompt against an unchanged model gets the same answer.
+    #
+    # The override is the other half. Without it the retry is better informed
+    # and still capped at the length that truncated it, so `nocap` spends the
+    # whole budget re-learning the same lesson.
     return LlmRetryConfig(
         max_attempts=3,
         backoff=deterministic_backoff(0.0),
-        reask=build_correction if mode == "reask" else None,
+        reask=build_correction if mode in {"reask", "nocap"} else None,
+        per_attempt_override=([RuntimeConfig(max_tokens=ROOMY_MAX_TOKENS)] if mode == "reask" else None),
     )
 
 
 async def extract(s: FeedState) -> Mapping[str, Any]:
-    """Extract one record per report, tolerating a wrong-shaped first reply."""
+    """Extract one record per report, recovering from an unusable first reply."""
     provider = _get_provider()
     retry = _retry_config(os.environ.get("MODE", "reask"))
     records: list[dict[str, Any]] = []
@@ -187,15 +240,16 @@ async def extract(s: FeedState) -> Mapping[str, Any]:
         try:
             response = await provider.complete(
                 [SystemMessage(content=_EXTRACT_SYSTEM), UserMessage(content=report)],
-                config=RuntimeConfig(temperature=0.0),
+                config=RuntimeConfig(temperature=0.0, max_tokens=TIGHT_MAX_TOKENS),
                 response_schema=MISSION_SCHEMA,
                 retry=retry,
             )
         except StructuredOutputInvalid as exc:
-            # Reached when the budget runs out, or immediately when MODE=off.
-            # The exception carries the last thing the model sent and why it
-            # was rejected, which is what you want in the log.
-            failures.append(f"{exc.error_message}: {exc.output_content[:120]}")
+            # Reached when the budget runs out, and immediately when no
+            # builder was supplied. The exception carries the last thing the
+            # model sent and why it was rejected, which is what belongs in
+            # the log.
+            failures.append(f"{exc.error_message}: {exc.output_content[:90]}")
             continue
         records.append(json.loads(response.message.content or "{}"))
 
@@ -218,18 +272,29 @@ def build_graph() -> CompiledGraph[FeedState]:
     )
 
 
+_POSTURE = {
+    "reask": "corrective message + raised token ceiling",
+    "nocap": "corrective message, ceiling left alone",
+    "off": "neither",
+}
+
+
 async def main() -> None:
     mode = os.environ.get("MODE", "reask")
     print("=== openarmature structured-output-reask demo ===")
-    print(f"mode: {mode}" + ("  (no corrective builder)" if mode == "off" else ""))
+    print(f"mode: {mode}  ({_POSTURE.get(mode, 'unknown mode')})")
     print(f"reports: {len(REPORTS)}")
+    print(
+        f"cap: {TIGHT_MAX_TOKENS} output tokens"
+        + (f", raised to {ROOMY_MAX_TOKENS} on retry" if mode == "reask" else "")
+    )
     print()
 
     graph = build_graph()
     try:
         final = await graph.invoke(FeedState(reports=REPORTS))
     finally:
-        await _get_provider().aclose()
+        await _close_provider()
         await graph.drain()
 
     for record in final.records:
@@ -239,15 +304,19 @@ async def main() -> None:
             f"{record.get('mass_kg')} kg"
         )
     if final.failures:
-        print()
         print("  unrecovered:")
         for f in final.failures:
             print(f"    {f}")
 
     print()
     print(f"extracted {len(final.records)} of {len(REPORTS)}")
-    if mode == "off" and final.failures:
-        print("Run without MODE=off to let the corrective builder retry these.")
+    if mode == "off":
+        print("MODE=nocap adds the corrective message. Default adds the ceiling too.")
+    elif mode == "nocap":
+        print(
+            "The model was told what went wrong and still had nowhere to put "
+            "the answer. Run without MODE to raise the ceiling as well."
+        )
 
 
 if __name__ == "__main__":

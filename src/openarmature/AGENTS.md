@@ -1694,7 +1694,7 @@ _Runnable example programs shipped in the source tree at `examples/`. The full c
 - **`examples/provider-extras/main.py`** — openarmature demo: reach a vendor knob openarmature does not model, and watch the guardrails that stop you reaching the wrong one.
 - **`examples/retrieval-rag/main.py`** — Retrieval-augmented answering over a lunar knowledge base.
 - **`examples/routing-and-subgraphs/main.py`** — openarmature demo: conditional routing + subgraph with a custom projection.
-- **`examples/structured-output-reask/main.py`** — openarmature demo: pull a structured mission record out of a prose lunar-landing report, and correct the model when it answers in the wrong shape.
+- **`examples/structured-output-reask/main.py`** — openarmature demo: pull a structured mission record out of a prose lunar-landing report, and recover when the reply arrives unusable.
 - **`examples/tool-use/main.py`** — openarmature demo: a lunar-mission assistant that calls local Python functions as tools to answer fact and physics questions about Apollo / Artemis missions.
 
 ## Discovery cross-references
