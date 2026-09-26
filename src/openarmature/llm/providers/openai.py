@@ -651,27 +651,20 @@ class OpenAIProvider:
         # leaving it in the dump would clear the caller's vendor knobs on any
         # override that never mentioned them.
         #
-        # An EMPTY override container therefore means "unspecified" and inherits,
-        # matching what None means for the declared fields. A NON-EMPTY one
-        # replaces, matching the same rule those fields follow. Clearing extras
-        # for one attempt is not expressible, since empty is how inherit is
-        # spelled.
+        # §7.1: "Undeclared extras (§6) merge by the same per-key rule." The
+        # per-key rule is the one the DECLARED fields follow, and the analogue of
+        # a field is an extras KEY rather than the container: a key set in the
+        # override replaces the base's value for that key, a key the override does
+        # not mention inherits the base's. So the container merges.
         #
-        # Replacing discards whatever the base carried, so the keys that go
-        # missing are logged rather than dropped in silence.
+        # This replaced the container wholesale and warned about the base keys it
+        # dropped, on the reading that a non-empty container is itself the unit a
+        # field's rule applies to. Under the merge rule nothing is dropped, so the
+        # warning went with it. Clearing a base key for one attempt stays
+        # inexpressible, exactly as an override cannot clear a declared field to
+        # None.
         update = override.model_dump(exclude_none=True, exclude={"extras"})
-        if override.extras:
-            dropped = sorted(set(base_or_empty.extras) - set(override.extras))
-            if dropped:
-                _log.warning(
-                    "per-attempt override for attempt %d replaces the base config's "
-                    "extras; %s not sent on this attempt",
-                    attempt,
-                    ", ".join(repr(k) for k in dropped),
-                )
-            update["extras"] = dict(override.extras)
-        else:
-            update["extras"] = dict(base_or_empty.extras)
+        update["extras"] = {**base_or_empty.extras, **override.extras}
         return base_or_empty.model_copy(update=update)
 
     @staticmethod
@@ -799,7 +792,7 @@ class OpenAIProvider:
                     # one terminal LlmFailedEvent still fires -- rather than
                     # leaking a non-§7 error and masking the real failure.
                     try:
-                        transcript = self._append_reask_pair(transcript, exc.raw_content, reask(exc))
+                        transcript = self._append_reask_pair(transcript, exc.output_content, reask(exc))
                     except Exception as reask_error:
                         raise exc from reask_error
                     next_retry_reason = "reask"
@@ -960,15 +953,15 @@ class OpenAIProvider:
             # Empty content projects to None (as the success path does with
             # ``content or None``), so both observers omit it identically
             # rather than one rendering "" and the other dropping it.
-            output_content = exc.raw_content or None
+            output_content = exc.output_content or None
             finish_reason = exc.finish_reason
             usage = exc.usage
             response_id = exc.response_id
             response_model = exc.response_model
             # error_message carries the failing locator (proposal 0082): the
             # terse category summary alone drops the which-field detail, so
-            # combine it with the failure_description observers triage on.
-            error_message = f"{exc}: {exc.failure_description}"
+            # combine it with the error_message observers triage on.
+            error_message = f"{exc}: {exc.error_message}"
         return LlmFailedEvent(
             invocation_id=invocation_id,
             correlation_id=current_correlation_id(),
@@ -1091,13 +1084,13 @@ class OpenAIProvider:
             response_fields = {
                 # Empty content -> None (as the success path projects), so both
                 # observers omit it identically.
-                "output_content": exc.raw_content or None,
+                "output_content": exc.output_content or None,
                 "finish_reason": exc.finish_reason,
                 "usage": exc.usage,
                 "response_id": exc.response_id,
                 "response_model": exc.response_model,
             }
-            error_message = f"{exc}: {exc.failure_description}"
+            error_message = f"{exc}: {exc.error_message}"
         return LlmRetryAttemptEvent(
             **base,
             error_category=exc.category,
@@ -1351,7 +1344,7 @@ class OpenAIProvider:
                 # The wire response is intact; attach its response-side
                 # context so the failed event / §7 error carries finish_reason
                 # (truncation triage), usage, and the response identity
-                # (proposal 0082). raw_content is already set by the helper.
+                # (proposal 0082). output_content is already set by the helper.
                 exc.finish_reason = finish_reason_typed
                 exc.usage = usage
                 exc.response_id = response_id
@@ -1477,15 +1470,15 @@ def _parse_and_validate(
         raise StructuredOutputInvalid(
             "response content is not valid JSON",
             response_schema=schema_dict,
-            raw_content=content,
-            failure_description=str(exc),
+            output_content=content,
+            error_message=str(exc),
         ) from exc
     if not isinstance(loaded, dict):
         raise StructuredOutputInvalid(
             "response JSON is not an object",
             response_schema=schema_dict,
-            raw_content=content,
-            failure_description=f"top-level type is {type(loaded).__name__}, expected object",
+            output_content=content,
+            error_message=f"top-level type is {type(loaded).__name__}, expected object",
         )
     parsed_dict = cast("dict[str, Any]", loaded)
 
@@ -1504,15 +1497,15 @@ def _parse_and_validate(
             raise StructuredOutputInvalid(
                 "response failed JSON Schema validation",
                 response_schema=schema_dict,
-                raw_content=content,
-                failure_description=_format_jsonschema_failure(exc),
+                output_content=content,
+                error_message=_format_jsonschema_failure(exc),
             ) from exc
         except jsonschema.SchemaError as exc:
             raise StructuredOutputInvalid(
                 "response could not be validated against the supplied schema",
                 response_schema=schema_dict,
-                raw_content=content,
-                failure_description=str(exc),
+                output_content=content,
+                error_message=str(exc),
             ) from exc
         try:
             return schema_class.model_validate(parsed_dict)
@@ -1520,8 +1513,8 @@ def _parse_and_validate(
             raise StructuredOutputInvalid(
                 "response failed Pydantic validation",
                 response_schema=schema_dict,
-                raw_content=content,
-                failure_description=str(exc),
+                output_content=content,
+                error_message=str(exc),
             ) from exc
 
     # Dict-schema path: jsonschema validation, return the dict.
@@ -1531,8 +1524,8 @@ def _parse_and_validate(
         raise StructuredOutputInvalid(
             "response failed JSON Schema validation",
             response_schema=schema_dict,
-            raw_content=content,
-            failure_description=_format_jsonschema_failure(exc),
+            output_content=content,
+            error_message=_format_jsonschema_failure(exc),
         ) from exc
     except jsonschema.SchemaError as exc:
         # Safety net: validate_response_schema's pre-validation should
@@ -1542,8 +1535,8 @@ def _parse_and_validate(
         raise StructuredOutputInvalid(
             "response could not be validated against the supplied schema",
             response_schema=schema_dict,
-            raw_content=content,
-            failure_description=str(exc),
+            output_content=content,
+            error_message=str(exc),
         ) from exc
     return parsed_dict
 
@@ -1552,7 +1545,7 @@ def _format_jsonschema_failure(exc: jsonschema.ValidationError) -> str:
     """jsonschema.ValidationError.message describes the value mismatch
     (e.g., "'30' is not of type 'integer'") but doesn't include the
     failing field path. Prefix with ``json_path`` (e.g., ``$.age``) so
-    the failure_description string carries both, matching the dict-
+    the error_message string carries both, matching the dict-
     schema and class-schema paths.
     """
     return f"{exc.json_path}: {exc.message}"

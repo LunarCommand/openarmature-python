@@ -199,8 +199,8 @@ class StructuredOutputInvalid(LlmProviderError):
 
     Attributes:
         response_schema: The JSON Schema requested.
-        raw_content: The raw response content the model produced.
-        failure_description: A description of the parse or validation
+        output_content: The raw response content the model produced.
+        error_message: A description of the parse or validation
             failure.
         finish_reason: The normalized finish reason of the response that
             failed validation (``"length"`` signals a truncation, the key
@@ -219,8 +219,8 @@ class StructuredOutputInvalid(LlmProviderError):
 
     category = STRUCTURED_OUTPUT_INVALID
     response_schema: dict[str, Any]
-    raw_content: str
-    failure_description: str
+    output_content: str
+    error_message: str
     finish_reason: str | None
     usage: Usage | None
     response_id: str | None
@@ -230,8 +230,8 @@ class StructuredOutputInvalid(LlmProviderError):
         self,
         *args: Any,
         response_schema: dict[str, Any],
-        raw_content: str,
-        failure_description: str,
+        output_content: str,
+        error_message: str,
         finish_reason: str | None = None,
         usage: Usage | None = None,
         response_id: str | None = None,
@@ -239,8 +239,8 @@ class StructuredOutputInvalid(LlmProviderError):
     ) -> None:
         super().__init__(*args)
         self.response_schema = response_schema
-        self.raw_content = raw_content
-        self.failure_description = failure_description
+        self.output_content = output_content
+        self.error_message = error_message
         self.finish_reason = finish_reason
         self.usage = usage
         self.response_id = response_id

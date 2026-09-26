@@ -166,13 +166,13 @@ response = await provider.complete(
     response_schema=schema,
     retry=LlmRetryConfig(
         max_attempts=3,
-        reask=lambda err: f"That output was invalid: {err.failure_description}. Return corrected JSON.",
+        reask=lambda err: f"That output was invalid: {err.error_message}. Return corrected JSON.",
     ),
 )
 ```
 
 The builder receives the raised `StructuredOutputInvalid` (its
-`raw_content` is the model's invalid output, `failure_description` the
+`output_content` is the model's invalid output, `error_message` the
 reason) and returns the correction text. On each invalid attempt the loop
 appends the model's raw output as an `assistant` message and your
 correction as a `user` message to a working transcript that accumulates
@@ -701,8 +701,8 @@ can handle them.
 `StructuredOutputInvalid` is the new one and worth a note. It fires
 when a model returns content that fails to parse as JSON, or parses
 but fails to validate against the supplied schema. The exception
-carries the requested `response_schema`, the `raw_content` the model
-produced, and a `failure_description`. It is non-transient by default
+carries the requested `response_schema`, the `output_content` the model
+produced, and a `error_message`. It is non-transient by default
 because a model that emits non-conforming output on a given prompt
 usually emits the same non-conforming output on retry. Useful retry
 strategies for this case involve changing the prompt or doubling
@@ -722,8 +722,8 @@ async def classify_with_diagnostics(state):
         log.warning(
             "schema-validation failure on classify",
             extra={
-                "raw_content": exc.raw_content,
-                "failure": exc.failure_description,
+                "output_content": exc.output_content,
+                "failure": exc.error_message,
             },
         )
         raise

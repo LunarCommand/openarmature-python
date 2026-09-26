@@ -26,8 +26,8 @@ if TYPE_CHECKING:
 
 # Proposal 0095b: a caller-supplied corrective-message builder for
 # structured-output reask. Given the raised StructuredOutputInvalid (the 0082
-# error surface -- ``exc.raw_content`` is the model's invalid output,
-# ``exc.failure_description`` the reason), it returns the correction text OA
+# error surface -- ``exc.output_content`` is the model's invalid output,
+# ``exc.error_message`` the reason), it returns the correction text OA
 # appends as a user message. OA authors no prompt of its own (charter §3.1
 # principle 7); the caller owns every word. Sync, mirroring classifier / backoff
 # -- pure string rendering. Passing the whole exception matches the classifier /

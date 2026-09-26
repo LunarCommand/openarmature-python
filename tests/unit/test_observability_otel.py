@@ -2120,11 +2120,11 @@ def _reask_appended_message_matches(actual: dict[str, Any], expected: dict[str, 
 
 def _assert_reask_carries(exc: Any, carries: dict[str, Any]) -> None:
     # Minimal llm-provider §7 carries check for the reask driver: the
-    # StructuredOutputInvalid names its attributes raw_content /
-    # failure_description (0098's output_content / error_message §7 names alias
+    # StructuredOutputInvalid names its attributes output_content /
+    # error_message (0098's output_content / error_message §7 names alias
     # onto them), honoring the _present / _mentions suffixes and a mapping-valued
     # subset (usage).
-    alias = {"output_content": "raw_content", "error_message": "failure_description"}
+    alias = {"output_content": "output_content", "error_message": "error_message"}
     for key, want in carries.items():
         if key.endswith("_present"):
             attr = alias.get(key[:-8], key[:-8])
@@ -2213,8 +2213,8 @@ async def test_call_level_reask_retry_fixture(fixture_id: str) -> None:
     def _reask(exc: StructuredOutputInvalid) -> str:
         return (
             cast("str", reask_template)
-            .replace("{output_content}", exc.raw_content or "")
-            .replace("{error_message}", exc.failure_description or "")
+            .replace("{output_content}", exc.output_content or "")
+            .replace("{error_message}", exc.error_message or "")
         )
 
     retry = LlmRetryConfig(
