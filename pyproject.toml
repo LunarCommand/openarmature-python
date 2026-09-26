@@ -108,8 +108,31 @@ observability = ["openarmature[otel,langfuse]"]
 # extras, which uv otherwise can't default.
 default-groups = ["dev", "docs", "examples", "observability"]
 
+# Hatch packages what is on disk. `.git/info/exclude` keeps `_tasks/` out of git
+# and hatch never reads that file, so the local follow-up notes were going into
+# the sdist and would have published to PyPI. They are working notes, not part of
+# the public artifact set. `openarmature-spec/` is a pinned submodule and was most
+# of a 3.4MB tarball; it reconstructs from `[tool.openarmature] spec_version`.
+#
+# `tests/`, `examples/` and `docs/` stay in deliberately: tests let a packager
+# verify a build from source, and the other two are adopter-facing and small.
+[tool.hatch.build.targets.sdist]
+exclude = [
+  "_tasks/",
+  "openarmature-spec/",
+]
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/openarmature"]
+
+# The bundled AGENTS.md tells an agent to read this manifest for per-proposal
+# implementation status, which is the only artifact that answers "is this real in
+# the version I have installed" for a behaviour with no importable name. It has to
+# be IN the wheel for that instruction to resolve outside a clone. Force-included
+# rather than copied into src/ so there is one copy in the repo: a second 128K
+# committed file would show up in every diff that touches the manifest.
+[tool.hatch.build.targets.wheel.force-include]
+"conformance.toml" = "openarmature/conformance.toml"
 
 [tool.pyright]
 include = ["src", "tests", "examples"]

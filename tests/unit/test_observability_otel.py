@@ -2119,22 +2119,18 @@ def _reask_appended_message_matches(actual: dict[str, Any], expected: dict[str, 
 
 
 def _assert_reask_carries(exc: Any, carries: dict[str, Any]) -> None:
-    # Minimal llm-provider §7 carries check for the reask driver: the
-    # StructuredOutputInvalid names its attributes output_content /
-    # error_message (0098's output_content / error_message §7 names alias
-    # onto them), honoring the _present / _mentions suffixes and a mapping-valued
-    # subset (usage).
-    alias = {"output_content": "output_content", "error_message": "error_message"}
+    # Minimal llm-provider §7 carries check for the reask driver. A carries key
+    # names a §7 error field and StructuredOutputInvalid's attributes are those
+    # names, so a key resolves onto an attribute directly. Honors the _present /
+    # _mentions suffixes and a mapping-valued subset (usage).
     for key, want in carries.items():
         if key.endswith("_present"):
-            attr = alias.get(key[:-8], key[:-8])
-            assert (getattr(exc, attr, None) is not None) == bool(want), f"carries {key}"
+            assert (getattr(exc, key[:-8], None) is not None) == bool(want), f"carries {key}"
         elif key.endswith("_mentions"):
-            attr = alias.get(key[:-9], key[:-9])
-            actual = getattr(exc, attr, None)
+            actual = getattr(exc, key[:-9], None)
             assert isinstance(actual, str) and want in actual, f"carries {key}: {actual!r} lacks {want!r}"
         else:
-            actual: Any = getattr(exc, alias.get(key, key), None)
+            actual: Any = getattr(exc, key, None)
             if isinstance(want, dict):
                 dump: Any = actual.model_dump() if hasattr(actual, "model_dump") else actual
                 for k, v in cast("dict[str, Any]", want).items():

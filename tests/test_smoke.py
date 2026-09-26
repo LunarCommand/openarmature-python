@@ -73,3 +73,86 @@ def test_spec_version_matches_submodule_changelog() -> None:
         f"submodule's CHANGELOG latest is {submodule_latest}, but "
         f"__spec_version__ is {openarmature.__spec_version__}"
     )
+
+
+def test_the_conformance_manifest_is_force_included_in_the_wheel() -> None:
+    # The bundled AGENTS.md tells an agent to read `conformance.toml` for
+    # per-proposal implementation status, which is the only artifact that can
+    # answer "is this real in the version I have installed" for a behaviour with
+    # no importable name. That instruction shipped for releases while the file
+    # did not, so it resolved only for someone working in a clone. An agent
+    # planning against an accepted proposal had no way to learn that half of it
+    # was missing, which is exactly what `partial` records.
+    #
+    # Guarded here rather than by building a wheel in the suite: this catches the
+    # entry being dropped or its paths going stale, which is how it would break.
+    pyproject_path = Path(__file__).resolve().parent.parent / "pyproject.toml"
+    config = tomllib.loads(pyproject_path.read_text())
+    force_include = config["tool"]["hatch"]["build"]["targets"]["wheel"]["force-include"]
+
+    assert "conformance.toml" in force_include, (
+        "conformance.toml must be force-included in the wheel; AGENTS.md instructs "
+        f"an agent to read it. force-include currently: {force_include}"
+    )
+    target = force_include["conformance.toml"]
+    package = config["tool"]["hatch"]["build"]["targets"]["wheel"]["packages"][0]
+    package_name = Path(package).name
+    assert target == f"{package_name}/conformance.toml", (
+        f"the manifest must land beside the other bundled docs inside the package; "
+        f"got {target!r}, expected {package_name}/conformance.toml"
+    )
+    source = pyproject_path.parent / "conformance.toml"
+    assert source.exists(), f"force-include names a source that does not exist: {source}"
+
+
+def test_agents_md_names_both_places_the_manifest_can_be() -> None:
+    # The manifest lives in two places depending on how the reader got the
+    # package, and a pointer naming only one is wrong for half of them. The
+    # original said "at the repo root", unresolvable from a venv. The first fix
+    # named only the packaged path, unresolvable in a clone, since force-include
+    # is build-time and nothing is committed under src/. Both were the same
+    # defect: telling an agent something untrue in its context.
+    #
+    # So the assertion is that BOTH are named, not that either is absent.
+    bundled = Path(__file__).resolve().parent.parent / "src" / "openarmature" / "AGENTS.md"
+    text = bundled.read_text()
+    assert "conformance.toml" in text, "AGENTS.md must still point at the manifest"
+    assert "importlib.resources" in text, (
+        "the pointer must name the packaged path, which is the only one that resolves "
+        "for someone who installed from PyPI"
+    )
+    assert "repository root" in text, (
+        "the pointer must also name the checkout location, which is the only one that "
+        "resolves in a clone: force-include is build-time, so nothing lands in src/"
+    )
+
+
+def test_the_sdist_excludes_the_private_follow_up_notes() -> None:
+    # `_tasks/` is kept out of git by `.git/info/exclude`, which hatch does not
+    # read: it packages what is on disk. So the local follow-up notes were going
+    # into the sdist and would have published to PyPI. They are working notes
+    # that quote internal coordination, not part of the public artifact set.
+    #
+    # Guarded by config shape rather than by building an sdist in the suite,
+    # because the way this breaks is someone editing or dropping the exclude.
+    pyproject_path = Path(__file__).resolve().parent.parent / "pyproject.toml"
+    config = tomllib.loads(pyproject_path.read_text())
+    exclude = config["tool"]["hatch"]["build"]["targets"]["sdist"]["exclude"]
+
+    assert "_tasks/" in exclude, (
+        "`_tasks/` must be excluded from the sdist. It holds private working notes, "
+        f"and .git/info/exclude does not reach hatch. Current excludes: {exclude}"
+    )
+    # The pinned spec submodule is most of the tarball and reconstructs from the
+    # version pin, so it is excluded too. Not a privacy matter, just size.
+    assert "openarmature-spec/" in exclude, (
+        f"the pinned spec submodule should stay out of the sdist; excludes: {exclude}"
+    )
+    # Deliberately NOT excluded, asserted so a future tidy-up does not quietly
+    # drop them: tests let a packager verify a build from source, and the other
+    # two are adopter-facing.
+    for kept in ("tests/", "examples/", "docs/"):
+        assert kept not in exclude, (
+            f"{kept} is excluded from the sdist; it was kept on purpose, so if that "
+            "changed the reasoning in pyproject.toml needs changing with it"
+        )

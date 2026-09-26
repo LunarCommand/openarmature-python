@@ -3462,10 +3462,6 @@ async def test_per_attempt_override_with_extras_merges_per_key() -> None:
     # key the override sets replaces that key and a key it does not mention
     # inherits the base's.
     #
-    # This asserted the opposite until the rule was read properly, and it asserted
-    # a warning about the base keys the replacement dropped. Under the merge rule
-    # nothing is dropped, so there is nothing to warn about.
-    #
     # Without this the merge direction is unpinned. Verified by mutation: both
     # dropping `override.extras` and reversing the precedence left the suite
     # green while this test was absent.
@@ -3518,3 +3514,102 @@ async def test_per_attempt_override_with_extras_merges_per_key() -> None:
         "per-key rule the declared fields follow"
     )
     assert bodies[1]["keep"] == 1, "every unmentioned base key inherits, not just the first"
+
+
+async def test_override_declared_field_supersedes_inherited_base_extras_key() -> None:
+    # A base extras key is the section 6 escape hatch: unmanaged where it was
+    # written, because the base leaves the declared field unset so the mapping
+    # emits nothing of that name. Merging carries it onto a retry whose override
+    # DOES set the field, where it is managed, and section 8.1 rejects a managed
+    # collision pre-send. Two individually valid configs would then compose into
+    # one the provider refuses, killing the retry the caller asked for.
+    #
+    # The override's field is the later and more specific instruction, so it wins
+    # and the inherited key drops.
+    #
+    # Not vacuous: without the supersede step the first assertion fails on call
+    # COUNT (one wire call, not two) because attempt 1 raises before sending, and
+    # the terminal error is provider_invalid_request rather than the transient
+    # the retry existed to ride out. Killed by removing the `merged.pop` loop.
+    from openarmature.llm import LlmRetryConfig
+
+    bodies: list[dict[str, Any]] = []
+    calls = {"n": 0}
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        bodies.append(json.loads(req.content))
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return httpx.Response(503, json={"error": {"message": "upstream"}})
+        return httpx.Response(
+            200,
+            json={
+                "id": "c",
+                "model": "m",
+                "choices": [
+                    {"index": 0, "message": {"role": "assistant", "content": "ok"}, "finish_reason": "stop"}
+                ],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+            },
+        )
+
+    provider = _collision_provider(handler)
+    try:
+        await provider.complete(
+            [UserMessage(content="hi")],
+            config=RuntimeConfig(extras={"temperature": 0.9, "keep": 1}),
+            retry=LlmRetryConfig(
+                max_attempts=2,
+                backoff=deterministic_backoff(0),
+                per_attempt_override=[RuntimeConfig(temperature=0.3)],
+            ),
+        )
+    finally:
+        await provider.aclose()
+
+    assert len(bodies) == 2, f"the retry must still run, got {len(bodies)} call(s)"
+    # Attempt 0 is untouched: the base's escape-hatch key is what reaches the wire.
+    assert bodies[0]["temperature"] == 0.9
+    # Attempt 1 sends the override's declared value, once, and the inherited
+    # extras key is gone rather than colliding with it.
+    assert bodies[1]["temperature"] == 0.3
+    # An unrelated base key still inherits, so the supersede is scoped to the
+    # colliding name rather than clearing the container.
+    assert bodies[1]["keep"] == 1
+
+
+async def test_override_naming_a_declared_field_in_its_own_extras_still_collides() -> None:
+    # The supersede above is deliberately asymmetric. A base key inherited into a
+    # collision was never written alongside the field, so yielding to the field is
+    # reading the caller's intent. An override that declares a field AND names it
+    # in its own extras contradicts itself inside one object, and section 8.1's
+    # reject is the right answer.
+    #
+    # Not vacuous: widening the supersede to drop the override's own extras key
+    # makes this call succeed instead of raising, so the assertion flips.
+    from openarmature.llm import LlmRetryConfig
+
+    calls = {"n": 0}
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        return httpx.Response(503, json={"error": {"message": "upstream"}})
+
+    provider = _collision_provider(handler)
+    try:
+        with pytest.raises(ProviderInvalidRequest):
+            await provider.complete(
+                [UserMessage(content="hi")],
+                config=RuntimeConfig(),
+                retry=LlmRetryConfig(
+                    max_attempts=2,
+                    backoff=deterministic_backoff(0),
+                    per_attempt_override=[RuntimeConfig(temperature=0.3, extras={"temperature": 0.5})],
+                ),
+            )
+    finally:
+        await provider.aclose()
+
+    # Attempt 0 went out (no override applies to it); attempt 1 raised pre-send,
+    # so the collision is what stopped it rather than a transport failure.
+    assert calls["n"] == 1

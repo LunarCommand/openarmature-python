@@ -88,6 +88,24 @@ the chat shape. Demonstrates: `ChatPrompt`, `ContentSegment`,
 `PlaceholderSegment`, history threading via the `append` reducer
 on `list[Message]`, conditional self-loop for multi-turn cycles.
 
+### Providers
+
+#### [`provider-extras/`](./provider-extras/main.py)
+
+Reaching an OpenAI request field openarmature does not model, and the
+guardrails that stop you reaching one it does. A bulk telemetry-alert
+classifier wants `service_tier` for the cheaper lane and `logit_bias` to
+suppress a retired severity label; neither is portable, so neither has a
+first-class field, and both ride in `extras` untouched. The refusals are the
+interesting half: a field the mapping produced on this call cannot also come
+from `extras`, because two sources of truth for one wire field is a bug you
+want at the call site. Demonstrates: `RuntimeConfig(extras=...)` passthrough,
+`ProviderInvalidRequest` on a managed-field collision, `model` / `messages` /
+`tools` / `tool_choice` rejecting always so an `extras` tool array cannot skip
+tool validation, and `stop` merging with `stop_sequences` rather than colliding
+because both realize the same wire field. Runs against a stub transport, since
+the point is the shape of the outbound request.
+
 ### Tool use
 
 #### [`tool-use/`](./tool-use/main.py)
@@ -126,6 +144,32 @@ no-op on symmetric OpenAI, meaningful on asymmetric providers), mapping
 `OpenAIProvider` answer node. Needs `OPENAI_API_KEY` and `COHERE_API_KEY`.
 
 ### Reliability
+
+#### [`structured-output-reask/`](./structured-output-reask/main.py)
+
+Extracting one structured mission record per lunar-landing report, under an
+output-token cap that is too tight for a complete record. The model stops
+mid-object, and the fragment that arrives is rejected at the schema boundary
+exactly as a wrong-typed field would be. The cap is what the demo drives,
+because it fails the same way on every endpoint; the wrong-typed field is the
+more common failure in practice and how often you see it depends on whether
+your endpoint enforces the schema during decoding. Both reach the same
+exception, and the builder here handles both. Recovery needs two different
+changes:
+a caller-supplied builder quotes the model's own fragment and the reader's
+objection back to it, and a per-attempt override raises the ceiling so the
+retry has somewhere to put the answer. Demonstrates:
+`complete(response_schema=...)` raising `StructuredOutputInvalid` instead of
+returning a half-built object, `LlmRetryConfig(reask=...)` making that failure
+retryable for one call, a builder reading `exc.output_content` and
+`exc.error_message` and branching on which failure it got,
+`LlmRetryConfig(per_attempt_override=...)` applying a config schedule to
+retries only, the framework appending the model's reply and the correction as
+an alternating transcript while authoring no prompt of its own, and reask
+sharing the `max_attempts` budget with transient retries. Three postures:
+`MODE=off` supplies neither and ends on the first unusable reply, `MODE=nocap`
+supplies the correction but not the raised ceiling so every attempt is cut off
+at the same place, and the default supplies both.
 
 #### [`checkpointing-and-migration/`](./checkpointing-and-migration/main.py)
 

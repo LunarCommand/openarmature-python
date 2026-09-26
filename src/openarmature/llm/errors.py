@@ -200,8 +200,10 @@ class StructuredOutputInvalid(LlmProviderError):
     Attributes:
         response_schema: The JSON Schema requested.
         output_content: The raw response content the model produced.
-        error_message: A description of the parse or validation
-            failure.
+        error_message: What the parse or validation step objected to,
+            on its own. It does not repeat this exception's own message,
+            so a caller composing text for the model normally wants
+            both (``str(exc)`` and this).
         finish_reason: The normalized finish reason of the response that
             failed validation (``"length"`` signals a truncation, the key
             retry signal; ``"stop"`` a clean-finish schema/parse failure).
