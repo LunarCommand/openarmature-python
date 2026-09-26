@@ -105,19 +105,25 @@ def test_the_conformance_manifest_is_force_included_in_the_wheel() -> None:
     assert source.exists(), f"force-include names a source that does not exist: {source}"
 
 
-def test_agents_md_tells_an_agent_where_the_manifest_actually_is() -> None:
-    # The pointer used to read "at the repo root", which is unresolvable from a
-    # venv and is the half of the defect that made the missing file invisible:
-    # an agent that could not find it had no reason to think it should be there.
+def test_agents_md_names_both_places_the_manifest_can_be() -> None:
+    # The manifest lives in two places depending on how the reader got the
+    # package, and a pointer naming only one is wrong for half of them. The
+    # original said "at the repo root", unresolvable from a venv. The first fix
+    # named only the packaged path, unresolvable in a clone, since force-include
+    # is build-time and nothing is committed under src/. Both were the same
+    # defect: telling an agent something untrue in its context.
+    #
+    # So the assertion is that BOTH are named, not that either is absent.
     bundled = Path(__file__).resolve().parent.parent / "src" / "openarmature" / "AGENTS.md"
     text = bundled.read_text()
     assert "conformance.toml" in text, "AGENTS.md must still point at the manifest"
-    assert "at the repo root" not in text, (
-        "the manifest pointer must not be repo-relative: it resolves for a clone and "
-        "not for anyone who installed the package"
-    )
     assert "importlib.resources" in text, (
-        "the pointer should name the access path that works from an installed package"
+        "the pointer must name the packaged path, which is the only one that resolves "
+        "for someone who installed from PyPI"
+    )
+    assert "repository root" in text, (
+        "the pointer must also name the checkout location, which is the only one that "
+        "resolves in a clone: force-include is build-time, so nothing lands in src/"
     )
 
 

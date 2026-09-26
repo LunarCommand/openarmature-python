@@ -38,12 +38,16 @@ site and not in a trace three days later.
 
 **Run it:**
 
-    export LLM_API_KEY=sk-...
     uv run python examples/provider-extras/main.py
 
-This demo talks to a stub transport rather than a real endpoint, because the
-point is the shape of the outbound request. Set ``LLM_BASE_URL`` and drop
-``--stub`` behaviour if you want to watch a real provider accept the knobs.
+No credentials needed. This demo installs a stub transport and prints the
+outbound request body, because the shape of that body IS the subject: whether a
+knob reached the wire, and what happened when it collided with one the framework
+manages. A real endpoint would answer neither question any better, and the
+refusals happen before any request is sent.
+
+To watch a real provider accept the knobs, change ``_provider()`` to drop the
+``transport=`` argument and supply a real ``base_url`` and ``api_key``.
 """
 
 from __future__ import annotations
