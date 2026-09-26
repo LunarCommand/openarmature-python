@@ -190,8 +190,30 @@ appends the model's raw output as an `assistant` message and your
 correction as a `user` message to a working transcript that accumulates
 across retries and consumes the `max_attempts` budget. The framework adds
 no prompt text of its own; you own every word beyond the model's output,
-and the caller's `messages` are never mutated. Reask composes with a
-`per_attempt_override` (escalate temperature *and* reask).
+and the caller's `messages` are never mutated.
+
+**Two different things produce an invalid reply, and the exception tells
+them apart.** The model can answer in the wrong shape: prose instead of
+JSON, a markdown fence around it, a string where the schema wanted a
+number. Or the reply can be cut off mid-object because it hit
+`max_tokens`, in which case nothing was wrong with the model's answer and
+there simply was not room for it. `finish_reason` is `"length"` in the
+second case and not in the first, so a builder can say something
+different about each.
+
+How often you see the first depends on your serving stack rather than on
+your code. An endpoint that enforces the schema during decoding will not
+produce it; one that ignores `response_format`, or serves a weaker model,
+or sits behind a proxy that drops the field, produces it routinely. Both
+causes arrive at the same exception, so a builder written for both keeps
+working when you change endpoints.
+
+Reask composes with a `per_attempt_override`, and the two halves do
+different work. The builder changes what you say; the override changes
+what the attempt is allowed to spend. A truncated reply needs the second:
+a correction alone gets cut off in the same place, so raise `max_tokens`
+on the retry. A wrong-shaped reply usually needs only the first, though
+escalating `temperature` alongside it is the canonical schedule.
 
 ### Call-level vs node-level retry
 

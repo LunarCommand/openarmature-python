@@ -27,6 +27,18 @@ different kinds of thing:
 Supply only the first and the retry is better informed and still truncated.
 This demo shows both arms so the difference is visible.
 
+**Why the ceiling and not the wrong-shaped answer.** The ceiling is the
+failure this demo can guarantee, on any endpoint and any model. The
+wrong-shaped answer is the one you are more likely to meet, and whether you
+meet it at all is a property of your serving stack rather than of your code.
+An endpoint that enforces the schema during decoding cannot produce it. An
+endpoint that ignores ``response_format``, or serves a weaker model behind
+one, produces it routinely, and so does a proxy that drops the field on the
+way through. Both failures arrive at the same exception and the same builder
+handles both, which is the point: you do not have to know in advance which
+kind of endpoint you are pointed at, and you keep working when someone moves
+you to a different one.
+
 **What's interesting in the implementation:**
 
 - ``complete(response_schema=...)`` asks the provider for a shape. When the

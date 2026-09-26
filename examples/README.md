@@ -150,7 +150,12 @@ no-op on symmetric OpenAI, meaningful on asymmetric providers), mapping
 Extracting one structured mission record per lunar-landing report, under an
 output-token cap that is too tight for a complete record. The model stops
 mid-object, and the fragment that arrives is rejected at the schema boundary
-exactly as a wrong-typed field would be. Recovery needs two different changes:
+exactly as a wrong-typed field would be. The cap is what the demo drives,
+because it fails the same way on every endpoint; the wrong-typed field is the
+more common failure in practice and how often you see it depends on whether
+your endpoint enforces the schema during decoding. Both reach the same
+exception, and the builder here handles both. Recovery needs two different
+changes:
 a caller-supplied builder quotes the model's own fragment and the reader's
 objection back to it, and a per-attempt override raises the ceiling so the
 retry has somewhere to put the answer. Demonstrates:
