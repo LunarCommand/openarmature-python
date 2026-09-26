@@ -142,12 +142,24 @@ replace, the rest inherited from the base), and the last entry carries
 forward when the schedule is shorter than the retry count. The caller's
 `config` is never mutated.
 
-`extras` follows the same rule with one wrinkle, because its default is
-an empty container rather than `None`. An override that declares no
-extras inherits the base's; one that declares any replaces them
-wholesale, and any base key it does not carry is logged as not sent on
-that attempt. Clearing extras for a single attempt is therefore not
-expressible, since an empty container is how inheriting is spelled.
+`extras` follows the same rule applied one level down, to each key
+rather than to the container. A key the override sets replaces that key;
+a key it does not mention inherits the base's. An override that declares
+no extras therefore inherits all of them, and one that adjusts a single
+vendor knob leaves the rest in place.
+
+Two edges are worth knowing. A field the override declares wins over a
+base extras key of the same name, so a base `extras={"temperature": 0.9}`
+yields to an override's `temperature=0.3` rather than colliding with it.
+But naming the same field twice in one override, once declared and once
+in its own `extras`, is a config that contradicts itself and is rejected
+before the call goes out.
+
+Withdrawing a base key for a single attempt is not available. Setting it
+to `None` in the override sends JSON `null` on the wire, which is not the
+same as omitting the field and many providers treat it differently. If an
+attempt genuinely must go out without a key the base carries, make it a
+separate call.
 
 ### Reasking on invalid structured output
 

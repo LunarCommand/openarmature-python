@@ -631,7 +631,8 @@ class OpenAIProvider:
         inherits the base -- and the last entry carries forward when the
         schedule is shorter than the retry count. ``extras`` merges by the same
         per-key rule: a key the override sets replaces that key, a key it does
-        not mention inherits the base's. Attempt 0 and the no-override
+        not mention inherits the base's, and a base key whose name the override
+        declares as a field is superseded by that field. Attempt 0 and the no-override
         case return the caller's base config as-is; only the override path
         returns a fresh ``model_copy``. The caller's config is never mutated
         either way -- the base path relies on the downstream body build reading
@@ -657,15 +658,25 @@ class OpenAIProvider:
         # a field is an extras KEY rather than the container: a key set in the
         # override replaces the base's value for that key, a key the override does
         # not mention inherits the base's. So the container merges.
-        #
-        # This replaced the container wholesale and warned about the base keys it
-        # dropped, on the reading that a non-empty container is itself the unit a
-        # field's rule applies to. Under the merge rule nothing is dropped, so the
-        # warning went with it. Clearing a base key for one attempt stays
-        # inexpressible, exactly as an override cannot clear a declared field to
-        # None.
         update = override.model_dump(exclude_none=True, exclude={"extras"})
-        update["extras"] = {**base_or_empty.extras, **override.extras}
+        merged = {**base_or_empty.extras, **override.extras}
+        # A field the override declares supersedes a base extras key of the same
+        # name. Without this the merge manufactures an invalid config out of two
+        # valid ones: the base's §6 escape-hatch key (unmanaged there, because the
+        # base left the field unset) is inherited onto an attempt whose override
+        # DOES set the field, so the mapping emits it, §8.1 sees a managed-field
+        # collision, and the call rejects pre-send -- killing a retry that
+        # previously ran. The override's field is the later and more specific
+        # instruction, so it wins.
+        #
+        # A key the override itself carries in `extras` is left alone, so
+        # declaring a field and naming it in the same override's extras still
+        # collides. That config contradicts itself in one object rather than
+        # across two, and §8.1's reject is the right answer to it.
+        for field_name in update:
+            if field_name not in override.extras:
+                merged.pop(field_name, None)
+        update["extras"] = merged
         return base_or_empty.model_copy(update=update)
 
     @staticmethod
@@ -795,6 +806,18 @@ class OpenAIProvider:
                     try:
                         transcript = self._append_reask_pair(transcript, exc.output_content, reask(exc))
                     except Exception as reask_error:
+                        # The chained cause carries this, but the surfaced error
+                        # reads as a bad model rather than a broken builder, and
+                        # a caller who never inspects __cause__ debugs the wrong
+                        # thing. Say which one failed where it will be seen.
+                        _log.warning(
+                            "reask builder raised on attempt %d (%s: %s); "
+                            "reask is disabled for this call and the "
+                            "structured_output_invalid failure stands",
+                            attempt,
+                            type(reask_error).__name__,
+                            reask_error,
+                        )
                         raise exc from reask_error
                     next_retry_reason = "reask"
                 else:
