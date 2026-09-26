@@ -152,12 +152,12 @@ def assert_error_carries(exc: BaseException, carries: Mapping[str, Any]) -> None
 
     - ``<attribute>_present: true`` — attribute MUST be set to a
       truthy non-None value (e.g., ``response_schema_present``,
-      ``failure_description_present``).
+      ``error_message_present``).
     - ``<attribute>: <value>`` — attribute value equals the supplied
-      value (e.g., ``raw_response_content: '...'``).
+      value (e.g., ``output_content: '...'``).
     - ``<attribute>_mentions: <substring>`` — string attribute value
       contains the supplied substring (e.g.,
-      ``failure_description_mentions: 'age'``).
+      ``error_message_mentions: 'age'``).
     """
     for key, expected in carries.items():
         if key.endswith("_present"):

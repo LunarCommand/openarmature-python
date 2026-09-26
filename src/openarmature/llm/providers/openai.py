@@ -629,8 +629,9 @@ class OpenAIProvider:
         (attempt ``i > 0``) merges ``overrides[i-1]`` onto the base -- the
         override's non-None fields replace, a None field (like an absent one)
         inherits the base -- and the last entry carries forward when the
-        schedule is shorter than the retry count. ``extras`` replaces when the
-        override declares any and inherits when it declares none. Attempt 0 and the no-override
+        schedule is shorter than the retry count. ``extras`` merges by the same
+        per-key rule: a key the override sets replaces that key, a key it does
+        not mention inherits the base's. Attempt 0 and the no-override
         case return the caller's base config as-is; only the override path
         returns a fresh ``model_copy``. The caller's config is never mutated
         either way -- the base path relies on the downstream body build reading

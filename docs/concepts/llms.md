@@ -702,7 +702,7 @@ can handle them.
 when a model returns content that fails to parse as JSON, or parses
 but fails to validate against the supplied schema. The exception
 carries the requested `response_schema`, the `output_content` the model
-produced, and a `error_message`. It is non-transient by default
+produced, and an `error_message`. It is non-transient by default
 because a model that emits non-conforming output on a given prompt
 usually emits the same non-conforming output on retry. Useful retry
 strategies for this case involve changing the prompt or doubling
