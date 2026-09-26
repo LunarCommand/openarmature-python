@@ -532,8 +532,8 @@ async def test_pydantic_class_path_rejects_coercible_string_for_int() -> None:
             )
     finally:
         await provider.aclose()
-    assert "age" in excinfo.value.failure_description
-    assert "integer" in excinfo.value.failure_description
+    assert "age" in excinfo.value.error_message
+    assert "integer" in excinfo.value.error_message
 
 
 async def test_pydantic_validation_failure_wraps_in_structured_output_invalid() -> None:
@@ -554,8 +554,8 @@ async def test_pydantic_validation_failure_wraps_in_structured_output_invalid() 
     finally:
         await provider.aclose()
     err = excinfo.value
-    assert err.raw_content == '{"name":"Alice","age":"thirty"}'
-    assert "age" in err.failure_description
+    assert err.output_content == '{"name":"Alice","age":"thirty"}'
+    assert "age" in err.error_message
     # Proposal 0082: the error carries the intact response's response-side
     # context (finish_reason for retry triage, usage, response identity),
     # attached at the parse/validate call site.

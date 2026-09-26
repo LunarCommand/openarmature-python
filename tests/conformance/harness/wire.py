@@ -152,12 +152,12 @@ def assert_error_carries(exc: BaseException, carries: Mapping[str, Any]) -> None
 
     - ``<attribute>_present: true`` — attribute MUST be set to a
       truthy non-None value (e.g., ``response_schema_present``,
-      ``failure_description_present``).
+      ``error_message_present``).
     - ``<attribute>: <value>`` — attribute value equals the supplied
-      value (e.g., ``raw_response_content: '...'``).
+      value (e.g., ``output_content: '...'``).
     - ``<attribute>_mentions: <substring>`` — string attribute value
       contains the supplied substring (e.g.,
-      ``failure_description_mentions: 'age'``).
+      ``error_message_mentions: 'age'``).
     """
     for key, expected in carries.items():
         if key.endswith("_present"):
@@ -220,27 +220,12 @@ def as_record_mapping(value: Any) -> Mapping[str, Any] | None:
 
 
 def _get_carries_attr(exc: BaseException, name: str) -> Any:
-    # Resolve a carries key to an exception attribute. Proposal 0098 renamed the
-    # structured_output_invalid carries keys to the llm-provider §7 error field
-    # names (output_content / error_message), but the Python
-    # StructuredOutputInvalid names those attributes raw_content /
-    # failure_description, so the alias below bridges the §7 names to the impl
-    # attributes. (The pre-0098 wire-side label raw_response_content is fully
-    # retired from the fixtures.)
+    # Resolve a carries key straight to an exception attribute. This used to
+    # carry an alias table bridging llm-provider section 7's `output_content` /
+    # `error_message` onto the implementation's own attribute names, with a
+    # comment saying it would stay correct if the implementation ever renamed
+    # them to match. It has, so the alias resolved to itself and is gone.
     #
-    # Resolve DIRECT-FIRST: an attribute named exactly as the carries key wins,
-    # and the alias is a fallback only when that attribute is absent. This keeps
-    # the alias from misdirecting a different error that legitimately exposes an
-    # output_content / error_message attribute, and stays correct if the impl
-    # ever renames its attributes to the §7 names.
-    aliases = {
-        "output_content": "raw_content",
-        "error_message": "failure_description",
-    }
-    # Single lookup for the direct case: a sentinel default avoids the
-    # hasattr + getattr double access (which would fire a descriptor twice).
-    missing = object()
-    direct = getattr(exc, name, missing)
-    if direct is not missing:
-        return direct
-    return getattr(exc, aliases.get(name, name), None)
+    # (The pre-0098 wire-side label raw_response_content is fully retired from
+    # the fixtures.)
+    return getattr(exc, name, None)

@@ -26,8 +26,8 @@ if TYPE_CHECKING:
 
 # Proposal 0095b: a caller-supplied corrective-message builder for
 # structured-output reask. Given the raised StructuredOutputInvalid (the 0082
-# error surface -- ``exc.raw_content`` is the model's invalid output,
-# ``exc.failure_description`` the reason), it returns the correction text OA
+# error surface -- ``exc.output_content`` is the model's invalid output,
+# ``exc.error_message`` the reason), it returns the correction text OA
 # appends as a user message. OA authors no prompt of its own (charter §3.1
 # principle 7); the caller owns every word. Sync, mirroring classifier / backoff
 # -- pure string rendering. Passing the whole exception matches the classifier /
@@ -47,8 +47,9 @@ class LlmRetryConfig(RetryConfig):
       partial-overrides applied to RETRIES only. Attempt 0 uses the caller's
       base ``config`` unmodified; retry ``i`` (attempt ``i+1``) merges
       ``per_attempt_override[i]`` onto the base (the override's set fields
-      replace, unspecified fields inherited; ``extras`` counts as unspecified
-      when empty, so it inherits, and replaces wholesale when not). When the
+      replace, unspecified fields inherited; ``extras`` merges by that same
+      per-key rule, so a key the override sets replaces that key and a key it
+      omits inherits the base's). When the
       schedule is shorter
       than the retry count, the last entry carries forward. The canonical form
       is an escalating temperature schedule (e.g. ``[RuntimeConfig(temperature=0.3),

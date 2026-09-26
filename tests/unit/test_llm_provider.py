@@ -1424,7 +1424,7 @@ async def test_complete_structured_output_failure_event_carries_response_surface
     # whose validation gate failed, so the LlmFailedEvent carries the
     # response-side surface (finish_reason for retry triage, output_content,
     # usage, response identity), and error_message carries the failing
-    # locator (the failure_description) rather than just the terse summary.
+    # locator (the error_message) rather than just the terse summary.
     from openarmature.graph.events import LlmFailedEvent
     from openarmature.llm import StructuredOutputInvalid
 
@@ -1485,7 +1485,7 @@ async def test_complete_structured_output_failure_event_carries_response_surface
 
 def test_structured_output_builder_projects_empty_content_to_none() -> None:
     # Proposal 0082 cross-observer parity (defensive): a structured failure whose
-    # raw_content is empty projects output_content to None in the built event
+    # output_content is empty projects output_content to None in the built event
     # (like the success path's `content or None`), so both observers omit it
     # identically rather than one rendering "" and the other dropping it on a
     # truthiness gate. The OpenAI wire can't currently produce empty content on
@@ -1496,7 +1496,7 @@ def test_structured_output_builder_projects_empty_content_to_none() -> None:
 
     provider = OpenAIProvider(base_url="http://test", model="m", api_key="k")
     exc = StructuredOutputInvalid(
-        "empty content", response_schema={}, raw_content="", failure_description="empty"
+        "empty content", response_schema={}, output_content="", error_message="empty"
     )
     event = provider._build_llm_failed_event(  # noqa: SLF001
         exc,
@@ -1864,7 +1864,7 @@ async def test_reask_corrects_on_retry() -> None:
     from openarmature.llm import LlmRetryConfig
 
     def reask(exc: Any) -> str:
-        return f"Your previous output {exc.raw_content} was invalid. Return corrected JSON."
+        return f"Your previous output {exc.output_content} was invalid. Return corrected JSON."
 
     bodies: list[dict[str, Any]] = []
     calls = [0]
@@ -1997,7 +1997,7 @@ async def test_reask_composes_with_override_and_accumulates() -> None:
             retry=LlmRetryConfig(
                 max_attempts=3,
                 backoff=deterministic_backoff(0),
-                reask=lambda e: f"fix {e.raw_content}",
+                reask=lambda e: f"fix {e.output_content}",
                 per_attempt_override=[RuntimeConfig(temperature=0.3), RuntimeConfig(temperature=0.6)],
             ),
         )
@@ -2038,7 +2038,7 @@ async def test_reask_transient_interleave_carries_transcript() -> None:
             [UserMessage(content="go")],
             response_schema=_PERSON_SCHEMA,
             retry=LlmRetryConfig(
-                max_attempts=3, backoff=deterministic_backoff(0), reask=lambda e: f"fix {e.raw_content}"
+                max_attempts=3, backoff=deterministic_backoff(0), reask=lambda e: f"fix {e.output_content}"
             ),
         )
     finally:
@@ -2204,8 +2204,8 @@ async def test_call_level_retry_plain_config_replays_identically() -> None:
             lambda: StructuredOutputInvalid(
                 "boom",
                 response_schema={},
-                raw_content="",
-                failure_description="",
+                output_content="",
+                error_message="",
             ),
             "StructuredOutputInvalid",
             "structured_output_invalid",
@@ -2236,7 +2236,7 @@ def test_build_llm_failed_event_maps_category_and_type_per_exception(
     assert event.error_category == expected_category
     assert event.error_type == expected_cls_name
     # error_message is str(exc) for all categories except
-    # structured_output_invalid, which appends the failure_description
+    # structured_output_invalid, which appends the error_message
     # locator (proposal 0082); startswith covers both.
     assert event.error_message.startswith("boom")
     assert event.latency_ms == 12.0
@@ -3456,13 +3456,15 @@ async def test_per_attempt_override_preserves_base_extras() -> None:
     assert bodies[1]["temperature"] == 0.6
 
 
-async def test_per_attempt_override_with_extras_replaces_and_warns(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    # An override that DOES declare extras replaces the container, following the
-    # same rule its declared fields follow. The base keys it does not carry are
-    # dropped for that attempt, so they are logged: replacing is legitimate, but
-    # losing a key the caller set without saying so is not.
+async def test_per_attempt_override_with_extras_merges_per_key() -> None:
+    # Section 7.1: "Undeclared extras (section 6) merge by the same per-key rule."
+    # The analogue of a declared field is an extras KEY, not the container, so a
+    # key the override sets replaces that key and a key it does not mention
+    # inherits the base's.
+    #
+    # This asserted the opposite until the rule was read properly, and it asserted
+    # a warning about the base keys the replacement dropped. Under the merge rule
+    # nothing is dropped, so there is nothing to warn about.
     #
     # Without this the merge direction is unpinned. Verified by mutation: both
     # dropping `override.extras` and reversing the precedence left the suite
@@ -3491,29 +3493,28 @@ async def test_per_attempt_override_with_extras_replaces_and_warns(
 
     provider = _collision_provider(handler)
     try:
-        with caplog.at_level(logging.WARNING):
-            await provider.complete(
-                [UserMessage(content="hi")],
-                config=RuntimeConfig(extras={"strict_grammar": "g", "keep": 1}),
-                retry=LlmRetryConfig(
-                    max_attempts=2,
-                    backoff=deterministic_backoff(0),
-                    per_attempt_override=[RuntimeConfig(extras={"relaxed": True})],
-                ),
-            )
+        await provider.complete(
+            [UserMessage(content="hi")],
+            config=RuntimeConfig(extras={"strict_grammar": "g", "keep": 1}),
+            retry=LlmRetryConfig(
+                max_attempts=2,
+                backoff=deterministic_backoff(0),
+                per_attempt_override=[RuntimeConfig(extras={"relaxed": True})],
+            ),
+        )
     finally:
         await provider.aclose()
 
     assert len(bodies) == 2, f"expected a retry, got {len(bodies)} call(s)"
-    # Attempt 0 carries the base's extras.
+    # Attempt 0 carries the base's extras, and none of the override's.
     assert bodies[0]["strict_grammar"] == "g"
     assert "relaxed" not in bodies[0]
-    # Attempt 1 carries the override's, and NOT the base's.
+    # Attempt 1 carries the override's key AND inherits the base's, which is the
+    # per-key rule. Asserting the inherited keys is the non-vacuous half: the
+    # override's own key arrives under either reading.
     assert bodies[1]["relaxed"] is True
-    assert "strict_grammar" not in bodies[1], "the override's extras must replace, not merge"
-    assert "keep" not in bodies[1]
-    # The dropped keys are named rather than lost silently.
-    warnings_seen = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
-    assert any("strict_grammar" in m and "keep" in m for m in warnings_seen), (
-        f"expected a warning naming the dropped keys; got {warnings_seen}"
+    assert bodies[1]["strict_grammar"] == "g", (
+        "a base extras key the override does not mention must inherit, per the same "
+        "per-key rule the declared fields follow"
     )
+    assert bodies[1]["keep"] == 1, "every unmentioned base key inherits, not just the first"
