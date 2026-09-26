@@ -697,3 +697,90 @@ async def test_fallback_mode_preserves_response_format_on_free_form_calls() -> N
     finally:
         await provider.aclose()
     assert captured_body_response_format == caller_extra
+
+
+async def test_a_reask_builder_written_against_the_documented_fields_recovers() -> None:
+    # llm-provider section 7 names the exception's fields `output_content` and
+    # `error_message`, and section 7.1 says the reask builder receives those two.
+    # This writes the builder the way the documentation says to and asserts the
+    # call recovers.
+    #
+    # Non-vacuity, and the reason this test exists: the implementation carried
+    # `raw_content` / `failure_description` instead, so a builder reading the
+    # documented names raised AttributeError, the retry loop converted it to
+    # `raise exc from reask_error`, and the call failed on the first invalid
+    # reply exactly as if no builder had been supplied. Every existing test
+    # either read the implementation's own spelling or went through a conformance
+    # harness that aliased the two, so none of them could fail on it. Reverting
+    # the rename makes this one fail on the attribute rather than the assertion.
+    from openarmature.graph.middleware import deterministic_backoff
+    from openarmature.llm import LlmRetryConfig
+
+    schema: dict[str, Any] = {
+        "type": "object",
+        "properties": {"mission": {"type": "string"}, "mass_kg": {"type": "number"}},
+        "required": ["mission", "mass_kg"],
+        "additionalProperties": False,
+    }
+    bodies: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        bodies.append(json.loads(request.content))
+        # Attempt 0 breaks the schema the way a model actually does: the mass
+        # echoed as prose rather than coerced to a number.
+        content = (
+            '{"mission": "IM-3", "mass_kg": "1,340 kg"}'
+            if len(bodies) == 1
+            else '{"mission": "IM-3", "mass_kg": 1340}'
+        )
+        return httpx.Response(
+            200,
+            json={
+                "id": "r1",
+                "model": "m",
+                "choices": [{"message": {"role": "assistant", "content": content}, "finish_reason": "stop"}],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+            },
+        )
+
+    seen: list[tuple[str, str]] = []
+
+    def build_correction(exc: StructuredOutputInvalid) -> str:
+        seen.append((exc.output_content, exc.error_message))
+        return "Send mass_kg as a bare number."
+
+    provider = OpenAIProvider(
+        base_url="http://mock-llm.test",
+        model="m",
+        api_key="k",
+        transport=httpx.MockTransport(handler),
+    )
+    try:
+        response = await provider.complete(
+            [UserMessage(content="IM-3 carried 1,340 kg")],
+            response_schema=schema,
+            retry=LlmRetryConfig(
+                max_attempts=3,
+                backoff=deterministic_backoff(0.0),
+                reask=build_correction,
+            ),
+        )
+    finally:
+        await provider.aclose()
+
+    assert len(bodies) == 2, f"expected one reask attempt, got {len(bodies)} call(s)"
+    assert json.loads(response.message.content or "{}")["mass_kg"] == 1340
+    # The builder saw both documented fields populated, not empty strings.
+    assert len(seen) == 1
+    invalid_output, complaint = seen[0]
+    assert "1,340 kg" in invalid_output, (
+        f"the builder must receive the model's verbatim reply, got {invalid_output!r}"
+    )
+    assert complaint, "the builder must receive the validator's objection, not an empty string"
+    # The correction reaches the model as a user turn after its own reply, so the
+    # transcript stays role-alternating.
+    roles = [m["role"] for m in bodies[-1]["messages"]]
+    assert roles == ["user", "assistant", "user"], f"expected an alternating transcript, got {roles}"
+    assert any("bare number" in str(m.get("content", "")) for m in bodies[-1]["messages"]), (
+        "the builder's correction must be the final user turn"
+    )
