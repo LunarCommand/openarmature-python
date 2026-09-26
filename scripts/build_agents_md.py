@@ -208,7 +208,13 @@ def _capability_summaries(spec_tag: str) -> str:
             + "`spec.md` verbatim — including additions from accepted proposals "
             + "that this Python implementation may not yet ship. For per-proposal "
             + "implementation status (implemented / partial / textual-only / "
-            + "not-yet), see the `conformance.toml` manifest at the repo root. "
+            + "not-yet), read the `conformance.toml` manifest. It ships inside this "
+            + "package, beside this file, so it resolves whether you installed from "
+            + "PyPI or are working in a clone: "
+            + "`importlib.resources.files('openarmature') / 'conformance.toml'`. "
+            + "Check it before planning against a behaviour from an accepted "
+            + "proposal: `partial` entries say which half is missing, and this "
+            + "release has two. "
             + "For the full spec text (execution model, error semantics, "
             + "determinism, observer hooks, etc.) see the linked docs site._"
         ),
@@ -335,6 +341,16 @@ def _patterns() -> str:
         (
             "_Recipes that compose the primitives. Not framework contracts — "
             + "these are how to do common things idiomatically._"
+        ),
+        "",
+        (
+            "_Each pattern below also ships as its own file, readable via "
+            + "`openarmature.patterns.list()` and `get(name)`. That is deliberate "
+            + "rather than duplication left in by accident: this copy is for "
+            + "reading the document whole, and the standalone copy is for "
+            + "retrieving one pattern without the other 90KB. The two are built "
+            + "from one source with different link handling, so a standalone "
+            + "pattern resolves its cross-references on its own._"
         ),
     ]
     pattern_files = sorted(p for p in (DOCS / "patterns").glob("*.md") if p.name != "index.md")
