@@ -135,6 +135,11 @@ def test_the_sdist_excludes_the_private_follow_up_notes() -> None:
     #
     # Guarded by config shape rather than by building an sdist in the suite,
     # because the way this breaks is someone editing or dropping the exclude.
+    #
+    # What this CANNOT catch is a correct-looking exclude with the wrong effect,
+    # which is how the conformance fixtures were dropped out from under the tests
+    # that read them. `test_the_sdist_ships_a_runnable_test_suite` builds the
+    # thing and looks inside; this one stays because it names the intent.
     pyproject_path = Path(__file__).resolve().parent.parent / "pyproject.toml"
     config = tomllib.loads(pyproject_path.read_text())
     exclude = config["tool"]["hatch"]["build"]["targets"]["sdist"]["exclude"]
@@ -143,10 +148,10 @@ def test_the_sdist_excludes_the_private_follow_up_notes() -> None:
         "`_tasks/` must be excluded from the sdist. It holds private working notes, "
         f"and .git/info/exclude does not reach hatch. Current excludes: {exclude}"
     )
-    # The pinned spec submodule is most of the tarball and reconstructs from the
-    # version pin, so it is excluded too. Not a privacy matter, just size.
-    assert "openarmature-spec/" in exclude, (
-        f"the pinned spec submodule should stay out of the sdist; excludes: {exclude}"
+    # Most of the pinned submodule is proposals and spec prose that reconstructs
+    # from the version pin, so it stays out. Not a privacy matter, just size.
+    assert any(e.startswith("openarmature-spec/") for e in exclude), (
+        f"the pinned spec submodule's bulk should stay out of the sdist; excludes: {exclude}"
     )
     # Deliberately NOT excluded, asserted so a future tidy-up does not quietly
     # drop them: tests let a packager verify a build from source, and the other
@@ -156,3 +161,50 @@ def test_the_sdist_excludes_the_private_follow_up_notes() -> None:
             f"{kept} is excluded from the sdist; it was kept on purpose, so if that "
             "changed the reasoning in pyproject.toml needs changing with it"
         )
+
+
+def test_the_sdist_ships_a_runnable_test_suite() -> None:
+    # The sdist keeps tests/ so a downstream packager can validate a build from
+    # source. That is only worth anything if the suite's inputs ship with it: the
+    # conformance drivers read their fixtures out of the submodule, and excluding
+    # the submodule wholesale left 48 tests failing on an empty corpus while every
+    # config-shape assertion above still passed.
+    #
+    # So this builds the artifact and looks inside it. Slower than reading
+    # pyproject, and the only form that can fail for the reason that matters: the
+    # exclusion is a pattern whose effect is not readable off its own text.
+    #
+    # Not vacuous in three directions. Dropping the negation pattern empties
+    # `fixtures`; dropping the `openarmature-spec/*` exclude lets `proposals`
+    # through; dropping the `_tasks/` exclude lets `notes` through. Each assertion
+    # fails on its own mutation.
+    import subprocess
+    import tarfile
+    import tempfile
+
+    repo = Path(__file__).resolve().parent.parent
+    with tempfile.TemporaryDirectory() as out:
+        built = subprocess.run(
+            ["uv", "build", "--sdist", "--out-dir", out],
+            cwd=repo,
+            capture_output=True,
+            text=True,
+        )
+        assert built.returncode == 0, f"sdist build failed: {built.stderr[-2000:]}"
+        tarballs = sorted(Path(out).glob("*.tar.gz"))
+        assert len(tarballs) == 1, f"expected one sdist, got {tarballs}"
+        with tarfile.open(tarballs[0]) as tar:
+            names = tar.getnames()
+
+    fixtures = [n for n in names if "/conformance/" in n and n.endswith(".yaml")]
+    proposals = [n for n in names if "/openarmature-spec/proposals/" in n]
+    notes = [n for n in names if "/_tasks/" in n]
+    suite = [n for n in names if "/tests/conformance/" in n and n.endswith(".py")]
+
+    assert suite, "the sdist ships no conformance tests, so nothing needs their fixtures"
+    assert fixtures, (
+        "the sdist ships conformance tests but none of the fixtures they read. "
+        "Running the suite from this sdist fails on an empty corpus."
+    )
+    assert not proposals, f"spec proposals should not ship in the sdist: {proposals[:3]}"
+    assert not notes, f"private follow-up notes should not ship in the sdist: {notes[:3]}"

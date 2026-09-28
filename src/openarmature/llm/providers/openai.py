@@ -63,6 +63,7 @@ from urllib.parse import urlparse
 
 import httpx
 import jsonschema
+from jsonschema.validators import validator_for
 from pydantic import BaseModel, ValidationError
 
 from openarmature._managed_extras import ManagedArm, apply_managed_extras
@@ -1596,9 +1597,16 @@ def _format_jsonschema_failure(
     # its payload byte cap (§5.5.5), so a wide schema lengthens the field a caller
     # reads and not the value a trace carries.
     try:
+        # validator_for reads the schema's own $schema, matching both the
+        # boundary check in llm/provider.py and what jsonschema.validate() does
+        # internally. Fixing a draft here instead would silently stop enumerating
+        # for every schema that declares an older one: Draft 7's tuple-form
+        # `items` raises under the 2020-12 validator, and the fallback below
+        # would hand back the single error this function exists to replace.
+        #
         # iter_errors is overloaded on its instance type and pyright cannot
         # narrow the yielded element, so the validator is typed at the boundary.
-        validator = cast("Any", jsonschema.Draft202012Validator(schema))
+        validator = cast("Any", validator_for(schema)(schema))
         found = cast("list[jsonschema.ValidationError]", list(validator.iter_errors(instance)))
         errors = sorted(found, key=lambda e: (str(e.json_path), e.message))
     except Exception:

@@ -1486,6 +1486,74 @@ async def test_error_message_names_every_schema_violation_not_just_the_first() -
     # itself would look like a stability check and assert nothing.
 
 
+async def test_error_message_enumerates_under_a_schema_declaring_an_older_draft() -> None:
+    # Enumeration has to use the validator the schema asks for. Fixing one draft
+    # looks harmless while every test schema omits `$schema`, because the absent
+    # key defaults to the latest draft and the two agree.
+    #
+    # They stop agreeing on a schema that declares an older one. Draft 7 allows
+    # the tuple form of `items`, which 2020-12 spells `prefixItems`, so a 2020-12
+    # validator raises on it. The enumeration's fallback would then hand back the
+    # single error it exists to replace, and the field would silently revert for
+    # every caller using an older draft.
+    #
+    # Not vacuous: this is the test whose absence let that ship. It fails with a
+    # count of 1 if the validator is hardcoded to any draft, and it exercises the
+    # fallback path rather than only the happy one. Killed by restoring
+    # `jsonschema.Draft202012Validator(schema)`.
+    from openarmature.llm import StructuredOutputInvalid
+
+    schema = {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "type": "object",
+        "properties": {
+            "name": {"type": "string"},
+            "pair": {"type": "array", "items": [{"type": "string"}, {"type": "integer"}]},
+        },
+        "required": ["name", "pair", "city"],
+        "additionalProperties": False,
+    }
+
+    def _handler(_req: httpx.Request) -> httpx.Response:
+        # Breaks the schema four ways, one of them inside the tuple-form array so
+        # the draft actually matters to the result rather than only to the walk.
+        return httpx.Response(
+            200,
+            json={
+                "id": "c",
+                "model": "m",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": '{"nickname": "Al", "pair": ["x", "y"]}',
+                        },
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+            },
+        )
+
+    provider = OpenAIProvider(
+        base_url="http://x", model="m", api_key="k", transport=httpx.MockTransport(_handler)
+    )
+    try:
+        with pytest.raises(StructuredOutputInvalid) as caught:
+            await provider.complete([UserMessage(content="hi")], response_schema=schema)
+    finally:
+        await provider.aclose()
+
+    message = caught.value.error_message
+    assert len(message.splitlines()) == 4, message
+    assert "'name' is a required property" in message, message
+    assert "'city' is a required property" in message, message
+    assert "nickname" in message, message
+    # The tuple-form element failure is the one a 2020-12 validator cannot reach.
+    assert "pair[1]" in message, message
+
+
 async def test_error_message_for_a_parse_failure_stays_a_single_violation() -> None:
     # A schema violation cannot be evaluated against output that is not
     # well-formed, so the field describes the parse failure and nothing else.

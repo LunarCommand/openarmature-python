@@ -117,9 +117,15 @@ default-groups = ["dev", "docs", "examples", "observability"]
 # `tests/`, `examples/` and `docs/` stay in deliberately: tests let a packager
 # verify a build from source, and the other two are adopter-facing and small.
 [tool.hatch.build.targets.sdist]
+# The sdist keeps tests/ so a downstream packager can validate the build, which
+# only means something if the suite can run. The conformance drivers read their
+# fixtures from openarmature-spec/spec/<capability>/conformance/, so excluding
+# the whole submodule left 48 tests failing on a missing corpus. Keep the
+# fixtures; drop the proposals, prose and tooling around them.
 exclude = [
   "_tasks/",
-  "openarmature-spec/",
+  "openarmature-spec/*",
+  "!openarmature-spec/spec/*/conformance/**",
 ]
 
 [tool.hatch.build.targets.wheel]
