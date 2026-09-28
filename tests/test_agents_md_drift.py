@@ -27,8 +27,12 @@ this test fails, regenerate both artifacts:
 from __future__ import annotations
 
 import importlib.util
+import shutil
+import subprocess
 from pathlib import Path
 from typing import Any
+
+import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 OUTPUT = REPO_ROOT / "src" / "openarmature" / "AGENTS.md"
@@ -52,11 +56,62 @@ def _load_generator() -> Any:
     return module
 
 
+def _in_a_git_checkout() -> bool:
+    """Whether this tree is a git repository the generator can interrogate."""
+    if shutil.which("git") is None:
+        return False
+    probe = subprocess.run(
+        ["git", "-C", str(REPO_ROOT), "rev-parse", "--git-dir"],
+        capture_output=True,
+        text=True,
+    )
+    return probe.returncode == 0
+
+
+# The bundle records which spec tag it was built from, so the generator asks git
+# for the submodule's pinned tag and refuses to build off an untagged commit. An
+# sdist ships the source without the repository, so there is nothing to ask and
+# the drift check cannot run at all rather than running and passing.
+#
+# Deliberately narrow: keyed on the absence of a repository, not on the
+# generator failing. Skipping whenever the generator raised would let a broken
+# generator read as a clean run in CI, where the repository is always present
+# and this never skips.
+@pytest.mark.skipif(
+    not _in_a_git_checkout(),
+    reason=(
+        "not a git checkout, so the generator cannot resolve the spec submodule's "
+        "pinned tag; drift is checked in the repository, not from an sdist"
+    ),
+)
 def test_agents_md_matches_generator_output() -> None:
     generator = _load_generator()
     expected = generator.build()
     actual = OUTPUT.read_text()
     assert actual == expected, f"src/openarmature/AGENTS.md is out of date with its sources.\n{REGEN_HINT}"
+
+
+def test_the_drift_check_is_not_skipping_in_this_repository() -> None:
+    # A skip condition cannot be caught by the test it guards: widen it and the
+    # drift check quietly stops running while the suite still reports green. That
+    # is the failure this repository treats as the null result, one level up.
+    #
+    # So the condition is asserted separately. Here the repository is present by
+    # definition (this file is in it), so the guard must evaluate False, and a
+    # widened condition fails here instead of going unnoticed.
+    # Both preconditions are checked by a different mechanism than the helper
+    # uses, so this is a cross-check rather than a restatement: the helper shells
+    # out to git, these read the filesystem and PATH. Where they disagree, the
+    # helper is wrong.
+    if shutil.which("git") is None:
+        pytest.skip("git is absent, so the drift check could not run either way")
+    if not (REPO_ROOT / ".git").exists():
+        pytest.skip("no repository here, as in an unpacked sdist")
+    assert _in_a_git_checkout(), (
+        "the drift check's skip condition is true inside the repository, so the "
+        "check is not running. Narrow the condition: it should only skip where "
+        "there is genuinely no git repository, such as an unpacked sdist."
+    )
 
 
 def test_patterns_dir_matches_generator_output() -> None:

@@ -1486,6 +1486,79 @@ async def test_error_message_names_every_schema_violation_not_just_the_first() -
     # itself would look like a stability check and assert nothing.
 
 
+async def test_a_failed_enumeration_says_so_rather_than_quietly_reporting_one(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # The enumeration falls back to the single violation it was handed when the
+    # validator cannot process the schema, so a structured_output_invalid is
+    # never replaced by something the caller cannot handle. That fallback returns
+    # a well-formed message, which is indistinguishable from a schema that
+    # genuinely broke one way, and a hardcoded draft reaching this path reverted
+    # the field for every caller on an older draft with nothing to show for it.
+    #
+    # So the fallback is audible. Driven by monkeypatching the validator lookup
+    # rather than by finding a schema that breaks it, because the whole point is
+    # that we do not know which schemas reach here.
+    #
+    # Not vacuous: the fallback still produces a valid one-line message, so no
+    # assertion on the returned value can distinguish it from a genuine single
+    # violation. The log record is the only observable. Killed by dropping the
+    # _log.warning call.
+    import logging
+
+    from openarmature.llm import StructuredOutputInvalid
+    from openarmature.llm.providers import openai as openai_module
+
+    schema = {
+        "type": "object",
+        "properties": {"name": {"type": "string"}, "age": {"type": "integer"}},
+        "required": ["name", "age"],
+    }
+
+    def _handler(_req: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "id": "c",
+                "model": "m",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": '{"name": "Al"}'},
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+            },
+        )
+
+    def _explode(_schema: Any) -> Any:
+        raise RuntimeError("validator lookup unavailable")
+
+    provider = OpenAIProvider(
+        base_url="http://x", model="m", api_key="k", transport=httpx.MockTransport(_handler)
+    )
+    original = openai_module.validator_for
+    openai_module.validator_for = _explode
+    try:
+        with caplog.at_level(logging.WARNING, logger="openarmature.llm.providers.openai"):
+            with pytest.raises(StructuredOutputInvalid) as caught:
+                await provider.complete([UserMessage(content="hi")], response_schema=schema)
+    finally:
+        openai_module.validator_for = original
+        await provider.aclose()
+
+    # The caller still gets a usable single-violation message, not an exception
+    # from the enumeration itself.
+    assert "'age' is a required property" in caught.value.error_message
+
+    warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert warnings, "a fallback to single-violation reporting must not be silent"
+    logged = warnings[0].getMessage()
+    assert "enumerate" in logged, logged
+    assert "RuntimeError" in logged, "the log must name what actually failed"
+
+
 async def test_error_message_enumerates_under_a_schema_declaring_an_older_draft() -> None:
     # Enumeration has to use the validator the schema asks for. Fixing one draft
     # looks harmless while every test schema omits `$schema`, because the absent

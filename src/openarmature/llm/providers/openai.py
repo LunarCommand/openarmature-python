@@ -1609,10 +1609,24 @@ def _format_jsonschema_failure(
         validator = cast("Any", validator_for(schema)(schema))
         found = cast("list[jsonschema.ValidationError]", list(validator.iter_errors(instance)))
         errors = sorted(found, key=lambda e: (str(e.json_path), e.message))
-    except Exception:
+    except Exception as enumeration_error:
         # Enumeration is a better report of the same failure, never a new failure
-        # mode. Any schema the enumerating validator cannot process falls back to
-        # the error already in hand.
+        # mode, so any schema the enumerating validator cannot process falls back
+        # to the error already in hand rather than replacing a
+        # structured_output_invalid with something the caller cannot handle.
+        #
+        # Logged because the fallback is invisible otherwise: it returns a
+        # well-formed single-violation message, which is indistinguishable from a
+        # schema that genuinely broke one way. A hardcoded draft reaching this
+        # path silently reverted the field for every caller on an older draft,
+        # and nothing said so.
+        _log.warning(
+            "could not enumerate schema violations (%s: %s); reporting the first "
+            "violation only. The schema declares %s.",
+            type(enumeration_error).__name__,
+            enumeration_error,
+            schema.get("$schema", "no $schema, so the latest draft applies"),
+        )
         errors = []
     if not errors:
         return f"{exc.json_path}: {exc.message}"
