@@ -1419,6 +1419,120 @@ async def test_complete_failure_emits_typed_llm_failed_event_only() -> None:
     assert failed_events[0].response_model is None
 
 
+async def test_error_message_names_every_schema_violation_not_just_the_first() -> None:
+    # Section 7's error_message describes how the output failed the schema, so it
+    # names every violation. The alternative is not a shorter message but an
+    # iterative one: section 7.1's reask builder quotes this field, and one
+    # violation per round costs one model call per wrong field.
+    #
+    # Not vacuous. `jsonschema.validate` raises on a single error, so the naive
+    # implementation passes a test that asserts only one of these strings. Every
+    # assertion below except the first names a violation the raising error does
+    # NOT carry, and the count assertion fails if enumeration regresses to one.
+    # Killed by returning `f"{exc.json_path}: {exc.message}"` from
+    # `_format_jsonschema_failure`.
+    from openarmature.llm import StructuredOutputInvalid
+
+    schema = {
+        "type": "object",
+        "properties": {
+            "name": {"type": "string"},
+            "age": {"type": "integer"},
+            "city": {"type": "string"},
+        },
+        "required": ["name", "age", "city"],
+        "additionalProperties": False,
+    }
+
+    def _handler(_req: httpx.Request) -> httpx.Response:
+        # Well-formed JSON that breaks the schema four separate ways: three
+        # required properties absent and one property the schema forbids.
+        return httpx.Response(
+            200,
+            json={
+                "id": "c",
+                "model": "m",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": '{"nickname":"Al"}'},
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+            },
+        )
+
+    provider = OpenAIProvider(
+        base_url="http://x", model="m", api_key="k", transport=httpx.MockTransport(_handler)
+    )
+    try:
+        with pytest.raises(StructuredOutputInvalid) as caught:
+            await provider.complete([UserMessage(content="hi")], response_schema=schema)
+    finally:
+        await provider.aclose()
+
+    message = caught.value.error_message
+    assert "'name' is a required property" in message, message
+    assert "'age' is a required property" in message, message
+    assert "'city' is a required property" in message, message
+    assert "nickname" in message, "the forbidden property must be named too"
+    # One line per violation, so a caller can quote the whole thing at a model.
+    assert len(message.splitlines()) == 4, message
+    # Order is deliberately not asserted. The implementation sorts so the same
+    # output and schema give the same string, which lets a caller diff
+    # corrections across attempts, but which order is unspecified: pinning one
+    # here would make a legitimate reordering fail. Comparing the value to
+    # itself would look like a stability check and assert nothing.
+
+
+async def test_error_message_for_a_parse_failure_stays_a_single_violation() -> None:
+    # A schema violation cannot be evaluated against output that is not
+    # well-formed, so the field describes the parse failure and nothing else.
+    # Enumeration applies to schema validation, not to every failure on the path.
+    #
+    # Not vacuous: an implementation that tried to enumerate here would have no
+    # instance to enumerate against and would either raise or report zero
+    # violations, both of which fail the substring assertion.
+    from openarmature.llm import StructuredOutputInvalid
+
+    schema = {
+        "type": "object",
+        "properties": {"name": {"type": "string"}},
+        "required": ["name"],
+    }
+
+    def _handler(_req: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "id": "c",
+                "model": "m",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": '{"name": "Al'},
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+            },
+        )
+
+    provider = OpenAIProvider(
+        base_url="http://x", model="m", api_key="k", transport=httpx.MockTransport(_handler)
+    )
+    try:
+        with pytest.raises(StructuredOutputInvalid) as caught:
+            await provider.complete([UserMessage(content="hi")], response_schema=schema)
+    finally:
+        await provider.aclose()
+
+    message = caught.value.error_message
+    assert "required property" not in message, message
+    assert message.strip() != ""
+
+
 async def test_complete_structured_output_failure_event_carries_response_surface() -> None:
     # Proposal 0082: a structured_output_invalid failure is a completion
     # whose validation gate failed, so the LlmFailedEvent carries the

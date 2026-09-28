@@ -30,14 +30,20 @@ This demo shows both arms so the difference is visible.
 **Why the ceiling and not the wrong-shaped answer.** The ceiling is the
 failure this demo can guarantee, on any endpoint and any model. The
 wrong-shaped answer is the one you are more likely to meet, and whether you
-meet it at all is a property of your serving stack rather than of your code.
-An endpoint that enforces the schema during decoding cannot produce it. An
-endpoint that ignores ``response_format``, or serves a weaker model behind
-one, produces it routinely, and so does a proxy that drops the field on the
-way through. Both failures arrive at the same exception and the same builder
-handles both, which is the point: you do not have to know in advance which
-kind of endpoint you are pointed at, and you keep working when someone moves
-you to a different one.
+meet it is a property of your serving stack rather than of your model.
+
+A schema reaches a model through exactly two channels: the endpoint enforces
+it while decoding, or the call puts it in the prompt. An endpoint that
+enforces it cannot produce a wrong shape. One that accepts
+``response_format`` and ignores it, or a proxy that drops the field on the
+way through, leaves neither channel open, and then the model is not guessing
+badly so much as guessing: it has never been told the field names, so it
+invents reasonable ones. That is not a weak-model failure and a stronger
+model does not fix it.
+
+Both failures arrive at the same exception, so one builder covers both, and
+you do not have to know in advance which kind of endpoint you are pointed at.
+What the builder puts in the correction is what decides whether it recovers.
 
 **What's interesting in the implementation:**
 
@@ -50,11 +56,19 @@ you to a different one.
   model cannot satisfy is usually a bug in the schema, not a transient.
 - The builder receives the exception and returns the correction as a string.
   It reads ``exc.output_content`` (verbatim, what the model actually sent),
-  ``exc.error_message`` (what the reader objected to), and
-  ``exc.finish_reason`` (``"length"`` when the ceiling ended the reply). This
-  one branches on that last signal and says something different about a
-  truncation than about a model that simply answered wrongly, which is the
-  kind of judgement only the caller can make.
+  ``exc.error_message`` (what the reader objected to), ``exc.finish_reason``
+  (``"length"`` when the ceiling ended the reply) and ``exc.response_schema``
+  (the shape that was asked for). It branches on ``finish_reason``, because
+  the two failures need different information rather than different wording:
+  a truncated reply understood the schema and ran out of room, so repeating
+  the schema at it adds nothing, while a complete-and-wrong reply usually
+  never saw the schema at all.
+- **Send the schema as well as the objection.** ``error_message`` lists every
+  way the reply failed the schema, so one correction clears all of them at
+  once rather than one per attempt. That is what keeps a small budget viable.
+  Including ``response_schema`` on top says what right looks like rather than
+  only what was wrong, which is the more useful thing to tell a model that
+  invented its own field names because it was never shown the contract.
 - ``LlmRetryConfig(per_attempt_override=...)`` is a schedule of partial
   configs applied to retries only. Attempt 0 runs the caller's config
   untouched; each retry merges the next entry over it. A schedule shorter
@@ -163,17 +177,15 @@ def build_correction(exc: StructuredOutputInvalid) -> str:
     appends the model's own reply before this, so it reads as a conversation:
     the model answered, you point at the problem, it answers again.
     """
-    # Both halves of the exception matter. The verbatim output lets the model
-    # see what it actually sent rather than what it meant to send, and the
-    # validator's complaint names the constraint it missed. A correction
-    # carrying neither is the original prompt again, which earns the original
-    # answer.
+    # The verbatim output lets the model see what it actually sent rather than
+    # what it meant to send. A correction without it is the original prompt
+    # again, which earns the original answer.
     raw = exc.output_content.strip()
-    # A reply that stops mid-object is a spend problem, not a comprehension
-    # problem, and saying "that did not match the schema" about it would be
-    # misleading. `finish_reason` is how the framework reports which one
-    # happened: "length" means the ceiling ended the reply, so the model was
-    # never given the chance to be wrong.
+    # The two failures need different INFORMATION, not just different wording,
+    # which is why this branches rather than composing one message for both.
+    # `finish_reason` of "length" means the ceiling ended the reply: the model
+    # understood the shape and ran out of room, so repeating the shape at it
+    # tells it nothing it did not already act on.
     if exc.finish_reason == "length":
         return (
             "That reply stopped before the object closed, so it could not be "
@@ -182,14 +194,24 @@ def build_correction(exc: StructuredOutputInvalid) -> str:
             "Send the whole object this time. Keep every value as short as "
             "the report allows and add nothing beyond the required fields."
         )
+    # Anything else means the reply was complete and wrong, and the usual cause
+    # is that the model never saw the schema. It only reaches the model when the
+    # endpoint enforces it during decoding or when the call falls back to
+    # putting it in the prompt, so a reply with invented field names is what a
+    # request that did neither looks like.
+    #
+    # Send the schema as well as the objection. `error_message` lists every way
+    # the reply broke the schema, so one round clears all of them; the schema
+    # says what right looks like rather than what was wrong, which is what a
+    # model that never saw it actually needs.
     return (
         "That reply did not match the required schema. The validator said: "
         f"{exc.error_message}\n\n"
         f"You sent:\n{raw}\n\n"
-        "Send the JSON object again, corrected. Return only the object, with "
-        "no surrounding prose and no markdown fence. `mass_kg` must be a bare "
-        'number in kilograms, so write 1340 rather than "1,340 kg". '
-        "`outcome` must be exactly one of: landed, lost, unconfirmed."
+        "Return only a JSON object matching this schema exactly, with no extra "
+        "properties, no surrounding prose and no markdown fence:\n"
+        f"{json.dumps(exc.response_schema, indent=2)}\n\n"
+        'Write `mass_kg` as a bare number, so 1340 rather than "1,340 kg".'
     )
 
 

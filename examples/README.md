@@ -161,8 +161,11 @@ objection back to it, and a per-attempt override raises the ceiling so the
 retry has somewhere to put the answer. Demonstrates:
 `complete(response_schema=...)` raising `StructuredOutputInvalid` instead of
 returning a half-built object, `LlmRetryConfig(reask=...)` making that failure
-retryable for one call, a builder reading `exc.output_content` and
-`exc.error_message` and branching on which failure it got,
+retryable for one call, a builder reading `exc.output_content`,
+`exc.error_message`, `exc.finish_reason` and `exc.response_schema` and
+branching on which failure it got (the two arms need different information,
+not just different wording, and the schema-mismatch arm sends the schema
+itself rather than only the objection to it),
 `LlmRetryConfig(per_attempt_override=...)` applying a config schedule to
 retries only, the framework appending the model's reply and the correction as
 an alternating transcript while authoring no prompt of its own, and reask

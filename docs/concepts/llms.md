@@ -209,11 +209,37 @@ second case and not in the first, so a builder can say something
 different about each.
 
 How often you see the first depends on your serving stack rather than on
-your code. An endpoint that enforces the schema during decoding will not
-produce it; one that ignores `response_format`, or serves a weaker model,
-or sits behind a proxy that drops the field, produces it routinely. Both
-causes arrive at the same exception, so a builder written for both keeps
-working when you change endpoints.
+your model. A schema reaches a model through two channels only: the
+endpoint enforces it while decoding, or the call puts it in the prompt. An
+endpoint that enforces it cannot return a wrong shape. One that accepts
+`response_format` and ignores it, or a proxy that drops the field, leaves
+neither channel open, and a model that was never told the field names
+invents plausible ones. A stronger model does not fix that.
+
+`error_message` names every way the output failed the schema, one per
+line, not just the first violation found. That is what lets a correction
+clear several problems in one round instead of one per attempt.
+
+**Consider sending the schema as well as the objection.** A model that
+returns a wrong shape has usually never seen the schema, and listing what
+is wrong is not the same as saying what is right.
+`StructuredOutputInvalid` carries `response_schema`, so a builder can
+include the contract itself:
+
+```python
+def correct(err):
+    if err.finish_reason == "length":
+        return "That reply was cut off. Send the whole object."
+    return (
+        f"{err.error_message}\n\nYou sent:\n{err.output_content}\n\n"
+        "Return only JSON matching this schema exactly:\n"
+        f"{json.dumps(err.response_schema, indent=2)}"
+    )
+```
+
+The two branches need different information rather than different
+wording. A truncated reply already acted on the schema and ran out of
+room, so resending the schema tells it nothing.
 
 Reask composes with a `per_attempt_override`, and the two halves do
 different work. The builder changes what you say; the override changes

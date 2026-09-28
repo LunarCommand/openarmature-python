@@ -1529,7 +1529,7 @@ def _parse_and_validate(
                 "response failed JSON Schema validation",
                 response_schema=schema_dict,
                 output_content=content,
-                error_message=_format_jsonschema_failure(exc),
+                error_message=_format_jsonschema_failure(exc, parsed_dict, schema_dict),
             ) from exc
         except jsonschema.SchemaError as exc:
             raise StructuredOutputInvalid(
@@ -1556,7 +1556,7 @@ def _parse_and_validate(
             "response failed JSON Schema validation",
             response_schema=schema_dict,
             output_content=content,
-            error_message=_format_jsonschema_failure(exc),
+            error_message=_format_jsonschema_failure(exc, parsed_dict, schema_dict),
         ) from exc
     except jsonschema.SchemaError as exc:
         # Safety net: validate_response_schema's pre-validation should
@@ -1572,14 +1572,43 @@ def _parse_and_validate(
     return parsed_dict
 
 
-def _format_jsonschema_failure(exc: jsonschema.ValidationError) -> str:
-    """jsonschema.ValidationError.message describes the value mismatch
-    (e.g., "'30' is not of type 'integer'") but doesn't include the
-    failing field path. Prefix with ``json_path`` (e.g., ``$.age``) so
-    the error_message string carries both, matching the dict-
-    schema and class-schema paths.
+def _format_jsonschema_failure(
+    exc: jsonschema.ValidationError,
+    instance: Any,
+    schema: dict[str, Any],
+) -> str:
+    """Describe every way ``instance`` fails ``schema``, one per line.
+
+    Each line pairs the failing location with what was wrong there, e.g.
+    ``$.age: '30' is not of type 'integer'``.
     """
-    return f"{exc.json_path}: {exc.message}"
+    # §7's error_message describes how the OUTPUT failed the SCHEMA, so it names
+    # every violation rather than the one that happened to be detected first.
+    # `jsonschema.validate` raises on a single error; iter_errors yields them all.
+    # A caller composing a reask correction (§7.1) otherwise pays one model round
+    # trip per wrong field and cannot converge inside a small max_attempts.
+    #
+    # Sorted so the same output and schema always produce the same string, which
+    # lets a caller diff corrections across attempts. Order is not asserted.
+    #
+    # Unbounded on the exception by design: the caller needs every violation to
+    # compose one correction. An observer's emitted copy is separately bounded by
+    # its payload byte cap (§5.5.5), so a wide schema lengthens the field a caller
+    # reads and not the value a trace carries.
+    try:
+        # iter_errors is overloaded on its instance type and pyright cannot
+        # narrow the yielded element, so the validator is typed at the boundary.
+        validator = cast("Any", jsonschema.Draft202012Validator(schema))
+        found = cast("list[jsonschema.ValidationError]", list(validator.iter_errors(instance)))
+        errors = sorted(found, key=lambda e: (str(e.json_path), e.message))
+    except Exception:
+        # Enumeration is a better report of the same failure, never a new failure
+        # mode. Any schema the enumerating validator cannot process falls back to
+        # the error already in hand.
+        errors = []
+    if not errors:
+        return f"{exc.json_path}: {exc.message}"
+    return "\n".join(f"{e.json_path}: {e.message}" for e in errors)
 
 
 _SCHEMA_DIRECTIVE_TEMPLATE = (
