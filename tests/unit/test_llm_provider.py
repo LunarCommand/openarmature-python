@@ -1504,8 +1504,6 @@ async def test_a_failed_enumeration_says_so_rather_than_quietly_reporting_one(
     # assertion on the returned value can distinguish it from a genuine single
     # violation. The log record is the only observable. Killed by dropping the
     # _log.warning call.
-    import logging
-
     from openarmature.llm import StructuredOutputInvalid
     from openarmature.llm.providers import openai as openai_module
 
