@@ -520,6 +520,7 @@ class OpenAIProvider:
             def build_body(
                 attempt_config: RuntimeConfig | None,
                 attempt_messages: Sequence[Message],
+                merged_attempt: bool,
             ) -> dict[str, Any]:
                 # Proposal 0095: the wire body is assembled PER ATTEMPT so a
                 # retry can vary sampling (0095a per-attempt override) and/or the
@@ -527,6 +528,19 @@ class OpenAIProvider:
                 # across attempts. Absent an override and a reask, every attempt
                 # passes the base config + base messages -> identical body
                 # (today's byte-identical replay).
+                #
+                # A collision on a merged attempt reads as a bug in one config,
+                # and it is a mismatch between two: the base supplied the extras
+                # key and the override declared the field. Attempt 0 sends
+                # cleanly, so the only report the caller gets names the channel
+                # they should change.
+                hint = (
+                    "this attempt's config merges the base config with a "
+                    "per-attempt override, so the two values come from different "
+                    "channels; set the field in the same channel the base used"
+                    if merged_attempt
+                    else None
+                )
                 return self._build_request_body(
                     attempt_messages,
                     tools,
@@ -534,6 +548,7 @@ class OpenAIProvider:
                     schema_dict,
                     include_response_format=include_response_format,
                     tool_choice=tool_choice,
+                    collision_hint=hint,
                 )
 
             # Per-attempt LLM span surface (observability §5.5 under
@@ -631,8 +646,7 @@ class OpenAIProvider:
         inherits the base -- and the last entry carries forward when the
         schedule is shorter than the retry count. ``extras`` merges by the same
         per-key rule: a key the override sets replaces that key, a key it does
-        not mention inherits the base's, and a base key whose name the override
-        declares as a field is superseded by that field. Attempt 0 and the no-override
+        not mention inherits the base's. Attempt 0 and the no-override
         case return the caller's base config as-is; only the override path
         returns a fresh ``model_copy``. The caller's config is never mutated
         either way -- the base path relies on the downstream body build reading
@@ -658,25 +672,17 @@ class OpenAIProvider:
         # a field is an extras KEY rather than the container: a key set in the
         # override replaces the base's value for that key, a key the override does
         # not mention inherits the base's. So the container merges.
-        update = override.model_dump(exclude_none=True, exclude={"extras"})
-        merged = {**base_or_empty.extras, **override.extras}
-        # A field the override declares supersedes a base extras key of the same
-        # name. Without this the merge manufactures an invalid config out of two
-        # valid ones: the base's §6 escape-hatch key (unmanaged there, because the
-        # base left the field unset) is inherited onto an attempt whose override
-        # DOES set the field, so the mapping emits it, §8.1 sees a managed-field
-        # collision, and the call rejects pre-send -- killing a retry that
-        # previously ran. The override's field is the later and more specific
-        # instruction, so it wins.
         #
-        # A key the override itself carries in `extras` is left alone, so
-        # declaring a field and naming it in the same override's extras still
-        # collides. That config contradicts itself in one object rather than
-        # across two, and §8.1's reject is the right answer to it.
-        for field_name in update:
-            if field_name not in override.extras:
-                merged.pop(field_name, None)
-        update["extras"] = merged
+        # The merge does not resolve an inherited key that collides with a field
+        # the override declares; §8.1 rejects it like any other managed-field
+        # collision. Dropping the key instead would make one config mean two
+        # things depending on how it was assembled, rejected when a caller writes
+        # both and accepted when a merge produces both, and §6 separately forbids
+        # silently discarding a conflicting extras value. A caller who wants the
+        # override to change such a value keeps it in the same channel the base
+        # used.
+        update = override.model_dump(exclude_none=True, exclude={"extras"})
+        update["extras"] = {**base_or_empty.extras, **override.extras}
         return base_or_empty.model_copy(update=update)
 
     @staticmethod
@@ -703,7 +709,7 @@ class OpenAIProvider:
 
     async def _do_complete_with_retry(
         self,
-        build_body: Callable[[RuntimeConfig | None, Sequence[Message]], dict[str, Any]],
+        build_body: Callable[[RuntimeConfig | None, Sequence[Message], bool], dict[str, Any]],
         base_config: RuntimeConfig | None,
         base_messages: Sequence[Message],
         schema_dict: dict[str, Any] | None,
@@ -729,7 +735,7 @@ class OpenAIProvider:
         terminal event still fires per ``complete()`` call.
         """
         if retry is None:
-            body = build_body(base_config, base_messages)
+            body = build_body(base_config, base_messages, False)
             attempt_start = time.perf_counter()
             try:
                 response = await self._do_complete(body, schema_dict, schema_class)
@@ -768,7 +774,7 @@ class OpenAIProvider:
         attempt = 0
         while True:
             attempt_config = self._config_for_attempt(base_config, overrides, attempt)
-            body = build_body(attempt_config, transcript)
+            body = build_body(attempt_config, transcript, bool(attempt and overrides))
             attempt_start = time.perf_counter()
             try:
                 response = await self._do_complete(body, schema_dict, schema_class)
@@ -1160,6 +1166,7 @@ class OpenAIProvider:
         schema_dict: dict[str, Any] | None,
         include_response_format: bool = True,
         tool_choice: ToolChoice | None = None,
+        collision_hint: str | None = None,
     ) -> dict[str, Any]:
         body: dict[str, Any] = {
             "model": self.model,
@@ -1238,7 +1245,7 @@ class OpenAIProvider:
                 for key, arm in _OPENAI_MANAGED_ARMS.items()
                 if key in body or key in _OPENAI_STRUCTURAL_KEYS
             }
-            apply_managed_extras(body, extras, managed)
+            apply_managed_extras(body, extras, managed, collision_hint=collision_hint)
         # Spec 0047 §8 belt-and-suspenders: walk the assembled body
         # once more sorting any dict at every nesting level, in case
         # a future code path introduces a user-input boundary the

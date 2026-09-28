@@ -57,6 +57,7 @@ def apply_managed_extras(
     managed: Mapping[str, ManagedArm],
     *,
     managed_values: Mapping[str, Any] | None = None,
+    collision_hint: str | None = None,
 ) -> None:
     """Fold ``extras`` into ``body``, reconciling managed-field collisions.
 
@@ -67,6 +68,10 @@ def apply_managed_extras(
     mapping does not place in ``body`` because it relies on a wire default, so a
     matching extras value stays a no-op that leaves the body minimal; where
     absent, the managed value is ``body[key]``.
+
+    ``collision_hint`` is appended to a collision's message by a caller that
+    knows something the check cannot see about where the conflicting values came
+    from.
 
     Mutates ``body`` in place; ``extras`` is not modified. Raises
     :class:`ProviderInvalidRequest` on a conflicting non-additive collision.
@@ -114,7 +119,7 @@ def apply_managed_extras(
                 f"extras key {key!r} conflicts with the mapping-managed wire "
                 f"field {key!r} (managed value {_summarize(managed_value)}, "
                 f"extras value {_summarize(value)}); a managed field cannot be "
-                f"overridden via extras"
+                f"overridden via extras" + (f". {collision_hint}" if collision_hint else "")
             )
 
 

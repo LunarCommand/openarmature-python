@@ -148,12 +148,19 @@ a key it does not mention inherits the base's. An override that declares
 no extras therefore inherits all of them, and one that adjusts a single
 vendor knob leaves the rest in place.
 
-Two edges are worth knowing. A field the override declares wins over a
-base extras key of the same name, so a base `extras={"temperature": 0.9}`
-yields to an override's `temperature=0.3` rather than colliding with it.
-But naming the same field twice in one override, once declared and once
-in its own `extras`, is a config that contradicts itself and is rejected
-before the call goes out.
+Two edges are worth knowing. The merge does not resolve an inherited
+extras key that collides with a field the override declares. A base
+`extras={"temperature": 0.9}` with an override `temperature=0.3` rejects
+before the call goes out, like any other managed-field collision, because
+dropping the inherited key would make one config mean two things
+depending on whether you wrote it or a merge assembled it. If the base
+reached for `extras`, keep the override in the same channel:
+`RuntimeConfig(extras={"temperature": 0.3})` merges per key and sends.
+
+Note when that surfaces. Attempt 0 uses the base alone, where the
+declared field is unset and nothing collides, so a retry config broken
+this way sends one successful call and then fails. The error names both
+channels and which to change.
 
 Withdrawing a base key for a single attempt is not available. Setting it
 to `None` in the override sends JSON `null` on the wire, which is not the
