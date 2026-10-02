@@ -216,15 +216,13 @@ endpoint that enforces it cannot return a wrong shape. One that accepts
 neither channel open, and a model that was never told the field names
 invents plausible ones. A stronger model does not fix that.
 
-`error_message` names every way the output failed the schema, one per
-line, not just the first violation found. That is what lets a correction
-clear several problems in one round instead of one per attempt.
-
-**Consider sending the schema as well as the objection.** A model that
-returns a wrong shape has usually never seen the schema, and listing what
-is wrong is not the same as saying what is right.
-`StructuredOutputInvalid` carries `response_schema`, so a builder can
-include the contract itself:
+**Send the schema, not only the objection.** `error_message` names the
+first violation validation found, so a correction quoting only it can
+cost one attempt per wrong field and will not converge inside a small
+budget. It also says what was wrong rather than what right looks like,
+and a model that returns an invented shape has usually never seen the
+schema. `StructuredOutputInvalid` carries `response_schema`, so a builder
+can send the contract itself and clear every problem in one round:
 
 ```python
 def correct(err):
