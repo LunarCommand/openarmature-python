@@ -44,7 +44,25 @@ DEMOS = [
     "langfuse-observability",
     "production-observability",
     "retrieval-rag",
+    "structured-output-reask",
+    "provider-extras",
 ]
+
+
+def test_every_example_directory_is_listed() -> None:
+    # `DEMOS` is an explicit enumeration, so a new example is covered by nothing
+    # until someone remembers to add it here. Derive the directory set and
+    # compare, so forgetting fails loudly rather than passing quietly.
+    on_disk = {
+        d.name
+        for d in EXAMPLES_DIR.iterdir()
+        if d.is_dir() and (d / "main.py").exists() and not d.name.startswith(".")
+    }
+    listed = set(DEMOS)
+    assert on_disk == listed, (
+        f"DEMOS and examples/ disagree. Only on disk: {sorted(on_disk - listed)}. "
+        f"Only listed: {sorted(listed - on_disk)}"
+    )
 
 
 @pytest.mark.parametrize("demo", DEMOS)

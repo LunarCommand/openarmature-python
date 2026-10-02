@@ -1,4 +1,5 @@
 import re
+import shutil
 import tomllib
 from pathlib import Path
 
@@ -73,3 +74,176 @@ def test_spec_version_matches_submodule_changelog() -> None:
         f"submodule's CHANGELOG latest is {submodule_latest}, but "
         f"__spec_version__ is {openarmature.__spec_version__}"
     )
+
+
+def test_the_conformance_manifest_is_force_included_in_the_wheel() -> None:
+    # The bundled AGENTS.md tells an agent to read `conformance.toml` for
+    # per-proposal implementation status, which is the only artifact that can
+    # answer "is this real in the version I have installed" for a behaviour with
+    # no importable name. That instruction shipped for releases while the file
+    # did not, so it resolved only for someone working in a clone. An agent
+    # planning against an accepted proposal had no way to learn that half of it
+    # was missing, which is exactly what `partial` records.
+    #
+    # Guarded here rather than by building a wheel in the suite: this catches the
+    # entry being dropped or its paths going stale, which is how it would break.
+    pyproject_path = Path(__file__).resolve().parent.parent / "pyproject.toml"
+    config = tomllib.loads(pyproject_path.read_text())
+    force_include = config["tool"]["hatch"]["build"]["targets"]["wheel"]["force-include"]
+
+    assert "conformance.toml" in force_include, (
+        "conformance.toml must be force-included in the wheel; AGENTS.md instructs "
+        f"an agent to read it. force-include currently: {force_include}"
+    )
+    target = force_include["conformance.toml"]
+    package = config["tool"]["hatch"]["build"]["targets"]["wheel"]["packages"][0]
+    package_name = Path(package).name
+    assert target == f"{package_name}/conformance.toml", (
+        f"the manifest must land beside the other bundled docs inside the package; "
+        f"got {target!r}, expected {package_name}/conformance.toml"
+    )
+    source = pyproject_path.parent / "conformance.toml"
+    assert source.exists(), f"force-include names a source that does not exist: {source}"
+
+
+def test_agents_md_names_both_places_the_manifest_can_be() -> None:
+    # The manifest lives in two places depending on how the reader got the
+    # package, and a pointer naming only one is wrong for half of them. The
+    # original said "at the repo root", unresolvable from a venv. The first fix
+    # named only the packaged path, unresolvable in a clone, since force-include
+    # is build-time and nothing is committed under src/. Both were the same
+    # defect: telling an agent something untrue in its context.
+    #
+    # So the assertion is that BOTH are named, not that either is absent.
+    bundled = Path(__file__).resolve().parent.parent / "src" / "openarmature" / "AGENTS.md"
+    text = bundled.read_text()
+    assert "conformance.toml" in text, "AGENTS.md must still point at the manifest"
+    assert "importlib.resources" in text, (
+        "the pointer must name the packaged path, which is the only one that resolves "
+        "for someone who installed from PyPI"
+    )
+    assert "repository root" in text, (
+        "the pointer must also name the checkout location, which is the only one that "
+        "resolves in a clone: force-include is build-time, so nothing lands in src/"
+    )
+
+
+def test_the_sdist_excludes_the_private_follow_up_notes() -> None:
+    # `_tasks/` is kept out of git by `.git/info/exclude`, which hatch does not
+    # read: it packages what is on disk. So the local follow-up notes were going
+    # into the sdist and would have published to PyPI. They are working notes
+    # that quote internal coordination, not part of the public artifact set.
+    #
+    # Guarded by config shape rather than by building an sdist in the suite,
+    # because the way this breaks is someone editing or dropping the exclude.
+    #
+    # What this CANNOT catch is a correct-looking exclude with the wrong effect,
+    # which is how the conformance fixtures were dropped out from under the tests
+    # that read them. `test_the_sdist_ships_a_runnable_test_suite` builds the
+    # thing and looks inside; this one stays because it names the intent.
+    pyproject_path = Path(__file__).resolve().parent.parent / "pyproject.toml"
+    config = tomllib.loads(pyproject_path.read_text())
+    exclude = config["tool"]["hatch"]["build"]["targets"]["sdist"]["exclude"]
+
+    assert "_tasks/" in exclude, (
+        "`_tasks/` must be excluded from the sdist. It holds private working notes, "
+        f"and .git/info/exclude does not reach hatch. Current excludes: {exclude}"
+    )
+    # Most of the pinned submodule is proposals and spec prose that reconstructs
+    # from the version pin, so it stays out. Not a privacy matter, just size.
+    assert any(e.startswith("openarmature-spec/") for e in exclude), (
+        f"the pinned spec submodule's bulk should stay out of the sdist; excludes: {exclude}"
+    )
+    # Deliberately NOT excluded, asserted so a future tidy-up does not quietly
+    # drop them: tests let a packager verify a build from source, and the other
+    # two are adopter-facing.
+    for kept in ("tests/", "examples/", "docs/"):
+        assert kept not in exclude, (
+            f"{kept} is excluded from the sdist; it was kept on purpose, so if that "
+            "changed the reasoning in pyproject.toml needs changing with it"
+        )
+
+
+def test_the_sdist_ships_a_runnable_test_suite() -> None:
+    # The sdist keeps tests/ so a downstream packager can validate a build from
+    # source. That is only worth anything if the suite's inputs ship with it: the
+    # conformance drivers read their fixtures out of the submodule, and excluding
+    # the submodule wholesale left 48 tests failing on an empty corpus while every
+    # config-shape assertion above still passed.
+    #
+    # So this builds the artifact and looks inside it, because the exclusion is a
+    # pattern whose effect is not readable off its own text.
+    #
+    # Asserted PER CAPABILITY rather than "at least one fixture anywhere". Seven
+    # corpora are read by the drivers, and a pattern narrowed to one of them, or a
+    # capability directory renamed out from under the glob, leaves the corpus
+    # mostly empty while a single-fixture check still passes. The path prefix is
+    # anchored on the submodule for the same reason: an unanchored
+    # `/conformance/` match is satisfied by any yaml under tests/.
+    #
+    # Not vacuous in four directions. Dropping the negation pattern empties every
+    # capability; narrowing it to one capability empties the other six; dropping
+    # the `openarmature-spec/*` exclude lets `proposals` through; dropping the
+    # `_tasks/` exclude lets `notes` through.
+    import subprocess
+    import tarfile
+    import tempfile
+
+    # The authority on which corpora matter, rather than a list restated here.
+    from tests.conformance.test_case_vocabulary import _RUN_DIRS
+
+    repo = Path(__file__).resolve().parent.parent
+
+    # `uv` is a dev-environment tool, not a runtime dependency, and tests/ ships
+    # to packagers who build with pip or `build`. Skipping keeps the shipped suite
+    # clean there instead of erroring on a missing executable -- which is the same
+    # defect this test exists to prevent, one layer out.
+    if shutil.which("uv") is None:
+        pytest.skip("uv is not installed, so the sdist cannot be built here")
+    if not (repo / "openarmature-spec" / "spec").is_dir():
+        pytest.skip("the spec submodule is not checked out, so no corpus could ship")
+
+    with tempfile.TemporaryDirectory() as out:
+        try:
+            built = subprocess.run(
+                ["uv", "build", "--sdist", "--out-dir", out],
+                cwd=repo,
+                capture_output=True,
+                text=True,
+                timeout=300,
+            )
+        except subprocess.TimeoutExpired:
+            pytest.skip("sdist build timed out; not a packaging-configuration failure")
+        if built.returncode != 0:
+            # A build that cannot provision its own backend says nothing about the
+            # exclude patterns, so it skips rather than reporting a packaging bug.
+            # Anything else is a real failure.
+            provisioning = ("No solution found", "network", "Failed to fetch", "offline", "Read-only")
+            if any(marker in built.stderr for marker in provisioning):
+                pytest.skip(f"sdist build could not provision: {built.stderr[-400:]}")
+            raise AssertionError(f"sdist build failed: {built.stderr[-2000:]}")
+        tarballs = sorted(Path(out).glob("*.tar.gz"))
+        assert len(tarballs) == 1, f"expected one sdist, got {tarballs}"
+        with tarfile.open(tarballs[0]) as tar:
+            names = tar.getnames()
+
+    proposals = [n for n in names if "/openarmature-spec/proposals/" in n]
+    notes = [n for n in names if "/_tasks/" in n]
+    suite = [n for n in names if "/tests/conformance/" in n and n.endswith(".py")]
+
+    assert suite, "the sdist ships no conformance tests, so nothing needs their fixtures"
+
+    missing = [
+        capability
+        for capability in _RUN_DIRS
+        if not any(
+            f"/openarmature-spec/spec/{capability}/conformance/" in n and n.endswith(".yaml") for n in names
+        )
+    ]
+    assert not missing, (
+        "the sdist ships conformance tests but no fixtures for "
+        f"{missing}. Those drivers collect nothing when the suite runs from this "
+        "sdist, which is indistinguishable from a passing run."
+    )
+    assert not proposals, f"spec proposals should not ship in the sdist: {proposals[:3]}"
+    assert not notes, f"private follow-up notes should not ship in the sdist: {notes[:3]}"

@@ -520,6 +520,7 @@ class OpenAIProvider:
             def build_body(
                 attempt_config: RuntimeConfig | None,
                 attempt_messages: Sequence[Message],
+                inherited_extras: frozenset[str],
             ) -> dict[str, Any]:
                 # Proposal 0095: the wire body is assembled PER ATTEMPT so a
                 # retry can vary sampling (0095a per-attempt override) and/or the
@@ -527,6 +528,31 @@ class OpenAIProvider:
                 # across attempts. Absent an override and a reask, every attempt
                 # passes the base config + base messages -> identical body
                 # (today's byte-identical replay).
+                #
+                # A collision reads as a bug in one config, and on a retry it
+                # can instead be a mismatch between two: the base supplied the
+                # extras key and the override declared the field. Attempt 0 sends
+                # cleanly in that case, so the only report the caller gets has to
+                # name the channel they should change.
+                #
+                # Keyed on whether the COLLIDING key was inherited, not on
+                # whether a merge happened. An override that declares a field and
+                # names it in its own extras collides on a merged attempt too,
+                # and sending that caller to inspect a base config they never
+                # wrote is worse than saying nothing.
+                def hint(key: str) -> str | None:
+                    if key in inherited_extras:
+                        return (
+                            "this attempt merges the base config with a per-attempt "
+                            f"override, and {key!r} was inherited from the base's extras "
+                            "while the override declares the field; set it in the channel "
+                            "the base used"
+                        )
+                    return (
+                        f"the per-attempt override sets {key!r} as a declared field and as "
+                        "an extras key; remove one"
+                    )
+
                 return self._build_request_body(
                     attempt_messages,
                     tools,
@@ -534,6 +560,7 @@ class OpenAIProvider:
                     schema_dict,
                     include_response_format=include_response_format,
                     tool_choice=tool_choice,
+                    collision_hint=hint,
                 )
 
             # Per-attempt LLM span surface (observability §5.5 under
@@ -622,7 +649,7 @@ class OpenAIProvider:
         base: RuntimeConfig | None,
         overrides: list[RuntimeConfig] | None,
         attempt: int,
-    ) -> RuntimeConfig | None:
+    ) -> tuple[RuntimeConfig | None, frozenset[str]]:
         """Resolve the RuntimeConfig for one call-level retry attempt.
 
         Attempt 0 uses the caller's base config unmodified; retry ``i``
@@ -636,12 +663,15 @@ class OpenAIProvider:
         returns a fresh ``model_copy``. The caller's config is never mutated
         either way -- the base path relies on the downstream body build reading
         it read-only.
+
+        Returns the attempt's config and the set of ``extras`` keys it inherited
+        from the base rather than receiving from the override.
         """
         # Proposal 0095 per-attempt override. A None override field inheriting
         # the base is the §6 null-skip rule (None means unset, not "clear to
         # null"); the never-mutate guarantee honors §5 immutability.
         if attempt == 0 or not overrides:
-            return base
+            return base, frozenset()
         override = overrides[min(attempt - 1, len(overrides) - 1)]
         base_or_empty = base if base is not None else RuntimeConfig()
         # exclude_none (not exclude_unset): a None override field inherits the
@@ -658,15 +688,21 @@ class OpenAIProvider:
         # override replaces the base's value for that key, a key the override does
         # not mention inherits the base's. So the container merges.
         #
-        # This replaced the container wholesale and warned about the base keys it
-        # dropped, on the reading that a non-empty container is itself the unit a
-        # field's rule applies to. Under the merge rule nothing is dropped, so the
-        # warning went with it. Clearing a base key for one attempt stays
-        # inexpressible, exactly as an override cannot clear a declared field to
-        # None.
+        # The merge does not resolve an inherited key that collides with a field
+        # the override declares; §8.1 rejects it like any other managed-field
+        # collision. Dropping the key instead would make one config mean two
+        # things depending on how it was assembled, rejected when a caller writes
+        # both and accepted when a merge produces both, and §6 separately forbids
+        # silently discarding a conflicting extras value. A caller who wants the
+        # override to change such a value keeps it in the same channel the base
+        # used.
         update = override.model_dump(exclude_none=True, exclude={"extras"})
         update["extras"] = {**base_or_empty.extras, **override.extras}
-        return base_or_empty.model_copy(update=update)
+        # A key present in the base and unmentioned by the override arrived here
+        # by inheritance rather than by the caller writing it alongside the
+        # field, which is what decides whether a collision crossed channels.
+        inherited = frozenset(base_or_empty.extras) - frozenset(override.extras)
+        return base_or_empty.model_copy(update=update), inherited
 
     @staticmethod
     def _append_reask_pair(
@@ -692,7 +728,7 @@ class OpenAIProvider:
 
     async def _do_complete_with_retry(
         self,
-        build_body: Callable[[RuntimeConfig | None, Sequence[Message]], dict[str, Any]],
+        build_body: Callable[[RuntimeConfig | None, Sequence[Message], frozenset[str]], dict[str, Any]],
         base_config: RuntimeConfig | None,
         base_messages: Sequence[Message],
         schema_dict: dict[str, Any] | None,
@@ -718,7 +754,7 @@ class OpenAIProvider:
         terminal event still fires per ``complete()`` call.
         """
         if retry is None:
-            body = build_body(base_config, base_messages)
+            body = build_body(base_config, base_messages, frozenset())
             attempt_start = time.perf_counter()
             try:
                 response = await self._do_complete(body, schema_dict, schema_class)
@@ -756,8 +792,8 @@ class OpenAIProvider:
         retry_reason: str | None = None
         attempt = 0
         while True:
-            attempt_config = self._config_for_attempt(base_config, overrides, attempt)
-            body = build_body(attempt_config, transcript)
+            attempt_config, inherited_extras = self._config_for_attempt(base_config, overrides, attempt)
+            body = build_body(attempt_config, transcript, inherited_extras)
             attempt_start = time.perf_counter()
             try:
                 response = await self._do_complete(body, schema_dict, schema_class)
@@ -795,6 +831,18 @@ class OpenAIProvider:
                     try:
                         transcript = self._append_reask_pair(transcript, exc.output_content, reask(exc))
                     except Exception as reask_error:
+                        # The chained cause carries this, but the surfaced error
+                        # reads as a bad model rather than a broken builder, and
+                        # a caller who never inspects __cause__ debugs the wrong
+                        # thing. Say which one failed where it will be seen.
+                        _log.warning(
+                            "reask builder raised on attempt %d (%s: %s); "
+                            "reask is disabled for this call and the "
+                            "structured_output_invalid failure stands",
+                            attempt,
+                            type(reask_error).__name__,
+                            reask_error,
+                        )
                         raise exc from reask_error
                     next_retry_reason = "reask"
                 else:
@@ -1137,6 +1185,7 @@ class OpenAIProvider:
         schema_dict: dict[str, Any] | None,
         include_response_format: bool = True,
         tool_choice: ToolChoice | None = None,
+        collision_hint: Callable[[str], str | None] | None = None,
     ) -> dict[str, Any]:
         body: dict[str, Any] = {
             "model": self.model,
@@ -1215,7 +1264,7 @@ class OpenAIProvider:
                 for key, arm in _OPENAI_MANAGED_ARMS.items()
                 if key in body or key in _OPENAI_STRUCTURAL_KEYS
             }
-            apply_managed_extras(body, extras, managed)
+            apply_managed_extras(body, extras, managed, collision_hint=collision_hint)
         # Spec 0047 §8 belt-and-suspenders: walk the assembled body
         # once more sorting any dict at every nesting level, in case
         # a future code path introduces a user-input boundary the

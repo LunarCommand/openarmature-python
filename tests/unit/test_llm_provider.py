@@ -3462,10 +3462,6 @@ async def test_per_attempt_override_with_extras_merges_per_key() -> None:
     # key the override sets replaces that key and a key it does not mention
     # inherits the base's.
     #
-    # This asserted the opposite until the rule was read properly, and it asserted
-    # a warning about the base keys the replacement dropped. Under the merge rule
-    # nothing is dropped, so there is nothing to warn about.
-    #
     # Without this the merge direction is unpinned. Verified by mutation: both
     # dropping `override.extras` and reversing the precedence left the suite
     # green while this test was absent.
@@ -3518,3 +3514,194 @@ async def test_per_attempt_override_with_extras_merges_per_key() -> None:
         "per-key rule the declared fields follow"
     )
     assert bodies[1]["keep"] == 1, "every unmentioned base key inherits, not just the first"
+
+
+async def test_merged_extras_key_colliding_with_an_overridden_field_rejects() -> None:
+    # A base extras key is the section 6 escape hatch: unmanaged where it was
+    # written, because the base leaves the declared field unset so the mapping
+    # emits nothing of that name. Merging carries it onto a retry whose override
+    # DOES set the field, where it is managed, and section 8.1 rejects the
+    # collision pre-send.
+    #
+    # The merge deliberately does not resolve this. Dropping the inherited key
+    # would make one config mean two things depending on how it was assembled:
+    # rejected when a caller writes both channels, accepted when a merge produces
+    # both. Section 6 also forbids silently discarding a conflicting extras value.
+    #
+    # Not vacuous in two directions. The call-count assertion fails if the merge
+    # starts resolving the collision (three calls instead of one), and the
+    # category assertion fails if the collision maps to something other than a
+    # pre-send request error. Killed by reinstating a drop of the colliding key.
+    from openarmature.llm import LlmRetryConfig
+
+    bodies: list[dict[str, Any]] = []
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        bodies.append(json.loads(req.content))
+        return httpx.Response(503, json={"error": {"message": "upstream"}})
+
+    provider = _collision_provider(handler)
+    try:
+        with pytest.raises(ProviderInvalidRequest) as caught:
+            await provider.complete(
+                [UserMessage(content="hi")],
+                config=RuntimeConfig(extras={"temperature": 0.9, "keep": 1}),
+                retry=LlmRetryConfig(
+                    max_attempts=3,
+                    backoff=deterministic_backoff(0),
+                    per_attempt_override=[RuntimeConfig(temperature=0.3)],
+                ),
+            )
+    finally:
+        await provider.aclose()
+
+    # Attempt 0 goes out on the base alone, where nothing collides, so the broken
+    # retry config is latent until the first retry. That is the ergonomic cost of
+    # the reject and the reason the message has to name both channels.
+    assert len(bodies) == 1, f"attempt 0 sends, attempt 1 raises pre-send; got {len(bodies)}"
+    assert bodies[0]["temperature"] == 0.9
+    assert caught.value.category == "provider_invalid_request"
+    # The message has to be actionable from the text alone: both channels named,
+    # and the fact that the value was inherited rather than written here.
+    message = str(caught.value)
+    assert "temperature" in message
+    assert "per-attempt override" in message, message
+    assert "inherited from the base" in message, message
+    assert "channel the base used" in message, message
+
+
+async def test_a_pre_send_collision_on_a_retry_emits_no_attempt_event() -> None:
+    # Pins what the reject COSTS in observability, which is a known gap kept
+    # deliberately rather than a defect of this change.
+    #
+    # `build_body` runs outside the attempt's try block, so a pre-send raise on a
+    # retry leaves the loop without emitting that attempt's LlmRetryAttemptEvent
+    # and without chaining the transient it was retrying. The terminal
+    # LlmFailedEvent carries provider_invalid_request, and its request_params and
+    # request_extras were snapshotted from the base config before the loop, so a
+    # trace shows the base's extras next to a failure about a collision that is
+    # not in them.
+    #
+    # Asserted so the gap is recorded where someone will see it rather than only
+    # in _tasks/: moving the build inside the try is what makes this go red, and
+    # then this test is the thing that tells you to update it.
+    #
+    # Not vacuous: attempt 0's event DOES fire, so the count distinguishes "no
+    # events at all" from "one attempt short".
+    from openarmature.llm import LlmRetryConfig
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        return httpx.Response(503, json={"error": {"message": "upstream"}})
+
+    events, token = _collecting_dispatch()
+    provider = _collision_provider(handler)
+    try:
+        with pytest.raises(ProviderInvalidRequest):
+            await provider.complete(
+                [UserMessage(content="hi")],
+                config=RuntimeConfig(extras={"temperature": 0.9}),
+                retry=LlmRetryConfig(
+                    max_attempts=3,
+                    backoff=deterministic_backoff(0),
+                    per_attempt_override=[RuntimeConfig(temperature=0.3)],
+                ),
+            )
+    finally:
+        await provider.aclose()
+        _release_dispatch(token)
+
+    attempts = [e for e in events if isinstance(e, LlmRetryAttemptEvent)]
+    failures = [e for e in events if isinstance(e, LlmFailedEvent)]
+
+    # Attempt 0 reached the wire and reported; attempt 1 raised before sending
+    # and reported nothing.
+    assert len(attempts) == 1, f"expected only attempt 0 to report, got {len(attempts)}"
+    assert attempts[0].attempt_index == 0
+    assert len(failures) == 1, "exactly one terminal failure event"
+    assert failures[0].error_category == "provider_invalid_request"
+    # The terminal event describes the base config, not the merged body that
+    # actually collided, so the trace cannot show the colliding pair.
+    assert failures[0].request_extras == {"temperature": 0.9}
+
+
+async def test_override_keeping_both_values_in_one_channel_retries_cleanly() -> None:
+    # The caller-side fix for the collision above, pinned so the documented
+    # remedy cannot rot. The base reached for extras, so the override stays in
+    # extras: the per-key merge replaces that key and the declared field is never
+    # set, so the mapping emits no temperature and nothing is managed.
+    #
+    # Not vacuous: asserting the retried value (not just the call count) is what
+    # fails if the merge stops letting an override's extras key win.
+    from openarmature.llm import LlmRetryConfig
+
+    bodies: list[dict[str, Any]] = []
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        bodies.append(json.loads(req.content))
+        return httpx.Response(503, json={"error": {"message": "upstream"}})
+
+    provider = _collision_provider(handler)
+    try:
+        with pytest.raises(ProviderUnavailable):
+            await provider.complete(
+                [UserMessage(content="hi")],
+                config=RuntimeConfig(extras={"temperature": 0.9, "keep": 1}),
+                retry=LlmRetryConfig(
+                    max_attempts=3,
+                    backoff=deterministic_backoff(0),
+                    per_attempt_override=[RuntimeConfig(extras={"temperature": 0.3, "seed": 7})],
+                ),
+            )
+    finally:
+        await provider.aclose()
+
+    assert len(bodies) == 3, f"every attempt sends; got {len(bodies)}"
+    assert bodies[0]["temperature"] == 0.9
+    assert bodies[1]["temperature"] == 0.3, "an override extras key replaces that key"
+    assert bodies[1]["seed"] == 7
+    assert bodies[1]["keep"] == 1, "an unmentioned base key still inherits"
+
+
+async def test_override_naming_a_declared_field_in_its_own_extras_collides() -> None:
+    # A declared field and an extras key of that name collide wherever the two
+    # halves came from, so this takes the same section 8.1 path as the inherited
+    # case above. Kept as its own case because it is the shape a caller is most
+    # likely to write by hand, and because an implementation that resolved the
+    # collision at merge time would have to treat the two differently.
+    #
+    # Not vacuous: dropping a colliding key from the merged extras makes this
+    # call succeed instead of raising, so the assertion flips.
+    from openarmature.llm import LlmRetryConfig
+
+    calls = {"n": 0}
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        return httpx.Response(503, json={"error": {"message": "upstream"}})
+
+    provider = _collision_provider(handler)
+    try:
+        with pytest.raises(ProviderInvalidRequest) as caught:
+            await provider.complete(
+                [UserMessage(content="hi")],
+                config=RuntimeConfig(),
+                retry=LlmRetryConfig(
+                    max_attempts=2,
+                    backoff=deterministic_backoff(0),
+                    per_attempt_override=[RuntimeConfig(temperature=0.3, extras={"temperature": 0.5})],
+                ),
+            )
+    finally:
+        await provider.aclose()
+
+    # Attempt 0 went out (no override applies to it); attempt 1 raised pre-send,
+    # so the collision is what stopped it rather than a transport failure.
+    assert calls["n"] == 1
+    # The advice names the override's own two entries. Sending this caller to the
+    # base config would be wrong: the base set no channel for this field, so
+    # there is none to match. That is the distinction the hint keys on.
+    message = str(caught.value)
+    assert "remove one" in message, message
+    assert "inherited" not in message, (
+        "nothing was inherited here, so the cross-channel advice must not fire: " + message
+    )

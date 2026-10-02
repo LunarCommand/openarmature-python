@@ -10,7 +10,7 @@ OpenArmature is a workflow framework for LLM pipelines and tool-calling agents: 
 
 ## Capability contracts
 
-_Sourced from openarmature-spec v0.118.2. Each entry below reproduces §1 (Purpose) and §2 (Concepts) of the capability's `spec.md` verbatim — including additions from accepted proposals that this Python implementation may not yet ship. For per-proposal implementation status (implemented / partial / textual-only / not-yet), see the `conformance.toml` manifest at the repo root. For the full spec text (execution model, error semantics, determinism, observer hooks, etc.) see the linked docs site._
+_Sourced from openarmature-spec v0.118.2. Each entry below reproduces §1 (Purpose) and §2 (Concepts) of the capability's `spec.md` verbatim — including additions from accepted proposals that this Python implementation may not yet ship. For per-proposal implementation status (implemented / partial / textual-only / not-yet), read the `conformance.toml` manifest. Where it is depends on how you got this package. Installed from PyPI: beside this file, at `importlib.resources.files('openarmature') / 'conformance.toml'`. In a source checkout: at the repository root, since it is added to the distribution at build time rather than committed under `src/`. Check it before planning against a behaviour from an accepted proposal: the spec text above includes proposals this implementation may not ship yet, and a `partial` entry says which half is missing. This release has two. For the full spec text (execution model, error semantics, determinism, observer hooks, etc.) see the linked docs site._
 
 ### Capability: `graph-engine`
 
@@ -615,6 +615,8 @@ extras-pass-through bag for vendor-specific knobs.
 ## Patterns
 
 _Recipes that compose the primitives. Not framework contracts — these are how to do common things idiomatically._
+
+_Each pattern below also ships as its own file, readable via `openarmature.patterns.list()` and `get(name)`. That is deliberate rather than duplication left in by accident: this copy is for reading the document whole, and the standalone copy is for retrieving one pattern without the other 90KB. The two are built from one source with different link handling, so a standalone pattern resolves its cross-references on its own._
 
 ### Bypass if output exists
 
@@ -1689,8 +1691,10 @@ _Runnable example programs shipped in the source tree at `examples/`. The full c
 - **`examples/observer-hooks/main.py`** — openarmature demo: observer hooks for structured logging, per-call metrics, and OTel spans.
 - **`examples/parallel-branches/main.py`** — openarmature demo: enrich a lunar-mission news article with several independent analyses running concurrently.
 - **`examples/production-observability/main.py`** — openarmature demo: production observability with dual OTel + Langfuse observers, caller hooks for trace.input/output, and the canonical TimingMiddleware.
+- **`examples/provider-extras/main.py`** — openarmature demo: reach a vendor knob openarmature does not model, and watch the guardrails that stop you reaching the wrong one.
 - **`examples/retrieval-rag/main.py`** — Retrieval-augmented answering over a lunar knowledge base.
 - **`examples/routing-and-subgraphs/main.py`** — openarmature demo: conditional routing + subgraph with a custom projection.
+- **`examples/structured-output-reask/main.py`** — openarmature demo: pull a structured mission record out of a prose lunar-landing report, and recover when the reply arrives unusable.
 - **`examples/tool-use/main.py`** — openarmature demo: a lunar-mission assistant that calls local Python functions as tools to answer fact and physics questions about Apollo / Artemis missions.
 
 ## Discovery cross-references
