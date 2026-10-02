@@ -520,7 +520,7 @@ class OpenAIProvider:
             def build_body(
                 attempt_config: RuntimeConfig | None,
                 attempt_messages: Sequence[Message],
-                inherited_extras: frozenset[str],
+                inherited_extras: frozenset[str] | None,
             ) -> dict[str, Any]:
                 # Proposal 0095: the wire body is assembled PER ATTEMPT so a
                 # retry can vary sampling (0095a per-attempt override) and/or the
@@ -541,6 +541,12 @@ class OpenAIProvider:
                 # and sending that caller to inspect a base config they never
                 # wrote is worse than saying nothing.
                 def hint(key: str) -> str | None:
+                    # None means no override applied to this attempt, so the
+                    # collision is between a caller's declared field and their own
+                    # extras key in one config. There is no second channel to
+                    # explain, and §8.1's message already names both values.
+                    if inherited_extras is None:
+                        return None
                     if key in inherited_extras:
                         return (
                             "this attempt merges the base config with a per-attempt "
@@ -728,7 +734,9 @@ class OpenAIProvider:
 
     async def _do_complete_with_retry(
         self,
-        build_body: Callable[[RuntimeConfig | None, Sequence[Message], frozenset[str]], dict[str, Any]],
+        build_body: Callable[
+            [RuntimeConfig | None, Sequence[Message], frozenset[str] | None], dict[str, Any]
+        ],
         base_config: RuntimeConfig | None,
         base_messages: Sequence[Message],
         schema_dict: dict[str, Any] | None,
@@ -754,7 +762,7 @@ class OpenAIProvider:
         terminal event still fires per ``complete()`` call.
         """
         if retry is None:
-            body = build_body(base_config, base_messages, frozenset())
+            body = build_body(base_config, base_messages, None)
             attempt_start = time.perf_counter()
             try:
                 response = await self._do_complete(body, schema_dict, schema_class)
@@ -793,7 +801,10 @@ class OpenAIProvider:
         attempt = 0
         while True:
             attempt_config, inherited_extras = self._config_for_attempt(base_config, overrides, attempt)
-            body = build_body(attempt_config, transcript, inherited_extras)
+            # Attempt 0 runs the caller's config untouched, so no override is in
+            # play and a collision there has only one channel to report.
+            merged = attempt > 0 and bool(overrides)
+            body = build_body(attempt_config, transcript, inherited_extras if merged else None)
             attempt_start = time.perf_counter()
             try:
                 response = await self._do_complete(body, schema_dict, schema_class)
