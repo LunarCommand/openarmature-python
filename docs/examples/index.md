@@ -67,6 +67,26 @@ the problem you're trying to solve.
   Survive a simulated mid-pipeline crash and resume from the saved
   checkpoint, then re-resume under an upgraded state schema with
   a v1->v2 migration backfilling new fields.
+- [**Structured-output reask**](structured-output-reask.md). Extract
+  a mission record under an output-token ceiling too tight for a
+  complete answer, then recover by correcting the model and raising
+  the ceiling on the retry. Three modes show why one without the
+  other does not recover.
+
+### Retrieval
+
+- [**Retrieval-augmented answering**](retrieval-rag.md). Answer a
+  question from a small corpus using embed-then-rerank before
+  generation: cosine similarity for recall over the whole corpus,
+  a cross-encoder for precision over the shortlist.
+
+### Providers
+
+- [**Provider extras**](provider-extras.md). Reach two OpenAI
+  request fields openarmature does not model, and see the three
+  things the `extras` container refuses. Runs with no credentials
+  against a stub transport, because the outbound request body is
+  the subject.
 
 ### Observability
 

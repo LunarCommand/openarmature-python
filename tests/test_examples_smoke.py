@@ -65,6 +65,31 @@ def test_every_example_directory_is_listed() -> None:
     )
 
 
+def test_every_example_has_a_published_docs_page() -> None:
+    # The examples ship three ways: in the sdist, in `examples/README.md`, and
+    # as a page on the docs site. The first two are derived from the directory
+    # listing and stay in step on their own. The site is hand-maintained in two
+    # places, so an example can ship with no page and nothing notices, which is
+    # what happened to three of them across two releases.
+    #
+    # Checked against the nav as well as the file, because a page absent from
+    # `mkdocs.yml` is unreachable even when it exists, and `mkdocs build` reports
+    # that as INFO rather than failing.
+    docs_dir = EXAMPLES_DIR.parent / "docs" / "examples"
+    mkdocs = (EXAMPLES_DIR.parent / "mkdocs.yml").read_text()
+
+    missing_page = sorted(name for name in DEMOS if not (docs_dir / f"{name}.md").is_file())
+    assert not missing_page, (
+        f"these examples have no docs page: {missing_page}. Add docs/examples/<name>.md for each."
+    )
+
+    missing_nav = sorted(name for name in DEMOS if f"examples/{name}.md" not in mkdocs)
+    assert not missing_nav, (
+        f"these examples have a docs page that the nav does not reference: "
+        f"{missing_nav}. Add each to the Examples section of mkdocs.yml."
+    )
+
+
 @pytest.mark.parametrize("demo", DEMOS)
 def test_example_loads(demo: str) -> None:
     main_py = EXAMPLES_DIR / demo / "main.py"

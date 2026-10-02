@@ -154,6 +154,11 @@ nav:
       - Tool use: examples/tool-use.md
     - Reliability:
       - Checkpointing and migration: examples/checkpointing-and-migration.md
+      - Structured-output reask: examples/structured-output-reask.md
+    - Retrieval:
+      - Retrieval-augmented answering: examples/retrieval-rag.md
+    - Providers:
+      - Provider extras: examples/provider-extras.md
     - Observability:
       - Observer hooks: examples/observer-hooks.md
       - Langfuse observability: examples/langfuse-observability.md
