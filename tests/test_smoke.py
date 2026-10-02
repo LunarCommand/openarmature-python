@@ -1,4 +1,5 @@
 import re
+import shutil
 import tomllib
 from pathlib import Path
 
@@ -170,41 +171,79 @@ def test_the_sdist_ships_a_runnable_test_suite() -> None:
     # the submodule wholesale left 48 tests failing on an empty corpus while every
     # config-shape assertion above still passed.
     #
-    # So this builds the artifact and looks inside it. Slower than reading
-    # pyproject, and the only form that can fail for the reason that matters: the
-    # exclusion is a pattern whose effect is not readable off its own text.
+    # So this builds the artifact and looks inside it, because the exclusion is a
+    # pattern whose effect is not readable off its own text.
     #
-    # Not vacuous in three directions. Dropping the negation pattern empties
-    # `fixtures`; dropping the `openarmature-spec/*` exclude lets `proposals`
-    # through; dropping the `_tasks/` exclude lets `notes` through. Each assertion
-    # fails on its own mutation.
+    # Asserted PER CAPABILITY rather than "at least one fixture anywhere". Seven
+    # corpora are read by the drivers, and a pattern narrowed to one of them, or a
+    # capability directory renamed out from under the glob, leaves the corpus
+    # mostly empty while a single-fixture check still passes. The path prefix is
+    # anchored on the submodule for the same reason: an unanchored
+    # `/conformance/` match is satisfied by any yaml under tests/.
+    #
+    # Not vacuous in four directions. Dropping the negation pattern empties every
+    # capability; narrowing it to one capability empties the other six; dropping
+    # the `openarmature-spec/*` exclude lets `proposals` through; dropping the
+    # `_tasks/` exclude lets `notes` through.
     import subprocess
     import tarfile
     import tempfile
 
+    # The authority on which corpora matter, rather than a list restated here.
+    from tests.conformance.test_case_vocabulary import _RUN_DIRS
+
     repo = Path(__file__).resolve().parent.parent
+
+    # `uv` is a dev-environment tool, not a runtime dependency, and tests/ ships
+    # to packagers who build with pip or `build`. Skipping keeps the shipped suite
+    # clean there instead of erroring on a missing executable -- which is the same
+    # defect this test exists to prevent, one layer out.
+    if shutil.which("uv") is None:
+        pytest.skip("uv is not installed, so the sdist cannot be built here")
+    if not (repo / "openarmature-spec" / "spec").is_dir():
+        pytest.skip("the spec submodule is not checked out, so no corpus could ship")
+
     with tempfile.TemporaryDirectory() as out:
-        built = subprocess.run(
-            ["uv", "build", "--sdist", "--out-dir", out],
-            cwd=repo,
-            capture_output=True,
-            text=True,
-        )
-        assert built.returncode == 0, f"sdist build failed: {built.stderr[-2000:]}"
+        try:
+            built = subprocess.run(
+                ["uv", "build", "--sdist", "--out-dir", out],
+                cwd=repo,
+                capture_output=True,
+                text=True,
+                timeout=300,
+            )
+        except subprocess.TimeoutExpired:
+            pytest.skip("sdist build timed out; not a packaging-configuration failure")
+        if built.returncode != 0:
+            # A build that cannot provision its own backend says nothing about the
+            # exclude patterns, so it skips rather than reporting a packaging bug.
+            # Anything else is a real failure.
+            provisioning = ("No solution found", "network", "Failed to fetch", "offline", "Read-only")
+            if any(marker in built.stderr for marker in provisioning):
+                pytest.skip(f"sdist build could not provision: {built.stderr[-400:]}")
+            raise AssertionError(f"sdist build failed: {built.stderr[-2000:]}")
         tarballs = sorted(Path(out).glob("*.tar.gz"))
         assert len(tarballs) == 1, f"expected one sdist, got {tarballs}"
         with tarfile.open(tarballs[0]) as tar:
             names = tar.getnames()
 
-    fixtures = [n for n in names if "/conformance/" in n and n.endswith(".yaml")]
     proposals = [n for n in names if "/openarmature-spec/proposals/" in n]
     notes = [n for n in names if "/_tasks/" in n]
     suite = [n for n in names if "/tests/conformance/" in n and n.endswith(".py")]
 
     assert suite, "the sdist ships no conformance tests, so nothing needs their fixtures"
-    assert fixtures, (
-        "the sdist ships conformance tests but none of the fixtures they read. "
-        "Running the suite from this sdist fails on an empty corpus."
+
+    missing = [
+        capability
+        for capability in _RUN_DIRS
+        if not any(
+            f"/openarmature-spec/spec/{capability}/conformance/" in n and n.endswith(".yaml") for n in names
+        )
+    ]
+    assert not missing, (
+        "the sdist ships conformance tests but no fixtures for "
+        f"{missing}. Those drivers collect nothing when the suite runs from this "
+        "sdist, which is indistinguishable from a passing run."
     )
     assert not proposals, f"spec proposals should not ship in the sdist: {proposals[:3]}"
     assert not notes, f"private follow-up notes should not ship in the sdist: {notes[:3]}"

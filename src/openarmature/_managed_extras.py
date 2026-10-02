@@ -35,7 +35,7 @@ with a field the mapping manages. The rule the reconciliation follows is
 described in the module comment above.
 """
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from typing import Any, Literal, cast
 
 # NOTE: ProviderInvalidRequest is imported lazily inside the reject branch, not
@@ -57,7 +57,7 @@ def apply_managed_extras(
     managed: Mapping[str, ManagedArm],
     *,
     managed_values: Mapping[str, Any] | None = None,
-    collision_hint: str | None = None,
+    collision_hint: Callable[[str], str | None] | None = None,
 ) -> None:
     """Fold ``extras`` into ``body``, reconciling managed-field collisions.
 
@@ -69,9 +69,10 @@ def apply_managed_extras(
     matching extras value stays a no-op that leaves the body minimal; where
     absent, the managed value is ``body[key]``.
 
-    ``collision_hint`` is appended to a collision's message by a caller that
-    knows something the check cannot see about where the conflicting values came
-    from.
+    ``collision_hint`` is called with the colliding key and its return value,
+    if any, is appended to the message. Taking the key rather than a fixed string
+    lets a caller that knows where each value came from say something true about
+    the one that actually collided.
 
     Mutates ``body`` in place; ``extras`` is not modified. Raises
     :class:`ProviderInvalidRequest` on a conflicting non-additive collision.
@@ -119,7 +120,8 @@ def apply_managed_extras(
                 f"extras key {key!r} conflicts with the mapping-managed wire "
                 f"field {key!r} (managed value {_summarize(managed_value)}, "
                 f"extras value {_summarize(value)}); a managed field cannot be "
-                f"overridden via extras" + (f". {collision_hint}" if collision_hint else "")
+                f"overridden via extras"
+                + (f". {hint}" if collision_hint and (hint := collision_hint(key)) else "")
             )
 
 

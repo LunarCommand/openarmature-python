@@ -30,7 +30,7 @@ import importlib.util
 import shutil
 import subprocess
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -56,16 +56,32 @@ def _load_generator() -> Any:
     return module
 
 
-def _in_a_git_checkout() -> bool:
-    """Whether this tree is a git repository the generator can interrogate."""
+def _spec_submodule_is_queryable(repo_root: Path = REPO_ROOT) -> bool:
+    """Whether the generator can resolve the spec submodule's pinned tag here.
+
+    Takes the tree root so the condition itself is testable against a synthetic
+    one; the drift marker calls it with no argument.
+    """
+    # Keyed on the submodule the generator interrogates rather than on
+    # repository discovery, which ASCENDS. A probe rooted anywhere beneath a
+    # checkout answers for the parent, so an sdist unpacked in a packaging
+    # feedstock, a vendored copy, or a CI workspace that is itself a checkout
+    # would all read as queryable while the submodule is absent, and the drift
+    # test would run and hard-fail there instead of skipping.
+    spec_root = repo_root / "openarmature-spec"
     if shutil.which("git") is None:
         return False
+    if not (spec_root / ".git").exists():
+        return False
     probe = subprocess.run(
-        ["git", "-C", str(REPO_ROOT), "rev-parse", "--git-dir"],
+        ["git", "-C", str(spec_root), "rev-parse", "--show-toplevel"],
         capture_output=True,
         text=True,
     )
-    return probe.returncode == 0
+    if probe.returncode != 0:
+        return False
+    # An ascent resolves to the enclosing repository rather than the submodule.
+    return Path(probe.stdout.strip()).resolve() == spec_root.resolve()
 
 
 # The bundle records which spec tag it was built from, so the generator asks git
@@ -78,10 +94,10 @@ def _in_a_git_checkout() -> bool:
 # generator read as a clean run in CI, where the repository is always present
 # and this never skips.
 @pytest.mark.skipif(
-    not _in_a_git_checkout(),
+    not _spec_submodule_is_queryable(),
     reason=(
-        "not a git checkout, so the generator cannot resolve the spec submodule's "
-        "pinned tag; drift is checked in the repository, not from an sdist"
+        "the spec submodule is not a queryable git checkout here, so the generator "
+        "cannot resolve its pinned tag; drift is checked in the repository"
     ),
 )
 def test_agents_md_matches_generator_output() -> None:
@@ -93,24 +109,76 @@ def test_agents_md_matches_generator_output() -> None:
 
 def test_the_drift_check_is_not_skipping_in_this_repository() -> None:
     # A skip condition cannot be caught by the test it guards: widen it and the
-    # drift check quietly stops running while the suite still reports green. That
-    # is the failure this repository treats as the null result, one level up.
+    # drift check quietly stops running while the suite still reports green.
+    # That is the null result this repository treats as evidence of nothing, one
+    # level up from a vacuous assertion.
     #
-    # So the condition is asserted separately. Here the repository is present by
-    # definition (this file is in it), so the guard must evaluate False, and a
-    # widened condition fails here instead of going unnoticed.
-    # Both preconditions are checked by a different mechanism than the helper
-    # uses, so this is a cross-check rather than a restatement: the helper shells
-    # out to git, these read the filesystem and PATH. Where they disagree, the
-    # helper is wrong.
+    # Asserted against the RESOLVED MARKER rather than the helper, so widening
+    # the decorator itself is caught too. A guard that only re-called the helper
+    # would stay green under `skipif(not helper() or something_else, ...)`.
+    #
+    # Gated on the two repository markers directly, which is what makes this
+    # non-circular: both are filesystem checks, while the part of the condition
+    # that matters is the ascent comparison the helper runs. Without the gate
+    # this test fails from an unpacked sdist, where skipping is correct.
+    if not (REPO_ROOT / ".git").exists() or not (REPO_ROOT / "openarmature-spec" / ".git").exists():
+        pytest.skip("not a complete repository checkout, so skipping is the right answer here")
+    # pytest attaches `pytestmark` dynamically, so the type checker cannot see it.
+    applied = cast("list[Any]", getattr(test_agents_md_matches_generator_output, "pytestmark", []))
+    marks = [m for m in applied if m.name == "skipif"]
+    assert len(marks) == 1, f"expected exactly one skipif marker, got {marks}"
+    condition = marks[0].args[0]
+    assert condition is False, (
+        "the drift check is skipping inside its own repository, so it is not "
+        "running at all. The condition should be true only where the spec "
+        "submodule cannot be queried, such as an unpacked sdist."
+    )
+
+
+def test_the_drift_check_skips_where_the_submodule_is_absent(tmp_path: Path) -> None:
+    # The other direction, and the one that catches a guard which never skips:
+    # that puts a hard failure in front of every downstream packager running the
+    # shipped suite.
+    #
+    # The shape is an unpacked sdist NESTED INSIDE A REPOSITORY, which is the
+    # ordinary case: a packaging feedstock, a vendored copy, a CI workspace that
+    # is itself a checkout. The sdist has an `openarmature-spec/` directory
+    # (9933608 ships the fixtures there) but no repository of its own.
+    #
+    # Not vacuous, and the nesting is what makes it so. Git repository discovery
+    # ASCENDS, so a condition keyed on `rev-parse` from the tree root answers for
+    # the enclosing repository and returns True here, which is the defect this
+    # replaces. Without an enclosing repository the mutation survives, because
+    # the probe simply fails and the condition is False for the wrong reason.
     if shutil.which("git") is None:
-        pytest.skip("git is absent, so the drift check could not run either way")
-    if not (REPO_ROOT / ".git").exists():
-        pytest.skip("no repository here, as in an unpacked sdist")
-    assert _in_a_git_checkout(), (
-        "the drift check's skip condition is true inside the repository, so the "
-        "check is not running. Narrow the condition: it should only skip where "
-        "there is genuinely no git repository, such as an unpacked sdist."
+        pytest.skip("git is absent, so the enclosing-repository shape cannot be built")
+
+    enclosing = tmp_path / "feedstock"
+    enclosing.mkdir()
+    init = subprocess.run(["git", "init", "-q", str(enclosing)], capture_output=True, text=True)
+    assert init.returncode == 0, init.stderr
+    assert (enclosing / ".git").exists(), "the enclosing repository did not initialize"
+
+    sdist_root = enclosing / "openarmature-0.0.0"
+    (sdist_root / "openarmature-spec" / "spec").mkdir(parents=True)
+
+    # Confirm the ascent is real in this fixture before relying on it, so the
+    # assertion below cannot pass because the setup failed to reproduce it.
+    ascent = subprocess.run(
+        ["git", "-C", str(sdist_root), "rev-parse", "--git-dir"],
+        capture_output=True,
+        text=True,
+    )
+    assert ascent.returncode == 0, (
+        "the nested sdist should resolve to the enclosing repository; if it does "
+        "not, this fixture is not reproducing the case it exists for"
+    )
+
+    assert not _spec_submodule_is_queryable(sdist_root), (
+        "an unpacked sdist has no queryable spec submodule, so the drift check "
+        "must skip there rather than running the generator and failing. A "
+        "condition keyed on repository discovery answers for the enclosing "
+        "repository instead."
     )
 
 

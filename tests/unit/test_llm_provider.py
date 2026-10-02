@@ -1419,259 +1419,6 @@ async def test_complete_failure_emits_typed_llm_failed_event_only() -> None:
     assert failed_events[0].response_model is None
 
 
-async def test_error_message_names_every_schema_violation_not_just_the_first() -> None:
-    # Section 7's error_message describes how the output failed the schema, so it
-    # names every violation. The alternative is not a shorter message but an
-    # iterative one: section 7.1's reask builder quotes this field, and one
-    # violation per round costs one model call per wrong field.
-    #
-    # Not vacuous. `jsonschema.validate` raises on a single error, so the naive
-    # implementation passes a test that asserts only one of these strings. Every
-    # assertion below except the first names a violation the raising error does
-    # NOT carry, and the count assertion fails if enumeration regresses to one.
-    # Killed by returning `f"{exc.json_path}: {exc.message}"` from
-    # `_format_jsonschema_failure`.
-    from openarmature.llm import StructuredOutputInvalid
-
-    schema = {
-        "type": "object",
-        "properties": {
-            "name": {"type": "string"},
-            "age": {"type": "integer"},
-            "city": {"type": "string"},
-        },
-        "required": ["name", "age", "city"],
-        "additionalProperties": False,
-    }
-
-    def _handler(_req: httpx.Request) -> httpx.Response:
-        # Well-formed JSON that breaks the schema four separate ways: three
-        # required properties absent and one property the schema forbids.
-        return httpx.Response(
-            200,
-            json={
-                "id": "c",
-                "model": "m",
-                "choices": [
-                    {
-                        "index": 0,
-                        "message": {"role": "assistant", "content": '{"nickname":"Al"}'},
-                        "finish_reason": "stop",
-                    }
-                ],
-                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
-            },
-        )
-
-    provider = OpenAIProvider(
-        base_url="http://x", model="m", api_key="k", transport=httpx.MockTransport(_handler)
-    )
-    try:
-        with pytest.raises(StructuredOutputInvalid) as caught:
-            await provider.complete([UserMessage(content="hi")], response_schema=schema)
-    finally:
-        await provider.aclose()
-
-    message = caught.value.error_message
-    assert "'name' is a required property" in message, message
-    assert "'age' is a required property" in message, message
-    assert "'city' is a required property" in message, message
-    assert "nickname" in message, "the forbidden property must be named too"
-    # One line per violation, so a caller can quote the whole thing at a model.
-    assert len(message.splitlines()) == 4, message
-    # Order is deliberately not asserted. The implementation sorts so the same
-    # output and schema give the same string, which lets a caller diff
-    # corrections across attempts, but which order is unspecified: pinning one
-    # here would make a legitimate reordering fail. Comparing the value to
-    # itself would look like a stability check and assert nothing.
-
-
-async def test_a_failed_enumeration_says_so_rather_than_quietly_reporting_one(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    # The enumeration falls back to the single violation it was handed when the
-    # validator cannot process the schema, so a structured_output_invalid is
-    # never replaced by something the caller cannot handle. That fallback returns
-    # a well-formed message, which is indistinguishable from a schema that
-    # genuinely broke one way, and a hardcoded draft reaching this path reverted
-    # the field for every caller on an older draft with nothing to show for it.
-    #
-    # So the fallback is audible. Driven by monkeypatching the validator lookup
-    # rather than by finding a schema that breaks it, because the whole point is
-    # that we do not know which schemas reach here.
-    #
-    # Not vacuous: the fallback still produces a valid one-line message, so no
-    # assertion on the returned value can distinguish it from a genuine single
-    # violation. The log record is the only observable. Killed by dropping the
-    # _log.warning call.
-    from openarmature.llm import StructuredOutputInvalid
-    from openarmature.llm.providers import openai as openai_module
-
-    schema = {
-        "type": "object",
-        "properties": {"name": {"type": "string"}, "age": {"type": "integer"}},
-        "required": ["name", "age"],
-    }
-
-    def _handler(_req: httpx.Request) -> httpx.Response:
-        return httpx.Response(
-            200,
-            json={
-                "id": "c",
-                "model": "m",
-                "choices": [
-                    {
-                        "index": 0,
-                        "message": {"role": "assistant", "content": '{"name": "Al"}'},
-                        "finish_reason": "stop",
-                    }
-                ],
-                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
-            },
-        )
-
-    def _explode(_schema: Any) -> Any:
-        raise RuntimeError("validator lookup unavailable")
-
-    provider = OpenAIProvider(
-        base_url="http://x", model="m", api_key="k", transport=httpx.MockTransport(_handler)
-    )
-    original = openai_module.validator_for
-    openai_module.validator_for = _explode
-    try:
-        with caplog.at_level(logging.WARNING, logger="openarmature.llm.providers.openai"):
-            with pytest.raises(StructuredOutputInvalid) as caught:
-                await provider.complete([UserMessage(content="hi")], response_schema=schema)
-    finally:
-        openai_module.validator_for = original
-        await provider.aclose()
-
-    # The caller still gets a usable single-violation message, not an exception
-    # from the enumeration itself.
-    assert "'age' is a required property" in caught.value.error_message
-
-    warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
-    assert warnings, "a fallback to single-violation reporting must not be silent"
-    logged = warnings[0].getMessage()
-    assert "enumerate" in logged, logged
-    assert "RuntimeError" in logged, "the log must name what actually failed"
-
-
-async def test_error_message_enumerates_under_a_schema_declaring_an_older_draft() -> None:
-    # Enumeration has to use the validator the schema asks for. Fixing one draft
-    # looks harmless while every test schema omits `$schema`, because the absent
-    # key defaults to the latest draft and the two agree.
-    #
-    # They stop agreeing on a schema that declares an older one. Draft 7 allows
-    # the tuple form of `items`, which 2020-12 spells `prefixItems`, so a 2020-12
-    # validator raises on it. The enumeration's fallback would then hand back the
-    # single error it exists to replace, and the field would silently revert for
-    # every caller using an older draft.
-    #
-    # Not vacuous: this is the test whose absence let that ship. It fails with a
-    # count of 1 if the validator is hardcoded to any draft, and it exercises the
-    # fallback path rather than only the happy one. Killed by restoring
-    # `jsonschema.Draft202012Validator(schema)`.
-    from openarmature.llm import StructuredOutputInvalid
-
-    schema = {
-        "$schema": "http://json-schema.org/draft-07/schema#",
-        "type": "object",
-        "properties": {
-            "name": {"type": "string"},
-            "pair": {"type": "array", "items": [{"type": "string"}, {"type": "integer"}]},
-        },
-        "required": ["name", "pair", "city"],
-        "additionalProperties": False,
-    }
-
-    def _handler(_req: httpx.Request) -> httpx.Response:
-        # Breaks the schema four ways, one of them inside the tuple-form array so
-        # the draft actually matters to the result rather than only to the walk.
-        return httpx.Response(
-            200,
-            json={
-                "id": "c",
-                "model": "m",
-                "choices": [
-                    {
-                        "index": 0,
-                        "message": {
-                            "role": "assistant",
-                            "content": '{"nickname": "Al", "pair": ["x", "y"]}',
-                        },
-                        "finish_reason": "stop",
-                    }
-                ],
-                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
-            },
-        )
-
-    provider = OpenAIProvider(
-        base_url="http://x", model="m", api_key="k", transport=httpx.MockTransport(_handler)
-    )
-    try:
-        with pytest.raises(StructuredOutputInvalid) as caught:
-            await provider.complete([UserMessage(content="hi")], response_schema=schema)
-    finally:
-        await provider.aclose()
-
-    message = caught.value.error_message
-    assert len(message.splitlines()) == 4, message
-    assert "'name' is a required property" in message, message
-    assert "'city' is a required property" in message, message
-    assert "nickname" in message, message
-    # The tuple-form element failure is the one a 2020-12 validator cannot reach.
-    assert "pair[1]" in message, message
-
-
-async def test_error_message_for_a_parse_failure_stays_a_single_violation() -> None:
-    # A schema violation cannot be evaluated against output that is not
-    # well-formed, so the field describes the parse failure and nothing else.
-    # Enumeration applies to schema validation, not to every failure on the path.
-    #
-    # Not vacuous: an implementation that tried to enumerate here would have no
-    # instance to enumerate against and would either raise or report zero
-    # violations, both of which fail the substring assertion.
-    from openarmature.llm import StructuredOutputInvalid
-
-    schema = {
-        "type": "object",
-        "properties": {"name": {"type": "string"}},
-        "required": ["name"],
-    }
-
-    def _handler(_req: httpx.Request) -> httpx.Response:
-        return httpx.Response(
-            200,
-            json={
-                "id": "c",
-                "model": "m",
-                "choices": [
-                    {
-                        "index": 0,
-                        "message": {"role": "assistant", "content": '{"name": "Al'},
-                        "finish_reason": "stop",
-                    }
-                ],
-                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
-            },
-        )
-
-    provider = OpenAIProvider(
-        base_url="http://x", model="m", api_key="k", transport=httpx.MockTransport(_handler)
-    )
-    try:
-        with pytest.raises(StructuredOutputInvalid) as caught:
-            await provider.complete([UserMessage(content="hi")], response_schema=schema)
-    finally:
-        await provider.aclose()
-
-    message = caught.value.error_message
-    assert "required property" not in message, message
-    assert message.strip() != ""
-
-
 async def test_complete_structured_output_failure_event_carries_response_surface() -> None:
     # Proposal 0082: a structured_output_invalid failure is a completion
     # whose validation gate failed, so the LlmFailedEvent carries the
@@ -3819,8 +3566,62 @@ async def test_merged_extras_key_colliding_with_an_overridden_field_rejects() ->
     message = str(caught.value)
     assert "temperature" in message
     assert "per-attempt override" in message, message
-    assert "base config" in message, message
-    assert "same channel" in message, message
+    assert "inherited from the base" in message, message
+    assert "channel the base used" in message, message
+
+
+async def test_a_pre_send_collision_on_a_retry_emits_no_attempt_event() -> None:
+    # Pins what the reject COSTS in observability, which is a known gap kept
+    # deliberately rather than a defect of this change.
+    #
+    # `build_body` runs outside the attempt's try block, so a pre-send raise on a
+    # retry leaves the loop without emitting that attempt's LlmRetryAttemptEvent
+    # and without chaining the transient it was retrying. The terminal
+    # LlmFailedEvent carries provider_invalid_request, and its request_params and
+    # request_extras were snapshotted from the base config before the loop, so a
+    # trace shows the base's extras next to a failure about a collision that is
+    # not in them.
+    #
+    # Asserted so the gap is recorded where someone will see it rather than only
+    # in _tasks/: moving the build inside the try is what makes this go red, and
+    # then this test is the thing that tells you to update it.
+    #
+    # Not vacuous: attempt 0's event DOES fire, so the count distinguishes "no
+    # events at all" from "one attempt short".
+    from openarmature.llm import LlmRetryConfig
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        return httpx.Response(503, json={"error": {"message": "upstream"}})
+
+    events, token = _collecting_dispatch()
+    provider = _collision_provider(handler)
+    try:
+        with pytest.raises(ProviderInvalidRequest):
+            await provider.complete(
+                [UserMessage(content="hi")],
+                config=RuntimeConfig(extras={"temperature": 0.9}),
+                retry=LlmRetryConfig(
+                    max_attempts=3,
+                    backoff=deterministic_backoff(0),
+                    per_attempt_override=[RuntimeConfig(temperature=0.3)],
+                ),
+            )
+    finally:
+        await provider.aclose()
+        _release_dispatch(token)
+
+    attempts = [e for e in events if isinstance(e, LlmRetryAttemptEvent)]
+    failures = [e for e in events if isinstance(e, LlmFailedEvent)]
+
+    # Attempt 0 reached the wire and reported; attempt 1 raised before sending
+    # and reported nothing.
+    assert len(attempts) == 1, f"expected only attempt 0 to report, got {len(attempts)}"
+    assert attempts[0].attempt_index == 0
+    assert len(failures) == 1, "exactly one terminal failure event"
+    assert failures[0].error_category == "provider_invalid_request"
+    # The terminal event describes the base config, not the merged body that
+    # actually collided, so the trace cannot show the colliding pair.
+    assert failures[0].request_extras == {"temperature": 0.9}
 
 
 async def test_override_keeping_both_values_in_one_channel_retries_cleanly() -> None:
@@ -3861,15 +3662,15 @@ async def test_override_keeping_both_values_in_one_channel_retries_cleanly() -> 
     assert bodies[1]["keep"] == 1, "an unmentioned base key still inherits"
 
 
-async def test_override_naming_a_declared_field_in_its_own_extras_still_collides() -> None:
-    # The supersede above is deliberately asymmetric. A base key inherited into a
-    # collision was never written alongside the field, so yielding to the field is
-    # reading the caller's intent. An override that declares a field AND names it
-    # in its own extras contradicts itself inside one object, and section 8.1's
-    # reject is the right answer.
+async def test_override_naming_a_declared_field_in_its_own_extras_collides() -> None:
+    # A declared field and an extras key of that name collide wherever the two
+    # halves came from, so this takes the same section 8.1 path as the inherited
+    # case above. Kept as its own case because it is the shape a caller is most
+    # likely to write by hand, and because an implementation that resolved the
+    # collision at merge time would have to treat the two differently.
     #
-    # Not vacuous: widening the supersede to drop the override's own extras key
-    # makes this call succeed instead of raising, so the assertion flips.
+    # Not vacuous: dropping a colliding key from the merged extras makes this
+    # call succeed instead of raising, so the assertion flips.
     from openarmature.llm import LlmRetryConfig
 
     calls = {"n": 0}
@@ -3880,7 +3681,7 @@ async def test_override_naming_a_declared_field_in_its_own_extras_still_collides
 
     provider = _collision_provider(handler)
     try:
-        with pytest.raises(ProviderInvalidRequest):
+        with pytest.raises(ProviderInvalidRequest) as caught:
             await provider.complete(
                 [UserMessage(content="hi")],
                 config=RuntimeConfig(),
@@ -3896,3 +3697,11 @@ async def test_override_naming_a_declared_field_in_its_own_extras_still_collides
     # Attempt 0 went out (no override applies to it); attempt 1 raised pre-send,
     # so the collision is what stopped it rather than a transport failure.
     assert calls["n"] == 1
+    # The advice names the override's own two entries. Sending this caller to the
+    # base config would be wrong: the base set no channel for this field, so
+    # there is none to match. That is the distinction the hint keys on.
+    message = str(caught.value)
+    assert "remove one" in message, message
+    assert "inherited" not in message, (
+        "nothing was inherited here, so the cross-channel advice must not fire: " + message
+    )

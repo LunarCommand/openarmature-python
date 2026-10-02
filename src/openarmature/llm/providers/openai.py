@@ -63,7 +63,6 @@ from urllib.parse import urlparse
 
 import httpx
 import jsonschema
-from jsonschema.validators import validator_for
 from pydantic import BaseModel, ValidationError
 
 from openarmature._managed_extras import ManagedArm, apply_managed_extras
@@ -521,7 +520,7 @@ class OpenAIProvider:
             def build_body(
                 attempt_config: RuntimeConfig | None,
                 attempt_messages: Sequence[Message],
-                merged_attempt: bool,
+                inherited_extras: frozenset[str],
             ) -> dict[str, Any]:
                 # Proposal 0095: the wire body is assembled PER ATTEMPT so a
                 # retry can vary sampling (0095a per-attempt override) and/or the
@@ -530,18 +529,30 @@ class OpenAIProvider:
                 # passes the base config + base messages -> identical body
                 # (today's byte-identical replay).
                 #
-                # A collision on a merged attempt reads as a bug in one config,
-                # and it is a mismatch between two: the base supplied the extras
-                # key and the override declared the field. Attempt 0 sends
-                # cleanly, so the only report the caller gets names the channel
-                # they should change.
-                hint = (
-                    "this attempt's config merges the base config with a "
-                    "per-attempt override, so the two values come from different "
-                    "channels; set the field in the same channel the base used"
-                    if merged_attempt
-                    else None
-                )
+                # A collision reads as a bug in one config, and on a retry it
+                # can instead be a mismatch between two: the base supplied the
+                # extras key and the override declared the field. Attempt 0 sends
+                # cleanly in that case, so the only report the caller gets has to
+                # name the channel they should change.
+                #
+                # Keyed on whether the COLLIDING key was inherited, not on
+                # whether a merge happened. An override that declares a field and
+                # names it in its own extras collides on a merged attempt too,
+                # and sending that caller to inspect a base config they never
+                # wrote is worse than saying nothing.
+                def hint(key: str) -> str | None:
+                    if key in inherited_extras:
+                        return (
+                            "this attempt merges the base config with a per-attempt "
+                            f"override, and {key!r} was inherited from the base's extras "
+                            "while the override declares the field; set it in the channel "
+                            "the base used"
+                        )
+                    return (
+                        f"the per-attempt override sets {key!r} as a declared field and as "
+                        "an extras key; remove one"
+                    )
+
                 return self._build_request_body(
                     attempt_messages,
                     tools,
@@ -638,7 +649,7 @@ class OpenAIProvider:
         base: RuntimeConfig | None,
         overrides: list[RuntimeConfig] | None,
         attempt: int,
-    ) -> RuntimeConfig | None:
+    ) -> tuple[RuntimeConfig | None, frozenset[str]]:
         """Resolve the RuntimeConfig for one call-level retry attempt.
 
         Attempt 0 uses the caller's base config unmodified; retry ``i``
@@ -652,12 +663,15 @@ class OpenAIProvider:
         returns a fresh ``model_copy``. The caller's config is never mutated
         either way -- the base path relies on the downstream body build reading
         it read-only.
+
+        Returns the attempt's config and the set of ``extras`` keys it inherited
+        from the base rather than receiving from the override.
         """
         # Proposal 0095 per-attempt override. A None override field inheriting
         # the base is the §6 null-skip rule (None means unset, not "clear to
         # null"); the never-mutate guarantee honors §5 immutability.
         if attempt == 0 or not overrides:
-            return base
+            return base, frozenset()
         override = overrides[min(attempt - 1, len(overrides) - 1)]
         base_or_empty = base if base is not None else RuntimeConfig()
         # exclude_none (not exclude_unset): a None override field inherits the
@@ -684,7 +698,11 @@ class OpenAIProvider:
         # used.
         update = override.model_dump(exclude_none=True, exclude={"extras"})
         update["extras"] = {**base_or_empty.extras, **override.extras}
-        return base_or_empty.model_copy(update=update)
+        # A key present in the base and unmentioned by the override arrived here
+        # by inheritance rather than by the caller writing it alongside the
+        # field, which is what decides whether a collision crossed channels.
+        inherited = frozenset(base_or_empty.extras) - frozenset(override.extras)
+        return base_or_empty.model_copy(update=update), inherited
 
     @staticmethod
     def _append_reask_pair(
@@ -710,7 +728,7 @@ class OpenAIProvider:
 
     async def _do_complete_with_retry(
         self,
-        build_body: Callable[[RuntimeConfig | None, Sequence[Message], bool], dict[str, Any]],
+        build_body: Callable[[RuntimeConfig | None, Sequence[Message], frozenset[str]], dict[str, Any]],
         base_config: RuntimeConfig | None,
         base_messages: Sequence[Message],
         schema_dict: dict[str, Any] | None,
@@ -736,7 +754,7 @@ class OpenAIProvider:
         terminal event still fires per ``complete()`` call.
         """
         if retry is None:
-            body = build_body(base_config, base_messages, False)
+            body = build_body(base_config, base_messages, frozenset())
             attempt_start = time.perf_counter()
             try:
                 response = await self._do_complete(body, schema_dict, schema_class)
@@ -774,8 +792,8 @@ class OpenAIProvider:
         retry_reason: str | None = None
         attempt = 0
         while True:
-            attempt_config = self._config_for_attempt(base_config, overrides, attempt)
-            body = build_body(attempt_config, transcript, bool(attempt and overrides))
+            attempt_config, inherited_extras = self._config_for_attempt(base_config, overrides, attempt)
+            body = build_body(attempt_config, transcript, inherited_extras)
             attempt_start = time.perf_counter()
             try:
                 response = await self._do_complete(body, schema_dict, schema_class)
@@ -1167,7 +1185,7 @@ class OpenAIProvider:
         schema_dict: dict[str, Any] | None,
         include_response_format: bool = True,
         tool_choice: ToolChoice | None = None,
-        collision_hint: str | None = None,
+        collision_hint: Callable[[str], str | None] | None = None,
     ) -> dict[str, Any]:
         body: dict[str, Any] = {
             "model": self.model,
@@ -1530,7 +1548,7 @@ def _parse_and_validate(
                 "response failed JSON Schema validation",
                 response_schema=schema_dict,
                 output_content=content,
-                error_message=_format_jsonschema_failure(exc, parsed_dict, schema_dict),
+                error_message=_format_jsonschema_failure(exc),
             ) from exc
         except jsonschema.SchemaError as exc:
             raise StructuredOutputInvalid(
@@ -1557,7 +1575,7 @@ def _parse_and_validate(
             "response failed JSON Schema validation",
             response_schema=schema_dict,
             output_content=content,
-            error_message=_format_jsonschema_failure(exc, parsed_dict, schema_dict),
+            error_message=_format_jsonschema_failure(exc),
         ) from exc
     except jsonschema.SchemaError as exc:
         # Safety net: validate_response_schema's pre-validation should
@@ -1573,64 +1591,14 @@ def _parse_and_validate(
     return parsed_dict
 
 
-def _format_jsonschema_failure(
-    exc: jsonschema.ValidationError,
-    instance: Any,
-    schema: dict[str, Any],
-) -> str:
-    """Describe every way ``instance`` fails ``schema``, one per line.
-
-    Each line pairs the failing location with what was wrong there, e.g.
-    ``$.age: '30' is not of type 'integer'``.
+def _format_jsonschema_failure(exc: jsonschema.ValidationError) -> str:
+    """jsonschema.ValidationError.message describes the value mismatch
+    (e.g., "'30' is not of type 'integer'") but doesn't include the
+    failing field path. Prefix with ``json_path`` (e.g., ``$.age``) so
+    the error_message string carries both, matching the dict-
+    schema and class-schema paths.
     """
-    # §7's error_message describes how the OUTPUT failed the SCHEMA, so it names
-    # every violation rather than the one that happened to be detected first.
-    # `jsonschema.validate` raises on a single error; iter_errors yields them all.
-    # A caller composing a reask correction (§7.1) otherwise pays one model round
-    # trip per wrong field and cannot converge inside a small max_attempts.
-    #
-    # Sorted so the same output and schema always produce the same string, which
-    # lets a caller diff corrections across attempts. Order is not asserted.
-    #
-    # Unbounded on the exception by design: the caller needs every violation to
-    # compose one correction. An observer's emitted copy is separately bounded by
-    # its payload byte cap (§5.5.5), so a wide schema lengthens the field a caller
-    # reads and not the value a trace carries.
-    try:
-        # validator_for reads the schema's own $schema, matching both the
-        # boundary check in llm/provider.py and what jsonschema.validate() does
-        # internally. Fixing a draft here instead would silently stop enumerating
-        # for every schema that declares an older one: Draft 7's tuple-form
-        # `items` raises under the 2020-12 validator, and the fallback below
-        # would hand back the single error this function exists to replace.
-        #
-        # iter_errors is overloaded on its instance type and pyright cannot
-        # narrow the yielded element, so the validator is typed at the boundary.
-        validator = cast("Any", validator_for(schema)(schema))
-        found = cast("list[jsonschema.ValidationError]", list(validator.iter_errors(instance)))
-        errors = sorted(found, key=lambda e: (str(e.json_path), e.message))
-    except Exception as enumeration_error:
-        # Enumeration is a better report of the same failure, never a new failure
-        # mode, so any schema the enumerating validator cannot process falls back
-        # to the error already in hand rather than replacing a
-        # structured_output_invalid with something the caller cannot handle.
-        #
-        # Logged because the fallback is invisible otherwise: it returns a
-        # well-formed single-violation message, which is indistinguishable from a
-        # schema that genuinely broke one way. A hardcoded draft reaching this
-        # path silently reverted the field for every caller on an older draft,
-        # and nothing said so.
-        _log.warning(
-            "could not enumerate schema violations (%s: %s); reporting the first "
-            "violation only. The schema declares %s.",
-            type(enumeration_error).__name__,
-            enumeration_error,
-            schema.get("$schema", "no $schema, so the latest draft applies"),
-        )
-        errors = []
-    if not errors:
-        return f"{exc.json_path}: {exc.message}"
-    return "\n".join(f"{e.json_path}: {e.message}" for e in errors)
+    return f"{exc.json_path}: {exc.message}"
 
 
 _SCHEMA_DIRECTIVE_TEMPLATE = (
