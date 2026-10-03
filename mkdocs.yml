@@ -62,6 +62,13 @@ plugins:
   - llmstxt:
       full_output: llms-full.txt
       sections:
+        # First, because it is the orientation an agent needs before any of
+        # the rest parses: what the framework is, what it is not, and the
+        # shapes that are not deducible from the API surface. These two files
+        # are also the generator's input for the AGENTS.md bundled in the
+        # wheel, so the ingest and the installed guide say the same thing.
+        Agent orientation:
+          - agent/*.md
         Getting Started:
           - getting-started/*.md
         Concepts:
