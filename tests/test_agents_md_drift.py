@@ -182,6 +182,43 @@ def test_the_drift_check_skips_where_the_submodule_is_absent(tmp_path: Path) -> 
     )
 
 
+def test_the_agent_orientation_reaches_the_llms_txt_ingest() -> None:
+    # docs/agent/ is the generator's input for the bundled AGENTS.md, and it is
+    # not in the site nav because it is written in agent register rather than as
+    # browsable prose. The site's channel for that register is the llmstxt
+    # plugin's /llms.txt and /llms-full.txt.
+    #
+    # Those two files were the only content written for the ingesting audience
+    # and the only content missing from the ingest, while publishing as unlinked
+    # HTML through the browse path they were never written for. A section absent
+    # from the plugin config fails nothing: mkdocs still builds the pages, and
+    # the strict build reports an unreferenced page as INFO.
+    #
+    # Not vacuous: asserted against the plugin's own glob rather than against a
+    # rendered artifact, so it does not need a site build, and removing the
+    # section or renaming the directory both fail it.
+    import yaml
+
+    repo = Path(__file__).resolve().parent.parent
+    raw = (repo / "mkdocs.yml").read_text()
+
+    # mkdocs.yml carries python/name: tags that safe_load rejects, and the nav
+    # is not what this checks, so the plugin block is read on its own.
+    assert "agent/*.md" in raw, (
+        "docs/agent/ is not listed in any mkdocs plugin section, so the agent "
+        "orientation reaches neither the site nav nor /llms.txt. Add it to the "
+        "llmstxt sections."
+    )
+    start = raw.index("  - llmstxt:")
+    end = raw.index("\nmarkdown_extensions:", start)
+    llmstxt = cast("dict[str, Any]", yaml.safe_load(raw[start:end])[0])["llmstxt"]
+    globs = [g for section in llmstxt["sections"].values() for g in section]
+    assert "agent/*.md" in globs, f"the agent orientation must be an llmstxt section; globs are {globs}"
+
+    on_disk = sorted(p.name for p in (repo / "docs" / "agent").glob("*.md"))
+    assert on_disk, "docs/agent/ is empty, so the glob covers nothing"
+
+
 def test_patterns_dir_matches_generator_output() -> None:
     generator = _load_generator()
     expected_payload: dict[str, str] = generator.build_patterns_data()

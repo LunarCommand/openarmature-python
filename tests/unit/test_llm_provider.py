@@ -3516,6 +3516,43 @@ async def test_per_attempt_override_with_extras_merges_per_key() -> None:
     assert bodies[1]["keep"] == 1, "every unmentioned base key inherits, not just the first"
 
 
+async def test_a_collision_with_no_override_in_play_gets_no_merge_advice() -> None:
+    # The merge advice explains a collision assembled from two configs. A caller
+    # who put a declared field and an extras key of that name in ONE config, with
+    # no retry schedule anywhere, has no second channel to be told about, and the
+    # section 8.1 message already names both values.
+    #
+    # Caught by running examples/provider-extras, not by a unit test: every test
+    # for the hint supplied a per_attempt_override, so the no-override path was
+    # never exercised and the advice fired there claiming an override existed.
+    #
+    # Not vacuous: the negative assertions are the whole test. The call raises
+    # either way, so only the message distinguishes a correct hint from a false
+    # one. Killed by passing an empty frozenset instead of None on the paths
+    # where no override applies.
+    def _unreached(_req: httpx.Request) -> httpx.Response:
+        raise AssertionError("the collision rejects before any request is sent")
+
+    provider = _collision_provider(_unreached)
+    try:
+        with pytest.raises(ProviderInvalidRequest) as caught:
+            await provider.complete(
+                [UserMessage(content="hi")],
+                config=RuntimeConfig(temperature=0.2, extras={"temperature": 0.9}),
+            )
+    finally:
+        await provider.aclose()
+
+    message = str(caught.value)
+    assert "temperature" in message, message
+    assert "managed field cannot be overridden" in message, message
+    assert "override" not in message.replace("overridden", ""), (
+        "no per-attempt override is in play, so the message must not mention one: " + message
+    )
+    assert "inherited" not in message, message
+    assert "channel" not in message, message
+
+
 async def test_merged_extras_key_colliding_with_an_overridden_field_rejects() -> None:
     # A base extras key is the section 6 escape hatch: unmanaged where it was
     # written, because the base leaves the declared field unset so the mapping
