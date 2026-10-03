@@ -43,11 +43,13 @@ three days later.
   models but you did not set.
 - **A matching value is a no-op, not an error.** Sending `0.2` in
   both places is not ambiguous, so it is allowed.
-- **Structural keys reject always.** `model`, `messages`, `tools`
-  and `tool_choice` are rejected even on a call that produced no
-  such field. That asymmetry is deliberate: it is what stops an
-  `extras` tool array from reaching the wire without passing tool
-  validation.
+- **Structural keys are managed unconditionally.** `model`,
+  `messages`, `tools` and `tool_choice` are managed whether or not
+  the mapping produced the field, so a *conflicting* value rejects
+  even on a call whose body carries nothing of that name. A matching
+  value is still a no-op, by the same rule as above. The asymmetry is
+  deliberate: it is what stops an `extras` tool array from reaching
+  the wire on a no-tools call without passing tool validation.
 - **`stop` merges instead of colliding**, because it realizes the
   same wire field as `stop_sequences`. Both lists arrive,
   concatenated and de-duplicated.
@@ -119,10 +121,10 @@ Three things in that output are the point.
   nothing manages them; `temperature` is there because the mapping
   produced it.
 - **`managed value None`** on the `tools` refusal is the structural
-  rule showing its work. The call declared no tools, so the mapping
-  produced nothing, and the key is still rejected. Every other
-  entry in the table would have been allowed under those
-  circumstances.
+  rule showing its work. The call declared no tools, so the managed
+  value is `None`, and a list conflicts with that. Every other entry
+  in the table is unmanaged on a call that did not produce it, so the
+  same extras key would have ridden through.
 - **`stop` accepted** is the merge arm. It is the only managed field
   in the OpenAI mapping that combines rather than collides.
 

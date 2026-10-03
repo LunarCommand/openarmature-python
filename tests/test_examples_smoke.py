@@ -24,8 +24,10 @@ from __future__ import annotations
 
 import runpy
 from pathlib import Path
+from typing import Any, cast
 
 import pytest
+import yaml
 
 EXAMPLES_DIR = Path(__file__).parent.parent / "examples"
 
@@ -47,6 +49,44 @@ DEMOS = [
     "structured-output-reask",
     "provider-extras",
 ]
+
+
+class _TolerantLoader(yaml.SafeLoader):
+    """SafeLoader that survives mkdocs-material's python tags.
+
+    `mkdocs.yml` carries `!!python/name:` values for the emoji extension, which
+    SafeLoader refuses and the unsafe loaders would execute. Ignoring unknown
+    tags parses the file without either.
+    """
+
+
+def _ignore_unknown_tag(loader: Any, suffix: str, node: Any) -> None:
+    return None
+
+
+for _prefix in (
+    "tag:yaml.org,2002:python/name:",
+    "tag:yaml.org,2002:python/object/apply:",
+):
+    # pyyaml ships no annotations for this classmethod, so reading it is
+    # unknown-typed under strict mode regardless of what the result is cast to.
+    _TolerantLoader.add_multi_constructor(_prefix, _ignore_unknown_tag)  # pyright: ignore[reportUnknownMemberType]
+
+
+def _nav_paths(nav: Any) -> list[str]:
+    """Every document path the nav references, at any depth.
+
+    A nav is nested lists of either a bare path or a one-key `{title: entry}`
+    mapping, where the entry is a path or another list. Only the leaf strings
+    are paths.
+    """
+    if isinstance(nav, str):
+        return [nav]
+    if isinstance(nav, list):
+        return [path for item in cast("list[Any]", nav) for path in _nav_paths(item)]
+    if isinstance(nav, dict):
+        return [path for value in cast("dict[str, Any]", nav).values() for path in _nav_paths(value)]
+    return []
 
 
 def test_every_example_directory_is_listed() -> None:
@@ -75,15 +115,23 @@ def test_every_example_has_a_published_docs_page() -> None:
     # Checked against the nav as well as the file, because a page absent from
     # `mkdocs.yml` is unreachable even when it exists, and `mkdocs build` reports
     # that as INFO rather than failing.
+    #
+    # The nav half reads the PARSED nav rather than the file's text. A substring
+    # search over mkdocs.yml is satisfied by a commented-out entry, by a mention
+    # in a comment, and by a path under `plugins:`, so it passes while the page
+    # is gone from the navigation. Which is the defect this guard exists to
+    # catch, one level up.
     docs_dir = EXAMPLES_DIR.parent / "docs" / "examples"
-    mkdocs = (EXAMPLES_DIR.parent / "mkdocs.yml").read_text()
+    config = yaml.load((EXAMPLES_DIR.parent / "mkdocs.yml").read_text(), Loader=_TolerantLoader)
 
     missing_page = sorted(name for name in DEMOS if not (docs_dir / f"{name}.md").is_file())
     assert not missing_page, (
         f"these examples have no docs page: {missing_page}. Add docs/examples/<name>.md for each."
     )
 
-    missing_nav = sorted(name for name in DEMOS if f"examples/{name}.md" not in mkdocs)
+    in_nav = set(_nav_paths(config.get("nav")))
+    assert in_nav, "parsed no nav entries at all, so the check below cannot mean anything"
+    missing_nav = sorted(name for name in DEMOS if f"examples/{name}.md" not in in_nav)
     assert not missing_nav, (
         f"these examples have a docs page that the nav does not reference: "
         f"{missing_nav}. Add each to the Examples section of mkdocs.yml."
