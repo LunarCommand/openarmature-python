@@ -73,8 +73,7 @@ changelog entry.
         "0.7.0"`.
       The rc and real-release pyproject bumps are SEPARATE COMMITS —
       one before each tag — because the normalized forms differ.
-      The version lands in **five** files, and two of them are easy to
-      miss because nothing fails until the artifact is built:
+      The version lands in **five** files:
       - `pyproject.toml` — `project.version`
       - `src/openarmature/__init__.py` — `__version__`
       - `tests/test_smoke.py` — the version assertion
@@ -86,6 +85,13 @@ changelog entry.
       All five in the same commit. The last two are generated, so run
       the generator and let `uv` touch the lock rather than editing
       either by hand.
+      Each of the last two is caught, so an omission shows up as a
+      failure rather than as a bad artifact — the point of listing them
+      is to know which failure means what:
+      - a stale `uv.lock` fails the `uv-lock` pre-commit hook at commit
+        time, and `uv sync --frozen` in both CI and the release workflow
+      - a stale bundled `AGENTS.md` fails
+        `test_agents_md_matches_generator_output`
 - [ ] **Branch state.** On `main`, clean working tree, latest pulled.
       Release tags should point at commits already on `main`.
 - [ ] **CI is green on `main`.** The release workflow's `test` job
