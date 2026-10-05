@@ -39,7 +39,17 @@ changelog entry.
 - [ ] **`CHANGELOG.md` is current.** Every commit since the previous
       release that changed user-visible behavior is reflected in the
       upcoming version's section. The date matches the day the rc tag
-      is pushed (refresh it again at the real-release step).
+      is pushed (refresh it again at the real-release step), **in the
+      releasing maintainer's local timezone, not UTC.** A tag pushed in
+      the evening US-Pacific carries a UTC timestamp on the following
+      day, so the two disagree for a few hours every night and a
+      reviewer reading UTC will call a correct heading stale. The
+      heading is a human record of when the work landed, so it follows
+      the human. Set it immediately before merging the version bump,
+      because setting it any earlier is what produces drift: v0.15.0
+      shipped a heading a day behind its own tag, and v0.17.0's was
+      nine days stale mid-cycle and needed correcting twice before it
+      was right at tag time.
 - [ ] **`conformance.toml` is current.** Any proposal whose impl
       landed in this cycle has its `[proposals."NNNN"]` entry — either
       newly added (set `since` to the version about to ship) or
@@ -63,8 +73,25 @@ changelog entry.
         "0.7.0"`.
       The rc and real-release pyproject bumps are SEPARATE COMMITS —
       one before each tag — because the normalized forms differ.
-      Also update `src/openarmature/__init__.py`'s `__version__` and
-      `tests/test_smoke.py`'s version assertion in the same commit.
+      The version lands in **five** files:
+      - `pyproject.toml` — `project.version`
+      - `src/openarmature/__init__.py` — `__version__`
+      - `tests/test_smoke.py` — the version assertion
+      - `uv.lock` — locks the local package's own version; `uv sync` or
+        any `uv run` refreshes it
+      - `src/openarmature/AGENTS.md` — stamps `version X.Y.Z (spec
+        vA.B.C)` into its header; regenerate with
+        `uv run python scripts/build_agents_md.py`
+      All five in the same commit. The last two are generated, so run
+      the generator and let `uv` touch the lock rather than editing
+      either by hand.
+      Each of the last two is caught, so an omission shows up as a
+      failure rather than as a bad artifact — the point of listing them
+      is to know which failure means what:
+      - a stale `uv.lock` fails the `uv-lock` pre-commit hook at commit
+        time, and `uv sync --frozen` in both CI and the release workflow
+      - a stale bundled `AGENTS.md` fails
+        `test_agents_md_matches_generator_output`
 - [ ] **Branch state.** On `main`, clean working tree, latest pulled.
       Release tags should point at commits already on `main`.
 - [ ] **CI is green on `main`.** The release workflow's `test` job
