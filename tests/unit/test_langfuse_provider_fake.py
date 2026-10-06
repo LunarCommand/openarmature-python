@@ -403,9 +403,6 @@ def test_the_classifier_agrees_with_a_real_langfuse_client() -> None:
     # on the path the fixture actually drives, while this file's other tests -- all
     # driving the fake -- passed. A double must not be the only witness for the
     # behaviour it exists to model, so drive the real SDK here.
-    from opentelemetry.sdk.trace import TracerProvider
-    from opentelemetry.sdk.trace.export import SimpleSpanProcessor
-    from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
     from tests.conformance.harness.langfuse_real_client import (
         CONFORMANCE_HOST,

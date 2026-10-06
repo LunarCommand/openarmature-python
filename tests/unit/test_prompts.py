@@ -572,8 +572,6 @@ async def test_manager_render_signature_returns_user_message() -> None:
 def test_manager_jinja_undefined_opt_out_renders_empty_for_missing_var() -> None:
     import jinja2
 
-    from openarmature.prompts import PromptManager
-
     prompt = TextPrompt(
         name="opt_out",
         version="v1",
@@ -930,7 +928,6 @@ def test_placeholder_segment_accepts_valid_name() -> None:
 def test_chat_prompt_rejects_duplicate_placeholder_at_construction() -> None:
     # Spec §3.1: placeholder names MUST be unique within a single
     # chat_template.  Construction-time enforcement.
-    from datetime import UTC, datetime
 
     from pydantic import ValidationError
 
@@ -987,13 +984,8 @@ async def test_chat_segment_template_cache_is_content_stable() -> None:
     # cache key derives from a SHA-256 of the segment source so it's
     # stable across process restarts (not the salted built-in
     # ``hash()``).
-    from datetime import UTC, datetime
 
-    from openarmature.prompts import (
-        ChatPrompt,
-        ContentSegment,
-        PromptManager,
-    )
+    from openarmature.prompts import ChatPrompt, ContentSegment
 
     backend = _DummyBackend()
     manager = PromptManager(backend)
@@ -1050,16 +1042,8 @@ async def test_inline_image_block_rejects_invalid_base64_at_render() -> None:
     # render-time check raises ``prompt_render_error`` rather than
     # letting the malformed payload reach the LLM provider where it
     # would surface as a provider-specific decode error.
-    from datetime import UTC, datetime
 
-    from openarmature.prompts import (
-        ChatPrompt,
-        ContentSegment,
-        ImageInlineBlockTemplate,
-        PromptManager,
-        PromptRenderError,
-        TextBlockTemplate,
-    )
+    from openarmature.prompts import ChatPrompt, ContentSegment, ImageInlineBlockTemplate, TextBlockTemplate
 
     backend = _DummyBackend()
     manager = PromptManager(backend)

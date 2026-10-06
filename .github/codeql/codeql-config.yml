@@ -28,15 +28,14 @@ name: "openarmature-python CodeQL config"
 query-filters:
   - exclude:
       id: py/ineffectual-statement
-  # ``py/unused-import`` produces false positives on three patterns
-  # this codebase relies on:
+  # ``py/unused-import`` produces false positives on patterns this
+  # codebase relies on:
   #
-  # - Forward-reference casts: ``cast("FinishReason", x)`` /
-  #   ``cast("Checkpointer", capturing)``. CodeQL doesn't look
-  #   inside the string argument; pyright's strict mode does, AND
-  #   raises ``reportUndefinedVariable`` if the name isn't in scope
-  #   (verified empirically — removing ``FinishReason`` from
-  #   ``openai.py``'s import yields the pyright error).
+  # - Quoted casts: ``cast("X", value)``. CodeQL doesn't look inside
+  #   the string argument; pyright's strict mode does, and raises
+  #   ``reportUndefinedVariable`` if the name isn't in scope. Where the
+  #   name is already imported at runtime the quotes buy nothing, so
+  #   prefer ``cast(X, value)``, which both tools see as a use.
   # - Subscripted base classes: ``class _TracingFanOutNode(
   #   FanOutNode[State, State]):``. The base class IS used; the
   #   generic subscription happens at class-definition time.

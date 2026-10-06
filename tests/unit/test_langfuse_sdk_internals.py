@@ -167,7 +167,6 @@ def test_the_installed_version_is_within_the_declared_range() -> None:
     # Non-vacuity for everything above: the checks are only meaningful against a
     # version we claim to support. This also surfaces drift between what is
     # installed and what openarmature.org/compatibility records as verified.
-    import re
     from importlib.metadata import version
 
     installed = version("langfuse")
