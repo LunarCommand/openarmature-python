@@ -22,9 +22,12 @@ from __future__ import annotations
 
 import ast
 import sys
+from collections.abc import Iterator
 from pathlib import Path
 
 ROOTS = ("src", "tests", "examples", "scripts")
+
+_SCOPES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)
 
 # (bound name, what it is bound to). `import a.b` binds `a` but loads `a.b`, so
 # the target is the full dotted path; a `from` import's target is the module,
@@ -50,21 +53,56 @@ def _is_type_checking_guard(node: ast.If) -> bool:
 
 
 def _module_bindings(body: list[ast.stmt]) -> set[Binding]:
-    # Runtime bindings only. An import under `if TYPE_CHECKING:` binds nothing
-    # at runtime, and a function re-importing the same name is the standard way
-    # to use it there without a circular import, so it is not a repeat.
+    # Only bindings every runtime path makes, so deleting a function-local
+    # import the guard flags can never leave the name undefined. An import
+    # under `if TYPE_CHECKING:` binds nothing at runtime, and a function
+    # re-importing the same name is the standard way to use it there without
+    # a circular import, so it is not a repeat.
     found: set[Binding] = set()
     for stmt in body:
         if isinstance(stmt, (ast.Import, ast.ImportFrom)):
             found.update(_bindings(stmt))
-        elif isinstance(stmt, ast.If) and not _is_type_checking_guard(stmt):
-            found |= _module_bindings(stmt.body) | _module_bindings(stmt.orelse)
+        elif isinstance(stmt, ast.If) and _is_type_checking_guard(stmt):
+            found |= _module_bindings(stmt.orelse)
+        elif isinstance(stmt, ast.If):
+            found |= _module_bindings(stmt.body) & _module_bindings(stmt.orelse)
         elif isinstance(stmt, ast.Try):
-            for block in (stmt.body, stmt.orelse, stmt.finalbody):
-                found |= _module_bindings(block)
-            for handler in stmt.handlers:
-                found |= _module_bindings(handler.body)
+            paths = [_module_bindings(stmt.body + stmt.orelse)]
+            paths += [_module_bindings(handler.body) for handler in stmt.handlers]
+            found |= paths[0].intersection(*paths[1:]) | _module_bindings(stmt.finalbody)
     return found
+
+
+def _own_scope(fn: ast.FunctionDef | ast.AsyncFunctionDef) -> Iterator[ast.AST]:
+    # Stops at nested scopes: an import in a nested class body sets a class
+    # attribute, and nested functions are checked as functions of their own.
+    stack: list[ast.AST] = list(fn.body)
+    while stack:
+        node = stack.pop()
+        yield node
+        if not isinstance(node, _SCOPES):
+            stack.extend(ast.iter_child_nodes(node))
+
+
+def _scope_names(fn: ast.FunctionDef | ast.AsyncFunctionDef, skip: set[Binding]) -> set[str]:
+    # Every name the function's own scope binds, except through imports whose
+    # binding is in `skip`. Comprehension targets are included; that only
+    # makes the guard report less.
+    args = fn.args
+    params = [*args.posonlyargs, *args.args, *args.kwonlyargs, args.vararg, args.kwarg]
+    names = {a.arg for a in params if a is not None}
+    for node in _own_scope(fn):
+        if isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
+            names.add(node.id)
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            names.add(node.name)
+        elif isinstance(node, (ast.Import, ast.ImportFrom)):
+            names.update(name for name, target in _bindings(node) if (name, target) not in skip)
+        elif isinstance(node, (ast.ExceptHandler, ast.MatchAs, ast.MatchStar)) and node.name:
+            names.add(node.name)
+        elif isinstance(node, ast.MatchMapping) and node.rest:
+            names.add(node.rest)
+    return names
 
 
 def check(path: Path) -> list[str]:
@@ -75,26 +113,33 @@ def check(path: Path) -> list[str]:
     module_level = _module_bindings(tree.body)
     if not module_level:
         return []
-    # Keyed on the import node, so an import inside a nested function is
-    # reported once against its innermost function rather than once per
-    # enclosing one. ast.walk is breadth-first, so the innermost function is
-    # the last to claim each node.
-    owner: dict[ast.AST, str] = {}
+    parents = {child: node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
+    problems: list[tuple[int, str]] = []
     for fn in ast.walk(tree):
-        if isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            for node in ast.walk(fn):
-                if isinstance(node, (ast.Import, ast.ImportFrom)):
-                    owner[node] = fn.name
-    problems = []
-    for node, fn_name in sorted(owner.items(), key=lambda item: item[0].lineno):
-        assert isinstance(node, (ast.Import, ast.ImportFrom))
-        for binding in _bindings(node):
-            if binding in module_level:
-                problems.append(
-                    f"{path}:{node.lineno}: `{binding[0]}` is already imported "
-                    f"at module level; this import in `{fn_name}` does nothing"
-                )
-    return problems
+        if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        # A name bound anywhere else in this function, or in an enclosing
+        # function, would not fall through to the module import if this
+        # import were deleted. Class scopes are skipped by name resolution.
+        shadowed = _scope_names(fn, module_level)
+        outer = parents.get(fn)
+        while outer is not None:
+            if isinstance(outer, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                shadowed |= _scope_names(outer, set())
+            outer = parents.get(outer)
+        for node in _own_scope(fn):
+            if not isinstance(node, (ast.Import, ast.ImportFrom)):
+                continue
+            for binding in _bindings(node):
+                if binding in module_level and binding[0] not in shadowed:
+                    problems.append(
+                        (
+                            node.lineno,
+                            f"{path}:{node.lineno}: `{binding[0]}` is already imported "
+                            f"at module level; this import in `{fn.name}` does nothing",
+                        )
+                    )
+    return [message for _, message in sorted(problems)]
 
 
 def main(argv: list[str]) -> int:
