@@ -204,7 +204,7 @@ async def test_chat_prompt_with_malformed_placeholder_fetches_then_raises_at_ren
     # ``PlaceholderSegment.model_construct`` to bypass construction-
     # time validators so the offending name reaches the render path
     # before surfacing.
-    from openarmature.prompts import ChatPrompt, PlaceholderSegment, PromptManager, PromptRenderError
+    from openarmature.prompts import ChatPrompt, PlaceholderSegment, PromptRenderError
 
     chat_result = _chat_client_with_raw_prompt(
         [

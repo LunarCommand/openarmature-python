@@ -1316,7 +1316,7 @@ class OpenAIProvider:
             finish_reason = "tool_calls"
         if finish_reason not in {"stop", "length", "tool_calls", "content_filter", "error"}:
             finish_reason = "error"
-        finish_reason_typed = cast("FinishReason", finish_reason)
+        finish_reason_typed = cast(FinishReason, finish_reason)
 
         # Build the assistant message. Tool calls under
         # finish_reason="error" may carry malformed argument JSON per

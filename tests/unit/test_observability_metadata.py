@@ -134,10 +134,7 @@ def test_current_invocation_metadata_empty_outside_invocation() -> None:
 def test_set_invocation_metadata_augments_existing() -> None:
     async def _runner() -> dict[str, Any]:
         # Simulate the engine setting initial metadata.
-        from openarmature.observability.metadata import (
-            _set_invocation_metadata,
-            validate_invocation_metadata,
-        )
+        from openarmature.observability.metadata import _set_invocation_metadata
 
         token = _set_invocation_metadata(validate_invocation_metadata({"tenantId": "acme"}))
         try:
@@ -155,11 +152,7 @@ def test_set_invocation_metadata_augments_existing() -> None:
 
 def test_set_invocation_metadata_overwrites_existing_key() -> None:
     async def _runner() -> dict[str, Any]:
-        from openarmature.observability.metadata import (
-            _reset_invocation_metadata,
-            _set_invocation_metadata,
-            validate_invocation_metadata,
-        )
+        from openarmature.observability.metadata import _reset_invocation_metadata, _set_invocation_metadata
 
         token = _set_invocation_metadata(validate_invocation_metadata({"phase": "draft"}))
         try:
@@ -712,11 +705,7 @@ async def test_terminal_failure_discards_final_failed_attempt_writes() -> None:
     # metadata ContextVar is back at the pre-attempt baseline — no
     # leak of the final failed attempt's writes.
     from openarmature.graph.middleware import RetryConfig, RetryMiddleware, compose_chain
-    from openarmature.observability.metadata import (
-        _reset_invocation_metadata,
-        _set_invocation_metadata,
-        validate_invocation_metadata,
-    )
+    from openarmature.observability.metadata import _reset_invocation_metadata, _set_invocation_metadata
 
     attempts: list[int] = []
 
@@ -753,11 +742,7 @@ async def test_cancellation_discards_in_flight_attempt_writes() -> None:
     # propagate (no retry, no swallow), so the reset must happen IN
     # ADDITION to, not instead of, propagating ``CancelledError``.
     from openarmature.graph.middleware import RetryConfig, RetryMiddleware, compose_chain
-    from openarmature.observability.metadata import (
-        _reset_invocation_metadata,
-        _set_invocation_metadata,
-        validate_invocation_metadata,
-    )
+    from openarmature.observability.metadata import _reset_invocation_metadata, _set_invocation_metadata
 
     attempts: list[int] = []
 
@@ -793,7 +778,6 @@ def test_validate_rejects_the_openarmature_underscore_namespace() -> None:
     # namespace in the same sentence as four new exact names, which makes "a few
     # more exact matches" the natural misreading; a name no mapping emits, like
     # the one below, is the case that tells the two readings apart.
-    from openarmature.observability.metadata import validate_invocation_metadata
 
     # Matched on the RULE, not the echoed key. The message interpolates the key,
     # so `match="openarmature_"` succeeded for any ValueError naming it,
@@ -809,7 +793,6 @@ def test_validate_rejects_the_0119_reserved_names(key: str) -> None:
     # `error_message` absent under the default privacy posture: an unreserved
     # caller key of that name lands unopposed in the very field 0118 requires to
     # be absent, reintroducing the leak through the metadata channel.
-    from openarmature.observability.metadata import validate_invocation_metadata
 
     # The exact-name rule specifically, not merely "a rejection happened": these
     # four are reserved by NAME, and matching the rule keeps the test honest if

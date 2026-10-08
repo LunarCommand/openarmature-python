@@ -2014,7 +2014,6 @@ async def test_call_level_retry_fixture_per_attempt_spans(fixture_id: str) -> No
     # observer renders one span per event; in production the engine's
     # serial queue carries them, here they are captured then replayed.
     import json
-    from pathlib import Path
 
     import httpx
     import yaml
@@ -2160,7 +2159,6 @@ async def test_call_level_reask_retry_fixture(fixture_id: str) -> None:
     # harness (which has no observer), mirroring
     # test_call_level_retry_fixture_per_attempt_spans above.
     import json
-    from pathlib import Path
 
     import httpx
     import yaml
@@ -2404,7 +2402,6 @@ def test_install_log_bridge_is_idempotent() -> None:
     the deprecated ``opentelemetry.sdk._logs.LoggingHandler`` used
     to emit a ``DeprecationWarning``. Any future regression that
     re-introduces the deprecated path fires here immediately."""
-    import warnings
 
     from opentelemetry.sdk._logs import LoggerProvider
 
@@ -2533,7 +2530,6 @@ def test_log_bridge_exports_records_with_correlation_id() -> None:
     Wrapped in ``warnings.catch_warnings("error")`` so the
     logging-handler migration's "no more deprecation warning"
     guarantee is asserted on the affirmative export path too."""
-    import warnings
 
     from opentelemetry.sdk._logs import LoggerProvider
     from opentelemetry.sdk._logs.export import (
@@ -2606,7 +2602,6 @@ async def test_shared_observer_concurrent_invocations_dont_collide() -> None:
     namespaces, no longer closes another in-flight invocation's span
     on a new event, and produces N distinct trace_ids for N
     concurrent invocations on the same compiled graph."""
-    import asyncio
 
     exporter = InMemorySpanExporter()
     observer = OTelObserver(span_processor=SimpleSpanProcessor(exporter))
@@ -2672,7 +2667,6 @@ async def test_concurrent_fan_out_no_lifo_violation() -> None:
     hazard goes away. This test drives a fan-out with three
     instances and asserts the run completes without the warnings
     that the suppressed guards would have produced."""
-    import warnings
 
     class _ParentState(State):
         items: list[int] = Field(default_factory=list[int])
@@ -2685,7 +2679,6 @@ async def test_concurrent_fan_out_no_lifo_violation() -> None:
     async def _double(s: _ChildState) -> dict[str, int]:
         # Yield to give other instances a chance to interleave their
         # started/completed events on the observer queue.
-        import asyncio
 
         await asyncio.sleep(0)
         return {"out": s.item * 2}
@@ -2821,7 +2814,6 @@ async def test_concurrent_fan_out_llm_spans_parent_under_calling_instance() -> N
     calling-node identity (namespace_prefix + attempt_index +
     fan_out_index threaded via ContextVar onto the LLM event
     payload) is what makes this attribution correct."""
-    import asyncio
 
     import httpx
 
@@ -3200,11 +3192,7 @@ async def test_prompt_context_propagates_cross_task_via_provider_complete() -> N
     from datetime import UTC, datetime
 
     import httpx
-    from opentelemetry.sdk.trace.export.in_memory_span_exporter import (
-        InMemorySpanExporter,
-    )
 
-    from openarmature.graph import END, GraphBuilder, State
     from openarmature.llm import OpenAIProvider, UserMessage
     from openarmature.prompts import (
         PromptResult,
@@ -3419,7 +3407,6 @@ async def test_metadata_augmentation_in_fan_out_isolates_per_instance() -> None:
     # parent span, NOT the invocation span, and NOT sibling instances'
     # spans. Each ``inner_ask`` span ends up tagged with its own
     # ``product_id`` only.
-    import asyncio
 
     from openarmature.observability.correlation import current_fan_out_index
     from openarmature.observability.metadata import set_invocation_metadata
@@ -3533,7 +3520,6 @@ async def test_metadata_augmentation_in_parallel_branches_skips_sibling() -> Non
     # OTel observer's open-span key disambiguates concurrent same-
     # named inner nodes across sibling branches (pre-fix, both
     # branches' ``ask`` opens collided on the same _StackKey).
-    import asyncio
 
     from openarmature.graph import BranchSpec
     from openarmature.observability.metadata import set_invocation_metadata
@@ -4582,7 +4568,6 @@ async def test_metadata_augmentation_updates_per_branch_dispatch_span() -> None:
     # ``_collect_augmentation_targets`` per-branch-dispatch lookup
     # added in PR 9.  Sibling-skip is still enforced — the OTHER
     # branch's dispatch span MUST NOT carry the augmenter's key.
-    import asyncio
 
     from openarmature.graph import BranchSpec
     from openarmature.observability.metadata import set_invocation_metadata
@@ -4674,7 +4659,6 @@ async def test_nested_fan_out_augmentation_reaches_outer_instance_dispatch_span(
     # is exercised by the resolver picking the matching outer
     # dispatch span (and skipping the sibling) on each leaf's
     # augmentation.
-    import asyncio
 
     from openarmature.observability.metadata import set_invocation_metadata
 
@@ -4800,7 +4784,6 @@ async def test_nested_fan_out_in_fan_out_dispatch_lineage() -> None:
     # lineage keys, no cross-instance collision -- before the fix the second
     # collided with the first), and an inner leaf's augmentation reaches its own
     # outer instance dispatch, not the sibling's, and not the shared NODE spans.
-    import asyncio
 
     from openarmature.observability.metadata import set_invocation_metadata
 
@@ -4906,7 +4889,6 @@ async def test_parallel_branches_in_fan_out_dispatch_lineage() -> None:
     # Each outer instance gets its own per-branch dispatch spans (distinct keys,
     # no cross-instance collision); only the augmenting branch + its outer
     # instance dispatch carry the augmentation, not the sibling branch.
-    import asyncio
 
     from openarmature.graph import BranchSpec
     from openarmature.observability.metadata import set_invocation_metadata
@@ -5309,7 +5291,6 @@ async def test_orphan_parent_survives_populate_caller_metadata_off() -> None:
     # test that only checked the parent would have caught this one but not the
     # next thing the openers learn to raise on.
     import json
-    import warnings
 
     import httpx
 
@@ -5693,7 +5674,6 @@ async def test_failure_isolated_marker_survives_orphan_path_synthesis() -> None:
     # End-to-end on purpose. Unit-testing the metadata helpers in isolation does
     # NOT pin this: reverting the openers' defensive read leaves those green,
     # because they never go through an opener.
-    import warnings
 
     from openarmature.graph import FailureIsolationMiddleware
     from openarmature.graph.parallel_branches import BranchSpec

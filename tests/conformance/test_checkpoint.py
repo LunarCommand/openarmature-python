@@ -634,7 +634,7 @@ async def _run_seeded_resume_case(spec: Mapping[str, Any], *, top_level: Mapping
     subgraphs = _build_subgraphs_for(spec, top_level, leaf_value_recorder=leaf_values)
     built = build_graph(spec, subgraphs=subgraphs, trace=[], leaf_value_recorder=leaf_values)
     checkpointer = InMemoryCheckpointer()
-    built.builder.with_checkpointer(cast("Checkpointer", checkpointer))
+    built.builder.with_checkpointer(cast(Checkpointer, checkpointer))
     compiled = built.builder.compile()
 
     seeded_block = cast("Mapping[str, Any]", spec["seeded_record"])
@@ -710,7 +710,7 @@ async def _run_one_case(spec: Mapping[str, Any], *, top_level: Mapping[str, Any]
     if declared_schema_version is not None:
         built.state_cls.schema_version = str(declared_schema_version)
 
-    builder.with_checkpointer(cast("Checkpointer", capturing))
+    builder.with_checkpointer(cast(Checkpointer, capturing))
     compiled = builder.compile()
 
     # Per proposal 0028: ``runtime_state_subclass`` constructs a Python
@@ -1676,7 +1676,7 @@ async def _seed_and_resume(
     subgraphs = _build_subgraphs_for(outer_case, top_level, leaf_value_recorder=leaf_values)
     built = build_graph(outer_case, subgraphs=subgraphs, trace=[], leaf_value_recorder=leaf_values)
     cp = InMemoryCheckpointer()
-    built.builder.with_checkpointer(cast("Checkpointer", cp))
+    built.builder.with_checkpointer(cast(Checkpointer, cp))
     compiled = built.builder.compile()
     inv = "seeded-cov"
     await cp.save(inv, _build_seeded_record(seeded, inv))

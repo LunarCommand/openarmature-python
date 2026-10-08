@@ -7383,8 +7383,6 @@ async def _run_orphan_fallback_case(case: Mapping[str, Any], spec: Mapping[str, 
 
     from openarmature.llm import OpenAIProvider, UserMessage  # noqa: PLC0415
 
-    from .adapter import build_graph  # noqa: PLC0415
-
     subgraph_specs = _merged_subgraph_specs(case, spec)
     mock_bodies = _mock_bodies_by_request_content(case, subgraph_specs)
 
@@ -8060,7 +8058,6 @@ async def _run_llm_cache_fixture_case(case: Mapping[str, Any]) -> None:
     from openarmature.graph import END, GraphBuilder
     from openarmature.llm import OpenAIProvider, UserMessage
     from openarmature.llm.response import Response
-    from openarmature.observability.otel import OTelObserver
 
     from .adapter import build_state_cls
 

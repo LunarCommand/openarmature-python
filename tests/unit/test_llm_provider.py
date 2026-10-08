@@ -899,7 +899,6 @@ async def test_complete_leaves_cached_tokens_none_when_provider_silent() -> None
 
 
 def test_runtime_config_from_partial_drops_nones() -> None:
-    from openarmature.llm import RuntimeConfig
 
     config = RuntimeConfig.from_partial(temperature=0.7, max_tokens=None, top_p=0.9, seed=None)
 
@@ -919,7 +918,6 @@ def test_runtime_config_from_partial_forwards_extras() -> None:
     # `from_partial` drops None-valued entries; it does not route undeclared
     # names. Extras reach the container the same way they do everywhere else,
     # so there is one spelling rather than two (0122).
-    from openarmature.llm import RuntimeConfig
 
     config = RuntimeConfig.from_partial(temperature=0.5, extras={"repetition_penalty": 1.05}, top_k=None)
 
@@ -932,7 +930,6 @@ def test_runtime_config_from_partial_forwards_extras() -> None:
 
 
 def test_runtime_config_from_partial_empty() -> None:
-    from openarmature.llm import RuntimeConfig
 
     config = RuntimeConfig.from_partial()
 
@@ -1386,7 +1383,6 @@ async def test_complete_failure_emits_typed_llm_failed_event_only() -> None:
     # success-only — no LlmCompletionEvent fires on failure. v0.13.0
     # dropped sentinel-namespace NodeEvent emission for LLM events
     # entirely; no NodeEvent fires on success OR failure.
-    from openarmature.graph.events import LlmCompletionEvent, LlmFailedEvent, NodeEvent
 
     def _503(_req: httpx.Request) -> httpx.Response:
         return httpx.Response(503, json={"error": {"message": "down"}})
@@ -1425,8 +1421,6 @@ async def test_complete_structured_output_failure_event_carries_response_surface
     # response-side surface (finish_reason for retry triage, output_content,
     # usage, response identity), and error_message carries the failing
     # locator (the error_message) rather than just the terse summary.
-    from openarmature.graph.events import LlmFailedEvent
-    from openarmature.llm import StructuredOutputInvalid
 
     schema = {
         "type": "object",
@@ -1492,7 +1486,6 @@ def test_structured_output_builder_projects_empty_content_to_none() -> None:
     # the structured path -- an empty assistant message with no tool calls fails
     # earlier as provider_invalid_response, and a tool_calls response skips
     # structured validation -- so this pins the projection at the builder.
-    from openarmature.llm import StructuredOutputInvalid
 
     provider = OpenAIProvider(base_url="http://test", model="m", api_key="k")
     exc = StructuredOutputInvalid(
@@ -1729,7 +1722,7 @@ async def test_call_level_retry_per_attempt_override_varies_sampling() -> None:
     # override[i]. Non-overridden base fields (top_p) carry through every
     # attempt. The caller's config is never mutated, and each retry attempt
     # event carries retry_reason="transient" (None on the base attempt).
-    from openarmature.llm import LlmRetryConfig, RuntimeConfig
+    from openarmature.llm import LlmRetryConfig
 
     bodies: list[dict[str, Any]] = []
     calls = [0]
@@ -1767,7 +1760,7 @@ async def test_call_level_retry_per_attempt_override_varies_sampling() -> None:
 async def test_call_level_retry_per_attempt_override_last_entry_carries_forward() -> None:
     # Proposal 0095a: when the override schedule is shorter than the retry
     # count, the last entry carries forward.
-    from openarmature.llm import LlmRetryConfig, RuntimeConfig
+    from openarmature.llm import LlmRetryConfig
 
     bodies: list[dict[str, Any]] = []
     calls = [0]
@@ -1797,7 +1790,7 @@ async def test_call_level_retry_per_attempt_override_last_entry_carries_forward(
 async def test_call_level_retry_empty_override_uses_base_config() -> None:
     # An empty per_attempt_override schedule applies no override: every attempt
     # replays the base config, same as a plain RetryConfig.
-    from openarmature.llm import LlmRetryConfig, RuntimeConfig
+    from openarmature.llm import LlmRetryConfig
 
     bodies: list[dict[str, Any]] = []
     calls = [0]
@@ -1907,7 +1900,7 @@ async def test_reask_off_by_default_raises_without_retry() -> None:
     # Proposal 0095b (064): absent a reask builder, structured_output_invalid is
     # non-transient and raises on attempt 0 -- the loop does not iterate even
     # with max_attempts=2, so the second response is never consumed.
-    from openarmature.llm import LlmRetryConfig, StructuredOutputInvalid
+    from openarmature.llm import LlmRetryConfig
 
     bodies: list[dict[str, Any]] = []
     calls = [0]
@@ -1935,7 +1928,7 @@ async def test_reask_budget_exhausted_raises_final() -> None:
     # Proposal 0095b (063): reask consumes the max_attempts budget; when
     # exhausted with every attempt invalid, the final structured_output_invalid
     # propagates.
-    from openarmature.llm import LlmRetryConfig, StructuredOutputInvalid
+    from openarmature.llm import LlmRetryConfig
 
     bodies: list[dict[str, Any]] = []
     calls = [0]
@@ -1969,7 +1962,7 @@ async def test_reask_composes_with_override_and_accumulates() -> None:
     # Proposal 0095b (065): reask composes with a per-attempt override, and the
     # transcript accumulates across reask retries. Two DIFFERENT invalid outputs
     # then a valid one -> attempt 2 carries both prior (assistant + user) pairs.
-    from openarmature.llm import LlmRetryConfig, RuntimeConfig
+    from openarmature.llm import LlmRetryConfig
 
     bodies: list[dict[str, Any]] = []
     calls = [0]
@@ -2092,8 +2085,7 @@ async def test_reask_builder_failure_surfaces_original_error(bad_reask: Any) -> 
     # exception-isolated. A builder that returns a non-str or raises MUST NOT
     # leak a non-§7 error; the original structured_output_invalid re-raises
     # through the terminal path, so exactly one terminal LlmFailedEvent fires.
-    from openarmature.graph.events import LlmCompletionEvent, LlmFailedEvent
-    from openarmature.llm import LlmRetryConfig, StructuredOutputInvalid
+    from openarmature.llm import LlmRetryConfig
 
     bodies: list[dict[str, Any]] = []
     calls = [0]
@@ -2126,7 +2118,7 @@ async def test_reask_builder_failure_surfaces_original_error(bad_reask: Any) -> 
 async def test_per_attempt_override_none_field_inherits_base() -> None:
     # Adversarial-review finding: an override field explicitly set to None
     # inherits the base (per §6 null-skip), rather than clearing it to null.
-    from openarmature.llm import LlmRetryConfig, RuntimeConfig
+    from openarmature.llm import LlmRetryConfig
 
     bodies: list[dict[str, Any]] = []
     calls = [0]
@@ -2158,7 +2150,6 @@ async def test_per_attempt_override_none_field_inherits_base() -> None:
 async def test_call_level_retry_plain_config_replays_identically() -> None:
     # A plain RetryConfig (no per_attempt_override) preserves the byte-identical
     # replay: every attempt sends the base config unchanged.
-    from openarmature.llm import RuntimeConfig
 
     bodies: list[dict[str, Any]] = []
     calls = [0]
@@ -2520,7 +2511,6 @@ async def test_llm_completion_event_request_params_only_carries_supplied_keys() 
     # caller-supplied gen_ai.request.* keys appear; unset RuntimeConfig
     # fields are omitted from the mapping (NOT included with None
     # values).
-    from openarmature.llm import RuntimeConfig
 
     events, token = _collecting_dispatch()
     transport = _make_openai_response_with_usage(
@@ -2544,7 +2534,6 @@ async def test_llm_completion_event_request_params_only_carries_supplied_keys() 
 async def test_llm_completion_event_request_extras_flows_through() -> None:
     # Proposal 0057 request_extras: RuntimeConfig extras pass-through
     # in native mapping form (not JSON-encoded).
-    from openarmature.llm import RuntimeConfig
 
     events, token = _collecting_dispatch()
     transport = _make_openai_response_with_usage(
@@ -2847,7 +2836,6 @@ async def test_wire_byte_equality_across_dict_key_insertion_order_on_tool_parame
     # key insertion order MUST produce byte-identical wire bytes.
     # Caller-supplied JSON Schemas are the primary source of byte
     # drift under APC; locking them down here pins the contract.
-    from openarmature.llm import Tool
 
     captured: list[bytes] = []
 
@@ -2919,7 +2907,6 @@ async def test_wire_byte_equality_across_runtime_config_extras_dict_order() -> N
     # insertion order. Catches the vLLM ``guided_decoding={"choice":
     # ["a", "b"]}``-style extras where dict-typed values are the
     # primary cache-stability hit.
-    from openarmature.llm import RuntimeConfig
 
     captured: list[bytes] = []
 
@@ -2967,7 +2954,6 @@ async def test_wire_byte_array_ordering_preserved() -> None:
     # preserved — only dict KEYS get sorted. Verify that swapping
     # the order of items in ``stop_sequences`` produces DIFFERENT
     # wire bytes (the canonicalizer must not silently sort the list).
-    from openarmature.llm import RuntimeConfig
 
     captured: list[bytes] = []
 
@@ -3373,7 +3359,6 @@ def test_undeclared_fields_must_go_in_the_extras_container(factory: str, declare
     #
     # The rejection is the assertion that matters: without it the flat form keeps
     # working alongside the container and there are two spellings.
-    from openarmature.llm import RuntimeConfig
     from openarmature.prompts import SamplingConfig
     from openarmature.retrieval import EmbeddingRuntimeConfig, RerankRuntimeConfig
 
