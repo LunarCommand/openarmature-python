@@ -24,12 +24,12 @@ import ast
 import importlib
 from collections import defaultdict
 from collections.abc import Iterator
-from typing import Any, cast
+from typing import Any, cast, get_args
 
 from pydantic import BaseModel
 
 from . import test_case_vocabulary as case_level
-from .harness.vocabulary import KNOWN_UNREAD_NESTED, NESTED_EXTRAS, NESTED_MODELS
+from .harness.vocabulary import KNOWN_UNREAD_NESTED, NESTED_EXTRAS, NESTED_MODELS, POSITION_BLIND_READS
 
 _CALL_LISTS = ("calls", "secondary_calls", "tertiary_calls")
 _SINGULAR_BODIES = ("subgraph", "subgraph_with_idx", "graph")
@@ -37,10 +37,14 @@ _PLURAL_BODIES = ("subgraphs", "inner_subgraphs")
 
 # Runners that validate their fixtures into a strict model and read the parsed
 # result by attribute, paired with that model's name. Only in these runners does
-# an attribute access count as a read: elsewhere `client.traces` would vouch for
+# an attribute access count as a read, and only off a value typed as one of the
+# capability's fixture models: elsewhere `client.traces` would vouch for
 # observability's `traces` assertion without reading it.
 _MODEL_PARSED_RUNNERS: dict[str, tuple[str, str]] = {
     "prompt-management": ("tests/conformance/test_prompt_management.py", "PromptManagementFixture"),
+}
+_FIXTURE_MODELS: dict[str, str] = {
+    "prompt-management": "tests.conformance.harness.prompt_management",
 }
 
 # `(capability, fixture, position, where, key)`
@@ -123,24 +127,142 @@ def _vocabulary(position: str) -> frozenset[str]:
     fields: set[str] = set()
     for target in NESTED_MODELS[position]:
         module, _, name = target.rpartition(".")
-        model = cast("type[BaseModel]", getattr(importlib.import_module(module), name))
+        model = cast(type[BaseModel], getattr(importlib.import_module(module), name))
         fields |= set(model.model_fields)
     return frozenset(fields) | NESTED_EXTRAS[position]
 
 
-def _attribute_reads() -> dict[str, set[str]]:
-    """Attribute names each model-parsed runner reads, by capability."""
+def _model_in(annotation: Any) -> type[BaseModel] | None:
+    """The one pydantic model an annotation holds, looking through Optional and containers."""
+    if isinstance(annotation, type) and issubclass(annotation, BaseModel):
+        return annotation
+    found = {m for arg in get_args(annotation) if (m := _model_in(arg)) is not None}
+    return found.pop() if len(found) == 1 else None
+
+
+class _ModelValues:
+    """Which names in one function hold a fixture model value, and which model."""
+
+    def __init__(
+        self, fn: ast.FunctionDef | ast.AsyncFunctionDef, models: dict[str, type[BaseModel]]
+    ) -> None:
+        self.models = models
+        self.env: dict[str, type[BaseModel]] = {}
+        # A list of tuples, such as `[(fixture.manager, fixture.calls), ...]`,
+        # unpacked by a `for a, b in ...`: the model at each tuple position.
+        self.rows: dict[str, list[type[BaseModel] | None]] = {}
+        args = fn.args
+        for arg in [*args.posonlyargs, *args.args, *args.kwonlyargs]:
+            self.bind(arg.arg, self.annotated(arg.annotation))
+        # Bindings can feed each other in any order, so settle them first.
+        for _ in range(4):
+            for node in ast.walk(fn):
+                self.learn(node)
+
+    def annotated(self, node: ast.expr | None) -> type[BaseModel] | None:
+        if node is None:
+            return None
+        named = {self.models[n.id] for n in ast.walk(node) if isinstance(n, ast.Name) and n.id in self.models}
+        return named.pop() if len(named) == 1 else None
+
+    def bind(self, target: ast.expr | str, model: type[BaseModel] | None) -> None:
+        name = target if isinstance(target, str) else target.id if isinstance(target, ast.Name) else None
+        if name is not None and model is not None:
+            self.env[name] = model
+
+    def type_of(self, expr: ast.expr) -> Any:
+        if isinstance(expr, ast.Name):
+            return self.env.get(expr.id)
+        if isinstance(expr, ast.Attribute) and (owner := _model_in(self.type_of(expr.value))) is not None:
+            field = owner.model_fields.get(expr.attr)
+            return field.annotation if field is not None else None
+        if (
+            isinstance(expr, ast.Call)
+            and isinstance(expr.func, ast.Attribute)
+            and expr.func.attr == "model_validate"
+            and isinstance(expr.func.value, ast.Name)
+        ):
+            return self.models.get(expr.func.value.id)
+        return None
+
+    def row_of(self, value: ast.expr) -> list[type[BaseModel] | None] | None:
+        if not isinstance(value, ast.List) or not value.elts:
+            return None
+        tuples = [e.elts for e in value.elts if isinstance(e, ast.Tuple)]
+        if len(tuples) != len(value.elts) or len({len(t) for t in tuples}) != 1:
+            return None
+        columns = zip(*([_model_in(self.type_of(e)) for e in t] for t in tuples), strict=True)
+        return [col[0] if len(set(col)) == 1 else None for col in columns]
+
+    def learn(self, node: ast.AST) -> None:
+        if isinstance(node, ast.Assign) and len(node.targets) == 1:
+            target = node.targets[0]
+            if isinstance(target, ast.Name) and (row := self.row_of(node.value)) is not None:
+                self.rows[target.id] = row
+            self.bind(target, _model_in(self.type_of(node.value)))
+        elif isinstance(node, ast.AnnAssign):
+            self.bind(node.target, self.annotated(node.annotation))
+        elif isinstance(node, (ast.For, ast.AsyncFor, ast.comprehension)):
+            target = node.target
+            if isinstance(target, ast.Tuple) and isinstance(node.iter, ast.Name):
+                row = self.rows.get(node.iter.id, [])
+                if len(row) == len(target.elts):
+                    for element, model in zip(target.elts, row, strict=True):
+                        self.bind(element, model)
+            self.bind(target, _model_in(self.type_of(node.iter)))
+
+
+def _field_reads(src: str, models: dict[str, type[BaseModel]]) -> set[tuple[str, str]]:
+    """`(model, field)` for each field the source reads off a fixture model value.
+
+    A value is a fixture model when it comes from a parameter or variable
+    annotated with one, a `<Model>.model_validate(...)` call, iteration over a
+    model-typed value, or an attribute of one. Any other receiver is ignored:
+    `backend.name` says nothing about `FixtureCall.name`.
+    """
+    reads: set[tuple[str, str]] = set()
+    for fn in ast.walk(ast.parse(src)):
+        if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        values = _ModelValues(fn, models)
+        for node in ast.walk(fn):
+            if (
+                isinstance(node, ast.Attribute)
+                and (owner := _model_in(values.type_of(node.value))) is not None
+            ):
+                if node.attr in owner.model_fields:
+                    reads.add((owner.__name__, node.attr))
+    return reads
+
+
+def _attribute_reads() -> dict[str, set[tuple[str, str]]]:
+    """`(model, field)` reads each model-parsed runner makes, by capability."""
     sources = case_level._runner_sources()  # noqa: SLF001
-    out: dict[str, set[str]] = {}
+    out: dict[str, set[tuple[str, str]]] = {}
     for capability, (path, model) in _MODEL_PARSED_RUNNERS.items():
         src = sources[path]
         assert f"{model}.model_validate(" in src, f"{path} no longer validates into {model}"
-        out[capability] = {n.attr for n in ast.walk(ast.parse(src)) if isinstance(n, ast.Attribute)}
+        module = importlib.import_module(_FIXTURE_MODELS[capability])
+        models = {
+            name: obj
+            for name, obj in vars(module).items()
+            if isinstance(obj, type) and issubclass(obj, BaseModel) and obj.__module__ == module.__name__
+        }
+        out[capability] = _field_reads(src, models)
     return out
 
 
-def _unread() -> dict[tuple[str, str], set[str]]:
-    """`(position, key)` to the running fixtures declaring it that no owning runner reads."""
+def _read_as_attribute(reads: set[tuple[str, str]], position: str, key: str) -> bool:
+    return any((target.rpartition(".")[2], key) in reads for target in NESTED_MODELS[position])
+
+
+def _reads() -> tuple[dict[tuple[str, str], set[str]], dict[tuple[str, str], set[str]]]:
+    """`(unread, literal)`, both keyed by `(position, key)` on running fixtures.
+
+    `unread` maps to the fixtures declaring a key no owning runner reads.
+    `literal` maps to the capabilities whose runner counts as reading it only
+    because the key's string appears there.
+    """
     positions = case_level._read_positions()  # noqa: SLF001
     attributes = _attribute_reads()
     owners = case_level._runner_owners()  # noqa: SLF001
@@ -148,14 +270,49 @@ def _unread() -> dict[tuple[str, str], set[str]]:
     shared = {"harness/", "adapter.py", "middleware_seam.py"}
     read_via = set(case_level.READ_VIA)
     unread: dict[tuple[str, str], set[str]] = defaultdict(set)
+    literal: dict[tuple[str, str], set[str]] = defaultdict(set)
     for capability, fixture, position, _, key in _declared():
-        if fixture not in executed or key in read_via or key in attributes.get(capability, set()):
+        if fixture not in executed or key in read_via:
+            continue
+        # A model-parsed runner reads its nested keys as model fields, so a
+        # string literal there is some other mapping's key: `fetched_prompt["label"]`
+        # would vouch for a call's own `label`.
+        if capability in attributes:
+            if not _read_as_attribute(attributes[capability], position, key):
+                unread[(position, key)].add(fixture)
             continue
         seen = positions.get(key, set())
         if seen & owners[capability] or any(any(m in src for m in shared) for src in seen):
+            literal[(position, key)].add(capability)
             continue
         unread[(position, key)].add(fixture)
-    return unread
+    return unread, literal
+
+
+def _unread() -> dict[tuple[str, str], set[str]]:
+    return _reads()[0]
+
+
+def _position_blind() -> dict[tuple[str, str], set[str]]:
+    """Literal-only reads of a key that also occurs at another position or at case level.
+
+    The string match cannot tell which mapping the runner read it from, so a
+    read of `resume.expected` would equally vouch for `calls[].expected`.
+    """
+    nested_positions: dict[str, set[str]] = defaultdict(set)
+    for _, _, position, _, key in _declared():
+        nested_positions[key].add(position)
+    case_keys = {
+        str(key)
+        for _, _, doc in case_level._fixture_docs()  # noqa: SLF001
+        for container in case_level._containers(doc)  # noqa: SLF001
+        for key in container
+    }
+    return {
+        (position, key): capabilities
+        for (position, key), capabilities in _reads()[1].items()
+        if len(nested_positions[key]) > 1 or key in case_keys
+    }
 
 
 # Each container shape the walk descends into, with a floor of fixtures it must
@@ -260,5 +417,34 @@ def test_the_unread_ledger_only_names_keys_that_are_still_unread() -> None:
     assert not stale, (
         "KNOWN_UNREAD_NESTED names gaps that are gone:\n"
         + "\n".join(f"  {f} at {p} for {k!r}" for p, k, f in stale)
+        + "\nRemove the entries."
+    )
+
+
+def test_position_blind_reads_are_all_ledgered() -> None:
+    # A raw-YAML runner's read is matched on the bare key string, so where the
+    # same key occurs at more than one level, one read vouches for all of them.
+    # Those pairs are recorded, both ways: a new one is a silent pass landing
+    # unseen, and a stale entry hides the next one under its name.
+    blind = _position_blind()
+    recorded = {pair: set(capabilities) for pair, capabilities in POSITION_BLIND_READS.items()}
+    unrecorded = sorted(
+        (position, key, capability)
+        for (position, key), capabilities in blind.items()
+        for capability in capabilities - recorded.get((position, key), set())
+    )
+    stale = sorted(
+        (position, key, capability)
+        for (position, key), capabilities in recorded.items()
+        for capability in capabilities - blind.get((position, key), set())
+    )
+    assert not unrecorded, (
+        "nested key(s) read only through a string that also names another position:\n"
+        + "\n".join(f"  {c} at {p} for {k!r}" for p, k, c in unrecorded)
+        + "\nRead the key from its own mapping, or add it to POSITION_BLIND_READS."
+    )
+    assert not stale, (
+        "POSITION_BLIND_READS names pairs that are no longer position-blind:\n"
+        + "\n".join(f"  {c} at {p} for {k!r}" for p, k, c in stale)
         + "\nRemove the entries."
     )

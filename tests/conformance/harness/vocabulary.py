@@ -354,3 +354,55 @@ KNOWN_UNREAD_NESTED: dict[tuple[str, str], tuple[str, ...]] = {
         "058-implementation-attribution-otel",
     ),
 }
+
+# Nested keys a raw-YAML runner counts as read only because the key's string
+# appears in it, where the same key also occurs at another position or at case
+# level. The string match cannot say which mapping was read, so each entry is a
+# read the nested check takes on trust. Keyed by `(position, key)` to the
+# capabilities affected. Same ratchet as above; attributing these reads to
+# their position empties it.
+POSITION_BLIND_READS: dict[tuple[str, str], tuple[str, ...]] = {
+    ("calls[]", "expected"): ("llm-provider",),
+    ("calls[]", "expected_wire_request"): ("llm-provider",),
+    ("calls[]", "expected_wire_request_checks"): ("llm-provider",),
+    ("calls[]", "retry_middleware"): ("llm-provider",),
+    ("expected", "expected_error"): (
+        "graph-engine",
+        "pipeline-utilities",
+    ),
+    ("expected", "invariants"): (
+        "graph-engine",
+        "llm-provider",
+        "observability",
+        "pipeline-utilities",
+        "retrieval-provider",
+    ),
+    ("expected", "observers"): (
+        "observability",
+        "retrieval-provider",
+    ),
+    ("expected", "raises"): ("llm-provider",),
+    ("nodes.*", "middleware"): (
+        "observability",
+        "pipeline-utilities",
+    ),
+    ("nodes.*", "raises"): (
+        "graph-engine",
+        "observability",
+        "pipeline-utilities",
+    ),
+    ("nodes.*", "retry_middleware"): ("observability",),
+    ("nodes.*", "subgraph"): (
+        "conformance-adapter",
+        "graph-engine",
+        "observability",
+        "pipeline-utilities",
+    ),
+    ("resume", "expected"): (
+        "observability",
+        "pipeline-utilities",
+    ),
+    ("resume", "expected_chain_ambiguity_error"): ("pipeline-utilities",),
+    ("resume", "expected_error"): ("pipeline-utilities",),
+    ("resume", "invariants"): ("pipeline-utilities",),
+}

@@ -47,6 +47,7 @@ from .harness.prompt_management import (
     FixtureBackendSpec,
     FixtureCall,
     FixtureExpectedResultEquivalence,
+    FixtureExpectedTopLevel,
     FixtureManagerSpec,
     ManagerTarget,
     PromptManagementFixture,
@@ -730,7 +731,7 @@ async def test_prompt_management_fixture(fixture_path: Path) -> None:
     _apply_top_level_expected(fixture.expected, captures)
 
 
-def _apply_top_level_expected(expected: Any, captures: dict[str, Any]) -> None:
+def _apply_top_level_expected(expected: FixtureExpectedTopLevel, captures: dict[str, Any]) -> None:
     if expected.prompt_group is not None:
         pg_expected = expected.prompt_group
         group = captures[pg_expected.of]
