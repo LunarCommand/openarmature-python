@@ -10,6 +10,11 @@
 # deferred, so NOTHING in the corpus reaches the guard today -- which means
 # without these tests the guard would itself be unverified, the exact shape it
 # was written to prevent.
+#
+# The set is empty whenever every leak assertion is implemented, and a matrix
+# parametrized over an empty set collects nothing. The tests below run against a
+# stand-in key in that case, patched into the set, so the guard stays exercised
+# between the times it has real work.
 
 from __future__ import annotations
 
@@ -52,11 +57,17 @@ def test_set_covers_every_leak_assertion_the_deferred_fixtures_use() -> None:
     assert not overlap, f"{overlap} are listed as both implemented and unimplemented"
 
 
+_STAND_IN = "no_langfuse_observations_on_global"
+_GUARDED = sorted(langfuse_runner._UNIMPLEMENTED_OBSERVABILITY_ASSERTIONS) or [_STAND_IN]
+
+
 def test_every_unimplemented_key_is_a_real_model_field() -> None:
     # A typo in the set would make the guard silently never match the key it was
     # meant to catch, so the set is pinned against the model that declares them.
+    # The stand-in is checked too: a stand-in no fixture could declare would
+    # exercise a path the guard never takes.
     declared = set(ObservabilityExpected.model_fields)
-    unknown = sorted(langfuse_runner._UNIMPLEMENTED_OBSERVABILITY_ASSERTIONS - declared)
+    unknown = sorted(set(_GUARDED) - declared)
     assert not unknown, (
         f"{unknown} are listed as unimplemented assertions but are not fields on "
         f"ObservabilityExpected, so the guard would never fire for them. Fix the spelling or "
@@ -91,12 +102,17 @@ _PATHS = {
 
 
 @pytest.mark.parametrize("path", sorted(_PATHS))
-@pytest.mark.parametrize("key", sorted(langfuse_runner._UNIMPLEMENTED_OBSERVABILITY_ASSERTIONS))
+@pytest.mark.parametrize("key", _GUARDED)
 async def test_an_activated_case_reaching_an_unimplemented_assertion_fails(
     monkeypatch: pytest.MonkeyPatch, key: str, path: str
 ) -> None:
     # Every key against every path: a guard covering four of five keys, or two of
     # three paths, reads identically to one that covers all of them.
+    monkeypatch.setattr(
+        langfuse_runner,
+        "_UNIMPLEMENTED_OBSERVABILITY_ASSERTIONS",
+        langfuse_runner._UNIMPLEMENTED_OBSERVABILITY_ASSERTIONS | {key},
+    )
     _inject(monkeypatch, key)
     with pytest.raises(AssertionError, match="does not implement"):
         await langfuse_runner.test_langfuse_fixture(langfuse_runner.CONFORMANCE_DIR / f"{_PATHS[path]}.yaml")
