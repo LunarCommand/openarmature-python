@@ -181,3 +181,176 @@ UNIMPLEMENTED_CAPABILITIES: dict[str, str] = {
 # in flight, and the entry is expected to go away. Folding the two together would
 # let work in progress read as a permanent absence.
 PENDING_ADOPTION: dict[str, str] = {}
+
+
+# The nested vocabulary: keys inside an `expected` block (at case level, under
+# `resume`, per `invocations[]` entry and per `calls[]` entry), inside `resume`,
+# inside each `calls[]` entry, and inside each node spec, subgraph bodies
+# included. Spec's v0.17.0 release review found running fixtures asserting
+# nothing at exactly this depth.
+#
+# A position's vocabulary is the fields of the models named here plus the extra
+# keys those models do not declare. Models are named as strings and resolved by
+# import, so a renamed model or field fails rather than shrinking the set.
+NESTED_MODELS: dict[str, tuple[str, ...]] = {
+    "expected": (
+        "tests.conformance.harness.expectations.GraphEngineExpected",
+        "tests.conformance.harness.expectations.PipelineUtilitiesExpected",
+        "tests.conformance.harness.expectations.ObservabilityExpected",
+        "tests.conformance.harness.expectations.LlmProviderExpected",
+        "tests.conformance.harness.prompt_management.FixtureExpectedPerCall",
+        "tests.conformance.harness.prompt_management.FixtureExpectedTopLevel",
+    ),
+    "resume": (),
+    "calls[]": (
+        "tests.conformance.harness.directives.LlmCallSpec",
+        "tests.conformance.harness.prompt_management.FixtureCall",
+    ),
+    "nodes.*": ("tests.conformance.harness.directives.NodeSpec",),
+}
+
+NESTED_EXTRAS: dict[str, frozenset[str]] = {
+    "expected": frozenset(
+        {
+            # graph-engine: the per-invocation drain (proposal 0054).
+            "final_accumulator_state",
+            "node_accumulator_snapshot_invariants",
+            "node_accumulator_snapshots",
+            "node_drain_summaries",
+            # pipeline-utilities: what a resume re-runs and skips.
+            "instances_executed_during_resume",
+            "instances_skipped_during_resume",
+            "nodes_executed_during_resume",
+            "nodes_skipped_during_resume",
+            "migrations_run",
+            "successful_attempt_index_during_resume",
+            # llm-provider.
+            "caller_messages_unmodified",
+            "llm_spans",
+            "no_token_events_emitted",
+            "provider_call_count",
+            "wire_requests",
+            # observability.
+            "augment_rejects_at_call_site",
+            "direct_call_result",
+            "final_state_bounds",
+            "first_trace_unchanged",
+            "invocation_id",
+            "invoke_rejects_at_api_boundary",
+            "llm_span_attributes",
+            "llm_span_attributes_absent",
+            "no_langfuse_observations_emitted",
+            "no_spans_emitted",
+            "node_completed_event_carries_error",
+            "per_invocation",
+            "response_usage",
+        }
+    ),
+    "resume": frozenset(
+        {
+            "caller_invocation_id",
+            "expected",
+            "expected_chain_ambiguity_error",
+            "expected_error",
+            "from_first_run",
+            "from_seeded_record",
+            "invariants",
+            "resume_with_modified_items",
+        }
+    ),
+    "calls[]": frozenset(
+        {
+            "config",
+            "expected_wire_request",
+            "expected_wire_request_checks",
+            "response_schema",
+            "retry_middleware",
+        }
+    ),
+    "nodes.*": frozenset(
+        {
+            "augment_metadata",
+            "capture_invocation_metadata_into",
+            "capture_queryable_observer_read_into",
+            "invoke_drain_events_for",
+            "noop",
+            "per_attempt_behavior",
+            "renders_prompt_group",
+            "retry_middleware",
+            "subgraph_call",
+            "then_assert_bucket_absent_into",
+            "then_drop_for_current_invocation",
+        }
+    ),
+}
+
+# Nested keys a running fixture declares and no owning runner reads, keyed by
+# `(position, key)` to the fixtures declaring them. The ledger may only shrink:
+# a new unread key fails, and an entry that stops being unread -- because the key
+# was wired, or the fixture stopped running -- fails until it is removed.
+KNOWN_UNREAD_NESTED: dict[tuple[str, str], tuple[str, ...]] = {
+    # graph-engine drain (028-033)
+    ("expected", "final_accumulator_state"): ("029-drain-events-for-snapshot-semantic",),
+    ("nodes.*", "invoke_drain_events_for"): (
+        "028-drain-events-for-basic-synchronization",
+        "029-drain-events-for-snapshot-semantic",
+        "030-drain-events-for-timeout",
+        "031-drain-events-for-invocation-scope",
+        "032-drain-events-for-fan-out-coverage",
+        "033-drain-events-for-parallel-branches-coverage",
+    ),
+    ("expected", "node_accumulator_snapshot_invariants"): (
+        "032-drain-events-for-fan-out-coverage",
+        "033-drain-events-for-parallel-branches-coverage",
+    ),
+    ("expected", "node_accumulator_snapshots"): (
+        "028-drain-events-for-basic-synchronization",
+        "029-drain-events-for-snapshot-semantic",
+        "031-drain-events-for-invocation-scope",
+    ),
+    ("expected", "node_drain_summaries"): (
+        "028-drain-events-for-basic-synchronization",
+        "029-drain-events-for-snapshot-semantic",
+        "030-drain-events-for-timeout",
+        "031-drain-events-for-invocation-scope",
+        "032-drain-events-for-fan-out-coverage",
+        "033-drain-events-for-parallel-branches-coverage",
+    ),
+    # pipeline-utilities resume, records and events
+    ("expected", "concurrency_invariant"): ("022-fan-out-count-and-concurrency-modes",),
+    ("expected", "expected_attempt_events"): ("061-failure-isolation-retry-three-piece-composition",),
+    ("expected", "latest_record_assertions"): ("026-checkpoint-record-shape",),
+    ("expected", "nodes_executed_during_resume"): (
+        "025-checkpoint-resume-from-completed-position",
+        "029-checkpoint-subgraph-resume",
+        "070-crash-injection-after-node-resume",
+    ),
+    ("expected", "nodes_skipped_during_resume"): (
+        "025-checkpoint-resume-from-completed-position",
+        "029-checkpoint-subgraph-resume",
+        "070-crash-injection-after-node-resume",
+    ),
+    ("expected", "observer_events"): (
+        "011-middleware-determinism",
+        "015-retry-per-attempt-observer-events",
+    ),
+    # graph-engine observer isolation
+    ("expected", "no_propagated_error"): ("015-observer-error-isolation",),
+    # observability per-fixture drivers. Some assert the claim by hardcoding it
+    # rather than reading the key, so a changed fixture value would go unnoticed.
+    ("nodes.*", "also_emits_via_global_tracer"): ("005-otel-llm-provider-span-nested",),
+    ("expected", "determinism_check"): ("011-otel-determinism",),
+    ("resume", "from_first_run"): ("037-langfuse-trace-input-output",),
+    ("expected", "invocation_count"): ("009-otel-correlation-id-cross-cutting",),
+    ("expected", "no_edge_spans"): ("004-otel-routing-error-attribution",),
+    ("expected", "no_llm_provider_span"): ("005-otel-llm-provider-span-nested",),
+    ("expected", "no_openarmature_spans_on_global"): ("005-otel-llm-provider-span-nested",),
+    ("expected", "parent_trace"): ("008-otel-detached-trace-mode",),
+    ("expected", "span_tree_global"): ("005-otel-llm-provider-span-nested",),
+    ("expected", "span_tree_private"): ("005-otel-llm-provider-span-nested",),
+    ("nodes.*", "subgraph_call"): ("039-nested-lineage-augmentation",),
+    ("expected", "traces"): (
+        "008-otel-detached-trace-mode",
+        "058-implementation-attribution-otel",
+    ),
+}
