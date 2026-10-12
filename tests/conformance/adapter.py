@@ -1131,6 +1131,27 @@ def normalize_expected_event(ev: Mapping[str, Any]) -> dict[str, Any]:
     return e
 
 
+def assert_events_match(
+    actual: Sequence[Mapping[str, Any]],
+    expected: Sequence[Mapping[str, Any]],
+    label: str,
+) -> None:
+    """Assert recorded events match a fixture's event list, in order.
+
+    Each expected event is backfilled with the engine's defaults and compared
+    on the keys it lists only, so a recorded event may carry more. A listed
+    key the recorded event lacks fails, even when the expected value is null.
+    """
+    normalized = [normalize_expected_event(ev) for ev in expected]
+    assert len(actual) == len(normalized), (
+        f"{label}: {len(actual)} events, expected {len(normalized)}\n  actual={list(actual)}"
+    )
+    for i, (a, e) in enumerate(zip(actual, normalized, strict=True)):
+        for key, want in e.items():
+            assert key in a, f"{label} event {i} missing key {key!r}: actual={a}"
+            assert a[key] == want, f"{label} event {i} key {key!r}: actual={a[key]!r}, expected={want!r}"
+
+
 def _add_fan_out_node(
     builder: GraphBuilder[Any],
     node_name: str,

@@ -39,9 +39,9 @@ from .adapter import (
     DrainHarness,
     NodeDrain,
     ObserverFixture,
+    assert_events_match,
     build_graph,
     make_observer_fn,
-    normalize_expected_event,
 )
 from .harness.subgraph_placement import resolve_subgraphs
 
@@ -471,22 +471,11 @@ async def _run_runtime_case(spec: Mapping[str, Any], fixture_id: str) -> None:
             if "observer_events" in inv_expected:
                 obs_events_map = cast("dict[str, list[dict[str, Any]]]", inv_expected["observer_events"])
                 for name, expected_events in obs_events_map.items():
-                    actual = observer_fixtures[name].events
-                    normalized = [normalize_expected_event(ev) for ev in expected_events]
-                    assert len(actual) == len(normalized), (
-                        f"invocation {inv_idx} observer event count mismatch for {name!r}: "
-                        f"actual={len(actual)}, expected={len(normalized)}"
+                    assert_events_match(
+                        observer_fixtures[name].events,
+                        expected_events,
+                        f"invocation {inv_idx} observer {name!r}",
                     )
-                    for i, (a, e) in enumerate(zip(actual, normalized, strict=True)):
-                        for key, expected_value in e.items():
-                            assert key in a, (
-                                f"invocation {inv_idx} observer {name!r} event {i} "
-                                f"missing key {key!r}: actual={a}"
-                            )
-                            assert a[key] == expected_value, (
-                                f"invocation {inv_idx} observer {name!r} event {i} "
-                                f"key {key!r} mismatch: actual={a[key]!r}, expected={expected_value!r}"
-                            )
 
             # Per-invocation invariants (e.g.,
             # `drain_returned_within_timeout` on the timed first
@@ -611,19 +600,7 @@ async def _run_runtime_case(spec: Mapping[str, Any], fixture_id: str) -> None:
     # MUST NOT fail because the recorded event happens to carry state.
     if "observer_events" in expected:
         for name, expected_events in expected["observer_events"].items():
-            actual = observer_fixtures[name].events
-            normalized = [normalize_expected_event(ev) for ev in expected_events]
-            assert len(actual) == len(normalized), (
-                f"observer event count mismatch for {name!r}: "
-                f"actual={len(actual)}, expected={len(normalized)}"
-            )
-            for i, (a, e) in enumerate(zip(actual, normalized, strict=True)):
-                for key, expected_value in e.items():
-                    assert key in a, f"observer {name!r} event {i} missing key {key!r}: actual={a}"
-                    assert a[key] == expected_value, (
-                        f"observer {name!r} event {i} key {key!r} mismatch: "
-                        f"actual={a[key]!r}, expected={expected_value!r}"
-                    )
+            assert_events_match(observer_fixtures[name].events, expected_events, f"observer {name!r}")
 
     if "delivery_order" in expected:
         expected_delivery = [(d["observer"], d["step"], d["phase"]) for d in expected["delivery_order"]]
@@ -725,17 +702,6 @@ def _drain_nodes(graph_spec: Mapping[str, Any]) -> set[str]:
     }
 
 
-def _assert_events(actual: list[dict[str, Any]], expected: list[dict[str, Any]], label: str) -> None:
-    # Projected to the keys the fixture lists, as `observer_events` is.
-    normalized = [normalize_expected_event(ev) for ev in expected]
-    assert len(actual) == len(normalized), (
-        f"{label}: {len(actual)} events, expected {len(normalized)}\n  actual={actual}"
-    )
-    for i, (a, e) in enumerate(zip(actual, normalized, strict=True)):
-        projected = {key: a.get(key) for key in e}
-        assert projected == e, f"{label} event {i}: actual={projected}, expected={e}"
-
-
 def _drain_of(harness: DrainHarness, node: str, invocation_index: int) -> NodeDrain:
     found = [d for d in harness.drains if d.node_name == node and d.invocation_index == invocation_index]
     assert len(found) == 1, (
@@ -805,7 +771,7 @@ def _assert_node_drains(
             assert observer == drain.observer, (
                 f"{label}{node} snapshotted {drain.observer!r}, not {observer!r}"
             )
-            _assert_events(drain.snapshot, events, f"{label}{node} snapshot of {observer!r}")
+            assert_events_match(drain.snapshot, events, f"{label}{node} snapshot of {observer!r}")
 
     snapshot_invariants = cast(
         "dict[str, dict[str, dict[str, Any]]]", expected.get("node_accumulator_snapshot_invariants") or {}
@@ -827,7 +793,7 @@ def _assert_node_drains(
         ids = {d.invocation_id for d in harness.drains if d.invocation_index == invocation_index}
         assert len(ids) == 1, f"{label}final_accumulator_state needs this invocation's id; drains saw {ids}"
         bucket = harness.observers[observer].buckets.get(ids.pop(), [])
-        _assert_events(bucket, events, f"{label}final state of {observer!r}")
+        assert_events_match(bucket, events, f"{label}final state of {observer!r}")
 
 
 def _final_bucket(drain: NodeDrain, harness: DrainHarness) -> list[dict[str, Any]]:
