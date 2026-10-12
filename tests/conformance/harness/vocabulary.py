@@ -212,11 +212,6 @@ NESTED_MODELS: dict[str, tuple[str, ...]] = {
 NESTED_EXTRAS: dict[str, frozenset[str]] = {
     "expected": frozenset(
         {
-            # graph-engine: the per-invocation drain (proposal 0054).
-            "final_accumulator_state",
-            "node_accumulator_snapshot_invariants",
-            "node_accumulator_snapshots",
-            "node_drain_summaries",
             # pipeline-utilities: what a resume re-runs and skips.
             "instances_executed_during_resume",
             "instances_skipped_during_resume",
@@ -272,7 +267,6 @@ NESTED_EXTRAS: dict[str, frozenset[str]] = {
             "augment_metadata",
             "capture_invocation_metadata_into",
             "capture_queryable_observer_read_into",
-            "invoke_drain_events_for",
             "noop",
             "per_attempt_behavior",
             "renders_prompt_group",
@@ -289,33 +283,6 @@ NESTED_EXTRAS: dict[str, frozenset[str]] = {
 # a new unread key fails, and an entry that stops being unread -- because the key
 # was wired, or the fixture stopped running -- fails until it is removed.
 KNOWN_UNREAD_NESTED: dict[tuple[str, str], tuple[str, ...]] = {
-    # graph-engine drain (028-033)
-    ("expected", "final_accumulator_state"): ("029-drain-events-for-snapshot-semantic",),
-    ("nodes.*", "invoke_drain_events_for"): (
-        "028-drain-events-for-basic-synchronization",
-        "029-drain-events-for-snapshot-semantic",
-        "030-drain-events-for-timeout",
-        "031-drain-events-for-invocation-scope",
-        "032-drain-events-for-fan-out-coverage",
-        "033-drain-events-for-parallel-branches-coverage",
-    ),
-    ("expected", "node_accumulator_snapshot_invariants"): (
-        "032-drain-events-for-fan-out-coverage",
-        "033-drain-events-for-parallel-branches-coverage",
-    ),
-    ("expected", "node_accumulator_snapshots"): (
-        "028-drain-events-for-basic-synchronization",
-        "029-drain-events-for-snapshot-semantic",
-        "031-drain-events-for-invocation-scope",
-    ),
-    ("expected", "node_drain_summaries"): (
-        "028-drain-events-for-basic-synchronization",
-        "029-drain-events-for-snapshot-semantic",
-        "030-drain-events-for-timeout",
-        "031-drain-events-for-invocation-scope",
-        "032-drain-events-for-fan-out-coverage",
-        "033-drain-events-for-parallel-branches-coverage",
-    ),
     # pipeline-utilities resume, records and events
     ("expected", "concurrency_invariant"): ("022-fan-out-count-and-concurrency-modes",),
     ("expected", "expected_attempt_events"): ("061-failure-isolation-retry-three-piece-composition",),

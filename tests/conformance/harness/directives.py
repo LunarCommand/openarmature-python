@@ -199,6 +199,16 @@ class FlakyResumeAwareSpec(_AllowExtras):
     on_success: dict[str, Any]
 
 
+class DrainEventsForSpec(_ForbidExtras):
+    """``invoke_drain_events_for``: after the body, drain this invocation's
+    events and snapshot the named accumulator's bucket."""
+
+    # conformance-adapter section 5 node directives; graph-engine section 6
+    # per-invocation drain.
+    timeout_seconds: float
+    snapshot_observer: str
+
+
 class UpdateFromFieldSpec(_ForbidExtras):
     """Mock computation: result_field = input_field × multiplier.
 
@@ -548,6 +558,9 @@ class NodeSpec(_ForbidExtras):
     # deterministic per §11.8) and to slow a third branch so fail-fast
     # cancellation has time to land before it finishes (033).
     sleep_ms: int | None = None
+    # Drain fixtures (028-033): the node drains its own invocation's events
+    # before returning.
+    invoke_drain_events_for: DrainEventsForSpec | None = None
 
     _PRIMARY_FIELDS = (
         "update",
@@ -725,8 +738,9 @@ class ObserverSpec(_ForbidExtras):
     - ``attach`` is ``graph`` (graph-attached, persists across invocations)
       or ``invocation`` (passed to one ``invoke`` call).
     - ``target`` is ``outer`` (outermost graph) or a subgraph name.
-    - ``behavior`` is ``record`` (capture events for assertion) or
-      ``raise`` (raise to verify error isolation).
+    - ``behavior`` is ``record`` (capture events for assertion),
+      ``accumulate`` (record into per-invocation buckets a drain snapshots),
+      or ``raise`` (raise to verify error isolation).
     - ``phases`` (optional) — subset of ``{"started", "completed"}``
       for per-observer phase subscription.
     - ``sleep_ms_per_event`` — the slow-observer directive. An int
@@ -739,7 +753,7 @@ class ObserverSpec(_ForbidExtras):
     name: str
     attach: Literal["graph", "invocation"]
     target: str
-    behavior: Literal["record", "raise"]
+    behavior: Literal["record", "accumulate", "raise"]
     phases: list[Literal["started", "completed"]] | None = None
     sleep_ms_per_event: int | dict[str, int] | None = None
 
