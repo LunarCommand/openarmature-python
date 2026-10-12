@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import time
 import warnings
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any, cast
 
@@ -36,10 +36,12 @@ from openarmature.graph import (
 from openarmature.graph.observer import Observer
 
 from .adapter import (
+    DrainHarness,
+    NodeDrain,
     ObserverFixture,
+    assert_events_match,
     build_graph,
     make_observer_fn,
-    normalize_expected_event,
 )
 from .harness.subgraph_placement import resolve_subgraphs
 
@@ -290,7 +292,9 @@ async def _run_runtime_case(spec: Mapping[str, Any], fixture_id: str) -> None:
     if declared:
         _compile_subgraphs_map(declared, subgraphs)
 
-    built = build_graph(graph_spec, subgraphs=subgraphs)
+    drain_harness = DrainHarness()
+    drain_nodes = _drain_nodes(graph_spec)
+    built = build_graph(graph_spec, subgraphs=subgraphs, drains=drain_harness)
 
     # Proposal 0094: a case may assert a compile-time outcome. A compile ERROR
     # (041) aborts before execution -- assert the category and stop. A compile
@@ -371,6 +375,8 @@ async def _run_runtime_case(spec: Mapping[str, Any], fixture_id: str) -> None:
                 invocation_observers.append(SubscribedObserver(observer=obs, phases=phases))
             else:
                 invocation_observers.append(obs)
+    drain_harness.observers = observer_fixtures
+    drain_harness.graph = compiled
 
     # Top-level expected_error: legacy runtime-error fixtures (008, 009).
     if "expected_error" in spec:
@@ -426,6 +432,7 @@ async def _run_runtime_case(spec: Mapping[str, Any], fixture_id: str) -> None:
                 # assertions don't accumulate.
                 built.trace.clear()
 
+            drain_harness.invocation_index = inv_idx
             inv_final = await compiled.invoke(inv_initial, observers=invocation_observers)
             inv_drain_start = time.monotonic()
             inv_drain_summary = await compiled.drain(timeout=inv_timeout)
@@ -464,22 +471,11 @@ async def _run_runtime_case(spec: Mapping[str, Any], fixture_id: str) -> None:
             if "observer_events" in inv_expected:
                 obs_events_map = cast("dict[str, list[dict[str, Any]]]", inv_expected["observer_events"])
                 for name, expected_events in obs_events_map.items():
-                    actual = observer_fixtures[name].events
-                    normalized = [normalize_expected_event(ev) for ev in expected_events]
-                    assert len(actual) == len(normalized), (
-                        f"invocation {inv_idx} observer event count mismatch for {name!r}: "
-                        f"actual={len(actual)}, expected={len(normalized)}"
+                    assert_events_match(
+                        observer_fixtures[name].events,
+                        expected_events,
+                        f"invocation {inv_idx} observer {name!r}",
                     )
-                    for i, (a, e) in enumerate(zip(actual, normalized, strict=True)):
-                        for key, expected_value in e.items():
-                            assert key in a, (
-                                f"invocation {inv_idx} observer {name!r} event {i} "
-                                f"missing key {key!r}: actual={a}"
-                            )
-                            assert a[key] == expected_value, (
-                                f"invocation {inv_idx} observer {name!r} event {i} "
-                                f"key {key!r} mismatch: actual={a[key]!r}, expected={expected_value!r}"
-                            )
 
             # Per-invocation invariants (e.g.,
             # `drain_returned_within_timeout` on the timed first
@@ -492,10 +488,18 @@ async def _run_runtime_case(spec: Mapping[str, Any], fixture_id: str) -> None:
                     f"elapsed={inv_drain_elapsed:.3f}s, timeout={inv_timeout}s"
                 )
 
+            label = f"invocation {inv_idx}: "
+            _assert_node_drains(inv_expected, drain_harness, inv_idx, label)
+            if drain_nodes:
+                own = [d for d in drain_harness.drains if d.invocation_index == inv_idx]
+                _check_drain_invariants(inv_invariants, own, drain_harness, label)
+
         # Top-level invariants (e.g.,
         # `second_invocation_drain_independent_of_first` on fixture 024)
         # apply after all invocations complete.
         top_invariants: dict[str, Any] = spec.get("invariants") or {}
+        if drain_nodes:
+            _check_drain_invariants(top_invariants, drain_harness.drains, drain_harness, "")
         if top_invariants.get("second_invocation_drain_independent_of_first"):
             # The fact that we reached this point with all per-invocation
             # assertions passing IS the proof of cross-invocation
@@ -596,19 +600,7 @@ async def _run_runtime_case(spec: Mapping[str, Any], fixture_id: str) -> None:
     # MUST NOT fail because the recorded event happens to carry state.
     if "observer_events" in expected:
         for name, expected_events in expected["observer_events"].items():
-            actual = observer_fixtures[name].events
-            normalized = [normalize_expected_event(ev) for ev in expected_events]
-            assert len(actual) == len(normalized), (
-                f"observer event count mismatch for {name!r}: "
-                f"actual={len(actual)}, expected={len(normalized)}"
-            )
-            for i, (a, e) in enumerate(zip(actual, normalized, strict=True)):
-                for key, expected_value in e.items():
-                    assert key in a, f"observer {name!r} event {i} missing key {key!r}: actual={a}"
-                    assert a[key] == expected_value, (
-                        f"observer {name!r} event {i} key {key!r} mismatch: "
-                        f"actual={a[key]!r}, expected={expected_value!r}"
-                    )
+            assert_events_match(observer_fixtures[name].events, expected_events, f"observer {name!r}")
 
     if "delivery_order" in expected:
         expected_delivery = [(d["observer"], d["step"], d["phase"]) for d in expected["delivery_order"]]
@@ -618,6 +610,10 @@ async def _run_runtime_case(spec: Mapping[str, Any], fixture_id: str) -> None:
 
     if "observer_event_invariants" in expected:
         _check_event_invariants(expected["observer_event_invariants"], observer_fixtures)
+
+    _assert_node_drains(expected, drain_harness, 0, "")
+    if drain_nodes:
+        _check_drain_invariants(expected.get("invariants") or {}, drain_harness.drains, drain_harness, "")
 
     # 018 — registering an observer with an empty `phases` set raises at
     # registration time per spec §6.
@@ -697,6 +693,224 @@ def _check_event_invariants(
                 f"inner node {ev['node_name']!r} expected branch_name={expected_branch!r}, "
                 f"got {ev.get('branch_name')!r}"
             )
+
+
+def _drain_nodes(graph_spec: Mapping[str, Any]) -> set[str]:
+    nodes = cast("dict[str, Any]", graph_spec.get("nodes") or {})
+    return {
+        name for name, node in nodes.items() if isinstance(node, dict) and "invoke_drain_events_for" in node
+    }
+
+
+def _drain_of(harness: DrainHarness, node: str, invocation_index: int) -> NodeDrain:
+    found = [d for d in harness.drains if d.node_name == node and d.invocation_index == invocation_index]
+    assert len(found) == 1, (
+        f"expected one drain by {node!r} in invocation {invocation_index}, got {len(found)}"
+    )
+    return found[0]
+
+
+def _snapshot_predicate(snapshot: list[dict[str, Any]], name: str) -> Any:
+    # The `node_accumulator_snapshot_invariants` predicates fixtures 032 and
+    # 033 declare. An inner event is one from below the top-level node.
+    inner = [e for e in snapshot if len(e["namespace"]) > 1]
+    if name == "inner_event_count":
+        return len(inner)
+    for predicate, key in (
+        ("inner_fan_out_indices_seen", "fan_out_index"),
+        ("inner_branch_names_seen", "branch_name"),
+    ):
+        if name == predicate:
+            # An inner event missing the key shows up as None and fails the match.
+            seen: set[Any] = {e.get(key) for e in inner}
+            present: list[Any] = sorted(v for v in seen if v is not None)
+            return present + ([None] if None in seen else [])
+    for suffix, phase in (("_started_present", "started"), ("_completed_present", "completed")):
+        if name.endswith(suffix):
+            node = name.removesuffix(suffix)
+            return any(e["namespace"] == [node] and e["phase"] == phase for e in snapshot)
+    if name.endswith("_node_events_count"):
+        node = name.removesuffix("_node_events_count")
+        return sum(e["namespace"] == [node] for e in snapshot)
+    raise AssertionError(f"unknown accumulator snapshot predicate {name!r}")
+
+
+def _assert_node_drains(
+    expected: Mapping[str, Any],
+    harness: DrainHarness,
+    invocation_index: int,
+    label: str,
+) -> None:
+    summaries = cast("dict[str, dict[str, Any]]", expected.get("node_drain_summaries") or {})
+    for node, want in summaries.items():
+        summary = _drain_of(harness, node, invocation_index).summary
+        unknown = set(want) - {"timeout_reached", "undelivered_count", "undelivered_count_min"}
+        assert not unknown, f"{label}node_drain_summaries.{node}: unrecognized key(s) {sorted(unknown)}"
+        if "timeout_reached" in want:
+            assert summary.timeout_reached == want["timeout_reached"], (
+                f"{label}{node} drain timeout_reached={summary.timeout_reached}, "
+                f"expected {want['timeout_reached']}"
+            )
+        if "undelivered_count" in want:
+            assert summary.undelivered_count == want["undelivered_count"], (
+                f"{label}{node} drain undelivered_count={summary.undelivered_count}, "
+                f"expected {want['undelivered_count']}"
+            )
+        if "undelivered_count_min" in want:
+            assert summary.undelivered_count >= want["undelivered_count_min"], (
+                f"{label}{node} drain undelivered_count={summary.undelivered_count}, "
+                f"expected at least {want['undelivered_count_min']}"
+            )
+
+    snapshots = cast(
+        "dict[str, dict[str, list[dict[str, Any]]]]", expected.get("node_accumulator_snapshots") or {}
+    )
+    for node, per_observer in snapshots.items():
+        drain = _drain_of(harness, node, invocation_index)
+        for observer, events in per_observer.items():
+            assert observer == drain.observer, (
+                f"{label}{node} snapshotted {drain.observer!r}, not {observer!r}"
+            )
+            assert_events_match(drain.snapshot, events, f"{label}{node} snapshot of {observer!r}")
+
+    snapshot_invariants = cast(
+        "dict[str, dict[str, dict[str, Any]]]", expected.get("node_accumulator_snapshot_invariants") or {}
+    )
+    for node, per_observer in snapshot_invariants.items():
+        drain = _drain_of(harness, node, invocation_index)
+        for observer, predicates in per_observer.items():
+            assert observer == drain.observer, (
+                f"{label}{node} snapshotted {drain.observer!r}, not {observer!r}"
+            )
+            for name, want in predicates.items():
+                got = _snapshot_predicate(drain.snapshot, name)
+                assert got == want, (
+                    f"{label}{node} snapshot predicate {name!r}: got {got!r}, expected {want!r}"
+                )
+
+    final_states = cast("dict[str, list[dict[str, Any]]]", expected.get("final_accumulator_state") or {})
+    for observer, events in final_states.items():
+        ids = {d.invocation_id for d in harness.drains if d.invocation_index == invocation_index}
+        assert len(ids) == 1, f"{label}final_accumulator_state needs this invocation's id; drains saw {ids}"
+        bucket = harness.observers[observer].buckets.get(ids.pop(), [])
+        assert_events_match(bucket, events, f"{label}final state of {observer!r}")
+
+
+def _final_bucket(drain: NodeDrain, harness: DrainHarness) -> list[dict[str, Any]]:
+    return harness.observers[drain.observer].buckets.get(drain.invocation_id, [])
+
+
+def _is_own(event: Mapping[str, Any], drain: NodeDrain, phase: str) -> bool:
+    return event["namespace"] == [drain.node_name] and event["phase"] == phase
+
+
+def _snapshot_is_all_before_own_completion(drain: NodeDrain, harness: DrainHarness) -> None:
+    # The snapshot holds exactly what the invocation emitted before the
+    # draining node's own `completed` event: every earlier event, nothing later.
+    final = _final_bucket(drain, harness)
+    cut = next((i for i, e in enumerate(final) if _is_own(e, drain, "completed")), None)
+    assert cut is not None, f"{drain.node_name}'s completed event never reached {drain.observer!r}"
+    assert drain.snapshot == final[:cut], (
+        f"{drain.node_name}'s snapshot is not everything emitted before its own completion:\n"
+        f"  snapshot={drain.snapshot}\n  final={final}"
+    )
+
+
+def _synchronized(drains: list[NodeDrain], harness: DrainHarness) -> None:
+    assert drains, "no drain ran"
+    for drain in drains:
+        assert not drain.summary.timeout_reached, f"{drain.node_name}'s drain timed out"
+        _snapshot_is_all_before_own_completion(drain, harness)
+
+
+def _not_blocked_by_own_completion(drains: list[NodeDrain], harness: DrainHarness) -> None:
+    assert drains, "no drain ran"
+    for drain in drains:
+        assert not drain.summary.timeout_reached, f"{drain.node_name}'s drain timed out"
+        assert not any(_is_own(e, drain, "completed") for e in drain.snapshot), (
+            f"{drain.node_name}'s own completed event is in its snapshot"
+        )
+
+
+def _within_timeout(drains: list[NodeDrain], harness: DrainHarness) -> None:
+    # Same slack as the process-wide drain_returned_within_timeout check.
+    assert drains, "no drain ran"
+    for drain in drains:
+        assert drain.elapsed < drain.timeout + 0.4, (
+            f"{drain.node_name}'s drain took {drain.elapsed:.3f}s against a {drain.timeout}s timeout"
+        )
+
+
+def _delivery_continued(drains: list[NodeDrain], harness: DrainHarness) -> None:
+    # The draining node's completed event is emitted after its drain timed
+    # out; it reaches the observer only if the deliver worker kept running.
+    timed_out = [d for d in drains if d.summary.timeout_reached]
+    assert timed_out, "no drain timed out"
+    for drain in timed_out:
+        assert any(_is_own(e, drain, "completed") for e in _final_bucket(drain, harness)), (
+            f"events after {drain.node_name}'s timed-out drain were never delivered"
+        )
+
+
+def _ran_after_a_timeout(drains: list[NodeDrain], harness: DrainHarness) -> None:
+    assert drains, "no drain ran in this invocation"
+    for drain in drains:
+        assert any(
+            d.summary.timeout_reached for d in harness.drains if d.invocation_index < drain.invocation_index
+        ), "no earlier invocation's drain timed out"
+        assert any(_is_own(e, drain, "completed") for e in _final_bucket(drain, harness)), (
+            f"{drain.node_name}'s invocation did not deliver all its events"
+        )
+
+
+def _unique_invocation_ids(drains: list[NodeDrain], harness: DrainHarness) -> None:
+    ids = {d.invocation_index: d.invocation_id for d in drains}
+    assert len(ids) > 1, "fewer than two invocations drained"
+    assert len(set(ids.values())) == len(ids), f"invocations shared an id: {ids}"
+
+
+def _scoped_to_own_invocation(drains: list[NodeDrain], harness: DrainHarness) -> None:
+    # One bucket per invocation, and each drain's snapshot is exactly its own
+    # invocation's pre-completion events.
+    assert drains, "no drain ran"
+    for observer in {d.observer for d in drains}:
+        got = set(harness.observers[observer].buckets)
+        want = {d.invocation_id for d in drains if d.observer == observer}
+        assert got == want, f"{observer!r} holds buckets {got}, expected one per invocation {want}"
+    for drain in drains:
+        _snapshot_is_all_before_own_completion(drain, harness)
+
+
+# The invariant predicates the drain fixtures (028-033) declare, each checked
+# against what the drain recorded. Per conformance-adapter section 5.9 these
+# are fixture-specific predicates the adapter MUST implement.
+_DRAIN_INVARIANTS: dict[str, Callable[[list[NodeDrain], DrainHarness], None]] = {
+    "drain_events_for_synchronized_accumulator_read": _synchronized,
+    "drain_covered_all_fan_out_instances_via_shared_invocation_id": _synchronized,
+    "drain_covered_all_parallel_branches_via_shared_invocation_id": _synchronized,
+    "drain_returned_without_blocking_on_post_call_events": _not_blocked_by_own_completion,
+    "drain_returned_within_timeout": _within_timeout,
+    "workers_not_cancelled_on_per_invocation_drain_timeout": _delivery_continued,
+    "graph_state_intact_after_per_invocation_drain_timeout": _ran_after_a_timeout,
+    "each_invocation_has_unique_invocation_id": _unique_invocation_ids,
+    "drain_scopes_strictly_to_supplied_invocation_id": _scoped_to_own_invocation,
+}
+
+
+def _check_drain_invariants(
+    invariants: Mapping[str, Any],
+    drains: list[NodeDrain],
+    harness: DrainHarness,
+    label: str,
+) -> None:
+    for name, value in invariants.items():
+        check = _DRAIN_INVARIANTS.get(name)
+        assert check is not None, f"{label}drain fixture declares unimplemented invariant {name!r}"
+        assert value is True, f"{label}invariant {name!r} is {value!r}; only true is checked"
+        try:
+            check(drains, harness)
+        except AssertionError as e:
+            raise AssertionError(f"{label}invariant {name!r}: {e}") from e
 
 
 async def _run_fixture_020(spec: Mapping[str, Any]) -> None:

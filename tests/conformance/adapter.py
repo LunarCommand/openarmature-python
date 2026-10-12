@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Annotated, Any, cast
@@ -23,6 +24,7 @@ from openarmature.graph import (
     BranchSpec,
     CompiledGraph,
     DeclaredSameName,
+    DrainSummary,
     EndSentinel,
     ExplicitMapping,
     FanOutNode,
@@ -42,6 +44,7 @@ from openarmature.graph import (
     merge_all,
 )
 from openarmature.graph.observer import Observer
+from openarmature.observability.correlation import current_invocation_id
 
 if TYPE_CHECKING:
     from openarmature.graph.observer import _InvocationContext
@@ -586,6 +589,72 @@ def _wrap_with_sleep(
     return fn_with_sleep
 
 
+@dataclass
+class NodeDrain:
+    """One `invoke_drain_events_for` call, as the node made it."""
+
+    node_name: str
+    invocation_index: int
+    invocation_id: str
+    timeout: float
+    summary: DrainSummary
+    elapsed: float
+    observer: str
+    snapshot: list[dict[str, Any]]
+
+
+@dataclass
+class DrainHarness:
+    """State shared by drain-calling nodes and the runner asserting on them.
+
+    Nodes are built before the graph compiles, so the runner sets `graph`
+    afterwards, and bumps `invocation_index` before each invoke.
+    """
+
+    observers: Mapping[str, ObserverFixture] = field(default_factory=dict[str, "ObserverFixture"])
+    graph: CompiledGraph[Any] | None = None
+    invocation_index: int = 0
+    drains: list[NodeDrain] = field(default_factory=list[NodeDrain])
+
+
+def _wrap_with_drain(
+    fn: Callable[[Any], Awaitable[Mapping[str, Any]]],
+    node_name: str,
+    cfg: Mapping[str, Any],
+    harness: DrainHarness,
+) -> Callable[[Any], Awaitable[Mapping[str, Any]]]:
+    # conformance-adapter section 6.6: a real drain_events_for call, made
+    # before the node returns, then a snapshot of the named accumulator's
+    # bucket for the same invocation.
+    timeout = float(cfg["timeout_seconds"])
+    observer = str(cfg["snapshot_observer"])
+
+    async def fn_with_drain(state: Any) -> Mapping[str, Any]:
+        update = await fn(state)
+        graph = harness.graph
+        invocation_id = current_invocation_id()
+        assert graph is not None, "the runner did not hand the compiled graph to the drain harness"
+        assert invocation_id is not None, f"{node_name!r} ran outside an invocation"
+        start = time.monotonic()
+        summary = await graph.drain_events_for(invocation_id, timeout=timeout)
+        elapsed = time.monotonic() - start
+        harness.drains.append(
+            NodeDrain(
+                node_name=node_name,
+                invocation_index=harness.invocation_index,
+                invocation_id=invocation_id,
+                timeout=timeout,
+                summary=summary,
+                elapsed=elapsed,
+                observer=observer,
+                snapshot=list(harness.observers[observer].buckets.get(invocation_id, [])),
+            )
+        )
+        return update
+
+    return fn_with_drain
+
+
 def _wrap_with_execution_recorder(
     fn: Callable[[Any], Awaitable[Mapping[str, Any]]],
     node_name: str,
@@ -782,6 +851,7 @@ def build_graph(
     flaky_per_index_attempt_recorders: dict[str, dict[int, list[int]]] | None = None,
     instance_execution_recorders: dict[str, dict[int, list[int]]] | None = None,
     leaf_value_recorder: list[Any] | None = None,
+    drains: DrainHarness | None = None,
 ) -> BuiltGraph:
     """Translate a graph-shaped fixture block into a `BuiltGraph`.
 
@@ -896,6 +966,12 @@ def build_graph(
         if sleep_ms is not None:
             body = _wrap_with_sleep(body, int(sleep_ms))
 
+        drain_cfg = node_spec.get("invoke_drain_events_for")
+        if drain_cfg is not None:
+            if drains is None:
+                raise ValueError(f"node {node_name!r} drains, but the runner passed no DrainHarness")
+            body = _wrap_with_drain(body, node_name, drain_cfg, drains)
+
         # Record per-instance execution for plain-node fan-outs so the
         # checkpoint resume driver can tell executed from rolled-forward
         # instances. flaky_per_index records its own per-instance attempts,
@@ -952,11 +1028,13 @@ class ObserverFixture:
     name: str
     attach: str  # "graph" | "invocation"
     target: str  # "outer" | <subgraph name>
-    behavior: str  # "record" | "raise"
+    behavior: str  # "record" | "accumulate" | "raise"
     phases: frozenset[str] | None = None
     sleep_ms_per_event: int | Mapping[str, int] | None = None
     invocation_counter: list[int] = field(default_factory=lambda: [0])
     events: list[dict[str, Any]] = field(default_factory=list[dict[str, Any]])
+    # `accumulate` only: events by the invocation that emitted them.
+    buckets: dict[str, list[dict[str, Any]]] = field(default_factory=dict[str, list[dict[str, Any]]])
 
 
 def _record_event(event: NodeEvent) -> dict[str, Any]:
@@ -1026,7 +1104,15 @@ def make_observer_fn(
         if sleep_ms > 0:
             await asyncio.sleep(sleep_ms / 1000.0)
         delivery.append((fixture.name, event.step, event.phase))
-        fixture.events.append(_record_event(event))
+        record = _record_event(event)
+        fixture.events.append(record)
+        if fixture.behavior == "accumulate":
+            # graph-engine section 6 tags each event with its invocation; the
+            # engine runs one deliver worker per invocation, started inside that
+            # invocation's context, so the observer reads the tag from there.
+            invocation_id = current_invocation_id()
+            assert invocation_id is not None, f"{fixture.name} received an event outside an invocation"
+            fixture.buckets.setdefault(invocation_id, []).append(record)
         if fixture.behavior == "raise":
             raise RuntimeError(f"{fixture.name} raised on event at step {event.step}")
 
@@ -1043,6 +1129,27 @@ def normalize_expected_event(ev: Mapping[str, Any]) -> dict[str, Any]:
     e.setdefault("parent_states", [])
     e.setdefault("attempt_index", 0)
     return e
+
+
+def assert_events_match(
+    actual: Sequence[Mapping[str, Any]],
+    expected: Sequence[Mapping[str, Any]],
+    label: str,
+) -> None:
+    """Assert recorded events match a fixture's event list, in order.
+
+    Each expected event is backfilled with the engine's defaults and compared
+    on the keys it lists only, so a recorded event may carry more. A listed
+    key the recorded event lacks fails, even when the expected value is null.
+    """
+    normalized = [normalize_expected_event(ev) for ev in expected]
+    assert len(actual) == len(normalized), (
+        f"{label}: {len(actual)} events, expected {len(normalized)}\n  actual={list(actual)}"
+    )
+    for i, (a, e) in enumerate(zip(actual, normalized, strict=True)):
+        for key, want in e.items():
+            assert key in a, f"{label} event {i} missing key {key!r}: actual={a}"
+            assert a[key] == want, f"{label} event {i} key {key!r}: actual={a[key]!r}, expected={want!r}"
 
 
 def _add_fan_out_node(

@@ -62,6 +62,13 @@ class GraphEngineExpected(_ForbidExtras):
     # 018 — registering an observer with `phases: []` raises at
     # registration time per spec §6.
     empty_phases_raises_at_registration: bool | None = None
+    # 028-033: per-invocation drain, keyed by the draining node's name:
+    # its drain summary, its accumulator snapshot (exact, or as predicates
+    # where inner ordering is not fixed), and the bucket once delivered.
+    node_drain_summaries: dict[str, dict[str, Any]] | None = None
+    node_accumulator_snapshots: dict[str, dict[str, list[dict[str, Any]]]] | None = None
+    node_accumulator_snapshot_invariants: dict[str, dict[str, dict[str, Any]]] | None = None
+    final_accumulator_state: dict[str, list[dict[str, Any]]] | None = None
 
 
 # ---------------------------------------------------------------------------
