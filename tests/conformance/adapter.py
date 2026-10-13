@@ -1052,6 +1052,10 @@ def _record_event(event: NodeEvent) -> dict[str, Any]:
         rec["post_state"] = event.post_state.model_dump()
     if event.error is not None:
         rec["error"] = event.error.category
+        # The category the node raised, which the engine's error wraps.
+        cause_category = getattr(event.error.__cause__, "category", None)
+        if cause_category is not None:
+            rec["error_category"] = cause_category
     if event.fan_out_index is not None:
         rec["fan_out_index"] = event.fan_out_index
     if event.branch_name is not None:

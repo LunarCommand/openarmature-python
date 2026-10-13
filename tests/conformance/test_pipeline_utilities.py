@@ -16,7 +16,7 @@ build_graph adapter the graph-engine fixtures use.
 from __future__ import annotations
 
 import re
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any, cast
 
@@ -43,11 +43,12 @@ from openarmature.graph.middleware import (
     deterministic_backoff,
 )
 
-from .adapter import ObserverFixture, build_graph, make_observer_fn
+from .adapter import ObserverFixture, assert_events_match, build_graph, make_observer_fn
 from .harness.subgraph_placement import resolve_subgraphs
 from .middleware_seam import (
     ErrorRaiserMiddleware,
     ErrorRecoveryMiddleware,
+    InFlightTrackerMiddleware,
     ShortCircuitMiddleware,
     StateInspectorMiddleware,
     TraceRecord,
@@ -753,6 +754,9 @@ async def _run_one(spec: Mapping[str, Any], monkeypatch: pytest.MonkeyPatch) -> 
     final_states: list[dict[str, Any]] = []
     traces: list[list[str]] = []
     observer_fixtures: dict[str, ObserverFixture] = {}
+    observer_runs: list[dict[str, ObserverFixture]] = []
+    implicit_runs: list[list[dict[str, Any]]] = []
+    trackers: list[InFlightTrackerMiddleware] = []
     for run_idx in range(run_count):
         run_sinks = sinks if run_count == 1 else CaptureSinks()
         if run_count == 1:
@@ -766,6 +770,10 @@ async def _run_one(spec: Mapping[str, Any], monkeypatch: pytest.MonkeyPatch) -> 
             if run_count == 1
             else _translate_fan_out_instance_middleware(spec, run_sinks, clock)
         )
+        if "concurrency_invariant" in expected:
+            tracker = InFlightTrackerMiddleware()
+            trackers.append(tracker)
+            run_fan_out_inst_mw = _with_in_flight_tracker(spec, run_fan_out_inst_mw, tracker)
         run_built = build_graph(
             spec,
             subgraphs=subgraphs,
@@ -796,12 +804,17 @@ async def _run_one(spec: Mapping[str, Any], monkeypatch: pytest.MonkeyPatch) -> 
             obs = make_observer_fn(ofx, run_delivery)
             if ofx.attach == "graph" and ofx.target == "outer":
                 run_compiled.attach_observer(obs, phases=phases)
+        # Event lists that name no observer are read against this recorder.
+        implicit = ObserverFixture(name="implicit", attach="graph", target="outer", behavior="record")
+        run_compiled.attach_observer(make_observer_fn(implicit, []))
         if run_idx == 0:
             run_compiled.attach_observer(_capture_isolation)
         run_final = await run_compiled.invoke(run_initial)
         await run_compiled.drain()
         final_states.append(run_final.model_dump())
         traces.append(list(run_built.trace))
+        observer_runs.append(run_observer_fixtures)
+        implicit_runs.append(implicit.events)
         if run_idx == 0:
             observer_fixtures = run_observer_fixtures
 
@@ -858,15 +871,71 @@ async def _run_one(spec: Mapping[str, Any], monkeypatch: pytest.MonkeyPatch) -> 
             for name, expected_recs in timing_dict.items():
                 _assert_timing_records(sinks.timing_records.get(name, []), expected_recs)
 
-    # Single observer-event assertion (fixture 015 uses singular form).
-    if "expected_observer_event" in expected:
-        # Fixture 015 has a top-level observer attached; we'd need observer
-        # wiring just for this. For this harness's reduced scope, skip the
-        # singular-observer-event check — fixture 015 is gated on retry's
-        # per-attempt event behavior, which we test via flaky+retry against
-        # final_state/execution_order. The detailed single-event assertion
-        # would need additional harness scaffolding.
-        pass
+    if "observer_events" in expected:
+        _assert_observer_events(expected["observer_events"], observer_runs, implicit_runs)
+    if "expected_attempt_events" in expected:
+        attempt_events = cast("list[Mapping[str, Any]]", expected["expected_attempt_events"])
+        for run_idx, events in enumerate(implicit_runs):
+            assert_events_match(events, attempt_events, f"run {run_idx} expected_attempt_events")
+    if "concurrency_invariant" in expected:
+        _assert_concurrency_invariant(
+            cast("Mapping[str, Any]", expected["concurrency_invariant"]), trackers, implicit_runs
+        )
+
+
+def _assert_observer_events(
+    expected: Any,
+    observer_runs: Sequence[Mapping[str, ObserverFixture]],
+    implicit_runs: Sequence[Sequence[Mapping[str, Any]]],
+) -> None:
+    """Assert every run's events against ``observer_events``, keyed by
+    observer name or given as one list for the implicit recorder."""
+    for run_idx, (observers, implicit) in enumerate(zip(observer_runs, implicit_runs, strict=True)):
+        # conformance-adapter section 5.8 keys the block by observer name; a
+        # bare list names none, so it is read against the implicit recorder.
+        if isinstance(expected, list):
+            assert_events_match(implicit, cast("list[Mapping[str, Any]]", expected), f"run {run_idx}")
+            continue
+        for name, events in cast("Mapping[str, list[Mapping[str, Any]]]", expected).items():
+            assert name in observers, f"observer_events names {name!r}, which no observers entry declares"
+            assert_events_match(observers[name].events, events, f"run {run_idx} observer {name!r}")
+
+
+def _with_in_flight_tracker(
+    spec: Mapping[str, Any],
+    instance_mw: Mapping[str, list[Middleware]],
+    tracker: InFlightTrackerMiddleware,
+) -> dict[str, list[Middleware]]:
+    """Return the instance middleware map with ``tracker`` outermost on
+    the case's fan-out node."""
+    nodes = cast("dict[str, dict[str, Any]]", spec.get("nodes") or {})
+    fan_out_nodes = [name for name, node in nodes.items() if "fan_out" in node]
+    assert len(fan_out_nodes) == 1, f"concurrency_invariant needs one fan-out node, got {fan_out_nodes}"
+    node_name = fan_out_nodes[0]
+    return {**instance_mw, node_name: [tracker, *instance_mw.get(node_name, [])]}
+
+
+def _assert_concurrency_invariant(
+    invariant: Mapping[str, Any],
+    trackers: Sequence[InFlightTrackerMiddleware],
+    implicit_runs: Sequence[Sequence[Mapping[str, Any]]],
+) -> None:
+    """Assert no run had more fan-out instances in flight than
+    ``max_in_flight``."""
+    max_in_flight = cast("int", invariant["max_in_flight"])
+    for run_idx, (tracker, events) in enumerate(zip(trackers, implicit_runs, strict=True)):
+        instances = {ev["fan_out_index"] for ev in events if "fan_out_index" in ev}
+        # A fan-out no wider than the bound cannot exceed it, and a tracker
+        # that missed an instance cannot see its overlap.
+        assert len(instances) > max_in_flight, (
+            f"run {run_idx}: {len(instances)} instances cannot exceed max_in_flight={max_in_flight}"
+        )
+        assert tracker.entered == len(instances), (
+            f"run {run_idx}: tracker saw {tracker.entered} instances, events show {len(instances)}"
+        )
+        assert tracker.peak <= max_in_flight, (
+            f"run {run_idx}: {tracker.peak} instances in flight at once, max_in_flight={max_in_flight}"
+        )
 
 
 def _collect_parallel_branches_errors_fields(spec: Mapping[str, Any]) -> set[str]:
