@@ -30,6 +30,7 @@ Fixture-by-fixture status:
 
 from __future__ import annotations
 
+import uuid
 from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Any, cast
@@ -57,7 +58,7 @@ from openarmature.graph import (
 )
 from openarmature.llm import TRANSIENT_CATEGORIES
 
-from .adapter import build_graph
+from .adapter import ObserverFixture, build_graph, make_observer_fn
 from .harness.subgraph_placement import resolve_subgraphs
 
 CONFORMANCE_DIR = (
@@ -806,7 +807,7 @@ async def _run_one_case(spec: Mapping[str, Any], *, top_level: Mapping[str, Any]
     try:
         final_first_run = await compiled.invoke(
             initial_state,
-            correlation_id=spec.get("correlation_id"),
+            correlation_id=spec.get("caller_correlation_id"),
         )
         # Under collect mode, the abort_after_instance sentinel fires
         # from inside a per-instance save and is captured by gather's
@@ -913,6 +914,15 @@ async def _run_one_case(spec: Mapping[str, Any], *, top_level: Mapping[str, Any]
         _assert_state_matches(final_first_run, cast("Mapping[str, Any]", expected["final_state"]))
     if "invariants" in expected:
         _assert_invariants(cast("Mapping[str, Any]", expected["invariants"]), capturing.saves)
+    if "latest_record_assertions" in expected:
+        assert invocation_id_first_run is not None, "latest_record_assertions: no save fired"
+        latest = await capturing.load(invocation_id_first_run)
+        assert latest is not None, f"latest_record_assertions: no record for {invocation_id_first_run!r}"
+        _assert_latest_record(
+            cast("Mapping[str, Any]", expected["latest_record_assertions"]),
+            latest,
+            built.state_cls.schema_version,
+        )
 
     # Per proposal 0028 (fixture 055): ``every_save_assertions`` is a
     # cross-save invariant block — every captured save during the
@@ -1007,17 +1017,36 @@ async def _run_one_case(spec: Mapping[str, Any], *, top_level: Mapping[str, Any]
         )
         return
 
+    resume_events = ObserverFixture(name="resume", attach="invocation", target="outer", behavior="record")
     try:
         final_resume = await compiled.invoke(
             initial_state,
+            [make_observer_fn(resume_events, [])],
             resume_invocation=invocation_id_first_run,
         )
     except CheckpointError:
         raise
+    await compiled.drain()
     _ = trace  # trace clearing/inspection deferred; recorder map is canonical
     resume_expected = cast("Mapping[str, Any]", resume_block.get("expected") or {})
     if "final_state" in resume_expected:
         _assert_state_matches(final_resume, cast("Mapping[str, Any]", resume_expected["final_state"]))
+
+    # Read from the resume invocation's events: the trace records a `flaky`
+    # node only on its first attempt and misses nodes inside subgraphs.
+    if "nodes_executed_during_resume" in resume_expected:
+        started = [ev["node_name"] for ev in resume_events.events if ev["phase"] == "started"]
+        expected_nodes = list(cast(Iterable[str], resume_expected["nodes_executed_during_resume"]))
+        assert started == expected_nodes, (
+            f"nodes_executed_during_resume mismatch: actual={started}, expected={expected_nodes}"
+        )
+    if "nodes_skipped_during_resume" in resume_expected:
+        emitted = {ev["node_name"] for ev in resume_events.events}
+        for node_name in cast(Iterable[str], resume_expected["nodes_skipped_during_resume"]):
+            assert node_name not in emitted, (
+                f"node {node_name!r} expected to be skipped on resume but emitted events: "
+                f"{[ev for ev in resume_events.events if ev['node_name'] == node_name]}"
+            )
 
     # proposal-0009 instances_executed_during_resume /
     # instances_skipped_during_resume — assert against the
@@ -1212,6 +1241,72 @@ def _assert_saved_record_from(
             f"fan_out_node_in_completed_positions mismatch: "
             f"actual={actual_present}, expected={expected_present}"
         )
+
+
+def _assert_latest_record(
+    block: Mapping[str, Any],
+    record: CheckpointRecord,
+    declared_schema_version: str,
+) -> None:
+    """Assert a ``latest_record_assertions`` block against the latest
+    loaded record."""
+    for key in ("invocation_id", "correlation_id"):
+        if key not in block:
+            continue
+        actual_id = cast("str", getattr(record, key))
+        want_id = block[key]
+        if want_id == "<uuid>":
+            # conformance-adapter section 5.10: a canonical UUIDv4.
+            assert _is_canonical_uuid4(actual_id), f"latest record {key}={actual_id!r} is not a UUIDv4"
+        else:
+            assert actual_id == want_id, f"latest record {key}: actual={actual_id!r}, expected={want_id!r}"
+    if "state" in block:
+        actual_state = record.state.model_dump()
+        assert actual_state == block["state"], (
+            f"latest record state: actual={actual_state}, expected={block['state']}"
+        )
+    if "completed_positions" in block:
+        _assert_saved_record_from({"completed_positions": block["completed_positions"]}, record)
+    if "parent_states" in block:
+        actual_parents = [ps.model_dump() for ps in record.parent_states]
+        assert actual_parents == block["parent_states"], (
+            f"latest record parent_states: actual={actual_parents}, expected={block['parent_states']}"
+        )
+    if "fan_out_progress" in block:
+        if block["fan_out_progress"] is None:
+            # Null reads as absent, which this record holds as an empty tuple.
+            assert record.fan_out_progress == (), (
+                f"latest record fan_out_progress expected absent, got {record.fan_out_progress}"
+            )
+        else:
+            expected_progress = cast("Mapping[str, Any]", block["fan_out_progress"])
+            _assert_fan_out_progress(expected_progress, record.fan_out_progress)
+    if "last_saved_at" in block:
+        # `<timestamp>` is not a section 5.10 matcher; read as present and numeric.
+        want_saved_at = block["last_saved_at"]
+        assert want_saved_at == "<timestamp>", f"unsupported last_saved_at {want_saved_at!r}"
+        assert isinstance(record.last_saved_at, float) and record.last_saved_at > 0, (
+            f"latest record last_saved_at={record.last_saved_at!r} is not a timestamp"
+        )
+    if "schema_version" in block:
+        # pipeline-utilities section 10.2: the declared state class's value, or
+        # the empty-string sentinel when it declares none. `<any-string>` would
+        # reject the sentinel (conformance-adapter section 5.10), so the token
+        # reads as the declared value.
+        want = block["schema_version"]
+        if want == "<any-string>":
+            want = declared_schema_version
+        assert record.schema_version == want, (
+            f"latest record schema_version: actual={record.schema_version!r}, expected={want!r}"
+        )
+
+
+def _is_canonical_uuid4(value: str) -> bool:
+    try:
+        parsed = uuid.UUID(value)
+    except ValueError:
+        return False
+    return parsed.version == 4 and str(parsed) == value
 
 
 def _assert_fan_out_progress(

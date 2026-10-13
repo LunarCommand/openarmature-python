@@ -287,18 +287,6 @@ KNOWN_UNREAD_NESTED: dict[tuple[str, str], tuple[str, ...]] = {
     # post_state, which graph-engine section 6 dispatch timing and fixture 061 do
     # not allow. Awaiting a spec ruling.
     ("expected", "expected_observer_event"): ("006-middleware-error-recovery",),
-    # pipeline-utilities checkpoint records and resume
-    ("expected", "latest_record_assertions"): ("026-checkpoint-record-shape",),
-    ("expected", "nodes_executed_during_resume"): (
-        "025-checkpoint-resume-from-completed-position",
-        "029-checkpoint-subgraph-resume",
-        "070-crash-injection-after-node-resume",
-    ),
-    ("expected", "nodes_skipped_during_resume"): (
-        "025-checkpoint-resume-from-completed-position",
-        "029-checkpoint-subgraph-resume",
-        "070-crash-injection-after-node-resume",
-    ),
     # graph-engine observer isolation
     ("expected", "no_propagated_error"): ("015-observer-error-isolation",),
     # observability per-fixture drivers. Some assert the claim by hardcoding it
