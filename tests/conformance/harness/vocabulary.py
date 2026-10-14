@@ -287,8 +287,6 @@ KNOWN_UNREAD_NESTED: dict[tuple[str, str], tuple[str, ...]] = {
     # post_state, which graph-engine section 6 dispatch timing and fixture 061 do
     # not allow. Awaiting a spec ruling.
     ("expected", "expected_observer_event"): ("006-middleware-error-recovery",),
-    # graph-engine observer isolation
-    ("expected", "no_propagated_error"): ("015-observer-error-isolation",),
     # observability per-fixture drivers. Some assert the claim by hardcoding it
     # rather than reading the key, so a changed fixture value would go unnoticed.
     ("nodes.*", "also_emits_via_global_tracer"): ("005-otel-llm-provider-span-nested",),

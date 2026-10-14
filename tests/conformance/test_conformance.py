@@ -544,6 +544,17 @@ async def _run_runtime_case(spec: Mapping[str, Any], fixture_id: str) -> None:
             assert final.model_dump() == expected["final_state"]
         if "execution_order" in expected:
             assert built.trace == expected["execution_order"]
+        # graph-engine section 6: an observer error MUST NOT interrupt the run.
+        # Reaching this line means invoke() and drain() returned, which shows
+        # that only if an observer raised. Without the count, a raiser that
+        # records but never raises passes every other check in 015.
+        if "no_propagated_error" in expected:
+            assert expected["no_propagated_error"] is True, (
+                f"unsupported no_propagated_error {expected['no_propagated_error']!r}"
+            )
+            assert any(o.raised for o in observer_fixtures.values()), (
+                "no_propagated_error: no observer raised during the run"
+            )
 
         # Proposal 0010 §6 Drain — DrainSummary assertions. The fixture
         # MAY assert exact `undelivered_count` or a lower-bound
