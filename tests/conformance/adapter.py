@@ -1035,6 +1035,8 @@ class ObserverFixture:
     events: list[dict[str, Any]] = field(default_factory=list[dict[str, Any]])
     # `accumulate` only: events by the invocation that emitted them.
     buckets: dict[str, list[dict[str, Any]]] = field(default_factory=dict[str, list[dict[str, Any]]])
+    # `raise` only: how many times the observer raised.
+    raised: int = 0
 
 
 def _record_event(event: NodeEvent) -> dict[str, Any]:
@@ -1100,6 +1102,10 @@ def make_observer_fn(
     BEFORE recording, so a drain timeout that cancels mid-sleep leaves
     the event unrecorded and the counter shows it as undelivered.
     """
+    # Anything else would run below as plain `record`. ObserverSpec rejects a
+    # fixture typo; this catches a value added there and not handled here.
+    if fixture.behavior not in ("record", "accumulate", "raise"):
+        raise ValueError(f"observer {fixture.name!r}: unsupported behavior {fixture.behavior!r}")
 
     async def observer(event: ObserverEvent) -> None:
         if not isinstance(event, NodeEvent):
@@ -1118,6 +1124,7 @@ def make_observer_fn(
             assert invocation_id is not None, f"{fixture.name} received an event outside an invocation"
             fixture.buckets.setdefault(invocation_id, []).append(record)
         if fixture.behavior == "raise":
+            fixture.raised += 1
             raise RuntimeError(f"{fixture.name} raised on event at step {event.step}")
 
     return observer
