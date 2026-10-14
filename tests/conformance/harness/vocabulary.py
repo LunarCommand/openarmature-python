@@ -283,24 +283,10 @@ NESTED_EXTRAS: dict[str, frozenset[str]] = {
 # a new unread key fails, and an entry that stops being unread -- because the key
 # was wired, or the fixture stopped running -- fails until it is removed.
 KNOWN_UNREAD_NESTED: dict[tuple[str, str], tuple[str, ...]] = {
-    # pipeline-utilities resume, records and events
-    ("expected", "concurrency_invariant"): ("022-fan-out-count-and-concurrency-modes",),
-    ("expected", "expected_attempt_events"): ("061-failure-isolation-retry-three-piece-composition",),
-    ("expected", "latest_record_assertions"): ("026-checkpoint-record-shape",),
-    ("expected", "nodes_executed_during_resume"): (
-        "025-checkpoint-resume-from-completed-position",
-        "029-checkpoint-subgraph-resume",
-        "070-crash-injection-after-node-resume",
-    ),
-    ("expected", "nodes_skipped_during_resume"): (
-        "025-checkpoint-resume-from-completed-position",
-        "029-checkpoint-subgraph-resume",
-        "070-crash-injection-after-node-resume",
-    ),
-    ("expected", "observer_events"): (
-        "011-middleware-determinism",
-        "015-retry-per-attempt-observer-events",
-    ),
+    # pipeline-utilities: the fixture expects the recovered node's event to carry
+    # post_state, which graph-engine section 6 dispatch timing and fixture 061 do
+    # not allow. Awaiting a spec ruling.
+    ("expected", "expected_observer_event"): ("006-middleware-error-recovery",),
     # graph-engine observer isolation
     ("expected", "no_propagated_error"): ("015-observer-error-isolation",),
     # observability per-fixture drivers. Some assert the claim by hardcoding it

@@ -7,6 +7,7 @@ the public API.
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
@@ -145,9 +146,36 @@ class StateInspectorMiddleware:
         return partial
 
 
+class InFlightTrackerMiddleware:
+    """Counts the dispatches running inside it and keeps the peak.
+
+    Placed as fan-out instance middleware, it sits inside the concurrency
+    gate, so `peak` is the most instances that were in flight at once.
+    """
+
+    def __init__(self) -> None:
+        self.entered = 0
+        self.in_flight = 0
+        self.peak = 0
+
+    async def __call__(self, state: Any, next_: NextCall) -> Mapping[str, Any]:
+        self.entered += 1
+        self.in_flight += 1
+        self.peak = max(self.peak, self.in_flight)
+        try:
+            # The fixture's instances never await, so without this yield each
+            # one finishes before the next starts and an ungated fan-out would
+            # still peak at one.
+            await asyncio.sleep(0)
+            return await next_(state)
+        finally:
+            self.in_flight -= 1
+
+
 __all__ = [
     "ErrorRaiserMiddleware",
     "ErrorRecoveryMiddleware",
+    "InFlightTrackerMiddleware",
     "ShortCircuitMiddleware",
     "StateInspectorMiddleware",
     "TraceRecord",
