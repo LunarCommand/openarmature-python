@@ -837,6 +837,9 @@ async def _run_one(spec: Mapping[str, Any], monkeypatch: pytest.MonkeyPatch) -> 
         first = (final_states[0], traces[0])
         for other in zip(final_states[1:], traces[1:], strict=True):
             assert other == first, f"determinism violated across {run_count} runs"
+        # Every recorded key, including the ones an expected event list leaves out.
+        for run_idx, events in enumerate(implicit_runs[1:], start=1):
+            assert events == implicit_runs[0], f"run {run_idx} recorded different events from run 0"
 
     _check_trace_records(
         cast("Mapping[str, list[Mapping[str, Any]]] | None", expected.get("trace_records")),
@@ -898,7 +901,14 @@ def _assert_observer_events(
             continue
         for name, events in cast("Mapping[str, list[Mapping[str, Any]]]", expected).items():
             assert name in observers, f"observer_events names {name!r}, which no observers entry declares"
-            assert_events_match(observers[name].events, events, f"run {run_idx} observer {name!r}")
+            observer = observers[name]
+            # The run attaches only these, and an unattached observer records
+            # nothing, which an empty expected list would pass.
+            assert (observer.attach, observer.target) == ("graph", "outer"), (
+                f"observer_events names {name!r}, declared {observer.attach}/{observer.target}; "
+                "only graph/outer observers are attached"
+            )
+            assert_events_match(observer.events, events, f"run {run_idx} observer {name!r}")
 
 
 def _with_in_flight_tracker(
@@ -920,20 +930,26 @@ def _assert_concurrency_invariant(
     trackers: Sequence[InFlightTrackerMiddleware],
     implicit_runs: Sequence[Sequence[Mapping[str, Any]]],
 ) -> None:
-    """Assert no run had more fan-out instances in flight than
-    ``max_in_flight``."""
+    """Assert every run peaked at exactly ``max_in_flight`` fan-out
+    instances in flight."""
+    unhandled = set(invariant) - {"max_in_flight"}
+    assert not unhandled, f"concurrency_invariant keys {sorted(unhandled)} are not handled"
     max_in_flight = cast("int", invariant["max_in_flight"])
     for run_idx, (tracker, events) in enumerate(zip(trackers, implicit_runs, strict=True)):
+        # A fan-out no wider than the bound never makes the gate hold an
+        # instance back.
+        assert tracker.entered > max_in_flight, (
+            f"run {run_idx}: the tracker saw {tracker.entered} instances, "
+            f"too few to test max_in_flight={max_in_flight}"
+        )
+        # A tracker that missed an instance cannot see its overlap.
         instances = {ev["fan_out_index"] for ev in events if "fan_out_index" in ev}
-        # A fan-out no wider than the bound cannot exceed it, and a tracker
-        # that missed an instance cannot see its overlap.
-        assert len(instances) > max_in_flight, (
-            f"run {run_idx}: {len(instances)} instances cannot exceed max_in_flight={max_in_flight}"
+        assert len(instances) == tracker.entered, (
+            f"run {run_idx}: events show {len(instances)} instances, the tracker saw {tracker.entered}"
         )
-        assert tracker.entered == len(instances), (
-            f"run {run_idx}: tracker saw {tracker.entered} instances, events show {len(instances)}"
-        )
-        assert tracker.peak <= max_in_flight, (
+        # Equality: a fan-out that ran one instance at a time passes `<=`.
+        # Killed by asyncio.Semaphore(1) in fan_out._bounded_runner.
+        assert tracker.peak == max_in_flight, (
             f"run {run_idx}: {tracker.peak} instances in flight at once, max_in_flight={max_in_flight}"
         )
 

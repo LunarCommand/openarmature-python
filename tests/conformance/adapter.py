@@ -1145,15 +1145,30 @@ def assert_events_match(
     Each expected event is backfilled with the engine's defaults and compared
     on the keys it lists only, so a recorded event may carry more. A listed
     key the recorded event lacks fails, even when the expected value is null.
+    Every recorded event must also carry the outcome its phase allows.
     """
     normalized = [normalize_expected_event(ev) for ev in expected]
     assert len(actual) == len(normalized), (
         f"{label}: {len(actual)} events, expected {len(normalized)}\n  actual={list(actual)}"
     )
     for i, (a, e) in enumerate(zip(actual, normalized, strict=True)):
+        _assert_outcome_shape(a, f"{label} event {i}")
         for key, want in e.items():
             assert key in a, f"{label} event {i} missing key {key!r}: actual={a}"
             assert a[key] == want, f"{label} event {i} key {key!r}: actual={a[key]!r}, expected={want!r}"
+
+
+def _assert_outcome_shape(event: Mapping[str, Any], label: str) -> None:
+    # graph-engine section 6: a started event carries neither post_state nor
+    # error, and a completed event carries exactly one. The key comparison
+    # ignores unlisted keys, so on its own it passes a completed event that
+    # carries both. Killed by populating post_state on the engine's failed
+    # completed event, and on its started event.
+    outcome = [key for key in ("post_state", "error") if key in event]
+    if event["phase"] == "started":
+        assert not outcome, f"{label}: started event carries {outcome}: actual={event}"
+    elif event["phase"] == "completed":
+        assert len(outcome) == 1, f"{label}: completed event carries {outcome}, expected one: actual={event}"
 
 
 def _add_fan_out_node(

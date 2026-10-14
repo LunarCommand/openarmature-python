@@ -30,6 +30,7 @@ Fixture-by-fixture status:
 
 from __future__ import annotations
 
+import time
 import uuid
 from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
@@ -680,14 +681,15 @@ async def _run_one_case(spec: Mapping[str, Any], *, top_level: Mapping[str, Any]
     # body records which instances ran. Consulted as a fallback for the
     # instances_executed / skipped assertions when no flaky_per_index node did.
     instance_execution_recorders: dict[str, dict[int, list[int]]] = {}
+    trace: list[str] = []
     subgraphs = _build_subgraphs_for(
         spec,
         top_level,
         flaky_per_index_recorders=flaky_per_index_recorders,
         instance_execution_recorders=instance_execution_recorders,
+        trace=trace,
     )
 
-    trace: list[str] = []
     sanitized_spec = _strip_abort_directive(spec)
     built = build_graph(
         sanitized_spec,
@@ -804,6 +806,7 @@ async def _run_one_case(spec: Mapping[str, Any], *, top_level: Mapping[str, Any]
     invocation_id_first_run: str | None = None
     final_first_run: State | None = None
     trace.clear()
+    first_run_started = time.time()
     try:
         final_first_run = await compiled.invoke(
             initial_state,
@@ -877,6 +880,7 @@ async def _run_one_case(spec: Mapping[str, Any], *, top_level: Mapping[str, Any]
             assert e.category == expected_category, (
                 f"first-run error category mismatch: actual={e.category!r}, expected={expected_category!r}"
             )
+    first_run_ended = time.time()
 
     # Capture invocation_id from the latest save (we attached a
     # capturing checkpointer; every save record carries the engine's
@@ -922,6 +926,7 @@ async def _run_one_case(spec: Mapping[str, Any], *, top_level: Mapping[str, Any]
             cast("Mapping[str, Any]", expected["latest_record_assertions"]),
             latest,
             built.state_cls.schema_version,
+            (first_run_started, first_run_ended),
         )
 
     # Per proposal 0028 (fixture 055): ``every_save_assertions`` is a
@@ -1027,26 +1032,33 @@ async def _run_one_case(spec: Mapping[str, Any], *, top_level: Mapping[str, Any]
     except CheckpointError:
         raise
     await compiled.drain()
-    _ = trace  # trace clearing/inspection deferred; recorder map is canonical
     resume_expected = cast("Mapping[str, Any]", resume_block.get("expected") or {})
     if "final_state" in resume_expected:
         _assert_state_matches(final_resume, cast("Mapping[str, Any]", resume_expected["final_state"]))
 
-    # Read from the resume invocation's events: the trace records a `flaky`
-    # node only on its first attempt and misses nodes inside subgraphs.
-    if "nodes_executed_during_resume" in resume_expected:
-        started = [ev["node_name"] for ev in resume_events.events if ev["phase"] == "started"]
-        expected_nodes = list(cast(Iterable[str], resume_expected["nodes_executed_during_resume"]))
-        assert started == expected_nodes, (
-            f"nodes_executed_during_resume mismatch: actual={started}, expected={expected_nodes}"
-        )
     if "nodes_skipped_during_resume" in resume_expected:
+        # Every name below passes against an observer that received nothing.
+        # Killed by dropping the invocation's observers in the engine.
+        assert resume_events.events, "nodes_skipped_during_resume: the resume observer received no events"
         emitted = {ev["node_name"] for ev in resume_events.events}
         for node_name in cast(Iterable[str], resume_expected["nodes_skipped_during_resume"]):
             assert node_name not in emitted, (
                 f"node {node_name!r} expected to be skipped on resume but emitted events: "
                 f"{[ev for ev in resume_events.events if ev['node_name'] == node_name]}"
             )
+            # Catches a body that re-ran without dispatching events. Killed by
+            # running the node at the engine's resume skip gate.
+            assert node_name not in trace, (
+                f"node {node_name!r} expected to be skipped on resume but its body ran: trace={trace}"
+            )
+    # Read from the resume invocation's events: the trace records a `flaky`
+    # node only on its first attempt.
+    if "nodes_executed_during_resume" in resume_expected:
+        started = [ev["node_name"] for ev in resume_events.events if ev["phase"] == "started"]
+        expected_nodes = list(cast(Iterable[str], resume_expected["nodes_executed_during_resume"]))
+        assert started == expected_nodes, (
+            f"nodes_executed_during_resume mismatch: actual={started}, expected={expected_nodes}"
+        )
 
     # proposal-0009 instances_executed_during_resume /
     # instances_skipped_during_resume — assert against the
@@ -1125,6 +1137,7 @@ def _build_subgraphs_for(
     flaky_per_index_recorders: dict[str, dict[int, list[int]]] | None = None,
     instance_execution_recorders: dict[str, dict[int, list[int]]] | None = None,
     leaf_value_recorder: list[Any] | None = None,
+    trace: list[str] | None = None,
 ) -> dict[str, Any]:
     """Build subgraphs from either the case's own ``subgraph`` /
     ``subgraphs`` block or the cases-fixture's top-level shared
@@ -1137,6 +1150,8 @@ def _build_subgraphs_for(
     assertions read. ``leaf_value_recorder`` (fixture 076) records the
     source values that inner-leaf ``update_from_field`` bodies read, so the
     resume driver can tell which inner instances re-ran vs. skipped.
+    ``trace`` (when supplied) is shared by every subgraph's bodies, so the
+    caller sees inner nodes run.
     """
     # Section 5.4 ranks per NAME. The merge below replaces the document's whole
     # block when the case declares any, dropping a name the document declares
@@ -1152,6 +1167,7 @@ def _build_subgraphs_for(
         flaky_per_index_recorders=flaky_per_index_recorders,
         instance_execution_recorders=instance_execution_recorders,
         leaf_value_recorder=leaf_value_recorder,
+        trace=trace,
     )
 
 
@@ -1161,6 +1177,7 @@ def _build_subgraphs(
     flaky_per_index_recorders: dict[str, dict[int, list[int]]] | None = None,
     instance_execution_recorders: dict[str, dict[int, list[int]]] | None = None,
     leaf_value_recorder: list[Any] | None = None,
+    trace: list[str] | None = None,
 ) -> dict[str, Any]:
     """Build any subgraphs (`subgraph:` or `subgraphs:`) the fixture
     declares. Returns a registry the adapter consumes by name.
@@ -1185,11 +1202,10 @@ def _build_subgraphs(
     # fan-out targets the leaf_scorer subgraph). YAML preserves insertion
     # order, so an inner subgraph declared before its user resolves.
     for name, sub_spec in subgraph_specs.items():
-        sub_trace: list[str] = []
         sub_built = build_graph(
             sub_spec,
             subgraphs=compiled_subgraphs,
-            trace=sub_trace,
+            trace=trace,
             flaky_per_index_attempt_recorders=flaky_per_index_recorders,
             instance_execution_recorders=instance_execution_recorders,
             leaf_value_recorder=leaf_value_recorder,
@@ -1247,9 +1263,23 @@ def _assert_latest_record(
     block: Mapping[str, Any],
     record: CheckpointRecord,
     declared_schema_version: str,
+    saved_during: tuple[float, float],
 ) -> None:
     """Assert a ``latest_record_assertions`` block against the latest
-    loaded record."""
+    loaded record, which was saved between the two ``saved_during``
+    wall-clock times."""
+    handled = {
+        "invocation_id",
+        "correlation_id",
+        "state",
+        "completed_positions",
+        "parent_states",
+        "fan_out_progress",
+        "last_saved_at",
+        "schema_version",
+    }
+    unhandled = set(block) - handled
+    assert not unhandled, f"latest_record_assertions keys {sorted(unhandled)} are not handled"
     for key in ("invocation_id", "correlation_id"):
         if key not in block:
             continue
@@ -1282,11 +1312,15 @@ def _assert_latest_record(
             expected_progress = cast("Mapping[str, Any]", block["fan_out_progress"])
             _assert_fan_out_progress(expected_progress, record.fan_out_progress)
     if "last_saved_at" in block:
-        # `<timestamp>` is not a section 5.10 matcher; read as present and numeric.
+        # `<timestamp>` is not a section 5.10 matcher; read as a wall-clock time
+        # taken while the saving run was in flight. Killed by time.monotonic()
+        # at the engine's record build.
         want_saved_at = block["last_saved_at"]
         assert want_saved_at == "<timestamp>", f"unsupported last_saved_at {want_saved_at!r}"
-        assert isinstance(record.last_saved_at, float) and record.last_saved_at > 0, (
-            f"latest record last_saved_at={record.last_saved_at!r} is not a timestamp"
+        started, ended = saved_during
+        saved_at = record.last_saved_at
+        assert isinstance(saved_at, float) and started <= saved_at <= ended, (
+            f"latest record last_saved_at={saved_at!r} is outside the saving run [{started}, {ended}]"
         )
     if "schema_version" in block:
         # pipeline-utilities section 10.2: the declared state class's value, or
