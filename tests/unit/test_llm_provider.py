@@ -3604,9 +3604,9 @@ async def test_a_pre_send_collision_on_a_retry_emits_no_attempt_event() -> None:
     # trace shows the base's extras next to a failure about a collision that is
     # not in them.
     #
-    # Asserted so the gap is recorded where someone will see it rather than only
-    # in _tasks/: moving the build inside the try is what makes this go red, and
-    # then this test is the thing that tells you to update it.
+    # Asserted so the gap is recorded where someone will see it: moving the build
+    # inside the try is what makes this go red, and then this test is the thing
+    # that tells you to update it.
     #
     # Not vacuous: attempt 0's event DOES fire, so the count distinguishes "no
     # events at all" from "one attempt short".

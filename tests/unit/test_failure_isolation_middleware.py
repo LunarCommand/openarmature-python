@@ -802,9 +802,9 @@ async def test_oa_keys_win_over_a_colliding_caller_key_on_the_marker() -> None:
     # `error_category` silently replaced the marker's only failure discriminator,
     # on the failure path, with no warning.
     #
-    # OA-wins is the interim, not a settled precedence rule (spec ruled on it in
-    # coord release-v0.17.0/54): it still drops the caller's value silently. The
-    # real fix is reservation, which arrives when the span is mapped.
+    # OA-wins is the interim spec agreed to, not a settled precedence rule: it
+    # still drops the caller's value silently. The real fix is reservation,
+    # which arrives when the span is mapped.
     from openarmature.observability.langfuse.client import InMemoryLangfuseClient
     from openarmature.observability.langfuse.observer import LangfuseObserver
     from openarmature.observability.metadata import set_invocation_metadata

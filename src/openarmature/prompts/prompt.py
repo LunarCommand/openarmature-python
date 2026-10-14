@@ -130,11 +130,11 @@ class ContentSegment(BaseModel):
 
     @model_validator(mode="after")
     def _check_role_blocks(self) -> ContentSegment:
-        # Per spec §11 / msg 07: render-time is the spec-normative
-        # trigger; construction-time enforcement is permitted as an
-        # "ergonomic-only bonus" for hand-built prompts.  Both fire
-        # the same canonical errors.  Backends or harnesses that
-        # need to construct intentionally-invalid prompts (e.g., for
+        # Per prompt-management §11, render is the normative point of
+        # enforcement; these construction-time checks are an optional
+        # earlier layer for hand-built prompts.  Both fire the same
+        # canonical errors.  Backends or harnesses that need to
+        # construct intentionally-invalid prompts (e.g., for
         # round-trip render-time error tests) bypass these checks
         # via ``ContentSegment.model_construct(...)``.
         if isinstance(self.content, list):
@@ -165,9 +165,9 @@ class PlaceholderSegment(BaseModel):
 
     @model_validator(mode="after")
     def _check_name(self) -> PlaceholderSegment:
-        # Per spec §11 / msg 07: render-time is the spec-normative
-        # trigger; construction-time enforcement is the optional
-        # "ergonomic bonus" for hand-built prompts.  Backends or
+        # Per prompt-management §11, render is the normative point of
+        # enforcement; this construction-time check is an optional
+        # earlier one for hand-built prompts.  Backends or
         # harnesses constructing intentionally-invalid names
         # (e.g., to verify the render-time error path) bypass this
         # check via ``PlaceholderSegment.model_construct(...)``.
@@ -254,9 +254,9 @@ class ChatPrompt(_PromptBase):
 
     @model_validator(mode="after")
     def _check_chat_template(self) -> ChatPrompt:
-        # Per spec §11 / msg 07: render-time is the spec-normative
-        # trigger; construction-time enforcement is the optional
-        # "ergonomic bonus".  Backends or harnesses constructing
+        # Per prompt-management §11, render is the normative point of
+        # enforcement; this construction-time check is an optional
+        # earlier one.  Backends or harnesses constructing
         # intentionally-invalid chat templates (e.g., to verify the
         # render-time error path) bypass via
         # ``ChatPrompt.model_construct(...)``.

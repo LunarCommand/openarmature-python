@@ -350,8 +350,7 @@ async def test_detached_subgraph_opens_separate_trace() -> None:
 
 
 async def test_detached_subgraph_subgraph_name_placement() -> None:
-    # Per coord thread `discuss-observability-langfuse-mapping` msg 07
-    # and the wrapper-role-migration framing: in detached mode the
+    # Per a spec ruling not yet in the text: in detached mode the
     # wrapper role migrates to the detached trace. The parent trace's
     # link observation IS the SubgraphNode span (no wrapper role) and
     # MUST NOT carry `subgraph_name`. The detached trace's dispatch
@@ -2114,8 +2113,8 @@ async def test_llm_event_parents_under_parallel_branch_dispatch() -> None:
     # 0084 fixtures (132/133/134) are fan-out only. An orphan LLM event fired
     # inside a parallel branch (calling node observation not open) MUST parent
     # under the per-branch dispatch observation -- the nearest enclosing wrapper
-    # -- resolved via branch_name_chain. Guards the reference behavior pending a
-    # spec fixture (see release-v0.17.0 coord).
+    # -- resolved via branch_name_chain. Guards the reference behavior until a
+    # spec fixture covers it.
     from openarmature.observability.correlation import (
         _reset_invocation_id,
         _set_invocation_id,

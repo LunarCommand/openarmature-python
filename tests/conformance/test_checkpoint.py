@@ -746,9 +746,9 @@ async def _run_one_case(spec: Mapping[str, Any], *, top_level: Mapping[str, Any]
     # Read as a SIBLING of `expected:` first. conformance-adapter section 5.8's
     # preamble says the `expected_*` directives sit inside that block, and the
     # corpus puts `expected_error` there twice against 106 at case level; spec
-    # has confirmed the corpus is right and the preamble wrong (coord thread
-    # release-v0.17.0 msg 58). The nested read stays as the compatibility form
-    # for the two fixtures that follow the preamble, and goes when they move.
+    # has confirmed the corpus is right and the preamble wrong. The nested read
+    # stays as the compatibility form for the two fixtures that follow the
+    # preamble, and goes when they move.
     #
     # It is a MAPPING, not a bare category string. Reading it as a string meant
     # this arm never fired: fixture 030 ran, asserted nothing, and stayed green

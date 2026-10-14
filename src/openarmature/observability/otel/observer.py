@@ -1482,16 +1482,10 @@ class OTelObserver:
     # Lookup hits the per-invocation_id open_spans so concurrent fan-out
     # instances each find their own calling node, not a sibling's.
     #
-    # v0.13.0 (proposal 0049 + 0057): the success-path span lifecycle is
-    # driven by the typed LlmCompletionEvent — opened and closed in one
-    # shot at typed-event arrival, with start_time back-dated by
-    # latency_ms so the span duration matches the adapter-boundary
-    # measurement. The error-path span is still driven by the sentinel
-    # NodeEvent (LlmCompletionEvent is success-only per proposal 0049
-    # §3 alternative 3). Success-side sentinel emission was dropped
-    # from the provider in v0.13.0; the failure-side sentinel emission
-    # stays until the spec extends LlmCompletionEvent with error
-    # semantics (coord-thread tracked).
+    # The per-attempt LlmRetryAttemptEvent (proposal 0050) drives the
+    # span, on success and failure alike: opened and closed in one shot
+    # when it arrives, with start_time back-dated by latency_ms so the
+    # span duration matches the adapter-boundary measurement.
     #
     # v0.17.0 attribute set (proposal 0024) preserved unchanged:
     #   - Baseline openarmature.llm.* attributes
@@ -3281,13 +3275,12 @@ class OTelObserver:
         debugging scenarios, and integration code that has the id
         from a checkpoint record's ``invocation_id`` field.
 
-        For typical production lifecycle on long-lived observers,
-        prefer :meth:`shutdown`; it drains every in-flight
-        invocation in one call without needing to track ids
-        externally. A first-class engine-level signal that lets
-        observers auto-drain per-invocation state on completion is
-        tracked as follow-up work in
-        ``openarmature-coord/docs/phase-6-1-conformance-fillin.md``.
+        The observer does not close an invocation on its own when
+        the invocation completes. Until this method or
+        :meth:`shutdown` runs, the invocation's state stays in
+        memory and its root span stays open, so it is not exported.
+        :meth:`shutdown` closes every open invocation at once,
+        which suits process exit.
         """
         inv_state = self._inv_states.pop(invocation_id, None)
         if inv_state is not None:

@@ -1,8 +1,7 @@
 # Spec: conformance-adapter section 8.2 + section 5 *Definition homes* (proposal
 # 0120, spec v0.113.0). Section 9 requires the adapter to raise rather than skip,
 # and to surface the offending directive and its location; the token itself is
-# not observable surface, per the ruling in coord thread
-# `proposal-0120-0123-adapter-obligations`.
+# not observable surface: no fixture can see which category an adapter raises.
 
 """Every directive is recognized, and every one outside the models is read.
 
@@ -12,8 +11,8 @@ only directives the fixture models do NOT declare: a field on `CaseSpec` or on a
 root model is skipped, and that exclusion is not the harmless one it looks like.
 `expected_wire_request`, `checkpointer` and `mock_llm` are modelled AND
 behavioural, so deleting every read of one from its owning runner passes here.
-Closing that needs the four-way classification tracked in
-`_tasks/modelled-field-read-check.md`, not a wider exclusion list.
+Closing that needs each modelled field classified as read through a model, read
+by name, inert by construction, or genuinely dark, not a wider exclusion list.
 
 `extra="forbid"` cannot carry this. It applies at the fixture's document root,
 while `CaseSpec` and `SubgraphDefinition` both allow extras, and the runners

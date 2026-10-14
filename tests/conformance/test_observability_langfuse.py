@@ -93,13 +93,12 @@ _LANGFUSE_FIXTURES = frozenset(
         # per §8.4.1 + §8.4.2).
         "027-langfuse-caller-supplied-metadata",
         # 031 / 032 / 033 — proposal 0035. Activated against spec
-        # v0.27.1, which patched the two fixture-vs-impl ambiguities
-        # raised in coord thread `clarify-subgraph-name-semantics`
-        # (msg 04): fixture 031's `outer_out` step corrected 2 → 3
+        # v0.27.1, which patched two fixture-vs-impl ambiguities:
+        # fixture 031's `outer_out` step corrected 2 → 3
         # (graph-engine §6 shared-counter), and fixture 033's
         # detached-trace inner namespace corrected to the wrapper
-        # node name (`["dispatch", "step"]`). The Option A
-        # subgraph_identity wiring on main satisfies both.
+        # node name (`["dispatch", "step"]`). The subgraph_identity
+        # wiring satisfies both.
         "031-langfuse-subgraph-span-hierarchy",
         "032-langfuse-fan-out-per-instance-spans",
         "033-langfuse-detached-trace-mode",

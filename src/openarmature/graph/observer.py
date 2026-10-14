@@ -494,8 +494,7 @@ class _InvocationContext:
     step_counter: list[int] = field(default_factory=lambda: [0])
     namespace_prefix: tuple[str, ...] = ()
     parent_states_prefix: tuple[State, ...] = ()
-    # Per observability §5.3 + the coord-thread `clarify-subgraph-name-
-    # semantics` resolution. Parallel to ``namespace_prefix`` — index
+    # Per observability §5.3. Parallel to ``namespace_prefix`` — index
     # ``i`` is the compiled-subgraph identity for the wrapper at
     # ``namespace_prefix[i]``, or ``None`` for wrappers constructed
     # without an identity. Used by observers to emit

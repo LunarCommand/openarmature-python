@@ -1736,7 +1736,7 @@ def _canonicalize_dict_keys(value: Any) -> Any:
 
 
 def _tool_to_wire(tool: Tool) -> dict[str, Any]:
-    # Per spec 0047 §8 ack (coord Q5): the byte-stability rule covers
+    # Per llm-provider §8.1.1, the wire-byte stability rule covers
     # tool DEFINITIONS broadly — not just the parameters subtree.
     # Sort the function record's top-level keys + recursively
     # canonicalize the parameters JSON Schema.

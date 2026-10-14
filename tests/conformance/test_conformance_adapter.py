@@ -9,8 +9,6 @@ on which declaration this harness resolved while building the graph, a choice
 made before the engine runs.
 
 Reported as adapter conformance, distinct from the five runtime capabilities.
-Spec ruled the directory in scope on coord thread
-`proposal-0120-0123-adapter-obligations` msg 02.
 """
 
 from __future__ import annotations
