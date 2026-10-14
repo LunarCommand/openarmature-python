@@ -879,18 +879,15 @@ def _emitted_top_level_metadata_keys() -> dict[str, list[int]]:
 
 
 # The three keys on the `openarmature.failure_isolated` marker span. They are
-# NOT reserved and a caller key of the same name overwrites them, because
-# `_apply_caller_metadata` runs last on that handler with a bare merge.
-#
-# Held rather than fixed: that span is a graph-mechanism span which no §8.4.x
-# table maps, so whether §3.4's reserved set should reach an UNMAPPED span is a
-# spec question, not ours to settle unilaterally. Raised to spec in coord thread
-# release-v0.17.0. When it rules, these move into `_RESERVED_KEY_NAMES` (or the
-# handler's merge order changes) and this set shrinks to empty.
+# NOT reserved: that span is a graph-mechanism span which no §8.4.x table maps,
+# and per a spec ruling, §3.4's reserved set does not reach an unmapped span.
+# The handler applies the caller set first, so a colliding caller key loses to
+# them. When a §8.4.x table maps the span, they move into `_RESERVED_KEY_NAMES`
+# and this set shrinks to empty.
 #
 # Listing them by name is the point: a NEW unreserved key fails this test, which
 # is the regression the proposal asks for.
-_UNRESERVED_PENDING_SPEC_RULING = frozenset(
+_UNRESERVED_ON_UNMAPPED_SPAN = frozenset(
     {
         "error_category",
         "failure_isolation_event_name",
@@ -917,7 +914,7 @@ def test_every_emitted_metadata_key_is_reserved_or_namespaced() -> None:
         for key, lines in emitted.items()
         if key not in _RESERVED_KEY_NAMES
         and not any(key.startswith(prefix) for prefix in _RESERVED_PREFIXES)
-        and key not in _UNRESERVED_PENDING_SPEC_RULING
+        and key not in _UNRESERVED_ON_UNMAPPED_SPAN
     }
     assert not uncovered, (
         "these top-level metadata keys are emitted by the Langfuse mapping but are "
@@ -927,14 +924,14 @@ def test_every_emitted_metadata_key_is_reserved_or_namespaced() -> None:
     )
 
 
-def test_the_scan_still_sees_the_keys_pending_a_spec_ruling() -> None:
+def test_the_scan_still_sees_the_unmapped_span_keys() -> None:
     # Pairs with the exclusion set above. Without this, a key that stops being
     # emitted (or that the scan stops seeing) leaves a stale name in the
     # exclusion set, quietly widening the hole the other test guards.
     emitted = _emitted_top_level_metadata_keys()
-    assert _UNRESERVED_PENDING_SPEC_RULING <= set(emitted), (
-        "a key held pending the spec ruling is no longer emitted; drop it from "
-        "_UNRESERVED_PENDING_SPEC_RULING rather than leaving the exclusion standing"
+    assert _UNRESERVED_ON_UNMAPPED_SPAN <= set(emitted), (
+        "a key held for the unmapped span is no longer emitted; drop it from "
+        "_UNRESERVED_ON_UNMAPPED_SPAN rather than leaving the exclusion standing"
     )
 
 

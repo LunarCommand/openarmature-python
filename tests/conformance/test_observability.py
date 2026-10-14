@@ -24,9 +24,6 @@ Driven fixtures:
 - **011-determinism** — deterministic span content
   (hierarchy, names, status, attributes minus the canonical
   non-deterministic-by-design list) is identical across runs.
-
-Per-fixture wiring notes live in
-``docs/phase-6-1-conformance-fillin.md``.
 """
 
 from __future__ import annotations
@@ -1136,8 +1133,7 @@ async def _run_fixture_002(spec: Mapping[str, Any]) -> None:
     assert sub_dispatch.context is not None
     sub_dispatch_id = sub_dispatch.context.span_id
     sub_dispatch_attrs = dict(sub_dispatch.attributes or {})
-    # Per observability §5.3 + coord thread `clarify-subgraph-name-
-    # semantics` Option A: `openarmature.subgraph.name` carries the
+    # Per observability §5.3: `openarmature.subgraph.name` carries the
     # compiled subgraph's identity, NOT the wrapper node name. The
     # conformance adapter sets ``subgraph_identity = "inner"`` when
     # compiling the fixture's ``subgraph: { name: inner }`` block.
@@ -1589,10 +1585,8 @@ async def _run_fixture_011_case(case: Mapping[str, Any]) -> None:
     # functionally equivalent to ``equals: 1`` for this fixture's
     # flow. The determinism comparison itself doesn't depend on
     # which adapter construct represents the edge; the same
-    # branch always fires under identical inputs. (Generic
-    # ``gt``/``lt``/etc. edge-condition support is tracked under
-    # the Harness backlog in
-    # ``openarmature-coord/docs/phase-6-1-conformance-fillin.md``.)
+    # branch always fires under identical inputs. (The adapter has
+    # no generic ``gt``/``lt`` edge conditions.)
     case_for_build = _translate_011_when_edges(case)
 
     invocations = int(case.get("invocations", 2))

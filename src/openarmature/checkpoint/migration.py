@@ -92,8 +92,7 @@ class MigrationRegistry:
         # it's the documented bridging path for pre-declaration
         # records (current class declares ``"v1"``; users register
         # ``with_state_migration("", "v1", fn)`` to migrate records
-        # saved before the class declared a version). See Q4 in the
-        # proposal-0014 coord-thread plan for the matrix.
+        # saved before the class declared a version).
         if not migration.to_version:
             raise ValueError(
                 f"state migration to_version MUST be non-empty "

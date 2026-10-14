@@ -56,7 +56,7 @@ spec_pin = "v0.118.2"
 langfuse_bound_provider_detection = true
 
 # External dependencies this implementation requires, and the private upstream
-# surface it reaches into (coord thread discuss-external-dependency-tracking).
+# surface it reaches into.
 #
 # The split from openarmature.org/compatibility's matrix is deliberate: that
 # matrix records what the SPEC's normative text is written against, which is one
@@ -373,7 +373,7 @@ since = "0.13.0"
 # landed in the same release cycle as 0048).
 # ``get_invocation_metadata`` lands as the canonical spec-idiomatic
 # public name; ``current_invocation_metadata`` stays as a stable
-# alias (Option A per the proposal-0048-implementation coord thread).
+# alias.
 # Plus a new §9 *Queryable observer pattern* section in
 # ``docs/concepts/observability.md`` covering the §9.1 read-method
 # contract, §9.2 async-safety, §9.3 three-channel guidance, §9.4
@@ -451,10 +451,9 @@ since = "0.13.0"
 # (single-attempt attempt_index) is wired in test_observability.
 # Failure-isolation fixtures (058-063) are all wired + passing: the
 # FailureIsolatedEvent's attempt_index reports the final / exhausting
-# attempt per §6.3's lineage-correlation rule (spec ruled this in the
-# attempt-index coord thread; RetryMiddleware now records the final
-# attempt in a terminal-attempt scope the outer isolation reads, rather
-# than the post-reset baseline).
+# attempt per §6.3's lineage-correlation rule (RetryMiddleware records
+# the final attempt in a terminal-attempt scope the outer isolation
+# reads, rather than the post-reset baseline).
 [proposals."0050"]
 status = "implemented"
 since = "0.15.0"
@@ -533,15 +532,12 @@ since = "0.12.0"
 #
 # Fixture 058 case 2 ("detached_subgraph_attribution_propagates_
 # _to_child_trace_invocation_span") expects two ``openarmature.invocation``
-# spans (parent + detached child trace), but fixture 008 establishes
-# that detached subgraphs root in their subgraph-dispatch span — NOT
-# in a separate invocation span. The two fixtures appear inconsistent.
-# Not deferring 058's parsing (it parses cleanly), but the runtime
-# exec contract for the detached-child-invocation-span case needs
-# coord-thread resolution before activation. The python implementation
-# emits the attribution attributes on every invocation span it opens
-# (pinned by the multi-invocation test above), so the 0052 contract
-# itself is honored.
+# spans: the parent's, and the detached invocation span observability
+# §4.4 puts at the detached child trace's root. 058 parses; its runtime
+# check is not wired yet. The python implementation emits the
+# attribution attributes on every invocation span it opens (pinned by
+# the multi-invocation test above), so the 0052 contract itself is
+# honored.
 [proposals."0052"]
 status = "implemented"
 since = "0.12.0"
@@ -565,11 +561,8 @@ since = "0.12.0"
 # implementation: per-invocation waker Futures on the existing
 # ``_DrainCounters``; ``deliver_loop`` fulfils waiters whose target
 # delivered-count has been reached.  Reuses the existing
-# ``DrainSummary`` shape verbatim per the
-# discuss-per-invocation-event-drain coord thread's Q4 direction.
-# Default timeout is 5.0 seconds (recommended-value nudge per the
-# coord-thread Q3 direction; spec leaves the default to the
-# implementation).
+# ``DrainSummary`` shape verbatim.  Default timeout is 5.0 seconds
+# (spec leaves the default to the implementation).
 #
 # Key divergence from process-wide ``drain()``: per-invocation drain
 # MUST NOT cancel the deliver worker on timeout (the graph remains
@@ -1180,7 +1173,7 @@ note = "A failed observation's metadata.error_message is harvested exception tex
 [proposals."0120"]
 status = "implemented"
 since = "0.17.0"
-note = "conformance-adapter §5 gains a Definition homes rule naming exactly two: §5 itself, and a per-directory harness note. Together they are the recognized vocabulary, and §8.2's parsing obligation re-anchors to that phrase. Per the coord ruling the obligation is the REJECTION rather than the fixture_directive_unknown token, which no fixture can observe: the adapter must raise rather than skip, name the directive, and name the location. Adopting it exposed that this harness rejected an unknown directive at the document root only. CaseSpec and SubgraphDefinition both allow extras, and the runners read raw YAML rather than the typed model, so an unknown case-level key was accepted in silence by the whole suite. Implemented as repository checks over the corpus (tests/conformance/test_case_vocabulary.py) rather than model config, covering both obligations: a key nothing recognizes is rejected, and a key recognized by the harness that no owning runner reads is also rejected. Fields the fixture models declare are excluded from the second check and tracked separately."
+note = "conformance-adapter §5 gains a Definition homes rule naming exactly two: §5 itself, and a per-directory harness note. Together they are the recognized vocabulary, and §8.2's parsing obligation re-anchors to that phrase. The obligation is the REJECTION rather than the fixture_directive_unknown token, which no fixture can observe: the adapter must raise rather than skip, name the directive, and name the location. Adopting it exposed that this harness rejected an unknown directive at the document root only. CaseSpec and SubgraphDefinition both allow extras, and the runners read raw YAML rather than the typed model, so an unknown case-level key was accepted in silence by the whole suite. Implemented as repository checks over the corpus (tests/conformance/test_case_vocabulary.py) rather than model config, covering both obligations: a key nothing recognizes is rejected, and a key recognized by the harness that no owning runner reads is also rejected. Fields the fixture models declare are excluded from the second check and tracked separately."
 
 [proposals."0121"]
 status = "implemented"

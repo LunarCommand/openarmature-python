@@ -777,7 +777,7 @@ class LangfuseObserver:
         # instance's dispatch observations and pops the shared
         # `fan_out_parent_node_name` entry they still need. Removing the filter
         # needs the match scoped to the completing event's own lineage first, in
-        # both observers. See `_tasks/dispatch-close-scoping.md`.
+        # both observers.
         if event.fan_out_index is None and event.fan_out_config is not None:
             ns = event.namespace
             for key in list(inv_state.fan_out_instance_observations.keys()):
@@ -1572,7 +1572,7 @@ class LangfuseObserver:
         # no loop over `parallel_branches_branch_spans`, so nothing reads a
         # branch dispatch's stored chains. Kept rather than dropped because the
         # OTel twin's equivalent is live and the chains are what that loop needs
-        # when it lands. See `_tasks/langfuse-augmentation-skips-branch-dispatches.md`.
+        # when it lands.
         _stored_fan_out, _stored_branches = _stored_lineage(event, chain_len, own_branch=branch_name)
         inv_state.parallel_branches_branch_spans[branch_key] = _OpenObservation(
             handle=handle,

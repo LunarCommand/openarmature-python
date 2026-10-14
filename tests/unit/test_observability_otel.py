@@ -629,7 +629,7 @@ async def test_llm_span_parents_under_parallel_branch_dispatch() -> None:
     # calling-node span) fired inside a parallel branch MUST parent under the
     # per-branch dispatch span -- the nearest enclosing wrapper -- resolved via
     # branch_name_chain, the branch-side analog of the fan-out case above. Guards
-    # the reference behavior pending a spec fixture (see release-v0.17.0 coord).
+    # the reference behavior until a spec fixture covers it.
     from openarmature.observability.correlation import (
         _reset_invocation_id,
         _set_invocation_id,
@@ -3603,11 +3603,8 @@ async def test_metadata_augmentation_in_parallel_branches_skips_sibling() -> Non
     # NOT carry either branch's branch_label (per-async-context
     # isolation). Note: the current OTel mapping synthesizes a
     # subgraph wrapper at the parallel-branches NODE's namespace in
-    # addition to the NODE's own span — that's a pre-existing
-    # divergence from fixture 030's expected Langfuse shape that
-    # `discuss-otel-parallel-branches-dispatch-span` is asking spec
-    # to settle. For this test both dispatcher-named spans MUST be
-    # augmentation-clean.
+    # addition to the NODE's own span, so for this test both
+    # dispatcher-named spans MUST be augmentation-clean.
     dispatcher_spans = [s for s in spans if s.name == "dispatcher"]
     invocation_spans = [s for s in spans if s.name == "openarmature.invocation"]
     assert len(invocation_spans) == 1
