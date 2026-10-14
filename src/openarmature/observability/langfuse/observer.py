@@ -942,7 +942,7 @@ class LangfuseObserver:
         # content on it is over-emission. It rides the OTel span instead.
         #
         # Caller set first because the three keys below are unreserved: a
-        # colliding caller key survives the §3.4 boundary and would win.
+        # colliding caller key survives the §3.4 boundary and would otherwise win.
         metadata: dict[str, Any] = {}
         _apply_caller_metadata(metadata, event.caller_invocation_metadata)
         metadata["failure_isolation_event_name"] = event.event_name

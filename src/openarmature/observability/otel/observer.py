@@ -3275,11 +3275,12 @@ class OTelObserver:
         debugging scenarios, and integration code that has the id
         from a checkpoint record's ``invocation_id`` field.
 
-        For typical production lifecycle on long-lived observers,
-        prefer :meth:`shutdown`; it drains every in-flight
-        invocation in one call without needing to track ids
-        externally. The observer does not release an invocation's
-        state on its own when the invocation completes.
+        The observer does not close an invocation on its own when
+        the invocation completes. Until this method or
+        :meth:`shutdown` runs, the invocation's state stays in
+        memory and its root span stays open, so it is not exported.
+        :meth:`shutdown` closes every open invocation at once,
+        which suits process exit.
         """
         inv_state = self._inv_states.pop(invocation_id, None)
         if inv_state is not None:
