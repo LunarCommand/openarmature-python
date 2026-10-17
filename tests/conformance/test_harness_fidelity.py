@@ -32,14 +32,10 @@ _UNGUARDED_SINGLE_FIXTURE_DRIVERS = frozenset(
         "_run_fixture_001",
         "_run_fixture_002",
         "_run_fixture_003",
-        "_run_fixture_004",
-        "_run_fixture_005",
         "_run_fixture_006",
         "_run_fixture_007",
         "_run_fixture_008",
-        "_run_fixture_009",
         "_run_fixture_010",
-        "_run_fixture_011",
         "_run_fixture_028",
         "_run_fixture_038",
         "_run_fixture_050",
@@ -92,6 +88,13 @@ def test_every_dispatched_driver_is_registered_or_explicitly_unguarded() -> None
     # And the lists must not accumulate names for drivers that no longer exist.
     stale = sorted((_UNGUARDED_SINGLE_FIXTURE_DRIVERS | _UNGUARDED_SHARED_DRIVERS) - dispatched)
     assert not stale, f"unguarded lists name drivers nothing dispatches to: {stale}"
+    # Nor keep a driver once it is registered: the subset check above is satisfied
+    # either way, so the list would go on claiming a guarded driver is unguarded.
+    registered = sorted(
+        set(otel_runner._DRIVER_EXPECTED_KEYS)  # noqa: SLF001
+        & (_UNGUARDED_SINGLE_FIXTURE_DRIVERS | _UNGUARDED_SHARED_DRIVERS)
+    )
+    assert not registered, f"unguarded lists name drivers registered in `_DRIVER_EXPECTED_KEYS`: {registered}"
 
 
 def _invariant_names_read_by(func: object, param: str) -> set[str]:
