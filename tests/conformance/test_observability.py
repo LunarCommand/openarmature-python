@@ -617,7 +617,7 @@ _UUIDV4_RE = re.compile(
 
 
 def _is_uuidv4(value: Any) -> bool:
-    return isinstance(value, str) and _UUIDV4_RE.match(value) is not None
+    return isinstance(value, str) and _UUIDV4_RE.fullmatch(value) is not None
 
 
 def _fixture_paths() -> list[Path]:
@@ -2218,7 +2218,8 @@ async def _run_fixture_009_case(case: Mapping[str, Any]) -> None:
     if (tree := expected.get("span_tree")) is not None:
         inv_root = next((s for s in spans if s.name == "openarmature.invocation" and s.parent is None), None)
         assert inv_root is not None, f"invocation root span missing; got {[s.name for s in spans]}"
-        _assert_span_tree_matches(spans, [inv_root], cast("list[dict[str, Any]]", tree))
+        # Matched from every root the exporter saw, so a stray root fails as well.
+        _assert_span_tree_matches(spans, _exporter_roots(spans), cast("list[dict[str, Any]]", tree))
 
     # Each invocation is its own trace.
     by_trace: dict[int, list[Any]] = {}
