@@ -1055,16 +1055,29 @@ def _build_039_case3(
     provider: OpenAIProvider | None,
     prompt_manager: PromptManager | None,
 ) -> tuple[Any, Any]:
-    # Case 3: a serial subgraph wrapper (`wrap`) descends into `wrapped_fan_out`,
-    # whose `pick` fan-out runs per-product; each instance augments note=<id>.
-    # The wrapper span must carry the augmentation (last-writer) per 0045's
-    # lineage-aware rule, the fan-out NODE must not.
-    # The fan-out places each outer product into per_product's item_field slot;
-    # the augment middleware reads <id> from it. per_product's declared state
-    # ({picked}) lacks the slot, so inject it (mirrors _synthesize_fan_out_
+    # Case 3: the entry node's `subgraph_call` descends into a serial subgraph
+    # whose entry node fans out per product; each instance augments metadata from
+    # its item. The wrapper span must carry the augmentation (last-writer) per
+    # 0045's lineage-aware rule, the fan-out NODE must not.
+    # The fan-out places each outer product into the inner subgraph's item_field
+    # slot; the augment middleware reads from it. The inner subgraph's declared
+    # state lacks the slot, so inject it (mirrors _synthesize_fan_out_
     # aggregation on the generic 029 path).
     assert provider is not None, "039 cases declare mock_llm, so the provider must be set"
-    per_product_spec = copy.deepcopy(cast("dict[str, Any]", case["inner_subgraphs"]["per_product"]))
+    wrap_name = cast("str", case["entry"])
+    call = cast("dict[str, Any]", case["nodes"][wrap_name]["subgraph_call"])
+    subgraphs = cast("dict[str, Any]", case["subgraphs"])
+    wrapped_name = cast("str", call["subgraph"])
+    assert wrapped_name in subgraphs, (
+        f"subgraph_call names {wrapped_name!r}; the case declares {sorted(subgraphs)}"
+    )
+    wrapped_spec = cast("dict[str, Any]", subgraphs[wrapped_name])
+    fan_out_name = cast("str", wrapped_spec["entry"])
+    fan_out = cast("dict[str, Any]", wrapped_spec["nodes"][fan_out_name]["fan_out"])
+    items_field = cast("str", fan_out["items_field"])
+    per_product_spec = copy.deepcopy(
+        cast("dict[str, Any]", case["inner_subgraphs"][cast("str", fan_out["inner_subgraph"])])
+    )
     per_product_spec.setdefault("state", {}).setdefault("fields", {}).setdefault(
         "oa_fan_out_item", {"type": "dict", "default": {}}
     )
@@ -1074,40 +1087,51 @@ def _build_039_case3(
         prompt_manager=prompt_manager,
         render_variables={},
     )
+    # The fixture under-declares this topology. Its call has no `inputs`, and
+    # graph-engine §2 projects nothing in by default, so the fan-out would see
+    # no items; neither state declares the items field either. The builder
+    # projects and declares it under its own name, pending a spec ruling. It
+    # also types `picks` and `result` as plain lists, since the declared
+    # `list<dict>` and `dict` cannot hold the strings the instances collect.
     wrap_state_cls = build_state_cls(
         "Wrapped039C3",
         {
             "picks": {"type": "list", "reducer": "append", "default": []},
-            "products": {"type": "list<dict>", "default": []},
+            items_field: {"type": "list<dict>", "default": []},
             "oa_fan_out_item": {"type": "dict", "default": {}},
         },
     )
     wrap_builder: GraphBuilder[Any] = GraphBuilder(wrap_state_cls)
-    wrap_builder.set_entry("pick")
+    wrap_builder.set_entry(fan_out_name)
     wrap_builder.add_fan_out_node(
-        "pick",
+        fan_out_name,
         subgraph=per_product,
-        items_field="products",
+        items_field=items_field,
         item_field="oa_fan_out_item",
         collect_field="picked",
         target_field="picks",
-        instance_middleware=[_make_augment_instance_middleware({"note": "id"}, "oa_fan_out_item")],
+        instance_middleware=[
+            _make_augment_instance_middleware(
+                cast("dict[str, str]", fan_out["augment_metadata_from_field"]), "oa_fan_out_item"
+            )
+        ],
     )
-    wrap_builder.add_edge("pick", END)
+    wrap_builder.add_edge(fan_out_name, END)
     wrapped_fan_out = wrap_builder.compile()
 
     outer_state_cls = build_state_cls(
         "Outer039C3",
-        {"result": {"type": "list", "default": []}, "products": {"type": "list<dict>", "default": []}},
+        {"result": {"type": "list", "default": []}, items_field: {"type": "list<dict>", "default": []}},
     )
+    inputs = cast("dict[str, str]", call["inputs"]) if "inputs" in call else {items_field: items_field}
     outer_builder: GraphBuilder[Any] = GraphBuilder(outer_state_cls)
-    outer_builder.set_entry("wrap")
+    outer_builder.set_entry(wrap_name)
     outer_builder.add_subgraph_node(
-        "wrap",
+        wrap_name,
         wrapped_fan_out,
-        ExplicitMapping(inputs={"products": "products"}, outputs={"result": "picks"}),
+        ExplicitMapping(inputs=inputs, outputs=cast("dict[str, str]", call["outputs"])),
     )
-    outer_builder.add_edge("wrap", END)
+    outer_builder.add_edge(wrap_name, END)
     graph = outer_builder.compile()
     initial = cast("dict[str, Any]", case.get("initial_state") or {})
     return graph, (lambda: outer_state_cls(**initial))
@@ -1456,6 +1480,11 @@ async def _run_resume_case(
     shared correlation_id, the snapshotted first trace's fields unchanged).
     """
     from openarmature.graph.errors import RuntimeGraphError  # noqa: PLC0415
+
+    # conformance-adapter §5.6: `from_first_run: true` resumes the first run's
+    # invocation id, which is the only resume Step 2 performs.
+    from_first_run = cast("dict[str, Any]", case["resume"]).get("from_first_run")
+    assert from_first_run is True, f"resume.from_first_run: only `true` is supported; got {from_first_run!r}"
 
     # ---- Step 1: first invoke catches expected error
     first_run_expected_error = cast("dict[str, Any]", case.get("first_run_expected_error") or {})

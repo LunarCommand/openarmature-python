@@ -287,19 +287,9 @@ KNOWN_UNREAD_NESTED: dict[tuple[str, str], tuple[str, ...]] = {
     # post_state, which graph-engine section 6 dispatch timing and fixture 061 do
     # not allow. Awaiting a spec ruling.
     ("expected", "expected_observer_event"): ("006-middleware-error-recovery",),
-    # observability per-fixture drivers. Some assert the claim by hardcoding it
-    # rather than reading the key, so a changed fixture value would go unnoticed.
-    ("nodes.*", "also_emits_via_global_tracer"): ("005-otel-llm-provider-span-nested",),
-    ("expected", "determinism_check"): ("011-otel-determinism",),
-    ("resume", "from_first_run"): ("037-langfuse-trace-input-output",),
-    ("expected", "invocation_count"): ("009-otel-correlation-id-cross-cutting",),
-    ("expected", "no_edge_spans"): ("004-otel-routing-error-attribution",),
-    ("expected", "no_llm_provider_span"): ("005-otel-llm-provider-span-nested",),
-    ("expected", "no_openarmature_spans_on_global"): ("005-otel-llm-provider-span-nested",),
+    # observability: the detached-trace drivers check their trees by hand rather
+    # than reading these keys, so a changed fixture value would go unnoticed.
     ("expected", "parent_trace"): ("008-otel-detached-trace-mode",),
-    ("expected", "span_tree_global"): ("005-otel-llm-provider-span-nested",),
-    ("expected", "span_tree_private"): ("005-otel-llm-provider-span-nested",),
-    ("nodes.*", "subgraph_call"): ("039-nested-lineage-augmentation",),
     ("expected", "traces"): (
         "008-otel-detached-trace-mode",
         "058-implementation-attribution-otel",

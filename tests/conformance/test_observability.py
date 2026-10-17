@@ -29,9 +29,11 @@ Driven fixtures:
 from __future__ import annotations
 
 import copy
+import fnmatch
 import functools
 import re
 import uuid
+from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
 from collections.abc import Set as AbstractSet
 from pathlib import Path
@@ -614,6 +616,10 @@ _UUIDV4_RE = re.compile(
 )
 
 
+def _is_uuidv4(value: Any) -> bool:
+    return isinstance(value, str) and _UUIDV4_RE.match(value) is not None
+
+
 def _fixture_paths() -> list[Path]:
     return sorted(CONFORMANCE_DIR.glob("[0-9][0-9][0-9]-*.yaml"))
 
@@ -710,6 +716,18 @@ _DRIVER_EXPECTED_KEYS: dict[str, frozenset[str]] = {
     # _run_llm_payload_case reads span_tree ONLY. Claiming observers is what let
     # 149 be re-routed here with its contains_event half silently dropped.
     "_run_llm_payload_fixture": frozenset({"span_tree", "invariants"}),
+    "_run_fixture_004": frozenset({"span_tree", "no_edge_spans"}),
+    "_run_fixture_005": frozenset(
+        {
+            "span_tree",
+            "span_tree_private",
+            "span_tree_global",
+            "no_llm_provider_span",
+            "no_openarmature_spans_on_global",
+        }
+    ),
+    "_run_fixture_009": frozenset({"span_tree", "invocation_count", "invariants"}),
+    "_run_fixture_011": frozenset({"determinism_check", "invariants"}),
 }
 
 
@@ -792,8 +810,6 @@ async def test_observability_fixture(fixture_path: Path) -> None:
     _reject_unsupported_capability_gate(fixture_id, spec)
     from .harness.capabilities import assert_case_asserts_something  # noqa: PLC0415
 
-    _assert_driver_reads_every_expected_key(fixture_id, spec)
-
     # `or [spec]` because a single-case fixture puts `expected` at the top
     # level with no `cases` list; `or []` skipped seven of them entirely.
     for _case in cast("list[dict[str, Any]]", spec.get("cases") or [spec]):
@@ -802,6 +818,9 @@ async def test_observability_fixture(fixture_path: Path) -> None:
             cast("str", _case.get("name") or "<unnamed>"),
             cast("Mapping[str, Any]", _case.get("expected") or {}),
         )
+    # After the hollow-case check, as in the Langfuse runner, so an invariants-only
+    # case on a registered driver is reported as hollow, not as an unread key.
+    _assert_driver_reads_every_expected_key(fixture_id, spec)
     if fixture_id == "001-otel-basic-trace":
         await _run_fixture_001(spec)
     elif fixture_id == "002-otel-subgraph-hierarchy":
@@ -1234,13 +1253,8 @@ async def _run_fixture_004(spec: Mapping[str, Any]) -> None:
     ``_handle_completed`` ERROR-mapping path picks this up
     automatically — no observer-side change needed for the swap.
 
-    Driver verifies: the ``pick`` node's span ends ERROR with
-    ``status_description == "routing_error"``, an ``exception``
-    event recorded, and the ``openarmature.error.category``
-    attribute. No span for the edge function (no ``edge_spans``) —
-    edge logic is folded into the preceding node span."""
-    from opentelemetry.trace import StatusCode
-
+    Driver verifies: the declared ``span_tree``, including the ERROR
+    span's description and exception event, and ``no_edge_spans``."""
     from openarmature.graph import RuntimeGraphError
 
     observer, exporter = _build_observer()
@@ -1255,51 +1269,31 @@ async def _run_fixture_004(spec: Mapping[str, Any]) -> None:
     await compiled.drain()
     observer.shutdown()
     spans = exporter.get_finished_spans()
+    expected = cast("dict[str, Any]", spec["expected"])
 
-    by_name = {s.name: s for s in spans}
+    expected_tree = cast("list[dict[str, Any]]", expected["span_tree"])
+    inv_root = next((s for s in spans if s.name == "openarmature.invocation" and s.parent is None), None)
+    assert inv_root is not None, f"invocation root span missing; got {[s.name for s in spans]}"
+    _assert_span_tree_matches(spans, [inv_root], expected_tree)
+    _assert_error_span_extras(spans, expected_tree)
 
-    pick = by_name.get("pick")
-    assert pick is not None
-    assert pick.status.status_code == StatusCode.ERROR, (
-        f"preceding node 'pick' span MUST be ERROR; got {pick.status.status_code}"
-    )
-    assert pick.status.description == "routing_error", (
-        f"preceding node 'pick' span status_description MUST be 'routing_error'; "
-        f"got {pick.status.description!r}"
-    )
-    pick_attrs = dict(pick.attributes or {})
-    assert pick_attrs.get("openarmature.error.category") == "routing_error"
-    # Exception event recorded on the span via record_exception.
-    exception_events = [e for e in pick.events if e.name == "exception"]
-    event_names = [e.name for e in pick.events]
-    assert len(exception_events) >= 1, (
-        f"'pick' MUST have at least one 'exception' event recorded; got {event_names}"
-    )
-
-    # Per fixture 004's "no_edge_spans: true" — the edge function
-    # itself does not produce a separate span; the routing error is
-    # folded into the preceding node's span.
-    edge_span_names = {"edge", "openarmature.edge", "edge_function"}
-    edge_spans = [s for s in spans if s.name in edge_span_names]
-    assert edge_spans == [], (
-        f"there MUST be no separate edge-function spans per §4.2; got {[s.name for s in edge_spans]}"
-    )
+    # §4.2: edge logic folds into the preceding node's span. Checked as a closed
+    # world over span names, so an edge span fails whatever it is called.
+    no_edge_spans = expected.get("no_edge_spans")
+    if no_edge_spans is not None:
+        assert no_edge_spans is True, f"no_edge_spans: only `true` is supported; got {no_edge_spans!r}"
+        allowed = {"openarmature.invocation", *cast("dict[str, Any]", spec["nodes"])}
+        extra = sorted(s.name for s in spans if s.name not in allowed)
+        assert not extra, f"spans that are neither the invocation nor a node (§4.2): {extra}"
 
     # Unreachable nodes never fire spans (they were unreached).
+    span_names = {s.name for s in spans}
     for unreachable in ("unreachable_a", "unreachable_b"):
-        assert unreachable not in by_name, f"{unreachable!r} MUST not produce a span — never reached"
-
-    # Invocation span ends ERROR per the §4.2 invocation-status
-    # propagation contract.
-    inv = by_name.get("openarmature.invocation")
-    assert inv is not None
-    assert inv.status.status_code == StatusCode.ERROR, (
-        f"invocation span MUST end ERROR when a child errors; got {inv.status.status_code}"
-    )
+        assert unreachable not in span_names, f"{unreachable!r} MUST not produce a span — never reached"
 
 
 # ---------------------------------------------------------------------------
-# Fixture 007 — retry attempt spans
+# Fixture 006 — fan-out instance attribution
 # ---------------------------------------------------------------------------
 
 
@@ -1398,6 +1392,11 @@ async def _run_fixture_006_case(case: Mapping[str, Any], subgraphs: Mapping[str,
         assert cs.parent is not None and cs.parent.span_id in per_instance_ids, (
             "compute span MUST parent under a per-instance dispatch span"
         )
+
+
+# ---------------------------------------------------------------------------
+# Fixture 007 — retry attempt spans
+# ---------------------------------------------------------------------------
 
 
 async def _run_fixture_007(spec: Mapping[str, Any]) -> None:
@@ -1542,31 +1541,19 @@ async def _run_fixture_007_case(case: Mapping[str, Any]) -> None:
 # ---------------------------------------------------------------------------
 
 
-# Spec-canonical attributes that are non-deterministic by design and
-# MUST be excluded from determinism-comparison runs. Per spec
-# coordination on the fixture (08-spec-prep-sync-confirmed reaffirms
-# the §3.2 + §5.1 distinction): caller-supplied correlation_id is
-# deterministic; auto-generated UUIDv4 is not. Fixture 011 omits
-# ``caller_correlation_id``, so the auto-generated correlation_id IS
-# in the ignore set for this fixture.
-_DETERMINISM_IGNORED_ATTRS: frozenset[str] = frozenset(
-    {
-        "openarmature.invocation_id",
-        "openarmature.correlation_id",
-    }
+# Each `determinism_check.compare` aspect names one part of a span's signature.
+_DETERMINISM_ASPECTS = frozenset(
+    {"span_tree_structure", "span_names", "span_status", "span_attributes_excluding_ignored"}
 )
+_DETERMINISM_INVARIANTS = frozenset({"same_execution_path", "span_count_equal_across_runs"})
 
 
 async def _run_fixture_011(spec: Mapping[str, Any]) -> None:
-    """Deterministic span content is identical across two
-    invocations of the same graph with the same input. The
-    signature compared per-span:
-    ``(name, status_code, parent_name, attrs ∖ ignored_set)``.
-    Parent linkage is encoded as the parent span's NAME rather
-    than its span_id (span_ids are non-deterministic per OTel SDK's
-    default RandomIdGenerator); a hierarchy regression where a
-    node reparented to a different ancestor surfaces as a
-    parent_name divergence."""
+    """Deterministic span content is identical across repeated
+    invocations of the same graph with the same input. Each span's
+    signature holds the parts ``determinism_check.compare`` selects,
+    with ``ignore_attributes`` removed, and the runs it names must
+    produce the same multiset of signatures."""
     cases = cast("list[dict[str, Any]]", spec["cases"])
     for case in cases:
         case_name = cast("str", case["name"])
@@ -1574,6 +1561,34 @@ async def _run_fixture_011(spec: Mapping[str, Any]) -> None:
             await _run_fixture_011_case(case)
         except AssertionError as e:
             raise AssertionError(f"case {case_name!r}: {e}") from e
+
+
+def _determinism_signature(
+    span: Any, by_id: Mapping[int, Any], aspects: AbstractSet[str], ignored: Sequence[str]
+) -> tuple[Any, ...]:
+    parts: list[Any] = []
+    if "span_names" in aspects:
+        parts.append(span.name)
+    if "span_status" in aspects:
+        parts.append(span.status.status_code.name)
+    if "span_tree_structure" in aspects:
+        # Span ids are random per run, so the hierarchy is the chain of ancestor
+        # names. A span moved under a different ancestor changes it.
+        ancestors: list[str] = []
+        parent = span.parent
+        while parent is not None and (above := by_id.get(parent.span_id)) is not None:
+            ancestors.append(cast("str", above.name))
+            parent = above.parent
+        parts.append(tuple(ancestors))
+    if "span_attributes_excluding_ignored" in aspects:
+        attrs = dict(span.attributes or {})
+        kept = (
+            (k, _normalize_attr_value(v))
+            for k, v in attrs.items()
+            if not any(fnmatch.fnmatchcase(k, pattern) for pattern in ignored)
+        )
+        parts.append(tuple(sorted(kept)))
+    return tuple(parts)
 
 
 async def _run_fixture_011_case(case: Mapping[str, Any]) -> None:
@@ -1588,11 +1603,30 @@ async def _run_fixture_011_case(case: Mapping[str, Any]) -> None:
     # branch always fires under identical inputs. (The adapter has
     # no generic ``gt``/``lt`` edge conditions.)
     case_for_build = _translate_011_when_edges(case)
-
     invocations = int(case.get("invocations", 2))
-    assert invocations == 2, f"fixture 011: expected invocations=2; got {invocations}"
+
+    expected = cast("dict[str, Any]", case["expected"])
+    check = cast("dict[str, Any]", expected["determinism_check"])
+    compare_runs = cast("list[int]", check["compare_runs"])
+    assert len(set(compare_runs)) >= 2 and all(0 <= i < invocations for i in compare_runs), (
+        f"determinism_check.compare_runs {compare_runs} must name two or more of the {invocations} runs"
+    )
+    ignored = cast("list[str]", check.get("ignore_attributes") or [])
+    aspects = frozenset(cast("list[str]", check["compare"]))
+    unknown_aspects = sorted(aspects - _DETERMINISM_ASPECTS)
+    assert not unknown_aspects, f"determinism_check.compare: unsupported aspect(s) {unknown_aspects}"
+    require_equal = check.get("require_equal")
+    assert require_equal is True, (
+        f"determinism_check.require_equal: only `true` is supported; got {require_equal!r}"
+    )
+    invariants = cast("dict[str, Any]", expected.get("invariants") or {})
+    unknown_invariants = sorted(set(invariants) - _DETERMINISM_INVARIANTS)
+    assert not unknown_invariants, f"unsupported invariant(s) {unknown_invariants}"
+    for name, value in invariants.items():
+        assert value is True, f"invariants.{name}: only `true` is supported; got {value!r}"
 
     runs: list[list[Any]] = []
+    paths: list[list[str]] = []
     for _ in range(invocations):
         observer, exporter = _build_observer()
         trace_log: list[str] = []
@@ -1604,52 +1638,27 @@ async def _run_fixture_011_case(case: Mapping[str, Any]) -> None:
         await compiled.drain()
         observer.shutdown()
         runs.append(list(exporter.get_finished_spans()))
+        paths.append(trace_log)
 
-    assert len(runs[0]) == len(runs[1]), (
-        f"deterministic input MUST produce equal span counts; got {len(runs[0])} vs {len(runs[1])}"
-    )
+    # The invariants are claims across all runs; the adapter's trace records the
+    # nodes each run executed, independent of what the observer emitted.
+    if "same_execution_path" in invariants:
+        assert all(path == paths[0] for path in paths), f"same_execution_path: runs took {paths}"
+    if "span_count_equal_across_runs" in invariants:
+        counts = [len(run) for run in runs]
+        assert len(set(counts)) == 1, f"span_count_equal_across_runs: span counts {counts}"
 
-    # Compare each span's structural signature across runs. Span
-    # span_ids are non-deterministic, so we encode the parent
-    # linkage by looking up parent.span_id in the same run's
-    # by-id map and including the parent's NAME in the signature.
-    # That way a hierarchy regression (e.g., a node reparented
-    # from invocation to a sibling) shows up as a signature
-    # difference even though both spans' own attributes are
-    # unchanged.
-    def _signature(
-        span: Any, by_id: Mapping[int, Any]
-    ) -> tuple[str, str, str | None, tuple[tuple[str, Any], ...]]:
-        attrs = dict(span.attributes or {})
-        deterministic_items = sorted(
-            (k, _normalize_attr_value(v)) for k, v in attrs.items() if k not in _DETERMINISM_IGNORED_ATTRS
+    signatures: list[Counter[tuple[Any, ...]]] = []
+    for i in compare_runs:
+        by_id = {s.context.span_id: s for s in runs[i] if s.context is not None}
+        signatures.append(Counter(_determinism_signature(s, by_id, aspects, ignored) for s in runs[i]))
+    first = compare_runs[0]
+    for i, signature in zip(compare_runs[1:], signatures[1:], strict=True):
+        assert signature == signatures[0], (
+            f"deterministic span content MUST match across runs; only in run {first}: "
+            f"{sorted(signatures[0] - signature, key=repr)}; only in run {i}: "
+            f"{sorted(signature - signatures[0], key=repr)}"
         )
-        parent_name: str | None = None
-        if span.parent is not None:
-            parent_span = by_id.get(span.parent.span_id)
-            if parent_span is not None:
-                parent_name = cast("str", parent_span.name)
-        return (
-            cast("str", span.name),
-            str(span.status.status_code),
-            parent_name,
-            tuple(deterministic_items),
-        )
-
-    by_id_run_0: dict[int, Any] = {}
-    for s in runs[0]:
-        if s.context is not None:
-            by_id_run_0[s.context.span_id] = s
-    by_id_run_1: dict[int, Any] = {}
-    for s in runs[1]:
-        if s.context is not None:
-            by_id_run_1[s.context.span_id] = s
-    sig_run_0 = sorted(_signature(s, by_id_run_0) for s in runs[0])
-    sig_run_1 = sorted(_signature(s, by_id_run_1) for s in runs[1])
-    assert sig_run_0 == sig_run_1, (
-        f"deterministic span content MUST match across runs; "
-        f"first divergence: run_0={sig_run_0!r} vs run_1={sig_run_1!r}"
-    )
 
 
 async def _run_fixture_028(spec: Mapping[str, Any]) -> None:
@@ -2173,65 +2182,84 @@ async def _run_fixture_009(spec: Mapping[str, Any]) -> None:
             raise AssertionError(f"case {case_name!r}: {e}") from e
 
 
+# Names `_run_fixture_009_case` implements.
+_CORRELATION_ID_INVARIANTS = frozenset(
+    {
+        "correlation_id_uniform_across_tree",
+        "correlation_id_is_uuidv4",
+        "each_invocation_correlation_id_uniform",
+        "correlation_ids_differ_across_invocations",
+        "all_correlation_ids_uuidv4",
+    }
+)
+
+
 async def _run_fixture_009_case(case: Mapping[str, Any]) -> None:
-    case_name = case["name"]
-    if case_name == "context_reset_between_invocations":
-        # Two back-to-back invocations of the same compiled graph;
-        # each MUST get its own UUIDv4 (distinct from the other).
-        observer, exporter = _build_observer()
-        # Build the graph ONCE so both invocations share it.
-        from .adapter import build_graph as _bg
+    expected = cast("dict[str, Any]", case["expected"])
+    _assert_invariants_recognized(case, _CORRELATION_ID_INVARIANTS, "fixture 009")
+    invariants = cast("dict[str, Any]", expected.get("invariants") or {})
+    for name, value in invariants.items():
+        if name != "correlation_id_uniform_across_tree":
+            assert value is True, f"invariants.{name}: only `true` is supported; got {value!r}"
 
-        built = _bg(case)
-        compiled = built.builder.compile()
-        compiled.attach_observer(observer)
-        for _ in range(int(case.get("invocations", 2))):
-            await compiled.invoke(built.initial_state(case.get("initial_state", {})))
-            await compiled.drain()
-        observer.shutdown()
-        spans = exporter.get_finished_spans()
-
-        # Group spans by trace_id (each invocation has its own trace).
-        by_trace: dict[int, list[Any]] = {}
-        for s in spans:
-            tid = s.context.trace_id
-            by_trace.setdefault(tid, []).append(s)
-        assert len(by_trace) == 2, f"expected 2 distinct traces (one per invocation); got {len(by_trace)}"
-        # Each invocation's spans share one correlation_id.
-        per_invocation_cids: list[str] = []
-        for trace_spans in by_trace.values():
-            cids = _all_correlation_ids(trace_spans)
-            assert len(cids) == 1, f"each invocation MUST uniformly carry one correlation_id; got {cids}"
-            cid = next(iter(cids))
-            assert _UUIDV4_RE.match(cid), f"auto-generated correlation_id MUST be UUIDv4; got {cid!r}"
-            per_invocation_cids.append(cid)
-        # Cross-invocation: distinct.
-        assert per_invocation_cids[0] != per_invocation_cids[1], (
-            "back-to-back invocations MUST get distinct correlation_ids"
-        )
-        return
-
-    # Sub-cases 1 & 2 (single-invocation).
     observer, exporter = _build_observer()
-    await _run_graph(case, observer, correlation_id=case.get("caller_correlation_id"))
+    built = build_graph(case)
+    compiled = built.builder.compile()
+    compiled.attach_observer(observer)
+    # Every run shares one compiled graph, so a correlation_id the context
+    # primitive failed to reset would carry into the next invocation.
+    for _ in range(int(case.get("invocations", 1))):
+        await compiled.invoke(
+            built.initial_state(case.get("initial_state", {})),
+            correlation_id=case.get("caller_correlation_id"),
+        )
+        await compiled.drain()
     observer.shutdown()
     spans = exporter.get_finished_spans()
-    cids = _all_correlation_ids(spans)
-    assert len(cids) == 1, f"every span MUST carry the same correlation_id; got {cids}"
-    cid = next(iter(cids))
-    expected = case.get("caller_correlation_id")
-    if expected is not None:
-        # Caller-supplied → exact match.
-        assert cid == expected, (
-            f"caller_correlation_id MUST be used verbatim; got {cid!r}, expected {expected!r}"
+    assert spans, "no spans were recorded, so every correlation_id claim would pass vacuously"
+
+    if (tree := expected.get("span_tree")) is not None:
+        inv_root = next((s for s in spans if s.name == "openarmature.invocation" and s.parent is None), None)
+        assert inv_root is not None, f"invocation root span missing; got {[s.name for s in spans]}"
+        _assert_span_tree_matches(spans, [inv_root], cast("list[dict[str, Any]]", tree))
+
+    # Each invocation is its own trace.
+    by_trace: dict[int, list[Any]] = {}
+    for s in spans:
+        by_trace.setdefault(s.context.trace_id, []).append(s)
+    if (invocation_count := expected.get("invocation_count")) is not None:
+        assert len(by_trace) == int(invocation_count), (
+            f"expected {invocation_count} distinct traces (one per invocation); got {len(by_trace)}"
         )
-    else:
-        # Auto-generated → UUIDv4.
-        assert _UUIDV4_RE.match(cid), f"auto-generated correlation_id MUST be UUIDv4; got {cid!r}"
+
+    all_cids = _all_correlation_ids(spans)
+    per_trace_cids = [_all_correlation_ids(trace_spans) for trace_spans in by_trace.values()]
+    not_uuidv4 = sorted(repr(c) for c in all_cids if not _is_uuidv4(c))
+    if (uniform := invariants.get("correlation_id_uniform_across_tree")) is not None:
+        assert len(all_cids) == 1, f"every span MUST carry the same correlation_id; got {all_cids}"
+        assert _attr_equal(next(iter(all_cids)), uniform), (
+            f"correlation_id_uniform_across_tree: expected {uniform!r}; got {all_cids}"
+        )
+    if "correlation_id_is_uuidv4" in invariants:
+        assert not not_uuidv4, f"correlation_id MUST be UUIDv4; got {not_uuidv4}"
+    if "all_correlation_ids_uuidv4" in invariants:
+        assert not not_uuidv4, f"every correlation_id MUST be UUIDv4; got {not_uuidv4}"
+    if "each_invocation_correlation_id_uniform" in invariants:
+        assert all(len(cids) == 1 for cids in per_trace_cids), (
+            f"each invocation MUST uniformly carry one correlation_id; got {per_trace_cids}"
+        )
+    if "correlation_ids_differ_across_invocations" in invariants:
+        assert len(per_trace_cids) >= 2, (
+            f"correlation_ids_differ_across_invocations needs two or more traces; got {len(per_trace_cids)}"
+        )
+        flat = [cid for cids in per_trace_cids for cid in cids]
+        assert len(flat) == len(set(flat)), (
+            f"back-to-back invocations MUST get distinct correlation_ids; got {per_trace_cids}"
+        )
 
 
 # ---------------------------------------------------------------------------
-# Fixture 005, 008 placeholders — driven below in subsequent commits
+# Fixtures 005, 008, 038, 110, 132 and 133, with the shared span-tree matcher
 # ---------------------------------------------------------------------------
 
 
@@ -2254,10 +2282,21 @@ async def _run_fixture_005(spec: Mapping[str, Any]) -> None:
             raise AssertionError(f"case {case_name!r}: {e}") from e
 
 
+# The tracer the harness's node emits through on the global provider, standing
+# in for an auto-instrumentation library.
+_EXTERNAL_TRACER_SCOPE = "external-instrumentation"
+
+
+def _exporter_roots(spans: Sequence[Any]) -> list[Any]:
+    """The spans whose parent did not reach the same exporter."""
+    ids = {s.context.span_id for s in spans if s.context is not None}
+    return [s for s in spans if s.parent is None or s.parent.span_id not in ids]
+
+
 async def _run_fixture_005_case(case: Mapping[str, Any]) -> None:
-    case_name = case["name"]
     disable_llm_spans = bool(case.get("disable_llm_spans", False))
     caller_global_active = bool(case.get("caller_global_otel_active", False))
+    expected = cast("dict[str, Any]", case["expected"])
 
     from opentelemetry import trace as otel_trace
     from opentelemetry.sdk.trace import TracerProvider
@@ -2291,6 +2330,7 @@ async def _run_fixture_005_case(case: Mapping[str, Any]) -> None:
             once._done = False  # pyright: ignore[reportPrivateUsage]
         otel_trace.set_tracer_provider(global_provider)
 
+    global_spans: Sequence[Any] = ()
     try:
         private_exporter = InMemorySpanExporter()
         observer = OTelObserver(
@@ -2305,29 +2345,12 @@ async def _run_fixture_005_case(case: Mapping[str, Any]) -> None:
         # Drive the graph. The ``calls_llm`` node body reads the mock
         # responses set up in ``_build_graph_with_mock_llm`` (httpx
         # MockTransport keyed off the response queue).
-        initial_state_cls = graph.state_cls
-        final = await graph.invoke(initial_state_cls())
+        await graph.invoke(graph.state_cls())
         await graph.drain()
         observer.shutdown()
         private_spans = private_exporter.get_finished_spans()
-
-        # Sub-case 3: external span emitted by the harness through the
-        # global tracer (simulating auto-instrumentation).
-        if caller_global_active:
-            global_tracer = otel_trace.get_tracer("external-instrumentation")
-            with global_tracer.start_as_current_span("external.llm.call"):
-                pass
-            assert global_exporter is not None
+        if global_exporter is not None:
             global_spans = global_exporter.get_finished_spans()
-            assert len(global_spans) == 1, (
-                f"global exporter MUST see exactly one external span; got {len(global_spans)}"
-            )
-            assert global_spans[0].name == "external.llm.call"
-            # The load-bearing isolation check.
-            for s in global_spans:
-                assert not s.name.startswith("openarmature."), (
-                    f"openarmature spans MUST NOT leak to the global provider; got {s.name!r}"
-                )
     finally:
         if caller_global_active and prior_global is not None:
             # OTel SDK 1.x makes set_tracer_provider one-shot: once a
@@ -2336,44 +2359,39 @@ async def _run_fixture_005_case(case: Mapping[str, Any]) -> None:
             # the global doesn't leak into subsequent tests.
             _reset_otel_global_tracer_provider(prior_global)
 
-    # Common assertions: the LLM span presence/absence + (when
-    # present) attributes + parent-child to the calling node.
-    llm_spans = [s for s in private_spans if s.name == "openarmature.llm.complete"]
-    if disable_llm_spans:
-        assert not llm_spans, (
-            f"disable_llm_spans=True MUST suppress LLM span emission; got {len(llm_spans)} llm spans"
+    # `span_tree` and `span_tree_private` both describe openarmature's own exporter.
+    for tree in (expected.get("span_tree"), expected.get("span_tree_private")):
+        if tree is not None:
+            _assert_span_tree_matches(
+                private_spans, _exporter_roots(private_spans), cast("list[dict[str, Any]]", tree)
+            )
+    if (tree := expected.get("span_tree_global")) is not None:
+        assert global_exporter is not None, "span_tree_global needs caller_global_otel_active"
+        _assert_span_tree_matches(
+            global_spans, _exporter_roots(global_spans), cast("list[dict[str, Any]]", tree)
         )
-        # ask_llm node span still emits.
-        assert any(s.name == "ask_llm" for s in private_spans)
-        return
 
-    # default + external_auto_instrumentation_active — LLM span
-    # MUST emit with the spec §5.5 attributes.
-    assert len(llm_spans) == 1, (
-        f"expected one LLM span; got {len(llm_spans)}: {[s.name for s in private_spans]}"
-    )
-    llm = llm_spans[0]
-    attrs = dict(llm.attributes or {})
-    assert attrs.get("openarmature.llm.model") == "test-model"
-    if case_name == "default":
-        # Sub-case 1 asserts the full attribute set.
-        assert attrs.get("openarmature.llm.finish_reason") == "stop"
-        assert attrs.get("openarmature.llm.usage.prompt_tokens") == 5
-        assert attrs.get("openarmature.llm.usage.completion_tokens") == 1
-        assert attrs.get("openarmature.llm.usage.total_tokens") == 6
-    # Parent: the ask_llm node span.
-    ask_llm = next((s for s in private_spans if s.name == "ask_llm"), None)
-    assert ask_llm is not None, "expected ask_llm node span"
-    llm_parent = llm.parent
-    ask_llm_ctx = ask_llm.context
-    assert llm_parent is not None and ask_llm_ctx is not None
-    assert llm_parent.span_id == ask_llm_ctx.span_id, (
-        "openarmature.llm.complete MUST be parented under the calling node span"
-    )
-    # Final state was updated by the calls_llm node (msg = "hello"
-    # for default; "hi back" for disable_llm_spans path that we
-    # already returned from above).
-    assert "msg" in dir(final)
+    no_llm_span = expected.get("no_llm_provider_span")
+    if no_llm_span is not None:
+        assert no_llm_span is True, f"no_llm_provider_span: only `true` is supported; got {no_llm_span!r}"
+        llm_spans = [s for s in private_spans if s.name == "openarmature.llm.complete"]
+        assert not llm_spans, f"expected no LLM provider span; got {len(llm_spans)}"
+
+    no_oa_on_global = expected.get("no_openarmature_spans_on_global")
+    if no_oa_on_global is not None:
+        assert no_oa_on_global is True, (
+            f"no_openarmature_spans_on_global: only `true` is supported; got {no_oa_on_global!r}"
+        )
+        assert global_exporter is not None, "no_openarmature_spans_on_global needs caller_global_otel_active"
+        # §6 TracerProvider isolation. Only the harness's external tracer writes to
+        # the global provider here, so any other scope is openarmature's, whatever
+        # the span is named.
+        leaked = [
+            (s.name, getattr(s.instrumentation_scope, "name", None))
+            for s in global_spans
+            if getattr(s.instrumentation_scope, "name", None) != _EXTERNAL_TRACER_SCOPE
+        ]
+        assert not leaked, f"openarmature spans reached the global TracerProvider: {leaked}"
 
 
 def _build_graph_with_mock_llm(case: Mapping[str, Any]) -> tuple[Any, list[Any]]:
@@ -2383,6 +2401,7 @@ def _build_graph_with_mock_llm(case: Mapping[str, Any]) -> tuple[Any, list[Any]]
     import json
 
     import httpx
+    from opentelemetry import trace as otel_trace
 
     from openarmature.graph import GraphBuilder
     from openarmature.llm import OpenAIProvider, UserMessage
@@ -2425,8 +2444,17 @@ def _build_graph_with_mock_llm(case: Mapping[str, Any]) -> tuple[Any, list[Any]]
         UserMessage(content=m["content"]) for m in messages_spec if m.get("role") == "user"
     ]
 
+    global_span = cast("dict[str, Any] | None", nodes[entry_name].get("also_emits_via_global_tracer"))
+
     async def ask_llm_body(_s: Any) -> dict[str, str]:
-        response = await provider.complete(messages)
+        if global_span is None:
+            response = await provider.complete(messages)
+        else:
+            # Auto-instrumentation wraps the provider call from inside the node,
+            # through whatever the global provider is at that moment.
+            tracer = otel_trace.get_tracer(_EXTERNAL_TRACER_SCOPE)
+            with tracer.start_as_current_span(cast("str", global_span["span_name"])):
+                response = await provider.complete(messages)
         return {stores_in: response.message.content or ""}
 
     builder = (
@@ -2672,6 +2700,9 @@ def _attr_equal(actual: Any, expected: Any) -> bool:
     # through this matcher, so nothing surfaced it before.
     if isinstance(expected, list) and isinstance(actual, tuple):
         return list(cast("tuple[Any, ...]", actual)) == cast("list[Any]", expected)
+    # conformance-adapter §5.10: `<uuid>` matches any canonical UUIDv4.
+    if expected == "<uuid>":
+        return _is_uuidv4(actual)
     return bool(actual == expected)
 
 
