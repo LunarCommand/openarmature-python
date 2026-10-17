@@ -610,10 +610,8 @@ _CONVENTION_ONLY_FIXTURES: dict[str, str] = {
 
 
 # UUIDv4 canonical form: xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx (where y in {8,9,a,b}).
-_UUIDV4_RE = re.compile(
-    r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
-    re.IGNORECASE,
-)
+# RFC 9562 section 4: lowercase on output.
+_UUIDV4_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$")
 
 
 def _is_uuidv4(value: Any) -> bool:
@@ -3901,7 +3899,7 @@ async def _run_fixture_031_case(case: Mapping[str, Any]) -> None:
         )
     else:
         # Auto-generated → UUIDv4 form.
-        assert _UUIDV4_RE.match(first_correlation_id), (
+        assert _is_uuidv4(first_correlation_id), (
             f"auto-generated correlation_id MUST be UUIDv4; got {first_correlation_id!r}"
         )
 
