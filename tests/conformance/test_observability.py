@@ -1274,7 +1274,9 @@ async def _run_fixture_004(spec: Mapping[str, Any]) -> None:
     expected_tree = cast("list[dict[str, Any]]", expected["span_tree"])
     inv_root = next((s for s in spans if s.name == "openarmature.invocation" and s.parent is None), None)
     assert inv_root is not None, f"invocation root span missing; got {[s.name for s in spans]}"
-    _assert_span_tree_matches(spans, [inv_root], expected_tree)
+    # Matched from every root the exporter saw, so a span outside the
+    # invocation's tree (an unreachable node's, say) fails as well.
+    _assert_span_tree_matches(spans, _exporter_roots(spans), expected_tree)
     _assert_error_span_extras(spans, expected_tree)
 
     # §4.2: edge logic folds into the preceding node's span. Checked as a closed
@@ -1285,11 +1287,6 @@ async def _run_fixture_004(spec: Mapping[str, Any]) -> None:
         allowed = {"openarmature.invocation", *cast("dict[str, Any]", spec["nodes"])}
         extra = sorted(s.name for s in spans if s.name not in allowed)
         assert not extra, f"spans that are neither the invocation nor a node (§4.2): {extra}"
-
-    # Unreachable nodes never fire spans (they were unreached).
-    span_names = {s.name for s in spans}
-    for unreachable in ("unreachable_a", "unreachable_b"):
-        assert unreachable not in span_names, f"{unreachable!r} MUST not produce a span — never reached"
 
 
 # ---------------------------------------------------------------------------
@@ -2707,12 +2704,18 @@ def _attr_equal(actual: Any, expected: Any) -> bool:
 
 
 def _assert_span_tree_matches(
-    all_spans: Sequence[Any], actual_roots: Sequence[Any], expected_nodes: Sequence[Mapping[str, Any]]
+    all_spans: Sequence[Any],
+    actual_roots: Sequence[Any],
+    expected_nodes: Sequence[Mapping[str, Any]],
+    *,
+    under: str = "the top level",
 ) -> None:
     """Recursive structural match: for every expected node, find a
     matching actual span by name + attribute-subset; recurse on its
     children.  Children are matched as a SET (order independent —
-    parallel-branches dispatch order isn't span-emission order)."""
+    parallel-branches dispatch order isn't span-emission order).
+    A declared list, at the top level or as ``children``, must account
+    for every span; a node without ``children`` leaves them unchecked."""
     actual_by_name: dict[str, list[Any]] = {}
     for root in actual_roots:
         actual_by_name.setdefault(root.name, []).append(root)
@@ -2765,7 +2768,14 @@ def _assert_span_tree_matches(
             actual_children = [
                 s for s in all_spans if s.parent is not None and s.parent.span_id == matched_span_id
             ]
-            _assert_span_tree_matches(all_spans, actual_children, expected_children)
+            _assert_span_tree_matches(
+                all_spans, actual_children, expected_children, under=repr(expected_name)
+            )
+    # A declared list is the complete set: `children: []` asserts a leaf, and a
+    # span the tree does not list fails. The suite's harness note is silent on
+    # children, so this reading is pending a spec ruling.
+    undeclared = sorted(s.name for group in actual_by_name.values() for s in group)
+    assert not undeclared, f"spans under {under} that the expected tree does not declare: {undeclared}"
 
 
 async def _run_fixture_132(spec: Mapping[str, Any]) -> None:
@@ -5716,7 +5726,8 @@ def _assert_langfuse_observation_tree(
         if "metadata_truncation" in exp:
             _assert_metadata_truncation(match, cast("dict[str, Any]", exp["metadata_truncation"]))
         children = cast("list[dict[str, Any]] | None", exp.get("children"))
-        if children:
+        # `children: []` asserts a leaf, so an empty list recurses too.
+        if children is not None:
             _assert_langfuse_observation_tree(trace, children, parent_id=match.id)
     # Every observation under this parent must be accounted for. Leaving
     # leftovers unasserted lets an unexpected observation ride silently, the
