@@ -2636,7 +2636,7 @@ async def _run_fixture_038_case(case: Mapping[str, Any]) -> None:
         (s for s in spans if s.name == "openarmature.invocation" and cast("Any", s.parent) is None), None
     )
     assert inv_root is not None, f"invocation root span missing; got {[s.name for s in spans]}"
-    _assert_span_tree_matches(spans, [inv_root], expected_tree)
+    _assert_span_tree_matches(spans, _exporter_roots(spans), expected_tree)
 
     # ---- Invariants
     invariants = cast("dict[str, Any]", case["expected"].get("invariants") or {})
@@ -2714,7 +2714,9 @@ def _assert_span_tree_matches(
     children.  Children are matched as a SET (order independent —
     parallel-branches dispatch order isn't span-emission order).
     A declared list, at the top level or as ``children``, must account
-    for every span; a node without ``children`` leaves them unchecked."""
+    for every span; a node without ``children`` leaves them unchecked.
+    The top level sees only ``actual_roots``, so pass every root the
+    exporter saw (``_exporter_roots``) or a stray root goes unchecked."""
     actual_by_name: dict[str, list[Any]] = {}
     for root in actual_roots:
         actual_by_name.setdefault(root.name, []).append(root)
@@ -2955,7 +2957,7 @@ async def _run_fixture_132_case(case: Mapping[str, Any], spec: Mapping[str, Any]
         (s for s in spans if s.name == "openarmature.invocation" and cast("Any", s.parent) is None), None
     )
     assert inv_root is not None, f"invocation root span missing; got {[s.name for s in spans]}"
-    _assert_span_tree_matches(spans, [inv_root], expected_tree)
+    _assert_span_tree_matches(spans, _exporter_roots(spans), expected_tree)
 
     # ---- Invariants (fail loud on any declared-but-unhandled name).
     invariants = cast("dict[str, Any]", case["expected"].get("invariants") or {})
@@ -3296,7 +3298,7 @@ async def _run_fixture_133_case(case: Mapping[str, Any], spec: Mapping[str, Any]
         (s for s in spans if s.name == "openarmature.invocation" and cast("Any", s.parent) is None), None
     )
     assert inv_root is not None, f"invocation root span missing; got {[s.name for s in spans]}"
-    _assert_span_tree_matches(spans, [inv_root], expected_tree)
+    _assert_span_tree_matches(spans, _exporter_roots(spans), expected_tree)
 
     # ---- Invariants (fail loud on any declared-but-unhandled name).
     invariants = cast("dict[str, Any]", case["expected"].get("invariants") or {})
@@ -3397,7 +3399,7 @@ async def _run_fixture_110_case(case: Mapping[str, Any]) -> None:
     expected_tree = cast("list[dict[str, Any]]", case["expected"]["span_tree"])
     inv_root = next((s for s in spans if s.name == "openarmature.invocation" and s.parent is None), None)
     assert inv_root is not None, f"invocation root span missing; got {[s.name for s in spans]}"
-    _assert_span_tree_matches(spans, [inv_root], expected_tree)
+    _assert_span_tree_matches(spans, _exporter_roots(spans), expected_tree)
 
     # ---- when-skipped branches emit NO span. The span_tree match is
     # subset-based, so assert the skip explicitly: any declared branch absent
@@ -5101,7 +5103,7 @@ async def _run_token_budget_case(case: Mapping[str, Any]) -> None:
             None,
         )
         assert inv_root is not None, f"invocation root span missing; got {[s.name for s in spans]}"
-        _assert_span_tree_matches(spans, [inv_root], expected_tree)
+        _assert_span_tree_matches(spans, _exporter_roots(spans), expected_tree)
         # _assert_span_tree_matches ignores attributes_absent; assert the
         # declared-only / no-budget absence claims explicitly.
         _assert_error_span_extras(spans, expected_tree)
@@ -5325,7 +5327,7 @@ async def _run_structured_output_error_span_case(case: Mapping[str, Any]) -> Non
         None,
     )
     assert inv_root is not None, f"invocation root span missing; got {[s.name for s in spans]}"
-    _assert_span_tree_matches(spans, [inv_root], expected_tree)
+    _assert_span_tree_matches(spans, _exporter_roots(spans), expected_tree)
     # _assert_span_tree_matches ignores status_description / attributes_absent /
     # exception_recorded; assert those (124's payload redaction + §4.2 exception
     # event) explicitly so the fixture's central claims are actually verified.
@@ -7096,7 +7098,7 @@ async def _run_typed_event_with_span_case(case: Mapping[str, Any]) -> None:
             None,
         )
         assert inv_root is not None, f"invocation root span missing; got {[s.name for s in spans]}"
-        _assert_span_tree_matches(spans, [inv_root], expected_tree)
+        _assert_span_tree_matches(spans, _exporter_roots(spans), expected_tree)
         _assert_error_span_extras(spans, expected_tree)
 
     _assert_invariants_recognized(case, _MALFORMED_COUNTER_INVARIANTS, "malformed-counter")
@@ -7625,7 +7627,7 @@ async def _run_orphan_fallback_case(case: Mapping[str, Any], spec: Mapping[str, 
         # while neither fixture declares a key one of them solely reads, so
         # assert that rather than leaving it to hold by luck.
         _assert_no_skipped_span_tree_keys(expected_tree)
-        _assert_span_tree_matches(spans, [inv_root], expected_tree)
+        _assert_span_tree_matches(spans, _exporter_roots(spans), expected_tree)
 
     _assert_invariants_recognized(case, _ORPHAN_FALLBACK_INVARIANTS, "orphan-fallback")
     _assert_orphan_fallback_invariants(case, spans, subgraph_specs, mock_bodies)
