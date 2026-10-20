@@ -634,6 +634,10 @@ async def _run_seeded_resume_case(spec: Mapping[str, Any], *, top_level: Mapping
     fan_out_progress entries) rather than crash-producing one, then resumes
     and asserts the nested-fan-out consume-side contract: lineage-matched
     skip, no mis-skip across enclosing instances, exactly-once accumulator."""
+    expected_block = cast("Mapping[str, Any]", spec.get("expected") or {})
+    assert not spec.get("invariants") and not expected_block.get("invariants"), (
+        "a seeded-record case checks only resume invariants"
+    )
     leaf_values: list[Any] = []
     subgraphs = _build_subgraphs_for(spec, top_level, leaf_value_recorder=leaf_values)
     built = build_graph(spec, subgraphs=subgraphs, trace=[], leaf_value_recorder=leaf_values)
@@ -674,13 +678,23 @@ async def _run_one_case(spec: Mapping[str, Any], *, top_level: Mapping[str, Any]
         await _run_seeded_resume_case(spec, top_level=top_level)
         return
     case_invariants = cast("Mapping[str, Any]", spec.get("invariants") or {})
+    resume_declared = cast("Mapping[str, Any]", spec.get("resume") or {})
+    resume_expected_declared = cast("Mapping[str, Any]", resume_declared.get("expected") or {})
+    # Fixtures put resume invariants under `resume.invariants` or under
+    # `resume.expected.invariants`.
+    resume_invariants: dict[str, Any] = {
+        **cast("Mapping[str, Any]", resume_declared.get("invariants") or {}),
+        **cast("Mapping[str, Any]", resume_expected_declared.get("invariants") or {}),
+    }
     if case_invariants:
         _assert_run_invariant_names(case_invariants, "case-level")
-        resume_declared = cast("Mapping[str, Any]", spec.get("resume") or {})
-        # Every case-level predicate compares the first run with the resume,
-        # so a case that never completes one would skip them all.
+    if resume_invariants:
+        _assert_run_invariant_names(resume_invariants, "resume")
+    if case_invariants or resume_invariants:
+        # Both blocks are checked once the resume completes, so a case that
+        # never completes one would skip them all.
         assert resume_declared.get("from_first_run") and "expected_error" not in resume_declared, (
-            "case-level invariants need a resume that completes"
+            "case-level and resume invariants need a resume that completes"
         )
     capturing = _build_capturing(spec)
     # Shared recorders so flaky_per_index nodes inside subgraphs feed
@@ -771,6 +785,9 @@ async def _run_one_case(spec: Mapping[str, Any], *, top_level: Mapping[str, Any]
     raw_not_found = spec.get("expected_error") or nested_expected.get("expected_error")
     declared = cast("Mapping[str, Any]", raw_not_found or {})
     if declared.get("category") == "checkpoint_not_found":
+        assert not nested_expected.get("invariants"), (
+            "a checkpoint_not_found case never checks expected.invariants"
+        )
         invoke_with = cast("Mapping[str, Any]", spec.get("invoke_with") or {})
         ghost = cast("str", invoke_with.get("resume_invocation", "ghost"))
         # Without this the store is empty and case 2 becomes case 1. Its name
@@ -1122,14 +1139,7 @@ async def _run_one_case(spec: Mapping[str, Any], *, top_level: Mapping[str, Any]
         recorders=flaky_per_index_recorders,
         resume_caller_invocation_id=cast("str | None", resume_block.get("caller_invocation_id")),
     )
-    # Fixtures put resume invariants under `resume.invariants` or under
-    # `resume.expected.invariants`.
-    resume_invariants: dict[str, Any] = {
-        **cast("Mapping[str, Any]", resume_block.get("invariants") or {}),
-        **cast("Mapping[str, Any]", resume_expected.get("invariants") or {}),
-    }
     if resume_invariants:
-        _assert_run_invariant_names(resume_invariants, "resume")
         _assert_run_invariants(resume_invariants, evidence)
     if case_invariants:
         _assert_run_invariants(case_invariants, evidence)
