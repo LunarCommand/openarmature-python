@@ -339,6 +339,7 @@ POSITION_BLIND_READS: dict[tuple[str, str], tuple[str, ...]] = {
         "observability",
         "pipeline-utilities",
     ),
+    ("resume", "caller_invocation_id"): ("pipeline-utilities",),
     ("resume", "expected"): (
         "observability",
         "pipeline-utilities",
