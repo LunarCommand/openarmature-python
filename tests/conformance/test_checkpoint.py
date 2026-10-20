@@ -1,5 +1,4 @@
-"""Run every spec checkpoint conformance fixture (024-031, 048-054)
-against the engine.
+"""Run every checkpoint conformance fixture against the engine.
 
 Drives the real :class:`InMemoryCheckpointer` (with optional fan-out
 internal save batching) through the engine's save+resume path
@@ -18,23 +17,31 @@ Fixture-by-fixture status:
 - 026 record-shape — supported.
 - 027 attempt-index-resets-on-resume — needs a resume-aware
   ``flaky_resume_aware`` test seam in the adapter; deferred.
-- 028 fan-out-atomic-restart — REMOVED (replaced by the per-instance
-  resume contract). The fixture file no longer exists.
 - 029 subgraph-resume — supported (uses plain ``flaky``).
 - 030 checkpoint-not-found — supported.
 - 031 correlation-id-preserved-across-resume — record-level
-  assertions supported here; the OTel span/log assertions are
-  gated until the observability mapping lands.
+  predicates checked here; its span-level claims run in the OTel
+  runner.
 - 048-054 per-instance fan-out resume contract — supported.
+- 055 schema-version-declared-class — supported.
+- 056 fan-out-count-drift — supported.
+- 057 resume-mints-fresh-invocation-id — supported.
+- 067 crash-injection-fan-out-resume — supported.
+- 069 fan-out-degrade-refinements — its crash and resume case runs
+  here; the plain degrade cases run in ``test_pipeline_utilities.py``.
+- 070 crash-injection-after-node-resume — supported.
+- 076 nested-fan-out-resume-lineage — supported, through the
+  seeded-record path.
 """
 
 from __future__ import annotations
 
+import re
 import time
 import uuid
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, NamedTuple, cast
 
 import pytest
 import yaml
@@ -66,22 +73,11 @@ CONFORMANCE_DIR = (
     Path(__file__).resolve().parents[2] / "openarmature-spec" / "spec" / "pipeline-utilities" / "conformance"
 )
 
-# Conformance fixture range: 024-031 minus 028 are the proposal-0008
-# set; 048-054 are the proposal-0009 per-instance-resume set; 055
-# (schema_version declared class — proposal 0028) and 056 (fan-out
-# count drift — proposal 0029) are the follow-on bundle. 028 (fan-out
-# atomic-restart) was REMOVED in spec v0.18.0 when proposal 0009
-# superseded its contract, so it is explicitly excluded from the set
-# rather than relying on the test runner's file-glob to filter the
-# missing fixture out. 067 (crash-injection fan-out resume, proposal
-# 0070) is a crash/resume fixture this runner owns; it joined at v0.58.0.
-# 069 (fan-out degrade refinements, proposal 0069, v0.59.0) is a mixed
-# fixture: this runner drives its crash_injection/resume case and skips the
-# plain FI-degrade cases (owned by test_pipeline_utilities.py).
-# 070 (crash-injection after_node resume, proposal 0070 coverage, spec
-# v0.63.1) is a crash/resume fixture this runner owns, alongside 067.
+# Proposal sources: 0008 for 024-031, 0009 for 048-054, 0028 for 055,
+# 0029 for 056, 0039 for 057, 0070 for 067 and 070, 0069 for 069, and
+# 0085 for 076. 028 is retired; 048-054 cover its contract.
 _CHECKPOINT_FIXTURE_NUMBERS: frozenset[int] = frozenset(
-    (set(range(24, 32)) - {28}) | set(range(48, 57)) | {67, 69, 70, 76}
+    (set(range(24, 32)) - {28}) | set(range(48, 58)) | {67, 69, 70, 76}
 )
 
 # Fixtures that need resume-aware test seams the conformance adapter
@@ -164,6 +160,8 @@ class _CapturingCheckpointer:
             fan_out_internal_save_batching=fan_out_internal_save_batching,
         )
         self.saves: list[CheckpointRecord] = []
+        # Parallel to ``saves``: the method each save arrived through.
+        self.save_routes: list[str] = []
         self._abort_after_instance = abort_after_instance
         # The fan-out node ``abort_after_instance`` targets. ``None`` (the
         # legacy fan_out.abort_after_instance path) matches any fan-out;
@@ -187,18 +185,21 @@ class _CapturingCheckpointer:
     async def save(self, invocation_id: str, record: CheckpointRecord) -> None:
         self._raise_if_post_abort()
         self.saves.append(record)
+        self.save_routes.append("save")
         await self._inner.save(invocation_id, record)
         self._maybe_abort(record)
 
     async def save_fan_out_internal(self, invocation_id: str, record: CheckpointRecord) -> None:
         self._raise_if_post_abort()
         self.saves.append(record)
+        self.save_routes.append("save_fan_out_internal")
         await self._inner.save_fan_out_internal(invocation_id, record)
         self._maybe_abort(record)
 
     async def save_fan_out_in_flight_failure(self, invocation_id: str, record: CheckpointRecord) -> None:
         self._raise_if_post_abort()
         self.saves.append(record)
+        self.save_routes.append("save_fan_out_in_flight_failure")
         await self._inner.save_fan_out_in_flight_failure(invocation_id, record)
         self._maybe_abort(record)
 
@@ -476,8 +477,8 @@ def _strip_abort_directive(spec: Mapping[str, Any]) -> Mapping[str, Any]:
 
 
 def _build_seeded_fan_out_progress(fp: Mapping[str, Any]) -> FanOutProgress:
-    """Build one FanOutProgress entry (incl. proposal-0085
-    enclosing_fan_out_lineage) from a fixture ``seeded_record`` block."""
+    """Build one FanOutProgress entry, with its
+    ``enclosing_fan_out_lineage``, from a fixture ``seeded_record`` block."""
     instances = tuple(
         FanOutInstanceProgress(
             state=inst["state"],
@@ -486,6 +487,7 @@ def _build_seeded_fan_out_progress(fp: Mapping[str, Any]) -> FanOutProgress:
         )
         for inst in cast("list[Mapping[str, Any]]", fp.get("instances", []))
     )
+    # Proposal 0085: lineage-qualified fan_out_progress.
     lineage = tuple(
         EnclosingFanOutInstance(
             namespace=tuple(e.get("namespace", [])),
@@ -503,13 +505,12 @@ def _build_seeded_fan_out_progress(fp: Mapping[str, Any]) -> FanOutProgress:
     )
 
 
+# test_state_migration.py seeds the same ``seeded_record`` shape. A
+# fan-out's runtime namespace_prefix equals its node-name path, so a seeded
+# namespace matches the re-entering execution's key with no mapping step.
 def _build_seeded_record(seeded: Mapping[str, Any], invocation_id: str) -> CheckpointRecord:
-    """Construct a CheckpointRecord from a fixture ``seeded_record`` block
-    (the mechanism the migration suite uses, extended for proposal 0085's
-    lineage-qualified fan_out_progress). ``namespace`` node-name paths are
-    used verbatim: the runtime namespace_prefix for a fan-out equals its
-    node-name path, so a seeded entry positively matches the re-entering
-    execution's key without a mapping step."""
+    """Construct a CheckpointRecord from a fixture ``seeded_record`` block,
+    using its ``namespace`` node-name paths verbatim."""
     positions = tuple(
         NodePosition(
             namespace=tuple(p.get("namespace", [])),
@@ -536,6 +537,8 @@ def _build_seeded_record(seeded: Mapping[str, Any], invocation_id: str) -> Check
     )
 
 
+# Fixture 076's fixture-specific predicates (proposal 0085), which
+# conformance-adapter §5.9 says an adapter MUST implement.
 _KNOWN_NESTED_RESUME_INVARIANTS = frozenset(
     {
         "inner_fan_out_progress_matched_per_enclosing_lineage",
@@ -552,20 +555,19 @@ def _assert_nested_resume_invariants(
     recorded_values: Sequence[Any],
     invariants: Mapping[str, Any],
 ) -> None:
-    """Assert fixture 076's nested-fan-out resume invariants (proposal 0085,
-    conformance-adapter §5.9 fixture-specific predicates) against the set of
-    inner-leaf source values that actually RE-RAN on resume.
+    """Assert fixture 076's nested-fan-out resume invariants against the set
+    of inner-leaf source values that actually RE-RAN on resume.
 
-    The leaf's source values are globally unique, so the recorded set tells a
-    correct per-lineage skip from a full re-run (final state alone cannot,
-    since both yield the same accumulator). Expectations are derived from the
-    seeded record: an inner entry with a matching lineage skips its
-    ``completed`` positions and re-runs the rest; a legacy (no-lineage) entry
-    matches nothing, so every inner instance re-runs. Fails loud on an
-    unmapped invariant name."""
+    Expectations are derived from the seeded record: an inner entry with a
+    matching lineage skips its ``completed`` positions and re-runs the rest;
+    a legacy (no-lineage) entry matches nothing, so every inner instance
+    re-runs. Fails loud on an unmapped invariant name."""
     unknown = set(invariants) - _KNOWN_NESTED_RESUME_INVARIANTS
     assert not unknown, f"unhandled nested-resume invariant(s): {sorted(unknown)}"
 
+    # The leaf's source values are globally unique, so the recorded set tells
+    # a correct per-lineage skip from a full re-run. Final state cannot: both
+    # yield the same accumulator.
     recorded = {v for v in recorded_values}
     outer_items = cast("list[list[int]]", seeded["state"]["outer_items"])
     all_inner = {v for sub in outer_items for v in sub}
@@ -626,7 +628,7 @@ def _assert_nested_resume_invariants(
 
 
 async def _run_seeded_resume_case(spec: Mapping[str, Any], *, top_level: Mapping[str, Any]) -> None:
-    """Drive a seeded-record resume case (fixture 076, proposal 0085).
+    """Drive a seeded-record resume case (fixture 076).
 
     Seeds a precise mid-flight CheckpointRecord (carrying lineage-qualified
     fan_out_progress entries) rather than crash-producing one, then resumes
@@ -671,6 +673,15 @@ async def _run_one_case(spec: Mapping[str, Any], *, top_level: Mapping[str, Any]
     if "seeded_record" in spec:
         await _run_seeded_resume_case(spec, top_level=top_level)
         return
+    case_invariants = cast("Mapping[str, Any]", spec.get("invariants") or {})
+    if case_invariants:
+        _assert_run_invariant_names(case_invariants, "case-level")
+        resume_declared = cast("Mapping[str, Any]", spec.get("resume") or {})
+        # Every case-level predicate compares the first run with the resume,
+        # so a case that never completes one would skip them all.
+        assert resume_declared.get("from_first_run") and "expected_error" not in resume_declared, (
+            "case-level invariants need a resume that completes"
+        )
     capturing = _build_capturing(spec)
     # Shared recorders so flaky_per_index nodes inside subgraphs feed
     # the same per-instance attempt table the resume assertions consult.
@@ -811,6 +822,7 @@ async def _run_one_case(spec: Mapping[str, Any], *, top_level: Mapping[str, Any]
         final_first_run = await compiled.invoke(
             initial_state,
             correlation_id=spec.get("caller_correlation_id"),
+            invocation_id=spec.get("caller_invocation_id"),
         )
         # Under collect mode, the abort_after_instance sentinel fires
         # from inside a per-instance save and is captured by gather's
@@ -961,7 +973,10 @@ async def _run_one_case(spec: Mapping[str, Any], *, top_level: Mapping[str, Any]
     if invocation_id_first_run is None:
         raise AssertionError("resume requested but no invocation_id captured (no saves fired)")
     saves_before_resume = list(capturing.saves)
+    routes_before_resume = list(capturing.save_routes)
     capturing.saves.clear()
+    capturing.save_routes.clear()
+    first_record = await capturing.load(invocation_id_first_run)
     # Clear per-instance attempt recorders so the resume run's
     # entries are isolated for ``instance_N_attempt_index_on_resume``
     # and ``instance_N_resume_attempt_count`` assertions.
@@ -1028,6 +1043,7 @@ async def _run_one_case(spec: Mapping[str, Any], *, top_level: Mapping[str, Any]
             initial_state,
             [make_observer_fn(resume_events, [])],
             resume_invocation=invocation_id_first_run,
+            invocation_id=resume_block.get("caller_invocation_id"),
         )
     except CheckpointError:
         raise
@@ -1092,37 +1108,31 @@ async def _run_one_case(spec: Mapping[str, Any], *, top_level: Mapping[str, Any]
                 f"but its body ran (recorded attempts: {executed_set})"
             )
 
-    if "invariants" in resume_expected or "invariants" in resume_block:
-        # Resume-block invariants land on either resume.expected.invariants
-        # or resume.invariants depending on fixture style. Read both.
-        invariants_block: dict[str, Any] = {}
-        if "invariants" in resume_block:
-            invariants_block.update(cast("dict[str, Any]", resume_block["invariants"]))
-        if "invariants" in resume_expected:
-            invariants_block.update(cast("dict[str, Any]", resume_expected["invariants"]))
-        _assert_resume_invariants(invariants_block, final_resume, flaky_per_index_recorders)
-
-    # Fixture 031: assert correlation_id preserved + invocation_id
-    # changed. Span/log assertions deferred — observability
-    # isn't wired yet. Skip those cleanly here.
-    if "correlation_id_assertions" in resume_expected:
-        cid_block = cast("Mapping[str, Any]", resume_expected["correlation_id_assertions"])
-        if cid_block.get("requires_observability"):
-            pytest.skip("correlation_id span/log assertions require observability — Phase 6")
-    if saves_before_resume and capturing.saves:
-        original_id = saves_before_resume[-1].invocation_id
-        resumed_id = capturing.saves[-1].invocation_id
-        if resume_block.get("invariants", {}).get("invocation_id_differs"):
-            assert original_id != resumed_id, (
-                f"invocation_id should differ on resume; got original={original_id!r}, resumed={resumed_id!r}"
-            )
-        if resume_block.get("invariants", {}).get("correlation_id_preserved"):
-            original_corr = saves_before_resume[-1].correlation_id
-            resumed_corr = capturing.saves[-1].correlation_id
-            assert original_corr == resumed_corr, (
-                f"correlation_id should be preserved across resume; "
-                f"got original={original_corr!r}, resumed={resumed_corr!r}"
-            )
+    evidence = _RunEvidence(
+        spec=spec,
+        first_saves=saves_before_resume,
+        resume_saves=list(capturing.saves),
+        saves=[*saves_before_resume, *capturing.saves],
+        save_routes=[*routes_before_resume, *capturing.save_routes],
+        first_record=first_record,
+        resume_events=resume_events.events,
+        resume_trace=list(trace),
+        final_resume=final_resume,
+        executed_instances=frozenset(executed_set),
+        recorders=flaky_per_index_recorders,
+        resume_caller_invocation_id=cast("str | None", resume_block.get("caller_invocation_id")),
+    )
+    # Fixtures put resume invariants under `resume.invariants` or under
+    # `resume.expected.invariants`.
+    resume_invariants: dict[str, Any] = {
+        **cast("Mapping[str, Any]", resume_block.get("invariants") or {}),
+        **cast("Mapping[str, Any]", resume_expected.get("invariants") or {}),
+    }
+    if resume_invariants:
+        _assert_run_invariant_names(resume_invariants, "resume")
+        _assert_run_invariants(resume_invariants, evidence)
+    if case_invariants:
+        _assert_run_invariants(case_invariants, evidence)
 
 
 # ---------------------------------------------------------------------------
@@ -1460,90 +1470,292 @@ def _assert_fan_out_instance(
         )
 
 
-def _assert_resume_invariants(
-    block: Mapping[str, Any],
-    final_state: State | None,
-    recorders: Mapping[str, dict[int, list[int]]],
-) -> None:
-    """Assert resume-side invariants — list-length, no-duplicate,
-    per-instance attempt counts."""
-    final_dict: dict[str, Any] = final_state.model_dump() if final_state is not None else {}
-    for key, value in block.items():
-        if key == "no_duplicate_results":
-            if not value:
+class _RunEvidence(NamedTuple):
+    """What the runner recorded across a case's first run and its resume."""
+
+    spec: Mapping[str, Any]
+    first_saves: Sequence[CheckpointRecord]
+    resume_saves: Sequence[CheckpointRecord]
+    # Both runs' saves, in order.
+    saves: Sequence[CheckpointRecord]
+    # Parallel to ``saves``: the checkpointer method each save arrived through.
+    save_routes: Sequence[str]
+    first_record: CheckpointRecord | None
+    resume_events: Sequence[Mapping[str, Any]]
+    resume_trace: Sequence[str]
+    final_resume: State | None
+    executed_instances: frozenset[int]
+    recorders: Mapping[str, dict[int, list[int]]]
+    resume_caller_invocation_id: str | None
+
+
+def _one(values: Iterable[str], what: str) -> str:
+    distinct = set(values)
+    assert len(distinct) == 1, f"{what}: expected exactly one value, got {sorted(distinct)}"
+    return next(iter(distinct))
+
+
+def _first_correlation_id(ev: _RunEvidence) -> str:
+    return _one((s.correlation_id for s in ev.first_saves), "first-run correlation_id")
+
+
+def _resumed_correlation_id(ev: _RunEvidence) -> str:
+    return _one((s.correlation_id for s in ev.resume_saves), "resumed-run correlation_id")
+
+
+def _first_invocation_id(ev: _RunEvidence) -> str:
+    return _one((s.invocation_id for s in ev.first_saves), "first-run invocation_id")
+
+
+def _resumed_invocation_id(ev: _RunEvidence) -> str:
+    return _one((s.invocation_id for s in ev.resume_saves), "resumed-run invocation_id")
+
+
+def _saved_record(ev: _RunEvidence) -> CheckpointRecord:
+    assert ev.first_record is not None, "the first run left no saved record"
+    return ev.first_record
+
+
+def _ran_on_resume(ev: _RunEvidence, position: NodePosition) -> bool:
+    # Without events every node would read as skipped.
+    assert ev.resume_events, "the resume observer received no events"
+    # An event's namespace ends with the node itself; a position's stops at its parent.
+    path = [*position.namespace, position.node_name]
+    started = any(e["phase"] == "started" and e["namespace"] == path for e in ev.resume_events)
+    return started or position.node_name in ev.resume_trace
+
+
+def _final_list(field_name: str, ev: _RunEvidence) -> list[Any]:
+    assert ev.final_resume is not None, "the resume returned no final state"
+    value = ev.final_resume.model_dump().get(field_name)
+    assert isinstance(value, list), f"final state {field_name!r} is not a list ({value!r})"
+    return cast("list[Any]", value)
+
+
+def _check_first_correlation_id(want: Any, ev: _RunEvidence) -> None:
+    actual = _first_correlation_id(ev)
+    assert actual == want, f"first-run correlation_id: actual={actual!r}, expected={want!r}"
+
+
+def _check_resumed_correlation_id(want: Any, ev: _RunEvidence) -> None:
+    actual = _resumed_correlation_id(ev)
+    assert actual == want, f"resumed-run correlation_id: actual={actual!r}, expected={want!r}"
+
+
+def _check_saved_record_correlation_id(want: Any, ev: _RunEvidence) -> None:
+    actual = _saved_record(ev).correlation_id
+    assert actual == want, f"saved record correlation_id: actual={actual!r}, expected={want!r}"
+
+
+def _check_one_correlation_id(_: Any, ev: _RunEvidence) -> None:
+    assert ev.first_saves and ev.resume_saves, "both runs must save"
+    _one((s.correlation_id for s in ev.saves), "correlation_id across both runs")
+
+
+def _check_correlation_id_carried(_: Any, ev: _RunEvidence) -> None:
+    first, resumed = _first_correlation_id(ev), _resumed_correlation_id(ev)
+    assert resumed == first, f"the resume carries correlation_id {resumed!r}; the first run had {first!r}"
+
+
+def _check_first_correlation_id_uuid4(_: Any, ev: _RunEvidence) -> None:
+    actual = _first_correlation_id(ev)
+    assert _is_canonical_uuid4(actual), f"first-run correlation_id {actual!r} is not a UUIDv4"
+
+
+def _check_first_invocation_id(want: Any, ev: _RunEvidence) -> None:
+    actual = _first_invocation_id(ev)
+    assert actual == want, f"first-run invocation_id: actual={actual!r}, expected={want!r}"
+
+
+def _check_invocation_ids_differ(_: Any, ev: _RunEvidence) -> None:
+    first = _first_invocation_id(ev)
+    assert _resumed_invocation_id(ev) != first, f"the resume reused the first run's invocation_id {first!r}"
+
+
+def _check_resumed_invocation_id_fresh(_: Any, ev: _RunEvidence) -> None:
+    resumed = _resumed_invocation_id(ev)
+    assert _is_canonical_uuid4(resumed), f"resumed-run invocation_id {resumed!r} is not a UUIDv4"
+    assert resumed != _first_invocation_id(ev), "the resume reused the first run's invocation_id"
+
+
+def _check_resumed_invocation_id_not_callers(_: Any, ev: _RunEvidence) -> None:
+    supplied = ev.resume_caller_invocation_id
+    assert supplied is not None, "the resume supplied no invocation_id, so there was none to ignore"
+    assert _resumed_invocation_id(ev) != supplied, (
+        f"the resume adopted the caller's invocation_id {supplied!r}"
+    )
+
+
+def _check_inner_first_node_not_re_run(_: Any, ev: _RunEvidence) -> None:
+    inner = sorted((p for p in _saved_record(ev).completed_positions if p.namespace), key=lambda p: p.step)
+    assert inner, "the saved record holds no completed position inside a subgraph"
+    assert not _ran_on_resume(ev, inner[0]), f"inner node {inner[0].node_name!r} re-ran on resume"
+
+
+def _check_subgraph_re_entry_parent_states(_: Any, ev: _RunEvidence) -> None:
+    saved = [ps.model_dump() for ps in _saved_record(ev).parent_states]
+    assert saved, "the saved record carries no parent_states"
+    re_entered = next(
+        (e for e in ev.resume_events if e["phase"] == "started" and len(e["namespace"]) > 1),
+        None,
+    )
+    assert re_entered is not None, "no node inside a subgraph started on resume"
+    # Killed by changing the outer state restored at re-entry. Restoring the
+    # state class's defaults instead is invisible here: 029 saves its outer
+    # state at the defaults.
+    assert re_entered["parent_states"] == saved, (
+        f"re-entered {re_entered['node_name']!r} got parent_states {re_entered['parent_states']}; "
+        f"the record saved {saved}"
+    )
+
+
+def _check_degraded_slot_rolled_forward(_: Any, ev: _RunEvidence) -> None:
+    assert ev.final_resume is not None, "the resume returned no final state"
+    final = ev.final_resume.model_dump()
+    nodes = cast("Mapping[str, Mapping[str, Any]]", ev.spec.get("nodes") or {})
+    checked = 0
+    for fp in _saved_record(ev).fan_out_progress:
+        target = cast("str", nodes[fp.fan_out_node_name]["fan_out"]["target_field"])
+        for index, inst in enumerate(fp.instances):
+            if inst.state != "completed":
                 continue
-            results = final_dict.get("results")
-            if isinstance(results, list):
-                results_list = cast("list[Any]", results)
-                assert len(set(_hashable(r) for r in results_list)) == len(results_list), (
-                    f"results list has duplicate entries: {results_list}"
-                )
-        elif key == "results_list_length":
-            results = final_dict.get("results")
-            assert isinstance(results, list), f"results_list_length: results is not a list ({results!r})"
-            results_list = cast("list[Any]", results)
-            assert len(results_list) == value, (
-                f"results_list_length: actual={len(results_list)}, expected={value}"
+            assert index not in ev.executed_instances, f"{fp.fan_out_node_name}[{index}] re-ran on resume"
+            # Indexing the target by instance holds while the target starts
+            # empty, as 069's does.
+            assert final[target][index] == inst.result, (
+                f"{fp.fan_out_node_name}[{index}]: final {target}[{index}]={final[target][index]!r}, "
+                f"saved {inst.result!r}"
             )
-        elif key == "errors_list_length":
-            errors = final_dict.get("errors")
-            assert isinstance(errors, list), f"errors_list_length: errors is not a list ({errors!r})"
-            errors_list = cast("list[Any]", errors)
-            assert len(errors_list) == value, (
-                f"errors_list_length: actual={len(errors_list)}, expected={value}"
+            checked += 1
+    assert checked, "the saved record holds no completed fan-out instance"
+
+
+def _check_after_node_rolled_forward(_: Any, ev: _RunEvidence) -> None:
+    node = cast("Mapping[str, Any]", ev.spec.get("crash_injection") or {}).get("after_node")
+    assert isinstance(node, str), "after_node_crash_rolls_node_forward needs crash_injection.after_node"
+    saved = [p for p in _saved_record(ev).completed_positions if p.node_name == node]
+    assert saved, f"the record saved at the crash boundary does not list {node!r}"
+    assert not _ran_on_resume(ev, saved[0]), f"{node!r} re-ran on resume"
+
+
+def _check_batching_scope(_: Any, ev: _RunEvidence) -> None:
+    routed = list(zip(ev.saves, ev.save_routes, strict=True))
+    assert any(route == "save_fan_out_internal" for _, route in routed), (
+        "no save went through the batched path"
+    )
+    fan_outs = {fp.fan_out_node_name for record, _ in routed for fp in record.fan_out_progress}
+    completions = [
+        route
+        for record, route in routed
+        if any(p.node_name in fan_outs and p.fan_out_index is None for p in record.completed_positions)
+    ]
+    assert completions, "no save recorded a fan-out node's own completion"
+    # Killed by sending the fan-out node's completion save down the batched path.
+    assert completions[0] == "save", f"the fan-out node's completion save went through {completions[0]!r}"
+
+
+def _check_no_duplicates(field_name: str) -> Callable[[Any, _RunEvidence], None]:
+    def check(_: Any, ev: _RunEvidence) -> None:
+        values = _final_list(field_name, ev)
+        hashes = [_hashable(v) for v in values]
+        assert len(set(hashes)) == len(hashes), f"final {field_name} has duplicate entries: {values}"
+
+    return check
+
+
+def _check_list_length(field_name: str) -> Callable[[Any, _RunEvidence], None]:
+    def check(want: Any, ev: _RunEvidence) -> None:
+        values = _final_list(field_name, ev)
+        assert len(values) == want, f"final {field_name} length: actual={len(values)}, expected={want}"
+
+    return check
+
+
+def _check_instance_invariant(index: int, kind: str, node: str | None, value: Any, ev: _RunEvidence) -> None:
+    if node is not None:
+        assert value is True, f"instance_{index}_executes_{node}_on_resume: only `true` is supported"
+        assert any(
+            e["phase"] == "started" and e["node_name"] == node and e.get("fan_out_index") == index
+            for e in ev.resume_events
+        ), f"instance {index} did not run {node!r} on resume"
+        return
+    seen = [recorder[index] for recorder in ev.recorders.values() if index in recorder]
+    if kind == "resume_attempt_count" and value == 0:
+        assert not seen, f"instance {index} ran on resume: {seen}"
+        return
+    assert seen and all(seen), f"no recorder saw instance {index} attempt on resume"
+    for attempts in seen:
+        if kind == "resume_attempt_count":
+            assert len(attempts) == value, (
+                f"instance {index} resume attempts: actual={len(attempts)}, expected={value}"
             )
-        elif key == "no_duplicate_error_entries":
-            if not value:
-                continue
-            errors = final_dict.get("errors")
-            if isinstance(errors, list):
-                errors_list = cast("list[Any]", errors)
-                hashes = [_hashable(e) for e in errors_list]
-                assert len(set(hashes)) == len(hashes), f"errors list has duplicates: {errors_list}"
-        elif key.startswith("instance_") and key.endswith("_attempt_index_on_resume"):
-            # Extract instance index from ``instance_<N>_attempt_index_on_resume``.
-            parts = key.split("_")
-            try:
-                idx = int(parts[1])
-            except ValueError:
-                continue
-            # Per §10.6: every retry budget resets to 0 on resume.
-            # Assert the first attempt observed on the resume run for
-            # the named instance is attempt_index 0.
-            for recorder in recorders.values():
-                if idx in recorder:
-                    attempts = recorder[idx]
-                    if attempts:
-                        assert attempts[0] == value, (
-                            f"instance {idx} first-resume attempt_index: "
-                            f"actual={attempts[0]}, expected={value}"
-                        )
-        elif key.startswith("instance_") and key.endswith("_resume_attempt_count"):
-            parts = key.split("_")
-            try:
-                idx = int(parts[1])
-            except ValueError:
-                continue
-            for recorder in recorders.values():
-                if idx in recorder:
-                    attempts = recorder[idx]
-                    assert len(attempts) == value, (
-                        f"instance {idx} resume attempt count: actual={len(attempts)}, expected={value}"
-                    )
-        elif key.startswith("instance_") and "_executes_step_" in key and key.endswith("_on_resume"):
-            # Fixture 050 directive: ``instance_1_executes_step_a_on_resume: true``.
-            # Verified indirectly by ``instances_executed_during_resume``
-            # — the instance ran, so its inner subgraph re-entered at
-            # the entry node. The harness doesn't yet introspect which
-            # specific inner nodes fired; the broader executed-set
-            # assertion covers the same correctness invariant.
+        else:
+            assert attempts[0] == value, (
+                f"instance {index} first resume attempt_index: actual={attempts[0]}, expected={value}"
+            )
+
+
+_INSTANCE_INVARIANT = re.compile(
+    r"instance_(\d+)_(attempt_index_on_resume|resume_attempt_count|executes_(\w+)_on_resume)"
+)
+
+# Every invariant name this runner checks once a resume has run, at case level
+# or under `resume`. The unknown-name guard is this table plus the
+# `instance_<N>_...` family above.
+_RUN_INVARIANTS: dict[str, Callable[[Any, _RunEvidence], None]] = {
+    "first_run_correlation_id": _check_first_correlation_id,
+    "resumed_run_correlation_id": _check_resumed_correlation_id,
+    "saved_record_correlation_id": _check_saved_record_correlation_id,
+    "correlation_id_uniform_across_both_runs": _check_one_correlation_id,
+    "resumed_run_correlation_id_matches_first": _check_correlation_id_carried,
+    "resumed_correlation_id_matches_original": _check_correlation_id_carried,
+    "no_new_correlation_id_generated_on_resume": _check_correlation_id_carried,
+    "first_run_correlation_id_is_uuidv4": _check_first_correlation_id_uuid4,
+    "first_run_invocation_id": _check_first_invocation_id,
+    "first_and_resumed_invocation_ids_differ": _check_invocation_ids_differ,
+    "resumed_invocation_id_differs_from_original": _check_invocation_ids_differ,
+    "resumed_run_invocation_id_is_fresh_uuidv4": _check_resumed_invocation_id_fresh,
+    "resumed_run_invocation_id_not_caller_supplied": _check_resumed_invocation_id_not_callers,
+    "inner_first_node_not_re_run": _check_inner_first_node_not_re_run,
+    "subgraph_re_entry_uses_parent_states": _check_subgraph_re_entry_parent_states,
+    "degrade_slot_rolled_forward_unchanged": _check_degraded_slot_rolled_forward,
+    "after_node_crash_rolls_node_forward": _check_after_node_rolled_forward,
+    "batching_scoped_to_fan_out_internal_saves_only": _check_batching_scope,
+    "no_duplicate_results": _check_no_duplicates("results"),
+    "no_duplicate_error_entries": _check_no_duplicates("errors"),
+    "results_list_length": _check_list_length("results"),
+    "errors_list_length": _check_list_length("errors"),
+}
+
+# Names whose value is the expectation. Every other name accepts only `true`,
+# so a fixture that flips one to `false` fails rather than switching it off.
+_VALUED_RUN_INVARIANTS = frozenset(
+    {
+        "first_run_correlation_id",
+        "resumed_run_correlation_id",
+        "saved_record_correlation_id",
+        "first_run_invocation_id",
+        "results_list_length",
+        "errors_list_length",
+    }
+)
+
+
+def _assert_run_invariant_names(block: Mapping[str, Any], where: str) -> None:
+    unknown = sorted(n for n in block if n not in _RUN_INVARIANTS and not _INSTANCE_INVARIANT.fullmatch(n))
+    assert not unknown, f"unhandled {where} invariant(s): {unknown}"
+
+
+def _assert_run_invariants(block: Mapping[str, Any], ev: _RunEvidence) -> None:
+    """Check each invariant in ``block`` against what the first run and the
+    resume recorded."""
+    for name, value in block.items():
+        if (match := _INSTANCE_INVARIANT.fullmatch(name)) is not None:
+            _check_instance_invariant(int(match.group(1)), match.group(2), match.group(3), value, ev)
             continue
-        elif key == "batching_scoped_to_fan_out_internal_saves_only":
-            # Structural invariant — verified across the fixture suite
-            # rather than per-fixture (every non-fan-out save runs
-            # synchronously regardless of the batching config). The
-            # fixture restates it as a reminder; no per-test action.
-            continue
+        if name not in _VALUED_RUN_INVARIANTS:
+            assert value is True, f"invariant {name}: only `true` is supported; got {value!r}"
+        _RUN_INVARIANTS[name](value, ev)
 
 
 def _hashable(value: Any) -> Any:
@@ -1635,21 +1847,62 @@ def _assert_state_matches(actual: Any, expected: Mapping[str, Any]) -> None:
         assert actual_dict.get(k) == v, f"state field {k!r}: actual={actual_dict.get(k)!r}, expected={v!r}"
 
 
+_FIRST_RUN_INVARIANTS = frozenset(
+    {
+        "save_count",
+        "save_order_matches_completed_event_order",
+        "saves_for_fan_out_internals",
+        "invocation_id_is_uuidv4",
+        "last_saved_at_monotonic_across_saves",
+        "completed_positions_step_monotonic",
+    }
+)
+
+
 def _assert_invariants(
     invariants: Mapping[str, Any],
     saves: list[CheckpointRecord],
 ) -> None:
+    unknown = sorted(set(invariants) - _FIRST_RUN_INVARIANTS)
+    assert not unknown, f"unhandled expected invariant(s): {unknown}"
+    for name, value in invariants.items():
+        if name not in {"save_count", "saves_for_fan_out_internals"}:
+            assert value is True, f"invariant {name}: only `true` is supported; got {value!r}"
     if "save_count" in invariants:
         assert len(saves) == invariants["save_count"], (
             f"save_count: actual={len(saves)}, expected={invariants['save_count']}"
         )
-    if invariants.get("save_order_matches_completed_event_order"):
+    if "save_order_matches_completed_event_order" in invariants:
+        assert saves, "save_order_matches_completed_event_order: no save fired"
         last_steps = [s.completed_positions[-1].step for s in saves]
         assert last_steps == sorted(last_steps), f"save order does not match step order: {last_steps}"
-    if invariants.get("saves_for_fan_out_internals") == 0:
+    if "saves_for_fan_out_internals" in invariants:
+        assert invariants["saves_for_fan_out_internals"] == 0, (
+            "saves_for_fan_out_internals: only 0 is supported"
+        )
         for s in saves:
             for p in s.completed_positions:
                 assert p.fan_out_index is None, f"unexpected fan-out internal save: {p}"
+    if "invocation_id_is_uuidv4" in invariants:
+        assert saves, "invocation_id_is_uuidv4: no save fired"
+        not_uuid = sorted({s.invocation_id for s in saves if not _is_canonical_uuid4(s.invocation_id)})
+        assert not not_uuid, f"saved invocation_id is not a UUIDv4: {not_uuid}"
+    if "last_saved_at_monotonic_across_saves" in invariants:
+        stamps = [s.last_saved_at for s in saves]
+        assert len(stamps) >= 2, (
+            f"last_saved_at_monotonic_across_saves needs two or more saves; got {len(stamps)}"
+        )
+        # Non-decreasing: two saves can land in the same clock tick.
+        assert stamps == sorted(stamps), f"last_saved_at went backwards across saves: {stamps}"
+    if "completed_positions_step_monotonic" in invariants:
+        assert any(len(s.completed_positions) >= 2 for s in saves), (
+            "completed_positions_step_monotonic: no save lists two or more positions"
+        )
+        for s in saves:
+            steps = [p.step for p in s.completed_positions]
+            assert all(a < b for a, b in zip(steps, steps[1:], strict=False)), (
+                f"completed_positions steps do not increase: {steps}"
+            )
 
 
 # ---------------------------------------------------------------------------
