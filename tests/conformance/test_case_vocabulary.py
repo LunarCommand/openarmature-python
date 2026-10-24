@@ -37,6 +37,7 @@ import ast
 import importlib
 import inspect
 from collections import defaultdict
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any, cast
 
@@ -74,18 +75,17 @@ _RUN_DIRS: tuple[str, ...] = (
     "conformance-adapter",
 )
 
-# Modules whose own `_fixture_paths()` is the authority on what they collect.
-# Paired with the capability each drives, so "runs" is computed from the
-# collection logic rather than pattern-matched on a registry's variable name --
-# a fixture can be held back by a deferral dict, by a different module's
-# registry, or by a numeric cutoff, and only the module itself knows which.
-# `(module, attributes that hold a fixture back, optional positive gate)`.
+# Modules whose own `_fixture_paths()` is the authority on what they collect,
+# so "runs" is computed from the collection logic rather than pattern-matched
+# on a registry's variable name -- a fixture can be held back by a deferral
+# dict, by a different module's registry, or by a numeric cutoff, and only the
+# module itself knows which. `(module, attributes that hold a fixture back,
+# optional positive gate)`.
 #
-# Named explicitly, and every name is resolved with `getattr` so a rename fails
-# loudly rather than shrinking the held-back set in silence. A prefix guess is
-# what the previous version used, and it missed `_CONVENTION_ONLY_FIXTURES`
-# outright; `test_observability` alone skips through four registries and a
-# membership gate.
+# The attributes are named rather than matched by pattern, because a name does
+# not say which way a registry points: some hold fixtures back and others gate
+# them in. Every name is resolved with `getattr`, so a rename fails loudly
+# rather than shrinking the held-back set in silence.
 _COLLECTORS: tuple[tuple[str, tuple[str, ...], str | None], ...] = (
     ("test_conformance", ("_DEFERRED_FIXTURES",), None),
     ("test_llm_provider", ("_DEFERRED_FIXTURES",), None),
@@ -111,11 +111,11 @@ _COLLECTORS: tuple[tuple[str, tuple[str, ...], str | None], ...] = (
 # Fixtures a module outside `tests/conformance` drives, by the function whose
 # `parametrize` names them.
 #
-# `test_llm_provider` defers 056-058 and 061-066 with reasons pointing here, so
-# subtracting its deferrals without adding these back marks nine RUNNING fixtures
-# dormant -- and a dormant fixture is skipped by the read check, which is the
-# direction that hides a vacuous case. Read off the parametrize decorators so the
-# list cannot drift from what actually runs.
+# `test_llm_provider` defers fixtures to these functions by name, so subtracting
+# its deferrals without adding these back marks RUNNING fixtures dormant -- and
+# a dormant fixture is skipped by the read check, which is the direction that
+# hides a vacuous case. Read off the parametrize decorators so the list cannot
+# drift from what actually runs.
 _UNIT_DRIVEN: tuple[tuple[str, str], ...] = (
     ("tests.unit.test_observability_otel", "test_call_level_retry_fixture_per_attempt_spans"),
     ("tests.unit.test_observability_otel", "test_call_level_reask_retry_fixture"),
@@ -133,8 +133,8 @@ def _runner_sources() -> dict[str, str]:
     # `rglob`, not `glob`: `harness/runtime/` exists and its README designates it
     # the future home of the fixture-executing code, so a directive reader landing
     # there would be invisible to the read check and to the collection scan. The
-    # unit-side llm-provider runner is included for the same reason -- it drives
-    # fixtures 056-058, which `test_llm_provider` defers to it by name.
+    # unit-side llm-provider runner is included for the same reason: it drives
+    # the fixtures `test_llm_provider` defers to it by name.
     paths = sorted(_RUNNER_DIR.rglob("*.py")) + [_REPO_ROOT / "tests/unit/test_observability_otel.py"]
     kept = [p for p in paths if p.name not in _SELF]
     sources = {str(p.relative_to(_REPO_ROOT)): p.read_text() for p in kept}
@@ -144,21 +144,19 @@ def _runner_sources() -> dict[str, str]:
     return sources
 
 
+# Derived from execution, not from mention. A hand-listed map misses owners as
+# runners are added, and a scan for the capability name anywhere in a source
+# goes wrong the other way, silently: it makes owners of `loader.py`'s registry
+# tuple and of a gate-wiring test that builds a synthetic `tmp_path` tree and
+# never opens the submodule. A too-broad owner vouches for a read that the real
+# runner never performs.
 def _runner_owners() -> dict[str, frozenset[str]]:
     """Which runner sources execute each capability's fixtures.
 
-    Derived from execution, not from mention. A hand-listed map was wrong three
-    times, each time too narrow; a scan for the capability name anywhere in a
-    source is wrong the other way, and worse, because it fails silently: it made
-    an owner of `loader.py`'s registry tuple and of a gate-wiring test that
-    builds a synthetic `tmp_path` tree and never opens the submodule. A too-broad
-    owner vouches for a read that the real runner never performs.
-
-    Two sources, both mechanical. The paths a collector's `_fixture_paths()`
-    actually returns, and module-level path constants rooted at the submodule --
-    which is what a cross-capability load looks like (`test_observability` reaches
-    into pipeline-utilities for fixture 031) and what a temp-directory tree does
-    not.
+    A source owns a capability when it is a collector whose `_fixture_paths()`
+    returns that capability's fixtures, or when it holds a path expression rooted
+    at the capability's directory in the submodule. A source that loads one named
+    fixture owns that fixture alone, and `_fixture_owners` reports it instead.
     """
     owners: dict[str, set[str]] = {cap: set() for cap in _RUN_DIRS}
     by_module = {name: f"tests/conformance/{name}.py" for name, _, _ in _COLLECTORS}
@@ -171,23 +169,8 @@ def _runner_owners() -> dict[str, frozenset[str]]:
                 owners[cap].add(by_module[name])
 
     for path, src in _runner_sources().items():
-        for node in ast.walk(ast.parse(src)):
-            # Any `/`-joined path expression, not only an assignment: a load can
-            # be written inline, and scanning assignments alone is the same
-            # partial-input mistake this module exists to catch.
-            if not isinstance(node, ast.BinOp) or not isinstance(node.op, ast.Div):
-                continue
-            literals = {
-                sub.value
-                for sub in ast.walk(node)
-                if isinstance(sub, ast.Constant) and isinstance(sub.value, str)
-            }
-            # Rooted at the submodule. A synthetic tree under `tmp_path` carries
-            # the same capability names and the same "conformance" segment, and
-            # is not a load -- `test_capability_gate_wiring` builds exactly that.
-            if "openarmature-spec" not in literals or "conformance" not in literals:
-                continue
-            for cap in literals & set(owners):
+        for cap, fixture in _submodule_loads(src):
+            if fixture is None and cap in owners:
                 owners[cap].add(path)
 
     missing = sorted(cap for cap, paths in owners.items() if not paths)
@@ -195,14 +178,80 @@ def _runner_owners() -> dict[str, frozenset[str]]:
     return {cap: frozenset(paths) for cap, paths in owners.items()}
 
 
-def _containers(doc: dict[str, Any]) -> list[dict[str, Any]]:
-    """The document root and each of its cases, as directive-bearing containers.
+def _fixture_owners() -> dict[str, frozenset[str]]:
+    """Runner sources that load one named fixture, keyed by fixture id."""
+    owners: dict[str, set[str]] = defaultdict(set)
+    for path, src in _runner_sources().items():
+        for _, fixture in _submodule_loads(src):
+            if fixture is not None:
+                owners[fixture].add(path)
+    return {fixture: frozenset(paths) for fixture, paths in owners.items()}
 
-    The root counts. 140 of the 448 fixtures in `_RUN_DIRS` carry their
-    directives there with no `cases:` list at all, and the document-root models
-    that would forbid an unknown key are applied only by `test_fixture_parsing`,
-    which skips retrieval-provider and its own deferrals.
-    """
+
+def _fixture_stem(expr: ast.expr) -> str | None:
+    if isinstance(expr, ast.Constant) and isinstance(expr.value, str) and expr.value.endswith(".yaml"):
+        return expr.value.removesuffix(".yaml")
+    return None
+
+
+def _submodule_loads(src: str) -> list[tuple[str, str | None]]:
+    """`(capability, fixture)` for each way a source reaches a capability's
+    conformance directory: the fixture's id when it joins one fixture filename
+    onto the directory, `None` when it reaches the directory any other way."""
+    tree = ast.parse(src)
+    parents = {child: node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
+    loads: list[tuple[str, str | None]] = []
+    for node in ast.walk(tree):
+        # Any `/`-joined path expression, not only an assignment: a load can be
+        # written inline, and scanning assignments alone is the same
+        # partial-input mistake this module exists to catch.
+        if not isinstance(node, ast.BinOp) or not isinstance(node.op, ast.Div):
+            continue
+        if isinstance(parents.get(node), ast.BinOp):
+            continue
+        literals = {
+            sub.value
+            for sub in ast.walk(node)
+            if isinstance(sub, ast.Constant) and isinstance(sub.value, str)
+        }
+        # Rooted at the submodule. A synthetic tree under `tmp_path` carries the
+        # same capability names and the same "conformance" segment, and is not a
+        # load -- `test_capability_gate_wiring` builds exactly that.
+        if "openarmature-spec" not in literals or "conformance" not in literals:
+            continue
+        caps = literals & set(_RUN_DIRS)
+        # A path ending in a fixture file is that one fixture, whether it is used
+        # inline or through a name bound to it.
+        stem = _fixture_stem(node.right)
+        binding = parents.get(node)
+        if stem is None and isinstance(binding, ast.Assign):
+            names = {t.id for t in binding.targets if isinstance(t, ast.Name)}
+        elif stem is None and isinstance(binding, ast.AnnAssign) and isinstance(binding.target, ast.Name):
+            names = {binding.target.id}
+        else:
+            loads.extend((cap, stem) for cap in caps)
+            continue
+        # A directory bound to a name owns the whole capability unless every use
+        # joins one fixture filename onto it. Owning the whole directory for a
+        # one-fixture load would let that runner's string reads vouch for every
+        # other fixture in it.
+        for use in ast.walk(tree):
+            if not (isinstance(use, ast.Name) and use.id in names and isinstance(use.ctx, ast.Load)):
+                continue
+            joined = parents.get(use)
+            fixture = None
+            if isinstance(joined, ast.BinOp) and isinstance(joined.op, ast.Div) and joined.left is use:
+                fixture = _fixture_stem(joined.right)
+            loads.extend((cap, fixture) for cap in caps)
+    return loads
+
+
+# The root counts: a fixture with no `cases:` list carries every directive
+# there, and the document-root models that would forbid an unknown key are
+# applied only by `test_fixture_parsing`, which parses `loader.CAPABILITIES`
+# alone and skips its own deferrals.
+def _containers(doc: dict[str, Any]) -> list[dict[str, Any]]:
+    """The document root and each of its cases, as directive-bearing containers."""
     out = [doc]
     cases = doc.get("cases")
     if isinstance(cases, list):
@@ -254,52 +303,221 @@ def _declared_keys() -> list[tuple[str, str, str, str]]:
     return out
 
 
-def _read_positions() -> dict[str, set[str]]:
-    """Where each directive name is used to READ a mapping, by source path.
+# `(source path, module-level name)`: a function or class with everything nested
+# in it, or a module-level assignment's value. A read outside all of them runs
+# at import rather than against a fixture, so it is recorded under `<module>`:
+# it counts for its own file's runner, and no other runner reaches it.
+_Unit = tuple[str, str]
 
-    A bare substring match cannot tell a read from a mention. `manager` occurs
-    twice in runner source and neither is a read of the case-level block -- both
-    concern a call's `target:` value -- so the scan it satisfies proves nothing.
-    Only subscript, ``.get`` / ``.pop``, and membership count here; anything
-    reached another way is declared in `READ_VIA` and verified there.
+
+def _runner_trees() -> dict[str, ast.Module]:
+    return {path: ast.parse(src) for path, src in _runner_sources().items()}
+
+
+def _unit_names(stmt: ast.stmt) -> tuple[str, ...]:
+    """The module-level names one top-level statement defines."""
+    if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+        return (stmt.name,)
+    if isinstance(stmt, ast.Assign):
+        return tuple(target.id for target in stmt.targets if isinstance(target, ast.Name))
+    if isinstance(stmt, ast.AnnAssign) and isinstance(stmt.target, ast.Name):
+        return (stmt.target.id,)
+    return ()
+
+
+def _read_keys(node: ast.AST) -> list[str]:
+    """The string keys one node reads: a subscript, a ``.get`` / ``.pop``, or a
+    membership test."""
+    hits: list[Any] = []
+    if isinstance(node, ast.Subscript) and isinstance(node.slice, ast.Constant):
+        hits.append(node.slice.value)
+    elif (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr in {"get", "pop"}
+        and node.args
+        and isinstance(node.args[0], ast.Constant)
+    ):
+        hits.append(node.args[0].value)
+    elif isinstance(node, ast.Compare) and isinstance(node.left, ast.Constant):
+        hits.append(node.left.value)
+    return [hit for hit in hits if isinstance(hit, str)]
+
+
+# Matched on the syntax tree, because a substring match cannot tell a read from
+# a mention: a key named in a comment, or as some other key's value, would count
+# as read.
+def _read_positions() -> dict[str, set[_Unit]]:
+    """Where each directive name is used to READ a mapping: the source and the
+    module-level definition holding each read.
+
+    Only a subscript, a ``.get`` / ``.pop``, or a membership test counts. A key
+    reached any other way is declared in `READ_VIA` instead.
     """
-    found: dict[str, set[str]] = defaultdict(set)
-    for path, src in _runner_sources().items():
-        try:
-            tree = ast.parse(src)
-        except SyntaxError:  # pragma: no cover - a runner that does not parse fails elsewhere
-            continue
-        for node in ast.walk(tree):
-            hits: list[Any] = []
-            if isinstance(node, ast.Subscript) and isinstance(node.slice, ast.Constant):
-                hits.append(node.slice.value)
-            elif (
-                isinstance(node, ast.Call)
-                and isinstance(node.func, ast.Attribute)
-                and node.func.attr in {"get", "pop"}
-                and node.args
-                and isinstance(node.args[0], ast.Constant)
-            ):
-                hits.append(node.args[0].value)
-            elif isinstance(node, ast.Compare) and isinstance(node.left, ast.Constant):
-                hits.append(node.left.value)
-            for hit in hits:
-                if isinstance(hit, str):
-                    found[hit].add(path)
+    found: dict[str, set[_Unit]] = defaultdict(set)
+    for path, tree in _runner_trees().items():
+        for stmt in tree.body:
+            units = _unit_names(stmt) or ("<module>",)
+            for node in ast.walk(stmt):
+                for key in _read_keys(node):
+                    found[key].update((path, unit) for unit in units)
     return found
 
 
-def _executed_fixture_ids() -> set[str]:
-    """Every fixture id some runner actually collects and does not defer.
+def _module_name(path: str) -> str:
+    parts = path.removesuffix(".py").split("/")
+    return ".".join(parts[:-1] if parts[-1] == "__init__" else parts)
 
-    Computed from each module's own `_fixture_paths()` rather than pattern-
-    matched on registry names. "In a `_DEFERRED` dict" does not mean "does not
-    run": four observability fixtures are deferred with reasons that name the
-    Langfuse runner, which executes them; three llm-provider fixtures are
-    deferred to `tests/unit`; `test_fixture_parsing`'s registry defers PARSING
-    only; and `test_pipeline_utilities` holds fixtures back with a numeric
-    cutoff and no registry at all.
+
+def _imports(path: str, tree: ast.Module) -> dict[str, tuple[str, str | None]]:
+    """Each name a source binds by import, in any scope, as `(module, attribute)`.
+
+    The attribute is ``None`` when the name binds the module itself.
     """
+    module = _module_name(path)
+    package = module if path.endswith("/__init__.py") else module.rpartition(".")[0]
+    bound: dict[str, tuple[str, str | None]] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                name = alias.asname or alias.name.partition(".")[0]
+                bound[name] = (alias.name if alias.asname else name, None)
+        elif isinstance(node, ast.ImportFrom):
+            base = package
+            for _ in range(node.level - 1):
+                base = base.rpartition(".")[0]
+            source = ".".join(part for part in (base if node.level else "", node.module or "") if part)
+            for alias in node.names:
+                bound[alias.asname or alias.name] = (source, alias.name)
+    return bound
+
+
+class _Namespace:
+    """Resolves a name in a runner source to the module-level definition it
+    refers to, following imports between runner sources."""
+
+    def __init__(self, trees: dict[str, ast.Module]) -> None:
+        self.paths = {_module_name(path): path for path in trees}
+        self.units = {
+            path: {n for stmt in tree.body for n in _unit_names(stmt)} for path, tree in trees.items()
+        }
+        self.imports = {path: _imports(path, tree) for path, tree in trees.items()}
+
+    def lookup(self, module: str, name: str, depth: int = 0) -> _Unit | str | None:
+        """`name` as an attribute of `module`: a definition, a submodule's
+        dotted name, or ``None`` outside the runner sources."""
+        if f"{module}.{name}" in self.paths:
+            return f"{module}.{name}"
+        path = self.paths.get(module)
+        # A re-export chain longer than this is a cycle.
+        if path is None or depth > 8:
+            return None
+        if name in self.units[path]:
+            return (path, name)
+        if name in self.imports[path]:
+            return self.imported(path, name, depth + 1)
+        return None
+
+    def imported(self, path: str, name: str, depth: int = 0) -> _Unit | str | None:
+        module, attr = self.imports[path][name]
+        if attr is None:
+            return module if module in self.paths else None
+        return self.lookup(module, attr, depth)
+
+    def resolve(self, path: str, expr: ast.expr) -> _Unit | str | None:
+        if isinstance(expr, ast.Name):
+            if expr.id in self.units[path]:
+                return (path, expr.id)
+            if expr.id in self.imports[path]:
+                return self.imported(path, expr.id)
+            return None
+        if isinstance(expr, ast.Attribute) and isinstance(base := self.resolve(path, expr.value), str):
+            return self.lookup(base, expr.attr)
+        return None
+
+
+def _annotation_ids(tree: ast.AST) -> set[int]:
+    """Every node inside a type annotation."""
+    roots: list[ast.expr] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.arg) and node.annotation is not None:
+            roots.append(node.annotation)
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.returns is not None:
+            roots.append(node.returns)
+        elif isinstance(node, ast.AnnAssign):
+            roots.append(node.annotation)
+    return {id(sub) for root in roots for sub in ast.walk(root)}
+
+
+def _runner_reach() -> dict[str, frozenset[_Unit]]:
+    """The module-level definitions each runner source reaches by name, directly
+    or through a definition it reaches."""
+    trees = _runner_trees()
+    namespace = _Namespace(trees)
+    statements: dict[_Unit, list[ast.stmt]] = defaultdict(list)
+    for path, tree in trees.items():
+        for stmt in tree.body:
+            for name in _unit_names(stmt):
+                statements[(path, name)].append(stmt)
+    # An annotation names a type without running any of it.
+    annotations = {path: _annotation_ids(tree) for path, tree in trees.items()}
+
+    def referenced(path: str, nodes: Sequence[ast.AST]) -> set[_Unit]:
+        found: set[_Unit] = set()
+        for node in nodes:
+            for sub in ast.walk(node):
+                if (
+                    isinstance(sub, (ast.Name, ast.Attribute))
+                    and isinstance(sub.ctx, ast.Load)
+                    and id(sub) not in annotations[path]
+                    and isinstance(unit := namespace.resolve(path, sub), tuple)
+                ):
+                    found.add(unit)
+        return found
+
+    edges = {unit: referenced(unit[0], stmts) for unit, stmts in statements.items()}
+    reach: dict[str, frozenset[_Unit]] = {}
+    for path, tree in trees.items():
+        seen = referenced(path, [tree])
+        todo = list(seen)
+        while todo:
+            for unit in edges[todo.pop()] - seen:
+                seen.add(unit)
+                todo.append(unit)
+        reach[path] = frozenset(seen)
+    return reach
+
+
+# A shared helper's reads count only for the runners that reach it. `adapter.py`
+# builds the graph for most capabilities, and its reads of `from` and `to` say
+# nothing about retrieval-provider, whose runner drives the entry node alone and
+# never builds one.
+def _owner_reads() -> Callable[[str, frozenset[str]], bool]:
+    """Whether a directive name is read by one of a set of runner sources: in
+    the source itself, or in a definition the source reaches."""
+    positions = _read_positions()
+    reach = _runner_reach()
+    reached_by: dict[frozenset[str], frozenset[_Unit]] = {}
+
+    def read(key: str, owning: frozenset[str]) -> bool:
+        if owning not in reached_by:
+            reached_by[owning] = frozenset().union(*(reach[path] for path in owning))
+        reached = reached_by[owning]
+        return any(site[0] in owning or site in reached for site in positions.get(key, ()))
+
+    return read
+
+
+# Computed from each module's own `_fixture_paths()` rather than pattern-matched
+# on registry names, because "in a `_DEFERRED` dict" does not mean "does not
+# run": observability defers fixtures with reasons that name the Langfuse runner,
+# which executes them; llm-provider defers fixtures to `tests/unit`;
+# `test_fixture_parsing`'s registry defers parsing only; and
+# `test_pipeline_utilities` also holds fixtures back with a numeric cutoff that
+# no registry records.
+def _executed_fixture_ids() -> set[str]:
+    """Every fixture id some runner actually collects and does not hold back,
+    including those a unit-side runner drives."""
     runs: set[str] = set()
     for name, held_back_attrs, gate_attr in _COLLECTORS:
         module = importlib.import_module(f".{name}", __package__)
@@ -307,8 +525,8 @@ def _executed_fixture_ids() -> set[str]:
         held_back: set[str] = set()
         for attr in held_back_attrs:
             # No default: a renamed registry raises AttributeError here rather
-            # than quietly shrinking the held-back set. Empty is legitimate --
-            # retrieval-provider defers nothing at the moment.
+            # than quietly shrinking the held-back set. Empty is legitimate: a
+            # runner may defer nothing.
             held_back |= set(getattr(module, attr))
         if gate_attr is not None:
             gate = getattr(module, gate_attr)
@@ -386,9 +604,9 @@ def test_every_declared_key_is_read_by_a_runner_that_owns_it() -> None:
     # Scoped per capability. A flat pool over every runner lets a key read by one
     # capability's runner count for a fixture whose own runner ignores it, which
     # is the same mis-routing defect one level up.
-    positions = _read_positions()
+    read = _owner_reads()
     owners = _runner_owners()
-    shared = {"harness/", "adapter.py", "middleware_seam.py"}
+    fixture_owners = _fixture_owners()
     exempt = set(UNAPPLIED_PENDING_DEFERRAL) | set(READ_VIA)
     # Matched on the whole triple, not the key. `UNAPPLIED_PENDING_CASE_DEFERRAL`
     # is keyed by `(fixture, case)` exactly so the exemption stays narrow;
@@ -423,8 +641,7 @@ def test_every_declared_key_is_read_by_a_runner_that_owns_it() -> None:
             or fixture not in executed
         ):
             continue
-        seen = positions.get(key, set())
-        if seen & owners[cap] or any(any(m in src for m in shared) for src in seen):
+        if read(key, owners[cap] | fixture_owners.get(fixture, frozenset())):
             continue
         unread.append(f"  {cap}/{fixture} at {where} declares {key!r}; no owning runner reads it")
     assert not unread, (
@@ -432,6 +649,63 @@ def test_every_declared_key_is_read_by_a_runner_that_owns_it() -> None:
         + "\n".join(sorted(set(unread)))
         + "\nWire the directive in that capability's runner, or record it against a deferral."
     )
+
+
+def test_a_helper_read_counts_only_for_the_runners_that_reach_it(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Reach is resolved by name through imports, so the way it goes wrong in
+    # silence is a runner counted as reaching a helper it never calls. Every
+    # runner below imports from the same helper module; only the ones that
+    # reach the reading definition may count.
+    helper = "tests/conformance/harness/helper.py"
+    sources = {
+        helper: (
+            "class Graph:\n"
+            "    def edges(self, spec):\n"
+            "        return spec['edges']\n"
+            "def build(spec):\n"
+            "    return spec['nodes']\n"
+            "def unrelated():\n"
+            "    return None\n"
+        ),
+        "tests/conformance/harness/__init__.py": "from .helper import build as build\n",
+        "tests/conformance/test_annotation.py": (
+            "from .harness.helper import Graph\ndef test(graph: Graph):\n    return graph\n"
+        ),
+    }
+    # Each runner's import, and the one line its test runs.
+    runners = {
+        "test_direct": ("from .harness.helper import build", "build(spec)"),
+        "test_module": ("from .harness import helper", "helper.build(spec)"),
+        "test_reexport": ("from .harness import build", "build(spec)"),
+        "test_other_name": ("from .harness.helper import unrelated", "unrelated()"),
+        "test_class": ("from .harness.helper import Graph", "Graph().edges(spec)"),
+    }
+    for name, (imports, body) in runners.items():
+        sources[f"tests/conformance/{name}.py"] = f"{imports}\ndef test(spec):\n    {body}\n"
+    monkeypatch.setattr(f"{__name__}._runner_sources", lambda: sources)
+    read = _owner_reads()
+    for runner in ("test_direct", "test_module", "test_reexport"):
+        assert read("nodes", frozenset({f"tests/conformance/{runner}.py"})), runner
+    assert not read("nodes", frozenset({"tests/conformance/test_other_name.py"}))
+    assert not read("edges", frozenset({"tests/conformance/test_annotation.py"}))
+    assert read("edges", frozenset({"tests/conformance/test_class.py"}))
+    assert read("nodes", frozenset({helper}))
+
+
+def test_a_path_to_one_fixture_owns_that_fixture_alone() -> None:
+    # One case per path shape the derivation resolves. The last is the control:
+    # a bound directory used whole still owns the capability.
+    root = 'ROOT / "openarmature-spec" / "spec" / "pipeline-utilities" / "conformance"'
+    one = ("pipeline-utilities", "031-x")
+    shapes = {
+        f'_load({root} / "031-x.yaml")': one,
+        f'd = {root}\n_load(d / "031-x.yaml")': one,
+        f'p = {root} / "031-x.yaml"\n_load(p)': one,
+        f'p: Path = {root} / "031-x.yaml"\n_load(p)': one,
+        f'd = {root}\nfor path in d.glob("*.yaml"):\n    _load(path)': ("pipeline-utilities", None),
+    }
+    for src, want in shapes.items():
+        assert _submodule_loads(src) == [want], src
 
 
 def test_exempt_keys_are_declared_only_by_fixtures_that_do_not_run() -> None:
@@ -489,14 +763,12 @@ def test_case_deferral_exemptions_name_cases_that_are_actually_skipped() -> None
             )
 
 
+# Recursive: bodies also sit under a case's `inner_subgraphs` and inside its
+# `graph:` wrapper. `inner_subgraphs` is the same shape by construction, since
+# the Langfuse runner renames it onto `subgraphs` before use.
 def _subgraph_bodies() -> list[tuple[str, str]]:
-    """`(fixture, key)` for every subgraph body anywhere in a running fixture.
-
-    Recursive rather than two enumerated container levels. Bodies also sit under
-    a case's `inner_subgraphs` and inside its `graph:` wrapper, and
-    `inner_subgraphs` is the same shape by construction -- the Langfuse runner
-    renames it onto `subgraphs` before use.
-    """
+    """`(fixture, key)` for each key of every subgraph body, at any depth, in
+    every fixture in a run directory."""
     out: list[tuple[str, str]] = []
 
     def visit(fixture: str, node: Any) -> None:
@@ -531,10 +803,9 @@ def test_every_subgraph_level_key_is_modelled() -> None:
     # fixture declares a subgraph key outside the model. It is here so the first
     # one that does is rejected rather than dropped.
     observed = _subgraph_bodies()
-    # Non-vacuity on the INPUT, at the post-fix count rather than a loose floor.
-    # A guard set well below what the walk reaches tolerates losing a whole
-    # container shape, which is how the two-level version passed while missing
-    # `inner_subgraphs` and `graph:` entirely.
+    # Non-vacuity on the INPUT, with the floor close to what the walk reaches
+    # rather than loose: a walk of two enumerated levels misses every body under
+    # `inner_subgraphs` and `graph:`, and only a close floor catches it.
     assert len({f for f, _ in observed}) >= 71, (
         f"walked {len(observed)} subgraph keys in {len({f for f, _ in observed})} fixtures; "
         "the traversal is not reaching them all"

@@ -35,6 +35,7 @@ from openarmature.graph import (
     ParallelBranchesNode,
     ProjectionStrategy,
     Reducer,
+    ReducerError,
     State,
     SubgraphNode,
     append,
@@ -511,6 +512,7 @@ def _make_flaky_fn(
     node_name: str,
     flaky: Mapping[str, Any],
     trace: list[str],
+    call_counts: dict[str, int] | None = None,
 ) -> Callable[[Any], Awaitable[Mapping[str, Any]]]:
     """Build a flaky node body. Two shapes:
 
@@ -532,10 +534,14 @@ def _make_flaky_fn(
     fail_first_invocation_only = bool(flaky.get("fail_first_invocation_only"))
     has_failed_once = [False]
     on_success = dict(flaky.get("on_success", {}))
+    if call_counts is not None:
+        call_counts.setdefault(node_name, 0)
 
     async def fn(_state: Any) -> Mapping[str, Any]:
         idx = attempt_counter[0]
         attempt_counter[0] = idx + 1
+        if call_counts is not None:
+            call_counts[node_name] = idx + 1
         # `execution_order` is engine-step-scoped, not per-attempt — only
         # append on the first attempt so retry middleware re-invocations
         # don't double-count the node.
@@ -838,6 +844,14 @@ def _projection_for(node_spec: Mapping[str, Any]) -> ProjectionStrategy[State, S
     return FieldNameMatching[State, State]()
 
 
+def raised_from_node(error: BaseException) -> str | None:
+    """The node a runtime error names: the producing node for a reducer
+    error, ``node_name`` otherwise, and ``None`` when it names none."""
+    if isinstance(error, ReducerError):
+        return error.producing_node
+    return getattr(error, "node_name", None)
+
+
 def build_graph(
     spec: Mapping[str, Any],
     *,
@@ -852,6 +866,7 @@ def build_graph(
     instance_execution_recorders: dict[str, dict[int, list[int]]] | None = None,
     leaf_value_recorder: list[Any] | None = None,
     drains: DrainHarness | None = None,
+    flaky_call_counts: dict[str, int] | None = None,
 ) -> BuiltGraph:
     """Translate a graph-shaped fixture block into a `BuiltGraph`.
 
@@ -928,7 +943,7 @@ def build_graph(
         if "raises" in node_spec:
             body = _make_raising_fn(node_name, node_spec["raises"], trace)
         elif "flaky" in node_spec:
-            body = _make_flaky_fn(node_name, node_spec["flaky"], trace)
+            body = _make_flaky_fn(node_name, node_spec["flaky"], trace, flaky_call_counts)
         elif "flaky_by_index" in node_spec:
             body = _make_flaky_by_index_fn(node_name, node_spec["flaky_by_index"], trace)
         elif "flaky_instance_only" in node_spec:

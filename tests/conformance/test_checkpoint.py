@@ -66,7 +66,7 @@ from openarmature.graph import (
 )
 from openarmature.llm import TRANSIENT_CATEGORIES
 
-from .adapter import ObserverFixture, build_graph, make_observer_fn
+from .adapter import ObserverFixture, build_graph, make_observer_fn, raised_from_node
 from .harness.subgraph_placement import resolve_subgraphs
 
 CONFORMANCE_DIR = (
@@ -204,20 +204,19 @@ class _CapturingCheckpointer:
         self._maybe_abort(record)
 
     def _raise_if_post_abort(self) -> None:
-        """Once the abort has fired, any subsequent save call raises
-        immediately — modelling a process-level crash after the
-        target instance's completion. Without this, gather would
-        continue dispatching sibling instances whose saves would
-        complete normally and pollute the loaded record."""
+        """Raise on every save once the abort has fired, modelling a process
+        that crashed at the boundary."""
+        # Without this, gather would keep dispatching sibling instances whose
+        # saves complete normally and pollute the loaded record.
         if self._aborted:
             raise _AbortAfterInstance("post-abort save call")
 
+    # Every save route calls this after its inner save, so the record is
+    # durably persisted before the simulated crash.
     def _maybe_abort(self, record: CheckpointRecord) -> None:
-        """Check whether this save is the configured crash boundary. If
-        so, raise the sentinel after the save has been recorded (so the
-        record is durably persisted before the simulated crash).
-        ``abort_after_instance`` fires on the save transitioning that
-        instance index to ``completed``; ``abort_after_node`` fires on
+        """Raise the sentinel if ``record``'s save is the configured crash
+        boundary. ``abort_after_instance`` fires on the save transitioning
+        that instance index to ``completed``; ``abort_after_node`` fires on
         the save recording that node in ``completed_positions``."""
         if self._aborted:
             return
@@ -402,13 +401,16 @@ def _find_crash_injection(spec: Mapping[str, Any]) -> tuple[int | None, str | No
 def _translate_fi_instance_middleware(
     spec: Mapping[str, Any],
 ) -> dict[str, list[FailureIsolationMiddleware]]:
-    """Translate a fan-out node's ``instance_middleware: [failure_isolation]``
-    into FailureIsolationMiddleware instances keyed by node name, for
-    build_graph's ``fan_out_instance_middleware``. Scoped to the static
-    ``degraded_update`` mapping form (the only shape the checkpoint fixtures
-    use, e.g. fixture 069 Case 3's degrade-survives-resume); the callable
-    forms are owned by test_pipeline_utilities.py, which drives the plain
-    FI-degrade cases."""
+    """Translate each fan-out node's ``instance_middleware: [failure_isolation]``
+    entries into FailureIsolationMiddleware instances keyed by node name, for
+    build_graph's ``fan_out_instance_middleware``.
+
+    Supports only the static ``degraded_update`` mapping form, and raises
+    ``ValueError`` for an entry that omits it or gives another form.
+    """
+    # The static form is the only one the checkpoint fixtures use (fixture 069
+    # case 3, degrade survives resume). test_pipeline_utilities.py owns the
+    # callable forms and drives the plain FI-degrade cases.
     out: dict[str, list[FailureIsolationMiddleware]] = {}
     nodes = cast("dict[str, dict[str, Any]]", spec.get("nodes") or {})
     for node_name, node_spec in nodes.items():
@@ -422,9 +424,8 @@ def _translate_fi_instance_middleware(
         mws: list[FailureIsolationMiddleware] = []
         for entry in entries:
             # Only failure_isolation is translated here. Other instance
-            # middleware (e.g. fixture 053's retry) is left unwired, as this
-            # runner did before — those fixtures drive their behavior via
-            # flaky_per_index seams, not a wired middleware.
+            # middleware, such as fixture 053's retry, stays unwired: those
+            # fixtures drive their behavior through flaky_per_index seams.
             if entry.get("type") != "failure_isolation":
                 continue
             if "degraded_update" not in entry:
@@ -449,13 +450,27 @@ def _translate_fi_instance_middleware(
     return out
 
 
+def _abort_after_instance_node(spec: Mapping[str, Any]) -> str | None:
+    """The fan-out node that carries ``abort_after_instance``, where the
+    harness simulates the first run's failure."""
+    for node_name, node_spec in cast("dict[str, dict[str, Any]]", spec.get("nodes", {})).items():
+        if "abort_after_instance" in (node_spec.get("fan_out") or {}):
+            return node_name
+    return None
+
+
+def _assert_first_run_raised_from(expected: Mapping[str, Any], node: str | None) -> None:
+    if "raised_from" in expected:
+        assert node == expected["raised_from"], (
+            f"first-run raised_from: actual={node!r}, expected={expected['raised_from']!r}"
+        )
+
+
 def _strip_abort_directive(spec: Mapping[str, Any]) -> Mapping[str, Any]:
-    """Return a fresh spec dict with any ``abort_after_instance``
-    directive removed from fan-out nodes. The engine doesn't recognize
-    the directive; the wrapper checkpointer interprets it on the
-    harness side. Strip before passing to ``build_graph`` so the
-    underlying fan-out config doesn't carry the unknown key into the
-    builder."""
+    """Return the spec with ``abort_after_instance`` removed from every
+    fan-out node, or the spec itself when no node carries it."""
+    # The engine does not recognize the directive. The capturing checkpointer
+    # interprets it on the harness side, so build_graph must not see it.
     nodes_raw = spec.get("nodes")
     if not isinstance(nodes_raw, dict):
         return spec
@@ -769,17 +784,17 @@ async def _run_one_case(spec: Mapping[str, Any], *, top_level: Mapping[str, Any]
     # ----- checkpoint_not_found expected (fixture 030) -----
     #
     # Read as a SIBLING of `expected:` first. conformance-adapter section 5.8's
-    # preamble says the `expected_*` directives sit inside that block, and the
-    # corpus puts `expected_error` there twice against 106 at case level; spec
-    # has confirmed the corpus is right and the preamble wrong. The nested read
-    # stays as the compatibility form for the two fixtures that follow the
-    # preamble, and goes when they move.
+    # preamble says the `expected_*` directives sit inside that block, but the
+    # corpus puts `expected_error` at case level nearly everywhere; spec has
+    # confirmed the corpus is right and the preamble wrong. The nested read stays
+    # as the compatibility form for the fixtures that follow the preamble, and
+    # goes when they move.
     #
     # It is a MAPPING, not a bare category string. Reading it as a string meant
     # this arm never fired: fixture 030 ran, asserted nothing, and stayed green
     # with the engine's `raise CheckpointNotFound` removed entirely.
-    # Both positions resolved here rather than reusing the `expected` block,
-    # which is built further down: this arm now runs BEFORE the first invoke,
+    # Both positions are resolved here rather than from the `expected` block,
+    # which is built further down: this arm runs before the first invoke,
     # because its premise is about what the store contains.
     nested_expected = cast("Mapping[str, Any]", spec.get("expected") or {})
     raw_not_found = spec.get("expected_error") or nested_expected.get("expected_error")
@@ -859,6 +874,7 @@ async def _run_one_case(spec: Mapping[str, Any], *, top_level: Mapping[str, Any]
                 assert expected_category == "node_exception", (
                     f"abort_after_instance simulates node_exception; fixture asserts {expected_category!r}"
                 )
+                _assert_first_run_raised_from(first_run_expected_error, _abort_after_instance_node(spec))
         elif crash_injection is not None:
             raise AssertionError("crash_injection configured but no crash fired during the first run")
         elif first_run_expected_error is not None:
@@ -878,6 +894,7 @@ async def _run_one_case(spec: Mapping[str, Any], *, top_level: Mapping[str, Any]
             assert expected_category == "node_exception", (
                 f"abort_after_instance simulates node_exception; fixture asserts {expected_category!r}"
             )
+            _assert_first_run_raised_from(first_run_expected_error, _abort_after_instance_node(spec))
     except CheckpointError:
         # When the abort fires during a subsequent post-abort save
         # (instance dispatched after the target's save), the engine wraps
@@ -894,6 +911,7 @@ async def _run_one_case(spec: Mapping[str, Any], *, top_level: Mapping[str, Any]
             assert expected_category == "node_exception", (
                 f"abort_after_instance simulates node_exception; fixture asserts {expected_category!r}"
             )
+            _assert_first_run_raised_from(first_run_expected_error, _abort_after_instance_node(spec))
     except RuntimeGraphError as e:
         # crash_injection's simulated crash can surface here too: under
         # serial fail_fast the abort sentinel is wrapped as
@@ -909,6 +927,7 @@ async def _run_one_case(spec: Mapping[str, Any], *, top_level: Mapping[str, Any]
             assert e.category == expected_category, (
                 f"first-run error category mismatch: actual={e.category!r}, expected={expected_category!r}"
             )
+            _assert_first_run_raised_from(first_run_expected_error, raised_from_node(e))
     first_run_ended = time.time()
 
     # Capture invocation_id from the latest save (we attached a
@@ -1923,9 +1942,10 @@ def _assert_invariants(
 async def test_capturing_checkpointer_aborts_after_node() -> None:
     # The ``crash_injection: {after_node}`` boundary fires the simulated-crash
     # sentinel after the save whose record records the named node in
-    # ``completed_positions``. Exercised directly because no v0.58.0 fixture
-    # uses after_node (fixture 067 uses after_fan_out_instance, which covers
-    # the shared abort path end-to-end); this pins the after_node branch.
+    # ``completed_positions``. Fixture 070 drives the boundary end to end, but
+    # its target is the entry node, so the first save already records it: a
+    # double that aborted after ANY node passes 070. The second half here is
+    # the only check that a save recording a different node does not abort.
     cp = _CapturingCheckpointer(abort_after_node="target")
     record = CheckpointRecord(
         invocation_id="inv",
