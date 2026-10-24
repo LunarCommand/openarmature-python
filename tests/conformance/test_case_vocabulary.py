@@ -75,18 +75,17 @@ _RUN_DIRS: tuple[str, ...] = (
     "conformance-adapter",
 )
 
-# Modules whose own `_fixture_paths()` is the authority on what they collect.
-# Paired with the capability each drives, so "runs" is computed from the
-# collection logic rather than pattern-matched on a registry's variable name --
-# a fixture can be held back by a deferral dict, by a different module's
-# registry, or by a numeric cutoff, and only the module itself knows which.
-# `(module, attributes that hold a fixture back, optional positive gate)`.
+# Modules whose own `_fixture_paths()` is the authority on what they collect,
+# so "runs" is computed from the collection logic rather than pattern-matched
+# on a registry's variable name -- a fixture can be held back by a deferral
+# dict, by a different module's registry, or by a numeric cutoff, and only the
+# module itself knows which. `(module, attributes that hold a fixture back,
+# optional positive gate)`.
 #
-# Named explicitly, and every name is resolved with `getattr` so a rename fails
-# loudly rather than shrinking the held-back set in silence. A prefix guess is
-# what the previous version used, and it missed `_CONVENTION_ONLY_FIXTURES`
-# outright; `test_observability` alone skips through four registries and a
-# membership gate.
+# The attributes are named rather than matched by pattern, because a name does
+# not say which way a registry points: some hold fixtures back and others gate
+# them in. Every name is resolved with `getattr`, so a rename fails loudly
+# rather than shrinking the held-back set in silence.
 _COLLECTORS: tuple[tuple[str, tuple[str, ...], str | None], ...] = (
     ("test_conformance", ("_DEFERRED_FIXTURES",), None),
     ("test_llm_provider", ("_DEFERRED_FIXTURES",), None),
@@ -112,11 +111,11 @@ _COLLECTORS: tuple[tuple[str, tuple[str, ...], str | None], ...] = (
 # Fixtures a module outside `tests/conformance` drives, by the function whose
 # `parametrize` names them.
 #
-# `test_llm_provider` defers 056-058 and 061-066 with reasons pointing here, so
-# subtracting its deferrals without adding these back marks nine RUNNING fixtures
-# dormant -- and a dormant fixture is skipped by the read check, which is the
-# direction that hides a vacuous case. Read off the parametrize decorators so the
-# list cannot drift from what actually runs.
+# `test_llm_provider` defers fixtures to these functions by name, so subtracting
+# its deferrals without adding these back marks RUNNING fixtures dormant -- and
+# a dormant fixture is skipped by the read check, which is the direction that
+# hides a vacuous case. Read off the parametrize decorators so the list cannot
+# drift from what actually runs.
 _UNIT_DRIVEN: tuple[tuple[str, str], ...] = (
     ("tests.unit.test_observability_otel", "test_call_level_retry_fixture_per_attempt_spans"),
     ("tests.unit.test_observability_otel", "test_call_level_reask_retry_fixture"),
@@ -134,8 +133,8 @@ def _runner_sources() -> dict[str, str]:
     # `rglob`, not `glob`: `harness/runtime/` exists and its README designates it
     # the future home of the fixture-executing code, so a directive reader landing
     # there would be invisible to the read check and to the collection scan. The
-    # unit-side llm-provider runner is included for the same reason -- it drives
-    # fixtures 056-058, which `test_llm_provider` defers to it by name.
+    # unit-side llm-provider runner is included for the same reason: it drives
+    # the fixtures `test_llm_provider` defers to it by name.
     paths = sorted(_RUNNER_DIR.rglob("*.py")) + [_REPO_ROOT / "tests/unit/test_observability_otel.py"]
     kept = [p for p in paths if p.name not in _SELF]
     sources = {str(p.relative_to(_REPO_ROOT)): p.read_text() for p in kept}
@@ -145,21 +144,19 @@ def _runner_sources() -> dict[str, str]:
     return sources
 
 
+# Derived from execution, not from mention. A hand-listed map misses owners as
+# runners are added, and a scan for the capability name anywhere in a source
+# goes wrong the other way, silently: it makes owners of `loader.py`'s registry
+# tuple and of a gate-wiring test that builds a synthetic `tmp_path` tree and
+# never opens the submodule. A too-broad owner vouches for a read that the real
+# runner never performs.
 def _runner_owners() -> dict[str, frozenset[str]]:
     """Which runner sources execute each capability's fixtures.
 
-    Derived from execution, not from mention. A hand-listed map was wrong three
-    times, each time too narrow; a scan for the capability name anywhere in a
-    source is wrong the other way, and worse, because it fails silently: it made
-    an owner of `loader.py`'s registry tuple and of a gate-wiring test that
-    builds a synthetic `tmp_path` tree and never opens the submodule. A too-broad
-    owner vouches for a read that the real runner never performs.
-
-    Two sources, both mechanical. The paths a collector's `_fixture_paths()`
-    actually returns, and path expressions rooted at the submodule -- which is
-    what a cross-capability load looks like and what a temp-directory tree does
-    not. A load of one named fixture owns that fixture alone, and is reported by
-    `_fixture_owners` instead.
+    A source owns a capability when it is a collector whose `_fixture_paths()`
+    returns that capability's fixtures, or when it holds a path expression rooted
+    at the capability's directory in the submodule. A source that loads one named
+    fixture owns that fixture alone, and `_fixture_owners` reports it instead.
     """
     owners: dict[str, set[str]] = {cap: set() for cap in _RUN_DIRS}
     by_module = {name: f"tests/conformance/{name}.py" for name, _, _ in _COLLECTORS}
@@ -246,14 +243,12 @@ def _submodule_loads(src: str) -> list[tuple[str, str | None]]:
     return loads
 
 
+# The root counts: a fixture with no `cases:` list carries every directive
+# there, and the document-root models that would forbid an unknown key are
+# applied only by `test_fixture_parsing`, which parses `loader.CAPABILITIES`
+# alone and skips its own deferrals.
 def _containers(doc: dict[str, Any]) -> list[dict[str, Any]]:
-    """The document root and each of its cases, as directive-bearing containers.
-
-    The root counts. 140 of the 448 fixtures in `_RUN_DIRS` carry their
-    directives there with no `cases:` list at all, and the document-root models
-    that would forbid an unknown key are applied only by `test_fixture_parsing`,
-    which skips retrieval-provider and its own deferrals.
-    """
+    """The document root and each of its cases, as directive-bearing containers."""
     out = [doc]
     cases = doc.get("cases")
     if isinstance(cases, list):
@@ -346,15 +341,15 @@ def _read_keys(node: ast.AST) -> list[str]:
     return [hit for hit in hits if isinstance(hit, str)]
 
 
+# Matched on the syntax tree, because a substring match cannot tell a read from
+# a mention: a key named in a comment, or as some other key's value, would count
+# as read.
 def _read_positions() -> dict[str, set[_Unit]]:
     """Where each directive name is used to READ a mapping: the source and the
     module-level definition holding each read.
 
-    A bare substring match cannot tell a read from a mention. `manager` occurs
-    twice in runner source and neither is a read of the case-level block -- both
-    concern a call's `target:` value -- so the scan it satisfies proves nothing.
-    Only subscript, ``.get`` / ``.pop``, and membership count here; anything
-    reached another way is declared in `READ_VIA` and verified there.
+    Only a subscript, a ``.get`` / ``.pop``, or a membership test counts. A key
+    reached any other way is declared in `READ_VIA` instead.
     """
     found: dict[str, set[_Unit]] = defaultdict(set)
     for path, tree in _runner_trees().items():
@@ -510,17 +505,16 @@ def _owner_reads() -> Callable[[str, frozenset[str]], bool]:
     return read
 
 
+# Computed from each module's own `_fixture_paths()` rather than pattern-matched
+# on registry names, because "in a `_DEFERRED` dict" does not mean "does not
+# run": observability defers fixtures with reasons that name the Langfuse runner,
+# which executes them; llm-provider defers fixtures to `tests/unit`;
+# `test_fixture_parsing`'s registry defers parsing only; and
+# `test_pipeline_utilities` also holds fixtures back with a numeric cutoff that
+# no registry records.
 def _executed_fixture_ids() -> set[str]:
-    """Every fixture id some runner actually collects and does not defer.
-
-    Computed from each module's own `_fixture_paths()` rather than pattern-
-    matched on registry names. "In a `_DEFERRED` dict" does not mean "does not
-    run": four observability fixtures are deferred with reasons that name the
-    Langfuse runner, which executes them; three llm-provider fixtures are
-    deferred to `tests/unit`; `test_fixture_parsing`'s registry defers PARSING
-    only; and `test_pipeline_utilities` holds fixtures back with a numeric
-    cutoff and no registry at all.
-    """
+    """Every fixture id some runner actually collects and does not hold back,
+    including those a unit-side runner drives."""
     runs: set[str] = set()
     for name, held_back_attrs, gate_attr in _COLLECTORS:
         module = importlib.import_module(f".{name}", __package__)
@@ -528,8 +522,8 @@ def _executed_fixture_ids() -> set[str]:
         held_back: set[str] = set()
         for attr in held_back_attrs:
             # No default: a renamed registry raises AttributeError here rather
-            # than quietly shrinking the held-back set. Empty is legitimate --
-            # retrieval-provider defers nothing at the moment.
+            # than quietly shrinking the held-back set. Empty is legitimate: a
+            # runner may defer nothing.
             held_back |= set(getattr(module, attr))
         if gate_attr is not None:
             gate = getattr(module, gate_attr)
@@ -750,14 +744,12 @@ def test_case_deferral_exemptions_name_cases_that_are_actually_skipped() -> None
             )
 
 
+# Recursive: bodies also sit under a case's `inner_subgraphs` and inside its
+# `graph:` wrapper. `inner_subgraphs` is the same shape by construction, since
+# the Langfuse runner renames it onto `subgraphs` before use.
 def _subgraph_bodies() -> list[tuple[str, str]]:
-    """`(fixture, key)` for every subgraph body anywhere in a running fixture.
-
-    Recursive rather than two enumerated container levels. Bodies also sit under
-    a case's `inner_subgraphs` and inside its `graph:` wrapper, and
-    `inner_subgraphs` is the same shape by construction -- the Langfuse runner
-    renames it onto `subgraphs` before use.
-    """
+    """`(fixture, key)` for each key of every subgraph body, at any depth, in
+    every fixture in a run directory."""
     out: list[tuple[str, str]] = []
 
     def visit(fixture: str, node: Any) -> None:
@@ -792,10 +784,9 @@ def test_every_subgraph_level_key_is_modelled() -> None:
     # fixture declares a subgraph key outside the model. It is here so the first
     # one that does is rejected rather than dropped.
     observed = _subgraph_bodies()
-    # Non-vacuity on the INPUT, at the post-fix count rather than a loose floor.
-    # A guard set well below what the walk reaches tolerates losing a whole
-    # container shape, which is how the two-level version passed while missing
-    # `inner_subgraphs` and `graph:` entirely.
+    # Non-vacuity on the INPUT, with the floor close to what the walk reaches
+    # rather than loose: a walk of two enumerated levels misses every body under
+    # `inner_subgraphs` and `graph:`, and only a close floor catches it.
     assert len({f for f, _ in observed}) >= 71, (
         f"walked {len(observed)} subgraph keys in {len({f for f, _ in observed})} fixtures; "
         "the traversal is not reaching them all"
