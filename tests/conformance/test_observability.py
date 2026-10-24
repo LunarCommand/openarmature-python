@@ -1916,6 +1916,8 @@ async def _run_get_invocation_metadata_case(case: Mapping[str, Any]) -> None:
     # Fixture 046: a bare get_invocation_metadata() call outside any invocation.
     direct_call = cast("dict[str, Any] | None", case.get("direct_call"))
     if direct_call is not None:
+        operation = direct_call.get("operation")
+        assert operation == "get_invocation_metadata", f"unsupported direct_call operation {operation!r}"
         result = get_invocation_metadata()
         dc = cast("dict[str, Any]", expected["direct_call_result"])
         assert dict(result) == cast("dict[str, Any]", dc.get("value") or {}), (
@@ -6519,9 +6521,9 @@ class _TypedEventCollector:
     ``include_caller_metadata`` directive on the fixture YAML is
     consumed at parse time to set the provider's
     ``populate_caller_metadata`` knob and is not threaded through
-    the collector instance. ``retains_arrival_order`` is preserved
-    for spec-text fidelity but has no runtime effect (lists preserve
-    insertion order).
+    the collector instance. ``retains_arrival_order`` is checked at
+    parse time and must be true, since the collector keeps events in
+    arrival order.
     """
 
     def __init__(self, *, filter_event_type: str | None = None) -> None:
@@ -6558,6 +6560,10 @@ def _parse_typed_observers(
         name = cast("str", entry["name"])
         kind = cast("str", entry.get("kind", "typed_event_collector"))
         assert kind == "typed_event_collector", f"unsupported typed_observer kind: {kind!r}"
+        # The collector appends, so arrival order is the only order it can keep.
+        assert entry.get("retains_arrival_order", True) is True, (
+            f"typed_observer {name!r}: the collector cannot drop arrival order"
+        )
         collectors[name] = _TypedEventCollector(
             filter_event_type=cast("str | None", entry.get("filter_event_type")),
         )

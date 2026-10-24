@@ -1,13 +1,13 @@
 # Spec: conformance-adapter section 8.2 + section 5 *Definition homes* (proposal
-# 0120), applied one level below the case: inside `expected`, `resume`, `calls[]`
-# and node specs.
+# 0120), applied one level below the case: inside `expected`, `resume`, `calls[]`,
+# node specs, and every other directive whose value is a mapping.
 
 """Every nested key is recognized, and every one a running fixture declares is read.
 
 The case-level checks in `test_case_vocabulary` stop at the case. A sub-key of
-an `expected` block, a `resume` block, a `calls[]` entry or a node spec is
-accepted and ignored by every runner that reads raw YAML, so a fixture declaring
-it passes with the assertion never made.
+an `expected` block, a `resume` block, a `calls[]` entry, a node spec or any
+other directive mapping is accepted and ignored by every runner that reads raw
+YAML, so a fixture declaring it passes with the assertion never made.
 
 Two things differ from the case level, both deliberately:
 
@@ -22,14 +22,23 @@ from __future__ import annotations
 
 import ast
 import importlib
-from collections import defaultdict
+from collections import Counter, defaultdict
 from collections.abc import Iterator
 from typing import Any, cast, get_args
 
 from pydantic import BaseModel
 
 from . import test_case_vocabulary as case_level
-from .harness.vocabulary import KNOWN_UNREAD_NESTED, NESTED_EXTRAS, NESTED_MODELS, POSITION_BLIND_READS
+from .harness.vocabulary import (
+    CASE_MAPPINGS,
+    KNOWN_UNREAD_NESTED,
+    NESTED_EXTRAS,
+    NESTED_MODELS,
+    OPEN_MAPPINGS,
+    OUT_OF_SCOPE_MAPPINGS,
+    POSITION_BLIND_READS,
+    WALKED_MAPPINGS,
+)
 
 _CALL_LISTS = ("calls", "secondary_calls", "tertiary_calls")
 _SINGULAR_BODIES = ("subgraph", "subgraph_with_idx", "graph")
@@ -49,6 +58,13 @@ _FIXTURE_MODELS: dict[str, str] = {
 
 # `(capability, fixture, position, where, key)`
 Declared = tuple[str, str, str, str, str]
+
+# Every position's models and extra keys: the nested positions and each closed
+# case-level mapping.
+_POSITIONS: dict[str, tuple[tuple[str, ...], frozenset[str]]] = {
+    **{position: (NESTED_MODELS[position], NESTED_EXTRAS[position]) for position in NESTED_MODELS},
+    **{position: (mapping.models, mapping.extras) for position, mapping in CASE_MAPPINGS.items()},
+}
 
 
 def _as_dict(value: Any) -> dict[str, Any] | None:
@@ -107,6 +123,12 @@ def _blocks(doc: dict[str, Any]) -> Iterator[tuple[str, str, dict[str, Any]]]:
                     yield "expected", f"{where}.{list_key}[{i}]", expected
         for path, spec in _node_specs(container):
             yield "nodes.*", f"{where}.{path}", spec
+        for key, value in container.items():
+            if key in CASE_MAPPINGS and (block := _as_dict(value)) is not None:
+                yield key, f"{where}.{key}", block
+            elif f"{key}[]" in CASE_MAPPINGS:
+                for i, entry in enumerate(_as_dicts(value)):
+                    yield f"{key}[]", f"{where}.{key}[{i}]", entry
 
 
 def _declared() -> list[Declared]:
@@ -123,13 +145,18 @@ def _declared() -> list[Declared]:
     return out
 
 
-def _vocabulary(position: str) -> frozenset[str]:
+def _model_fields(position: str) -> frozenset[str]:
     fields: set[str] = set()
-    for target in NESTED_MODELS[position]:
+    for target in _POSITIONS[position][0]:
         module, _, name = target.rpartition(".")
         model = cast(type[BaseModel], getattr(importlib.import_module(module), name))
-        fields |= set(model.model_fields)
-    return frozenset(fields) | NESTED_EXTRAS[position]
+        # The YAML spelling: `EdgeSpec.from_` is declared in a fixture as `from`.
+        fields |= {field.alias or field_name for field_name, field in model.model_fields.items()}
+    return frozenset(fields)
+
+
+def _vocabulary(position: str) -> frozenset[str]:
+    return _model_fields(position) | _POSITIONS[position][1]
 
 
 def _model_in(annotation: Any) -> type[BaseModel] | None:
@@ -253,7 +280,7 @@ def _attribute_reads() -> dict[str, set[tuple[str, str]]]:
 
 
 def _read_as_attribute(reads: set[tuple[str, str]], position: str, key: str) -> bool:
-    return any((target.rpartition(".")[2], key) in reads for target in NESTED_MODELS[position])
+    return any((target.rpartition(".")[2], key) in reads for target in _POSITIONS[position][0])
 
 
 def _reads() -> tuple[dict[tuple[str, str], set[str]], dict[tuple[str, str], set[str]]]:
@@ -266,6 +293,7 @@ def _reads() -> tuple[dict[tuple[str, str], set[str]], dict[tuple[str, str], set
     positions = case_level._read_positions()  # noqa: SLF001
     attributes = _attribute_reads()
     owners = case_level._runner_owners()  # noqa: SLF001
+    fixture_owners = case_level._fixture_owners()  # noqa: SLF001
     executed = case_level._executed_fixture_ids()  # noqa: SLF001
     shared = {"harness/", "adapter.py", "middleware_seam.py"}
     read_via = set(case_level.READ_VIA)
@@ -282,7 +310,8 @@ def _reads() -> tuple[dict[tuple[str, str], set[str]], dict[tuple[str, str], set
                 unread[(position, key)].add(fixture)
             continue
         seen = positions.get(key, set())
-        if seen & owners[capability] or any(any(m in src for m in shared) for src in seen):
+        owning = owners[capability] | fixture_owners.get(fixture, frozenset())
+        if seen & owning or any(any(m in src for m in shared) for src in seen):
             literal[(position, key)].add(capability)
             continue
         unread[(position, key)].add(fixture)
@@ -321,6 +350,8 @@ def _position_blind() -> dict[tuple[str, str], set[str]]:
 # fixtures also carry top-level blocks.
 def _shape(position: str, where: str) -> str:
     _, _, path = where.partition(".")
+    if position in CASE_MAPPINGS:
+        return "case-level mappings"
     if position == "nodes.*":
         return "nodes" if path.startswith("nodes.") else "nodes in subgraph bodies"
     if position == "expected":
@@ -341,6 +372,7 @@ _SHAPE_FLOORS: dict[str, int] = {
     "calls[]": 75,
     "nodes": 325,
     "nodes in subgraph bodies": 70,
+    "case-level mappings": 445,
 }
 
 
@@ -356,8 +388,8 @@ def test_the_walk_reaches_every_container_shape() -> None:
     }
     assert not short, f"the walk reached too few fixtures for {short}; a container shape is being skipped"
     walked = {position for _, _, position, _, _ in _declared()}
-    assert walked == set(NESTED_MODELS), (
-        f"walked positions {sorted(walked)} but the registry declares {sorted(NESTED_MODELS)}"
+    assert walked == set(_POSITIONS), (
+        f"walked positions {sorted(walked)} but the registry declares {sorted(_POSITIONS)}"
     )
 
 
@@ -365,18 +397,47 @@ def test_the_registry_names_every_position_once() -> None:
     assert set(NESTED_MODELS) == set(NESTED_EXTRAS), (
         f"NESTED_MODELS {sorted(NESTED_MODELS)} and NESTED_EXTRAS {sorted(NESTED_EXTRAS)} disagree"
     )
+    both = sorted(set(NESTED_MODELS) & set(CASE_MAPPINGS))
+    assert not both, f"{both} are registered as both a nested position and a case-level mapping"
     # An extra the models already declare is a stale entry: it reads as a gap
     # in the model when there is none.
-    for position in NESTED_MODELS:
-        modelled = _vocabulary(position) - NESTED_EXTRAS[position]
-        redundant = sorted(NESTED_EXTRAS[position] & modelled)
-        assert not redundant, f"{position}: {redundant} are model fields; drop them from NESTED_EXTRAS"
+    for position, (_, extras) in _POSITIONS.items():
+        redundant = sorted(extras & _model_fields(position))
+        assert not redundant, f"{position}: {redundant} are model fields; drop them from its extras"
+
+
+def test_every_case_level_mapping_is_placed() -> None:
+    # The classification is a decision per directive. A mapping nothing places
+    # would have its keys go unchecked with no record that anyone chose that.
+    used: set[str] = set()
+    for _, _, doc in case_level._fixture_docs():  # noqa: SLF001
+        for container in case_level._containers(doc):  # noqa: SLF001
+            for key, value in container.items():
+                entries = _as_dicts(value)
+                if _as_dict(value) is not None or (entries and len(entries) == len(value)):
+                    used.add(str(key))
+    groups = {
+        "walked": WALKED_MAPPINGS,
+        "open": frozenset(OPEN_MAPPINGS),
+        "out of scope": frozenset(OUT_OF_SCOPE_MAPPINGS),
+        "closed": frozenset(position.removesuffix("[]") for position in CASE_MAPPINGS),
+    }
+    placed = Counter(name for names in groups.values() for name in names)
+    twice = sorted(name for name, count in placed.items() if count > 1)
+    assert not twice, f"case-level mapping(s) placed in more than one group: {twice}"
+    unplaced = sorted(used - set(placed))
+    assert not unplaced, (
+        f"case-level mapping(s) in no group: {unplaced}\n"
+        "Place each in harness/vocabulary.py: CASE_MAPPINGS with its keys, or OPEN_MAPPINGS with the reason."
+    )
+    stale = sorted(set(placed) - used)
+    assert not stale, f"no fixture declares these as a mapping any more; remove them: {stale}"
 
 
 def test_every_nested_key_is_recognized() -> None:
     # Section 8.2 one level down. Dormant fixtures count: recognition is about
     # the corpus, not about what runs.
-    vocabularies = {p: _vocabulary(p) for p in NESTED_MODELS}
+    vocabularies = {p: _vocabulary(p) for p in _POSITIONS}
     unrecognized = sorted(
         (cap, fixture, where, key)
         for cap, fixture, position, where, key in _declared()
@@ -385,7 +446,7 @@ def test_every_nested_key_is_recognized() -> None:
     assert not unrecognized, (
         "nested key(s) outside the recognized vocabulary:\n"
         + "\n".join(f"  {c}/{f} at {w} carries {k!r}" for c, f, w, k in unrecognized)
-        + "\nWire the key and add it to NESTED_EXTRAS, or defer the fixture."
+        + "\nWire the key and add it to NESTED_EXTRAS or CASE_MAPPINGS, or defer the fixture."
     )
 
 

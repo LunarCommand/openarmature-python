@@ -66,7 +66,7 @@ from openarmature.graph import (
 )
 from openarmature.llm import TRANSIENT_CATEGORIES
 
-from .adapter import ObserverFixture, build_graph, make_observer_fn
+from .adapter import ObserverFixture, build_graph, make_observer_fn, raised_from_node
 from .harness.subgraph_placement import resolve_subgraphs
 
 CONFORMANCE_DIR = (
@@ -447,6 +447,22 @@ def _translate_fi_instance_middleware(
         if mws:
             out[node_name] = mws
     return out
+
+
+def _abort_after_instance_node(spec: Mapping[str, Any]) -> str | None:
+    """The fan-out node that carries ``abort_after_instance``, where the
+    harness simulates the first run's failure."""
+    for node_name, node_spec in cast("dict[str, dict[str, Any]]", spec.get("nodes", {})).items():
+        if "abort_after_instance" in (node_spec.get("fan_out") or {}):
+            return node_name
+    return None
+
+
+def _assert_first_run_raised_from(expected: Mapping[str, Any], node: str | None) -> None:
+    if "raised_from" in expected:
+        assert node == expected["raised_from"], (
+            f"first-run raised_from: actual={node!r}, expected={expected['raised_from']!r}"
+        )
 
 
 def _strip_abort_directive(spec: Mapping[str, Any]) -> Mapping[str, Any]:
@@ -859,6 +875,7 @@ async def _run_one_case(spec: Mapping[str, Any], *, top_level: Mapping[str, Any]
                 assert expected_category == "node_exception", (
                     f"abort_after_instance simulates node_exception; fixture asserts {expected_category!r}"
                 )
+                _assert_first_run_raised_from(first_run_expected_error, _abort_after_instance_node(spec))
         elif crash_injection is not None:
             raise AssertionError("crash_injection configured but no crash fired during the first run")
         elif first_run_expected_error is not None:
@@ -878,6 +895,7 @@ async def _run_one_case(spec: Mapping[str, Any], *, top_level: Mapping[str, Any]
             assert expected_category == "node_exception", (
                 f"abort_after_instance simulates node_exception; fixture asserts {expected_category!r}"
             )
+            _assert_first_run_raised_from(first_run_expected_error, _abort_after_instance_node(spec))
     except CheckpointError:
         # When the abort fires during a subsequent post-abort save
         # (instance dispatched after the target's save), the engine wraps
@@ -894,6 +912,7 @@ async def _run_one_case(spec: Mapping[str, Any], *, top_level: Mapping[str, Any]
             assert expected_category == "node_exception", (
                 f"abort_after_instance simulates node_exception; fixture asserts {expected_category!r}"
             )
+            _assert_first_run_raised_from(first_run_expected_error, _abort_after_instance_node(spec))
     except RuntimeGraphError as e:
         # crash_injection's simulated crash can surface here too: under
         # serial fail_fast the abort sentinel is wrapped as
@@ -909,6 +928,7 @@ async def _run_one_case(spec: Mapping[str, Any], *, top_level: Mapping[str, Any]
             assert e.category == expected_category, (
                 f"first-run error category mismatch: actual={e.category!r}, expected={expected_category!r}"
             )
+            _assert_first_run_raised_from(first_run_expected_error, raised_from_node(e))
     first_run_ended = time.time()
 
     # Capture invocation_id from the latest save (we attached a

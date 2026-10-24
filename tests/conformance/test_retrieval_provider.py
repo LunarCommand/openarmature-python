@@ -540,6 +540,9 @@ def _install_typed_collector(case: Mapping[str, Any]) -> tuple[list[Any], Callab
     """
     if not case.get("typed_observers"):
         return [], lambda: None
+    for observer in cast("list[Mapping[str, Any]]", case["typed_observers"]):
+        kind = observer.get("kind", "typed_event_collector")
+        assert kind == "typed_event_collector", f"unsupported typed_observers kind {kind!r}"
     events: list[Any] = []
     dispatch_token = _set_active_dispatch(events.append)
     entry = cast("str", case["entry"])
@@ -611,6 +614,18 @@ async def test_retrieval_provider_fixture(fixture_path: Path) -> None:
             raise AssertionError(f"case {case_name!r}: {e}") from e
 
 
+def _assert_expected_error(raised: LlmProviderError, expected_error: Mapping[str, Any], entry: str) -> None:
+    assert raised.category == expected_error["category"], (
+        f"expected {expected_error['category']}, got {raised.category}"
+    )
+    # The harness calls the provider for the entry node alone, with no engine
+    # around it, so that node is the only one an error can come from.
+    raised_from = expected_error.get("raised_from", entry)
+    assert raised_from == entry, (
+        f"expected_error.raised_from is {raised_from!r}, but the harness drives {entry!r}"
+    )
+
+
 async def _run_one_case(case: Mapping[str, Any], spec: Mapping[str, Any]) -> None:
     mapping = cast("str | None", spec.get("mapping"))
     entry = cast("str", case["entry"])
@@ -632,9 +647,7 @@ async def _run_one_case(case: Mapping[str, Any], spec: Mapping[str, Any]) -> Non
         if expected_error is not None:
             with pytest.raises(LlmProviderError) as excinfo:
                 await provider.embed(input_strings, config=config)
-            assert excinfo.value.category == expected_error["category"], (
-                f"expected {expected_error['category']}, got {excinfo.value.category}"
-            )
+            _assert_expected_error(excinfo.value, expected_error, entry)
         else:
             response = await provider.embed(input_strings, config=config)
             # Baseline assertion: every success case checks the core
@@ -676,9 +689,7 @@ async def _run_rerank_case(
         if expected_error is not None:
             with pytest.raises(LlmProviderError) as excinfo:
                 await provider.rerank(query, documents, top_k=top_k, config=config)
-            assert excinfo.value.category == expected_error["category"], (
-                f"expected {expected_error['category']}, got {excinfo.value.category}"
-            )
+            _assert_expected_error(excinfo.value, expected_error, cast("str", case["entry"]))
         else:
             response = await provider.rerank(query, documents, top_k=top_k, config=config)
             # Baseline assertion: every success case satisfies the §6

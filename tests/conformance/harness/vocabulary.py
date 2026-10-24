@@ -20,6 +20,8 @@ the resolved route, and read by nothing.
 
 from __future__ import annotations
 
+from typing import NamedTuple
+
 # Directives the harness recognizes beyond what the fixture models declare, at
 # the document root and at case level both.
 #
@@ -278,6 +280,172 @@ NESTED_EXTRAS: dict[str, frozenset[str]] = {
     ),
 }
 
+# Case-level directives whose value is a mapping, or a list of mappings. Each one
+# the corpus uses sits in exactly one of the four groups below, so a new one
+# fails until it is placed.
+#
+# Walked already: a position above, a container of positions, or a subgraph
+# body, which the subgraph-level check covers.
+WALKED_MAPPINGS: frozenset[str] = frozenset(
+    {
+        "calls",
+        "cases",
+        "expected",
+        "inner_subgraphs",
+        "nodes",
+        "resume",
+        "secondary_calls",
+        "subgraph",
+        "subgraph_with_idx",
+        "subgraphs",
+        "tertiary_calls",
+    }
+)
+
+# Mappings whose keys this check does not police, each with the reason.
+OPEN_MAPPINGS: dict[str, str] = {
+    "caller_metadata": "metadata keys the caller chooses",
+    "expected_backend_state": "keyed by backend name",
+    "expected_wire_headers": "HTTP header names",
+    "expected_wire_request": "wire request body fields",
+    "expected_wire_request_checks": "`<wire field>_absent` checks, read by pattern",
+    "initial_state": "state field names, which the case's state schema declares",
+    "render_variables": "template variable names",
+    "requires_capability": "capability names; the gate rejects one conformance.toml does not declare",
+}
+
+# Outside the recognized vocabulary by conformance-adapter section 5's own rule.
+OUT_OF_SCOPE_MAPPINGS: dict[str, str] = {
+    "invariants": "section 5.9 fixture-specific predicate names",
+}
+
+
+class CaseMapping(NamedTuple):
+    models: tuple[str, ...] = ()
+    extras: frozenset[str] = frozenset()
+
+
+# Every other case-level mapping is a closed vocabulary and a position of its
+# own, named for the directive, or `<directive>[]` for each entry of a list. The
+# same two obligations apply as one level down: an unknown key fails, and a key a
+# running fixture declares must be read.
+CASE_MAPPINGS: dict[str, CaseMapping] = {
+    "backends[]": CaseMapping(("tests.conformance.harness.prompt_management.FixtureBackendSpec",)),
+    "call": CaseMapping(
+        ("tests.conformance.harness.directives.LlmCallSpec",),
+        frozenset({"config", "response_schema", "retry", "stream", "tool_choice"}),
+    ),
+    "checkpointer": CaseMapping(extras=frozenset({"fan_out_internal_save_batching", "kind"})),
+    "clock_stub": CaseMapping(extras=frozenset({"advance_ms_per_call", "type"})),
+    "cohere_embedding_provider": CaseMapping(extras=frozenset({"api_key", "base_url", "model"})),
+    "cohere_rerank_provider": CaseMapping(extras=frozenset({"api_key", "base_url", "model"})),
+    "crash_injection": CaseMapping(extras=frozenset({"after_fan_out_instance", "after_node"})),
+    "direct_call": CaseMapping(extras=frozenset({"operation"})),
+    "edges[]": CaseMapping(("tests.conformance.harness.directives.EdgeSpec",)),
+    "every_save_assertions": CaseMapping(extras=frozenset({"schema_version"})),
+    "expected_construction_error": CaseMapping(extras=frozenset({"category"})),
+    "expected_error": CaseMapping(
+        extras=frozenset(
+            {
+                "category",
+                "execution_order",
+                "fan_out_category",
+                "flaky_call_count",
+                "message",
+                "raised_from",
+                "recoverable_state",
+                "transient",
+            }
+        )
+    ),
+    "expected_message_equal": CaseMapping(extras=frozenset({"between", "message_indices"})),
+    "expected_shared_prefix": CaseMapping(extras=frozenset({"between", "message_index", "prefix"})),
+    "expected_wire_bytes_identical": CaseMapping(extras=frozenset({"calls"})),
+    "first_run_expected": CaseMapping(extras=frozenset({"langfuse_trace"})),
+    "first_run_expected_error": CaseMapping(extras=frozenset({"category", "raised_from"})),
+    "graph": CaseMapping(
+        ("tests.conformance.harness.fixtures.SubgraphDefinition",),
+        frozenset({"subgraph", "subgraphs"}),
+    ),
+    "invocations[]": CaseMapping(
+        extras=frozenset({"drain", "expected", "initial_state", "name", "session_id"})
+    ),
+    "invoke": CaseMapping(extras=frozenset({"drain"})),
+    "invoke_with": CaseMapping(extras=frozenset({"resume_invocation"})),
+    "jina_embedding_provider": CaseMapping(extras=frozenset({"api_key", "base_url", "model"})),
+    "jina_rerank_provider": CaseMapping(extras=frozenset({"api_key", "base_url", "model"})),
+    "label_resolver": CaseMapping(("tests.conformance.harness.prompt_management.FixtureLabelResolverSpec",)),
+    "langfuse_client": CaseMapping(
+        extras=frozenset({"accept_shared_provider", "mode", "preexisting_same_key_client", "provider"})
+    ),
+    "langfuse_observer": CaseMapping(
+        extras=frozenset(
+            {
+                "disable_provider_payload",
+                "disable_state_payload",
+                "payload_byte_cap",
+                "trace_input_from_state",
+                "trace_output_from_state",
+            }
+        )
+    ),
+    "langfuse_observer_config": CaseMapping(extras=frozenset({"disable_state_payload"})),
+    "manager": CaseMapping(("tests.conformance.harness.prompt_management.FixtureManagerSpec",)),
+    "middleware": CaseMapping(("tests.conformance.harness.directives.MiddlewareConfig",)),
+    "migrations[]": CaseMapping(extras=frozenset({"from_version", "migrate", "to_version"})),
+    "mock_embedding[]": CaseMapping(extras=frozenset({"body", "raises", "status"})),
+    "mock_llm[]": CaseMapping(("tests.conformance.harness.directives.MockResponse",), frozenset({"raises"})),
+    "mock_llm_stream[]": CaseMapping(extras=frozenset({"wire_attempts"})),
+    "mock_provider": CaseMapping(
+        ("tests.conformance.harness.directives.MockProviderConfig",), frozenset({"capabilities"})
+    ),
+    "mock_rerank[]": CaseMapping(extras=frozenset({"body", "raises", "status"})),
+    "observers[]": CaseMapping(("tests.conformance.harness.directives.ObserverSpec",)),
+    "openai_embedding_provider": CaseMapping(
+        extras=frozenset({"api_key", "base_url", "chunk_size", "document_prefix", "model", "query_prefix"})
+    ),
+    "otel_observer": CaseMapping(extras=frozenset({"disable_genai_semconv", "disable_provider_payload"})),
+    "prompt_backend": CaseMapping(extras=frozenset({"prompts", "type"})),
+    "provider": CaseMapping(extras=frozenset({"genai_system", "type"})),
+    "queryable_observers[]": CaseMapping(extras=frozenset({"kind", "name", "persists_across_invocations"})),
+    "runtime_state_subclass": CaseMapping(extras=frozenset({"schema_version"})),
+    "saved_record_assertions": CaseMapping(
+        extras=frozenset(
+            {
+                "completed_positions",
+                "fan_out_node_in_completed_positions",
+                "fan_out_progress",
+                "parent_states_outermost_first",
+                "parent_states_present",
+                "state",
+            }
+        )
+    ),
+    "secondary_manager": CaseMapping(("tests.conformance.harness.prompt_management.FixtureManagerSpec",)),
+    "seeded_record": CaseMapping(
+        extras=frozenset(
+            {"completed_positions", "fan_out_progress", "parent_states", "schema_version", "state"}
+        )
+    ),
+    "sequential_invocations": CaseMapping(extras=frozenset({"invocations", "observer_persists_across"})),
+    "state": CaseMapping(("tests.conformance.harness.directives.StateSchema",)),
+    "tei_embedding_provider": CaseMapping(
+        extras=frozenset(
+            {"base_url", "chunk_size", "document_prefix", "input_type_prompt_map", "model", "query_prefix"}
+        )
+    ),
+    "tei_rerank_provider": CaseMapping(extras=frozenset({"base_url", "chunk_size", "model"})),
+    "tertiary_label_resolver": CaseMapping(
+        ("tests.conformance.harness.prompt_management.FixtureLabelResolverSpec",)
+    ),
+    "tertiary_manager": CaseMapping(("tests.conformance.harness.prompt_management.FixtureManagerSpec",)),
+    "typed_observers[]": CaseMapping(
+        extras=frozenset(
+            {"filter_event_type", "include_caller_metadata", "kind", "name", "retains_arrival_order"}
+        )
+    ),
+}
+
 # Nested keys a running fixture declares and no owning runner reads, keyed by
 # `(position, key)` to the fixtures declaring them. The ledger may only shrink:
 # a new unread key fails, and an entry that stops being unread -- because the key
@@ -294,6 +462,9 @@ KNOWN_UNREAD_NESTED: dict[tuple[str, str], tuple[str, ...]] = {
         "008-otel-detached-trace-mode",
         "058-implementation-attribution-otel",
     ),
+    # observability: only 084's multi-invocation session case declares it, and
+    # that case waits for the sessions capability (proposal 0020).
+    ("invocations[]", "session_id"): ("084-langfuse-session-user-promotion",),
 }
 
 # Nested keys a raw-YAML runner counts as read only because the key's string
@@ -303,10 +474,33 @@ KNOWN_UNREAD_NESTED: dict[tuple[str, str], tuple[str, ...]] = {
 # capabilities affected. Same ratchet as above; attributing these reads to
 # their position empties it.
 POSITION_BLIND_READS: dict[tuple[str, str], tuple[str, ...]] = {
+    ("call", "config"): ("llm-provider",),
+    ("call", "messages"): ("llm-provider",),
+    ("call", "operation"): ("llm-provider",),
+    ("call", "response_schema"): ("llm-provider",),
+    ("call", "tools"): ("llm-provider",),
     ("calls[]", "expected"): ("llm-provider",),
     ("calls[]", "expected_wire_request"): ("llm-provider",),
     ("calls[]", "expected_wire_request_checks"): ("llm-provider",),
+    ("calls[]", "messages"): ("llm-provider",),
+    ("calls[]", "operation"): ("llm-provider",),
+    ("calls[]", "response_schema"): ("llm-provider",),
     ("calls[]", "retry_middleware"): ("llm-provider",),
+    ("calls[]", "tools"): ("llm-provider",),
+    ("checkpointer", "kind"): ("pipeline-utilities",),
+    ("clock_stub", "type"): ("pipeline-utilities",),
+    ("cohere_embedding_provider", "api_key"): ("retrieval-provider",),
+    ("cohere_embedding_provider", "base_url"): ("retrieval-provider",),
+    ("cohere_embedding_provider", "model"): ("retrieval-provider",),
+    ("cohere_rerank_provider", "api_key"): ("retrieval-provider",),
+    ("cohere_rerank_provider", "base_url"): ("retrieval-provider",),
+    ("cohere_rerank_provider", "model"): ("retrieval-provider",),
+    ("direct_call", "operation"): ("observability",),
+    ("every_save_assertions", "schema_version"): ("pipeline-utilities",),
+    ("expected", "execution_order"): (
+        "graph-engine",
+        "pipeline-utilities",
+    ),
     ("expected", "expected_error"): (
         "graph-engine",
         "pipeline-utilities",
@@ -318,11 +512,100 @@ POSITION_BLIND_READS: dict[tuple[str, str], tuple[str, ...]] = {
         "pipeline-utilities",
         "retrieval-provider",
     ),
+    ("expected", "langfuse_trace"): ("observability",),
     ("expected", "observers"): (
         "observability",
         "retrieval-provider",
     ),
     ("expected", "raises"): ("llm-provider",),
+    ("expected", "recoverable_state"): ("pipeline-utilities",),
+    ("expected_construction_error", "category"): ("observability",),
+    ("expected_error", "category"): (
+        "graph-engine",
+        "observability",
+        "pipeline-utilities",
+        "retrieval-provider",
+    ),
+    ("expected_error", "execution_order"): ("graph-engine",),
+    ("expected_error", "raised_from"): (
+        "graph-engine",
+        "observability",
+        "pipeline-utilities",
+        "retrieval-provider",
+    ),
+    ("expected_error", "recoverable_state"): (
+        "graph-engine",
+        "pipeline-utilities",
+    ),
+    ("first_run_expected", "langfuse_trace"): ("observability",),
+    ("first_run_expected_error", "category"): (
+        "observability",
+        "pipeline-utilities",
+    ),
+    ("first_run_expected_error", "raised_from"): (
+        "observability",
+        "pipeline-utilities",
+    ),
+    ("graph", "edges"): (
+        "conformance-adapter",
+        "graph-engine",
+        "pipeline-utilities",
+    ),
+    ("graph", "entry"): (
+        "conformance-adapter",
+        "graph-engine",
+        "pipeline-utilities",
+    ),
+    ("graph", "nodes"): (
+        "conformance-adapter",
+        "graph-engine",
+        "pipeline-utilities",
+    ),
+    ("graph", "state"): (
+        "conformance-adapter",
+        "graph-engine",
+        "pipeline-utilities",
+    ),
+    ("graph", "subgraph"): ("graph-engine",),
+    ("graph", "subgraphs"): ("conformance-adapter",),
+    ("invocations[]", "drain"): ("graph-engine",),
+    ("invocations[]", "expected"): ("graph-engine",),
+    ("invocations[]", "initial_state"): (
+        "graph-engine",
+        "observability",
+    ),
+    ("invocations[]", "name"): ("graph-engine",),
+    ("invoke", "drain"): ("graph-engine",),
+    ("jina_embedding_provider", "api_key"): ("retrieval-provider",),
+    ("jina_embedding_provider", "base_url"): ("retrieval-provider",),
+    ("jina_embedding_provider", "model"): ("retrieval-provider",),
+    ("jina_rerank_provider", "api_key"): ("retrieval-provider",),
+    ("jina_rerank_provider", "base_url"): ("retrieval-provider",),
+    ("jina_rerank_provider", "model"): ("retrieval-provider",),
+    ("langfuse_client", "provider"): ("observability",),
+    ("langfuse_observer", "disable_provider_payload"): ("observability",),
+    ("langfuse_observer", "disable_state_payload"): ("observability",),
+    ("langfuse_observer_config", "disable_state_payload"): ("observability",),
+    ("mock_embedding[]", "body"): (
+        "observability",
+        "retrieval-provider",
+    ),
+    ("mock_embedding[]", "raises"): ("observability",),
+    ("mock_embedding[]", "status"): (
+        "observability",
+        "retrieval-provider",
+    ),
+    ("mock_llm[]", "body"): ("observability",),
+    ("mock_llm[]", "status"): ("observability",),
+    ("mock_rerank[]", "body"): (
+        "observability",
+        "retrieval-provider",
+    ),
+    ("mock_rerank[]", "raises"): ("observability",),
+    ("mock_rerank[]", "status"): (
+        "observability",
+        "retrieval-provider",
+    ),
     ("nodes.*", "middleware"): (
         "observability",
         "pipeline-utilities",
@@ -339,6 +622,24 @@ POSITION_BLIND_READS: dict[tuple[str, str], tuple[str, ...]] = {
         "observability",
         "pipeline-utilities",
     ),
+    ("observers[]", "name"): (
+        "graph-engine",
+        "pipeline-utilities",
+    ),
+    ("observers[]", "target"): (
+        "graph-engine",
+        "pipeline-utilities",
+    ),
+    ("openai_embedding_provider", "api_key"): ("retrieval-provider",),
+    ("openai_embedding_provider", "base_url"): ("retrieval-provider",),
+    ("openai_embedding_provider", "chunk_size"): ("retrieval-provider",),
+    ("openai_embedding_provider", "document_prefix"): ("retrieval-provider",),
+    ("openai_embedding_provider", "model"): ("retrieval-provider",),
+    ("openai_embedding_provider", "query_prefix"): ("retrieval-provider",),
+    ("otel_observer", "disable_provider_payload"): ("observability",),
+    ("prompt_backend", "prompts"): ("observability",),
+    ("prompt_backend", "type"): ("observability",),
+    ("provider", "type"): ("observability",),
     ("resume", "caller_invocation_id"): ("pipeline-utilities",),
     ("resume", "expected"): (
         "observability",
@@ -347,4 +648,29 @@ POSITION_BLIND_READS: dict[tuple[str, str], tuple[str, ...]] = {
     ("resume", "expected_chain_ambiguity_error"): ("pipeline-utilities",),
     ("resume", "expected_error"): ("pipeline-utilities",),
     ("resume", "invariants"): ("pipeline-utilities",),
+    ("runtime_state_subclass", "schema_version"): ("pipeline-utilities",),
+    ("saved_record_assertions", "completed_positions"): ("pipeline-utilities",),
+    ("saved_record_assertions", "fan_out_progress"): ("pipeline-utilities",),
+    ("saved_record_assertions", "state"): ("pipeline-utilities",),
+    ("seeded_record", "completed_positions"): ("pipeline-utilities",),
+    ("seeded_record", "fan_out_progress"): ("pipeline-utilities",),
+    ("seeded_record", "schema_version"): ("pipeline-utilities",),
+    ("seeded_record", "state"): ("pipeline-utilities",),
+    ("state", "schema_version"): ("pipeline-utilities",),
+    ("tei_embedding_provider", "base_url"): ("retrieval-provider",),
+    ("tei_embedding_provider", "chunk_size"): ("retrieval-provider",),
+    ("tei_embedding_provider", "document_prefix"): ("retrieval-provider",),
+    ("tei_embedding_provider", "model"): ("retrieval-provider",),
+    ("tei_embedding_provider", "query_prefix"): ("retrieval-provider",),
+    ("tei_rerank_provider", "base_url"): ("retrieval-provider",),
+    ("tei_rerank_provider", "chunk_size"): ("retrieval-provider",),
+    ("tei_rerank_provider", "model"): ("retrieval-provider",),
+    ("typed_observers[]", "kind"): (
+        "observability",
+        "retrieval-provider",
+    ),
+    ("typed_observers[]", "name"): (
+        "observability",
+        "retrieval-provider",
+    ),
 }

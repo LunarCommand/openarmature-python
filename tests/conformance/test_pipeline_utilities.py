@@ -43,7 +43,7 @@ from openarmature.graph.middleware import (
     deterministic_backoff,
 )
 
-from .adapter import ObserverFixture, assert_events_match, build_graph, make_observer_fn
+from .adapter import ObserverFixture, assert_events_match, build_graph, make_observer_fn, raised_from_node
 from .harness.subgraph_placement import resolve_subgraphs
 from .middleware_seam import (
     ErrorRaiserMiddleware,
@@ -701,6 +701,7 @@ async def _run_one(spec: Mapping[str, Any], monkeypatch: pytest.MonkeyPatch) -> 
     if expected_err_raw is not None:
         expected_err = cast("dict[str, Any]", expected_err_raw)
         # Build fresh for the error path.
+        flaky_calls: dict[str, int] = {}
         built = build_graph(
             spec,
             subgraphs=subgraphs,
@@ -708,6 +709,7 @@ async def _run_one(spec: Mapping[str, Any], monkeypatch: pytest.MonkeyPatch) -> 
             node_middleware=node_mw,
             fan_out_instance_middleware=fan_out_inst_mw,
             parallel_branches_branch_middleware=branch_middleware,
+            flaky_call_counts=flaky_calls,
         )
         compiled = built.builder.compile()
         compiled.attach_observer(_capture_isolation)
@@ -731,6 +733,26 @@ async def _run_one(spec: Mapping[str, Any], monkeypatch: pytest.MonkeyPatch) -> 
             assert str(leaf) == expected_err["cause_message"]
         if "branch_name" in expected_err and isinstance(excinfo.value, ParallelBranchesBranchFailed):
             assert excinfo.value.branch_name == expected_err["branch_name"]
+        if "raised_from" in expected_err:
+            node = raised_from_node(excinfo.value)
+            assert node == expected_err["raised_from"], (
+                f"raised_from: actual={node!r} ({type(excinfo.value).__name__}), "
+                f"expected={expected_err['raised_from']!r}"
+            )
+        if "fan_out_category" in expected_err:
+            actual_fan_out = getattr(excinfo.value, "fan_out_category", None)
+            assert actual_fan_out == expected_err["fan_out_category"], (
+                f"fan_out_category: actual={actual_fan_out!r}, expected={expected_err['fan_out_category']!r}"
+            )
+        if "flaky_call_count" in expected_err:
+            # The count names no node, so it is only unambiguous with one flaky node.
+            assert len(flaky_calls) == 1, (
+                f"flaky_call_count needs exactly one flaky node; saw {sorted(flaky_calls)}"
+            )
+            (calls,) = flaky_calls.values()
+            assert calls == expected_err["flaky_call_count"], (
+                f"the flaky node ran {calls} time(s), expected {expected_err['flaky_call_count']}"
+            )
         # ``recoverable_state`` may live nested under ``expected_error``
         # (legacy fan-out shape) or as a sibling under ``expected`` (per
         # spec §11.5 for parallel-branches fail_fast fixtures). Both

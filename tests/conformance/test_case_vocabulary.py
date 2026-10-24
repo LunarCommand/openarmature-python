@@ -155,10 +155,10 @@ def _runner_owners() -> dict[str, frozenset[str]]:
     owner vouches for a read that the real runner never performs.
 
     Two sources, both mechanical. The paths a collector's `_fixture_paths()`
-    actually returns, and module-level path constants rooted at the submodule --
-    which is what a cross-capability load looks like (`test_observability` reaches
-    into pipeline-utilities for fixture 031) and what a temp-directory tree does
-    not.
+    actually returns, and path expressions rooted at the submodule -- which is
+    what a cross-capability load looks like and what a temp-directory tree does
+    not. A load of one named fixture owns that fixture alone, and is reported by
+    `_fixture_owners` instead.
     """
     owners: dict[str, set[str]] = {cap: set() for cap in _RUN_DIRS}
     by_module = {name: f"tests/conformance/{name}.py" for name, _, _ in _COLLECTORS}
@@ -171,28 +171,78 @@ def _runner_owners() -> dict[str, frozenset[str]]:
                 owners[cap].add(by_module[name])
 
     for path, src in _runner_sources().items():
-        for node in ast.walk(ast.parse(src)):
-            # Any `/`-joined path expression, not only an assignment: a load can
-            # be written inline, and scanning assignments alone is the same
-            # partial-input mistake this module exists to catch.
-            if not isinstance(node, ast.BinOp) or not isinstance(node.op, ast.Div):
-                continue
-            literals = {
-                sub.value
-                for sub in ast.walk(node)
-                if isinstance(sub, ast.Constant) and isinstance(sub.value, str)
-            }
-            # Rooted at the submodule. A synthetic tree under `tmp_path` carries
-            # the same capability names and the same "conformance" segment, and
-            # is not a load -- `test_capability_gate_wiring` builds exactly that.
-            if "openarmature-spec" not in literals or "conformance" not in literals:
-                continue
-            for cap in literals & set(owners):
+        for cap, fixture in _submodule_loads(src):
+            if fixture is None and cap in owners:
                 owners[cap].add(path)
 
     missing = sorted(cap for cap, paths in owners.items() if not paths)
     assert not missing, f"no runner executes {missing}; the ownership derivation is broken"
     return {cap: frozenset(paths) for cap, paths in owners.items()}
+
+
+def _fixture_owners() -> dict[str, frozenset[str]]:
+    """Runner sources that load one named fixture, keyed by fixture id."""
+    owners: dict[str, set[str]] = defaultdict(set)
+    for path, src in _runner_sources().items():
+        for _, fixture in _submodule_loads(src):
+            if fixture is not None:
+                owners[fixture].add(path)
+    return {fixture: frozenset(paths) for fixture, paths in owners.items()}
+
+
+def _fixture_stem(expr: ast.expr) -> str | None:
+    if isinstance(expr, ast.Constant) and isinstance(expr.value, str) and expr.value.endswith(".yaml"):
+        return expr.value.removesuffix(".yaml")
+    return None
+
+
+def _submodule_loads(src: str) -> list[tuple[str, str | None]]:
+    """`(capability, fixture)` for each way a source reaches a capability's
+    conformance directory: the fixture's id when it joins one fixture filename
+    onto the directory, `None` when it reaches the directory any other way."""
+    tree = ast.parse(src)
+    parents = {child: node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
+    loads: list[tuple[str, str | None]] = []
+    for node in ast.walk(tree):
+        # Any `/`-joined path expression, not only an assignment: a load can be
+        # written inline, and scanning assignments alone is the same
+        # partial-input mistake this module exists to catch.
+        if not isinstance(node, ast.BinOp) or not isinstance(node.op, ast.Div):
+            continue
+        if isinstance(parents.get(node), ast.BinOp):
+            continue
+        literals = {
+            sub.value
+            for sub in ast.walk(node)
+            if isinstance(sub, ast.Constant) and isinstance(sub.value, str)
+        }
+        # Rooted at the submodule. A synthetic tree under `tmp_path` carries the
+        # same capability names and the same "conformance" segment, and is not a
+        # load -- `test_capability_gate_wiring` builds exactly that.
+        if "openarmature-spec" not in literals or "conformance" not in literals:
+            continue
+        caps = literals & set(_RUN_DIRS)
+        binding = parents.get(node)
+        if isinstance(binding, ast.Assign):
+            names = {t.id for t in binding.targets if isinstance(t, ast.Name)}
+        elif isinstance(binding, ast.AnnAssign) and isinstance(binding.target, ast.Name):
+            names = {binding.target.id}
+        else:
+            loads.extend((cap, _fixture_stem(node.right)) for cap in caps)
+            continue
+        # A directory bound to a name owns the whole capability unless every use
+        # joins one fixture filename onto it. Owning the whole directory for a
+        # one-fixture load would let that runner's string reads vouch for every
+        # other fixture in it.
+        for use in ast.walk(tree):
+            if not (isinstance(use, ast.Name) and use.id in names and isinstance(use.ctx, ast.Load)):
+                continue
+            joined = parents.get(use)
+            fixture = None
+            if isinstance(joined, ast.BinOp) and isinstance(joined.op, ast.Div) and joined.left is use:
+                fixture = _fixture_stem(joined.right)
+            loads.extend((cap, fixture) for cap in caps)
+    return loads
 
 
 def _containers(doc: dict[str, Any]) -> list[dict[str, Any]]:
@@ -388,6 +438,7 @@ def test_every_declared_key_is_read_by_a_runner_that_owns_it() -> None:
     # is the same mis-routing defect one level up.
     positions = _read_positions()
     owners = _runner_owners()
+    fixture_owners = _fixture_owners()
     shared = {"harness/", "adapter.py", "middleware_seam.py"}
     exempt = set(UNAPPLIED_PENDING_DEFERRAL) | set(READ_VIA)
     # Matched on the whole triple, not the key. `UNAPPLIED_PENDING_CASE_DEFERRAL`
@@ -424,7 +475,9 @@ def test_every_declared_key_is_read_by_a_runner_that_owns_it() -> None:
         ):
             continue
         seen = positions.get(key, set())
-        if seen & owners[cap] or any(any(m in src for m in shared) for src in seen):
+        if seen & (owners[cap] | fixture_owners.get(fixture, frozenset())) or any(
+            any(m in src for m in shared) for src in seen
+        ):
             continue
         unread.append(f"  {cap}/{fixture} at {where} declares {key!r}; no owning runner reads it")
     assert not unread, (
