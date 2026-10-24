@@ -220,13 +220,16 @@ def _submodule_loads(src: str) -> list[tuple[str, str | None]]:
         if "openarmature-spec" not in literals or "conformance" not in literals:
             continue
         caps = literals & set(_RUN_DIRS)
+        # A path ending in a fixture file is that one fixture, whether it is used
+        # inline or through a name bound to it.
+        stem = _fixture_stem(node.right)
         binding = parents.get(node)
-        if isinstance(binding, ast.Assign):
+        if stem is None and isinstance(binding, ast.Assign):
             names = {t.id for t in binding.targets if isinstance(t, ast.Name)}
-        elif isinstance(binding, ast.AnnAssign) and isinstance(binding.target, ast.Name):
+        elif stem is None and isinstance(binding, ast.AnnAssign) and isinstance(binding.target, ast.Name):
             names = {binding.target.id}
         else:
-            loads.extend((cap, _fixture_stem(node.right)) for cap in caps)
+            loads.extend((cap, stem) for cap in caps)
             continue
         # A directory bound to a name owns the whole capability unless every use
         # joins one fixture filename onto it. Owning the whole directory for a
@@ -687,6 +690,22 @@ def test_a_helper_read_counts_only_for_the_runners_that_reach_it(monkeypatch: py
     assert not read("edges", frozenset({"tests/conformance/test_annotation.py"}))
     assert read("edges", frozenset({"tests/conformance/test_class.py"}))
     assert read("nodes", frozenset({helper}))
+
+
+def test_a_path_to_one_fixture_owns_that_fixture_alone() -> None:
+    # One case per path shape the derivation resolves. The last is the control:
+    # a bound directory used whole still owns the capability.
+    root = 'ROOT / "openarmature-spec" / "spec" / "pipeline-utilities" / "conformance"'
+    one = ("pipeline-utilities", "031-x")
+    shapes = {
+        f'_load({root} / "031-x.yaml")': one,
+        f'd = {root}\n_load(d / "031-x.yaml")': one,
+        f'p = {root} / "031-x.yaml"\n_load(p)': one,
+        f'p: Path = {root} / "031-x.yaml"\n_load(p)': one,
+        f'd = {root}\nfor path in d.glob("*.yaml"):\n    _load(path)': ("pipeline-utilities", None),
+    }
+    for src, want in shapes.items():
+        assert _submodule_loads(src) == [want], src
 
 
 def test_exempt_keys_are_declared_only_by_fixtures_that_do_not_run() -> None:
