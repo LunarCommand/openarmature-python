@@ -37,6 +37,7 @@ import ast
 import importlib
 import inspect
 from collections import defaultdict
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any, cast
 
@@ -304,8 +305,50 @@ def _declared_keys() -> list[tuple[str, str, str, str]]:
     return out
 
 
-def _read_positions() -> dict[str, set[str]]:
-    """Where each directive name is used to READ a mapping, by source path.
+# `(source path, module-level name)`: a function or class with everything nested
+# in it, or a module-level assignment's value. A read outside all of them runs
+# at import rather than against a fixture, so it is recorded under `<module>`:
+# it counts for its own file's runner, and no other runner reaches it.
+_Unit = tuple[str, str]
+
+
+def _runner_trees() -> dict[str, ast.Module]:
+    return {path: ast.parse(src) for path, src in _runner_sources().items()}
+
+
+def _unit_names(stmt: ast.stmt) -> tuple[str, ...]:
+    """The module-level names one top-level statement defines."""
+    if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+        return (stmt.name,)
+    if isinstance(stmt, ast.Assign):
+        return tuple(target.id for target in stmt.targets if isinstance(target, ast.Name))
+    if isinstance(stmt, ast.AnnAssign) and isinstance(stmt.target, ast.Name):
+        return (stmt.target.id,)
+    return ()
+
+
+def _read_keys(node: ast.AST) -> list[str]:
+    """The string keys one node reads: a subscript, a ``.get`` / ``.pop``, or a
+    membership test."""
+    hits: list[Any] = []
+    if isinstance(node, ast.Subscript) and isinstance(node.slice, ast.Constant):
+        hits.append(node.slice.value)
+    elif (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr in {"get", "pop"}
+        and node.args
+        and isinstance(node.args[0], ast.Constant)
+    ):
+        hits.append(node.args[0].value)
+    elif isinstance(node, ast.Compare) and isinstance(node.left, ast.Constant):
+        hits.append(node.left.value)
+    return [hit for hit in hits if isinstance(hit, str)]
+
+
+def _read_positions() -> dict[str, set[_Unit]]:
+    """Where each directive name is used to READ a mapping: the source and the
+    module-level definition holding each read.
 
     A bare substring match cannot tell a read from a mention. `manager` occurs
     twice in runner source and neither is a read of the case-level block -- both
@@ -313,30 +356,158 @@ def _read_positions() -> dict[str, set[str]]:
     Only subscript, ``.get`` / ``.pop``, and membership count here; anything
     reached another way is declared in `READ_VIA` and verified there.
     """
-    found: dict[str, set[str]] = defaultdict(set)
-    for path, src in _runner_sources().items():
-        try:
-            tree = ast.parse(src)
-        except SyntaxError:  # pragma: no cover - a runner that does not parse fails elsewhere
-            continue
-        for node in ast.walk(tree):
-            hits: list[Any] = []
-            if isinstance(node, ast.Subscript) and isinstance(node.slice, ast.Constant):
-                hits.append(node.slice.value)
-            elif (
-                isinstance(node, ast.Call)
-                and isinstance(node.func, ast.Attribute)
-                and node.func.attr in {"get", "pop"}
-                and node.args
-                and isinstance(node.args[0], ast.Constant)
-            ):
-                hits.append(node.args[0].value)
-            elif isinstance(node, ast.Compare) and isinstance(node.left, ast.Constant):
-                hits.append(node.left.value)
-            for hit in hits:
-                if isinstance(hit, str):
-                    found[hit].add(path)
+    found: dict[str, set[_Unit]] = defaultdict(set)
+    for path, tree in _runner_trees().items():
+        for stmt in tree.body:
+            units = _unit_names(stmt) or ("<module>",)
+            for node in ast.walk(stmt):
+                for key in _read_keys(node):
+                    found[key].update((path, unit) for unit in units)
     return found
+
+
+def _module_name(path: str) -> str:
+    parts = path.removesuffix(".py").split("/")
+    return ".".join(parts[:-1] if parts[-1] == "__init__" else parts)
+
+
+def _imports(path: str, tree: ast.Module) -> dict[str, tuple[str, str | None]]:
+    """Each name a source binds by import, in any scope, as `(module, attribute)`.
+
+    The attribute is ``None`` when the name binds the module itself.
+    """
+    module = _module_name(path)
+    package = module if path.endswith("/__init__.py") else module.rpartition(".")[0]
+    bound: dict[str, tuple[str, str | None]] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                name = alias.asname or alias.name.partition(".")[0]
+                bound[name] = (alias.name if alias.asname else name, None)
+        elif isinstance(node, ast.ImportFrom):
+            base = package
+            for _ in range(node.level - 1):
+                base = base.rpartition(".")[0]
+            source = ".".join(part for part in (base if node.level else "", node.module or "") if part)
+            for alias in node.names:
+                bound[alias.asname or alias.name] = (source, alias.name)
+    return bound
+
+
+class _Namespace:
+    """Resolves a name in a runner source to the module-level definition it
+    refers to, following imports between runner sources."""
+
+    def __init__(self, trees: dict[str, ast.Module]) -> None:
+        self.paths = {_module_name(path): path for path in trees}
+        self.units = {
+            path: {n for stmt in tree.body for n in _unit_names(stmt)} for path, tree in trees.items()
+        }
+        self.imports = {path: _imports(path, tree) for path, tree in trees.items()}
+
+    def lookup(self, module: str, name: str, depth: int = 0) -> _Unit | str | None:
+        """`name` as an attribute of `module`: a definition, a submodule's
+        dotted name, or ``None`` outside the runner sources."""
+        if f"{module}.{name}" in self.paths:
+            return f"{module}.{name}"
+        path = self.paths.get(module)
+        # A re-export chain longer than this is a cycle.
+        if path is None or depth > 8:
+            return None
+        if name in self.units[path]:
+            return (path, name)
+        if name in self.imports[path]:
+            return self.imported(path, name, depth + 1)
+        return None
+
+    def imported(self, path: str, name: str, depth: int = 0) -> _Unit | str | None:
+        module, attr = self.imports[path][name]
+        if attr is None:
+            return module if module in self.paths else None
+        return self.lookup(module, attr, depth)
+
+    def resolve(self, path: str, expr: ast.expr) -> _Unit | str | None:
+        if isinstance(expr, ast.Name):
+            if expr.id in self.units[path]:
+                return (path, expr.id)
+            if expr.id in self.imports[path]:
+                return self.imported(path, expr.id)
+            return None
+        if isinstance(expr, ast.Attribute) and isinstance(base := self.resolve(path, expr.value), str):
+            return self.lookup(base, expr.attr)
+        return None
+
+
+def _annotation_ids(tree: ast.AST) -> set[int]:
+    """Every node inside a type annotation."""
+    roots: list[ast.expr] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.arg) and node.annotation is not None:
+            roots.append(node.annotation)
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.returns is not None:
+            roots.append(node.returns)
+        elif isinstance(node, ast.AnnAssign):
+            roots.append(node.annotation)
+    return {id(sub) for root in roots for sub in ast.walk(root)}
+
+
+def _runner_reach() -> dict[str, frozenset[_Unit]]:
+    """The module-level definitions each runner source reaches by name, directly
+    or through a definition it reaches."""
+    trees = _runner_trees()
+    namespace = _Namespace(trees)
+    statements: dict[_Unit, list[ast.stmt]] = defaultdict(list)
+    for path, tree in trees.items():
+        for stmt in tree.body:
+            for name in _unit_names(stmt):
+                statements[(path, name)].append(stmt)
+    # An annotation names a type without running any of it.
+    annotations = {path: _annotation_ids(tree) for path, tree in trees.items()}
+
+    def referenced(path: str, nodes: Sequence[ast.AST]) -> set[_Unit]:
+        found: set[_Unit] = set()
+        for node in nodes:
+            for sub in ast.walk(node):
+                if (
+                    isinstance(sub, (ast.Name, ast.Attribute))
+                    and isinstance(sub.ctx, ast.Load)
+                    and id(sub) not in annotations[path]
+                    and isinstance(unit := namespace.resolve(path, sub), tuple)
+                ):
+                    found.add(unit)
+        return found
+
+    edges = {unit: referenced(unit[0], stmts) for unit, stmts in statements.items()}
+    reach: dict[str, frozenset[_Unit]] = {}
+    for path, tree in trees.items():
+        seen = referenced(path, [tree])
+        todo = list(seen)
+        while todo:
+            for unit in edges[todo.pop()] - seen:
+                seen.add(unit)
+                todo.append(unit)
+        reach[path] = frozenset(seen)
+    return reach
+
+
+# A shared helper's reads count only for the runners that reach it. `adapter.py`
+# builds the graph for most capabilities, and its reads of `from` and `to` say
+# nothing about retrieval-provider, whose runner drives the entry node alone and
+# never builds one.
+def _owner_reads() -> Callable[[str, frozenset[str]], bool]:
+    """Whether a directive name is read by one of a set of runner sources: in
+    the source itself, or in a definition the source reaches."""
+    positions = _read_positions()
+    reach = _runner_reach()
+    reached_by: dict[frozenset[str], frozenset[_Unit]] = {}
+
+    def read(key: str, owning: frozenset[str]) -> bool:
+        if owning not in reached_by:
+            reached_by[owning] = frozenset().union(*(reach[path] for path in owning))
+        reached = reached_by[owning]
+        return any(site[0] in owning or site in reached for site in positions.get(key, ()))
+
+    return read
 
 
 def _executed_fixture_ids() -> set[str]:
@@ -436,10 +607,9 @@ def test_every_declared_key_is_read_by_a_runner_that_owns_it() -> None:
     # Scoped per capability. A flat pool over every runner lets a key read by one
     # capability's runner count for a fixture whose own runner ignores it, which
     # is the same mis-routing defect one level up.
-    positions = _read_positions()
+    read = _owner_reads()
     owners = _runner_owners()
     fixture_owners = _fixture_owners()
-    shared = {"harness/", "adapter.py", "middleware_seam.py"}
     exempt = set(UNAPPLIED_PENDING_DEFERRAL) | set(READ_VIA)
     # Matched on the whole triple, not the key. `UNAPPLIED_PENDING_CASE_DEFERRAL`
     # is keyed by `(fixture, case)` exactly so the exemption stays narrow;
@@ -474,10 +644,7 @@ def test_every_declared_key_is_read_by_a_runner_that_owns_it() -> None:
             or fixture not in executed
         ):
             continue
-        seen = positions.get(key, set())
-        if seen & (owners[cap] | fixture_owners.get(fixture, frozenset())) or any(
-            any(m in src for m in shared) for src in seen
-        ):
+        if read(key, owners[cap] | fixture_owners.get(fixture, frozenset())):
             continue
         unread.append(f"  {cap}/{fixture} at {where} declares {key!r}; no owning runner reads it")
     assert not unread, (
@@ -485,6 +652,47 @@ def test_every_declared_key_is_read_by_a_runner_that_owns_it() -> None:
         + "\n".join(sorted(set(unread)))
         + "\nWire the directive in that capability's runner, or record it against a deferral."
     )
+
+
+def test_a_helper_read_counts_only_for_the_runners_that_reach_it(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Reach is resolved by name through imports, so the way it goes wrong in
+    # silence is a runner counted as reaching a helper it never calls. Every
+    # runner below imports from the same helper module; only the ones that
+    # reach the reading definition may count.
+    helper = "tests/conformance/harness/helper.py"
+    sources = {
+        helper: (
+            "class Graph:\n"
+            "    def edges(self, spec):\n"
+            "        return spec['edges']\n"
+            "def build(spec):\n"
+            "    return spec['nodes']\n"
+            "def unrelated():\n"
+            "    return None\n"
+        ),
+        "tests/conformance/harness/__init__.py": "from .helper import build as build\n",
+        "tests/conformance/test_annotation.py": (
+            "from .harness.helper import Graph\ndef test(graph: Graph):\n    return graph\n"
+        ),
+    }
+    # Each runner's import, and the one line its test runs.
+    runners = {
+        "test_direct": ("from .harness.helper import build", "build(spec)"),
+        "test_module": ("from .harness import helper", "helper.build(spec)"),
+        "test_reexport": ("from .harness import build", "build(spec)"),
+        "test_other_name": ("from .harness.helper import unrelated", "unrelated()"),
+        "test_class": ("from .harness.helper import Graph", "Graph().edges(spec)"),
+    }
+    for name, (imports, body) in runners.items():
+        sources[f"tests/conformance/{name}.py"] = f"{imports}\ndef test(spec):\n    {body}\n"
+    monkeypatch.setattr(f"{__name__}._runner_sources", lambda: sources)
+    read = _owner_reads()
+    for runner in ("test_direct", "test_module", "test_reexport"):
+        assert read("nodes", frozenset({f"tests/conformance/{runner}.py"})), runner
+    assert not read("nodes", frozenset({"tests/conformance/test_other_name.py"}))
+    assert not read("edges", frozenset({"tests/conformance/test_annotation.py"}))
+    assert read("edges", frozenset({"tests/conformance/test_class.py"}))
+    assert read("nodes", frozenset({helper}))
 
 
 def test_exempt_keys_are_declared_only_by_fixtures_that_do_not_run() -> None:

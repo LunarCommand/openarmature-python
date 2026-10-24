@@ -290,12 +290,11 @@ def _reads() -> tuple[dict[tuple[str, str], set[str]], dict[tuple[str, str], set
     `literal` maps to the capabilities whose runner counts as reading it only
     because the key's string appears there.
     """
-    positions = case_level._read_positions()  # noqa: SLF001
+    read = case_level._owner_reads()  # noqa: SLF001
     attributes = _attribute_reads()
     owners = case_level._runner_owners()  # noqa: SLF001
     fixture_owners = case_level._fixture_owners()  # noqa: SLF001
     executed = case_level._executed_fixture_ids()  # noqa: SLF001
-    shared = {"harness/", "adapter.py", "middleware_seam.py"}
     read_via = set(case_level.READ_VIA)
     unread: dict[tuple[str, str], set[str]] = defaultdict(set)
     literal: dict[tuple[str, str], set[str]] = defaultdict(set)
@@ -309,9 +308,7 @@ def _reads() -> tuple[dict[tuple[str, str], set[str]], dict[tuple[str, str], set
             if not _read_as_attribute(attributes[capability], position, key):
                 unread[(position, key)].add(fixture)
             continue
-        seen = positions.get(key, set())
-        owning = owners[capability] | fixture_owners.get(fixture, frozenset())
-        if seen & owning or any(any(m in src for m in shared) for src in seen):
+        if read(key, owners[capability] | fixture_owners.get(fixture, frozenset())):
             literal[(position, key)].add(capability)
             continue
         unread[(position, key)].add(fixture)
@@ -479,6 +476,34 @@ def test_the_unread_ledger_only_names_keys_that_are_still_unread() -> None:
         "KNOWN_UNREAD_NESTED names gaps that are gone:\n"
         + "\n".join(f"  {f} at {p} for {k!r}" for p, k, f in stale)
         + "\nRemove the entries."
+    )
+
+
+def test_a_block_with_unread_invariants_carries_a_read_directive() -> None:
+    # The `invariants` ledger entry holds only while each block it covers also
+    # carries a directive the runner reads. Predicates alone assert nothing, so
+    # a block of them and nothing else would pass as coverage under the entry.
+    unread = _unread()
+    ledgered = set(KNOWN_UNREAD_NESTED.get(("expected", "invariants"), ()))
+    walked: set[str] = set()
+    bare: list[tuple[str, str]] = []
+    for _, fixture, doc in case_level._fixture_docs():  # noqa: SLF001
+        if fixture not in ledgered:
+            continue
+        for position, where, block in _blocks(doc):
+            if position != "expected" or "invariants" not in block:
+                continue
+            walked.add(fixture)
+            siblings = [str(key) for key in block if key != "invariants"]
+            if all(fixture in unread.get((position, key), set()) for key in siblings):
+                bare.append((fixture, where))
+    # Non-vacuity on the INPUT: a ledgered fixture whose block the walk misses
+    # would pass here unchecked.
+    assert walked == ledgered, f"found no `expected.invariants` block in {sorted(ledgered - walked)}"
+    assert not bare, (
+        "block(s) whose `invariants` are ledgered as unread, with no directive the runner reads:\n"
+        + "\n".join(f"  {f} at {w}" for f, w in sorted(bare))
+        + "\nAdd a directive the runner reads, or wire the predicates and drop the ledger entry."
     )
 
 

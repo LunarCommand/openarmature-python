@@ -626,9 +626,23 @@ def _assert_expected_error(raised: LlmProviderError, expected_error: Mapping[str
     )
 
 
+def _assert_entry_only_graph(case: Mapping[str, Any], entry: str) -> None:
+    # The harness calls the provider for the entry node alone, with no engine
+    # around it, so any other node or edge would never run.
+    nodes = sorted(cast("Mapping[str, Any]", case["nodes"]))
+    edges = [
+        (edge.get("from"), edge.get("to"))
+        for edge in cast("list[Mapping[str, Any]]", case.get("edges") or [])
+    ]
+    assert nodes == [entry] and edges == [(entry, "END")], (
+        f"the harness drives {entry!r} alone, but the graph has nodes {nodes} and edges {edges}"
+    )
+
+
 async def _run_one_case(case: Mapping[str, Any], spec: Mapping[str, Any]) -> None:
     mapping = cast("str | None", spec.get("mapping"))
     entry = cast("str", case["entry"])
+    _assert_entry_only_graph(case, entry)
     node = cast("Mapping[str, Any]", cast("Mapping[str, Any]", case["nodes"])[entry])
     if "calls_rerank" in node:
         await _run_rerank_case(case, spec, cast("Mapping[str, Any]", node["calls_rerank"]), mapping)

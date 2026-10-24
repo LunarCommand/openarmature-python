@@ -455,6 +455,27 @@ KNOWN_UNREAD_NESTED: dict[tuple[str, str], tuple[str, ...]] = {
     # post_state, which graph-engine section 6 dispatch timing and fixture 061 do
     # not allow. Awaiting a spec ruling.
     ("expected", "expected_observer_event"): ("006-middleware-error-recovery",),
+    # llm-provider: the runners assert each case's concrete directives and none
+    # of its section 5.9 predicates, so a case is covered by its concrete
+    # directives alone until a per-predicate pass reads them.
+    ("expected", "invariants"): (
+        "056-call-level-retry-transient",
+        "057-call-level-retry-exhaustion",
+        "058-call-level-retry-non-transient-no-retry",
+        "061-call-level-retry-per-attempt-override",
+        "062-call-level-reask-success",
+        "063-call-level-reask-budget-exhausted",
+        "064-call-level-reask-off-by-default",
+        "065-call-level-reask-compose-override",
+        "066-call-level-reask-transient-interleave",
+        "068-usage-counter-malformed-partial",
+        "069-usage-counter-malformed-all",
+        "072-managed-response-format-collision",
+        "074-managed-structural-model-collision",
+        "075-managed-declared-scalar-collision",
+        "076-managed-declared-stop-merge",
+        "081-managed-declared-stop-malformed",
+    ),
     # observability: the detached-trace drivers check their trees by hand rather
     # than reading these keys, so a changed fixture value would go unnoticed.
     ("expected", "parent_trace"): ("008-otel-detached-trace-mode",),
@@ -507,7 +528,6 @@ POSITION_BLIND_READS: dict[tuple[str, str], tuple[str, ...]] = {
     ),
     ("expected", "invariants"): (
         "graph-engine",
-        "llm-provider",
         "observability",
         "pipeline-utilities",
         "retrieval-provider",
