@@ -30,3 +30,21 @@ updates:
       codeql-action:
         patterns:
           - "github/codeql-action*"
+
+  # uv.lock pins only our dev, docs and CI environment, so one monthly group
+  # is enough. The cooldown skips releases under a week old; it does not apply
+  # to security updates.
+  - package-ecosystem: "uv"
+    directory: "/"
+    schedule:
+      interval: "monthly"
+    cooldown:
+      default-days: 7
+    open-pull-requests-limit: 10
+    commit-message:
+      prefix: "chore"
+      include: "scope"
+    groups:
+      python-packages:
+        patterns:
+          - "*"
