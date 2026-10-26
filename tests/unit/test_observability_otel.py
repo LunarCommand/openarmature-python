@@ -2431,6 +2431,16 @@ def test_install_log_bridge_is_idempotent() -> None:
         logging.setLogRecordFactory(prior_factory)
 
 
+# These tests attach the SDK's own LoggingHandler on purpose: an application may
+# still attach it, and install_log_bridge has to detect it. The SDK deprecates
+# the class, so its warning is expected here. install_log_bridge's own path is
+# held to no warnings by test_install_log_bridge_is_idempotent.
+_ATTACHES_SDK_HANDLER = pytest.mark.filterwarnings(
+    "ignore:`LoggingHandler` in `opentelemetry-sdk` is deprecated:DeprecationWarning"
+)
+
+
+@_ATTACHES_SDK_HANDLER
 @pytest.mark.filterwarnings("ignore::openarmature.observability.otel.LoggingSetupModified")
 def test_install_log_bridge_skips_when_sdk_handler_already_attached() -> None:
     """Downstream report (HyperDX integration): if an application's
@@ -2479,6 +2489,7 @@ def test_install_log_bridge_skips_when_sdk_handler_already_attached() -> None:
         logging.setLogRecordFactory(prior_factory)
 
 
+@_ATTACHES_SDK_HANDLER
 def test_install_log_bridge_adds_handler_when_pre_attached_uses_different_provider() -> None:
     """An application MAY intentionally attach an SDK handler against
     a DIFFERENT :class:`LoggerProvider` (e.g., a console-only logs
@@ -6589,6 +6600,7 @@ def test_event_name_bridge_degrades_when_the_upstream_seam_is_gone() -> None:
     _ChangedSeam().emit(record)
 
 
+@_ATTACHES_SDK_HANDLER
 @pytest.mark.filterwarnings("ignore::openarmature.observability.otel.LoggingSetupModified")
 def test_log_bridge_lifts_the_event_name_on_an_already_attached_handler() -> None:
     # An application that wired its own OTel logs handler gets no second one,
@@ -6672,6 +6684,7 @@ def test_log_bridge_lifts_the_event_name_on_an_already_attached_handler() -> Non
         provider.shutdown()
 
 
+@_ATTACHES_SDK_HANDLER
 def test_log_bridge_leaves_a_foreign_providers_handler_alone() -> None:
     # The retrofit is provider-scoped, like the dedup check that routes to it.
     # A handler feeding a different LoggerProvider is a separate pipeline OA was
@@ -6705,6 +6718,7 @@ def test_log_bridge_leaves_a_foreign_providers_handler_alone() -> None:
         audit_provider.shutdown()
 
 
+@_ATTACHES_SDK_HANDLER
 def test_the_re_class_announcement_survives_a_raised_handler_level() -> None:
     # The log record travels through the very handler being modified, so a
     # handler capped at ERROR (a normal way to limit OTLP volume) swallows it
