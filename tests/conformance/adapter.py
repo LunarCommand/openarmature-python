@@ -396,26 +396,29 @@ def _make_flaky_instance_only_fn(
     cfg: Mapping[str, Any],
     trace: list[str],
 ) -> Callable[[Any], Awaitable[Mapping[str, Any]]]:
-    """`flaky_instance_only` test seam — fails on the first call,
-    succeeds thereafter. Same fixture-global counter as
-    flaky_by_index; see that function's note on the per-instance vs
-    per-fixture keying tradeoff. The current fixtures (021
-    instance-level retry) align with the global counter at runtime
-    even though strict per-instance semantics would need a richer
-    identifier."""
-    fail_first_only = bool(cfg.get("fail_first_only", True))
+    """`flaky_instance_only` test seam: each fan-out instance fails its first
+    ``fail_count_per_instance`` calls, then succeeds."""
+    from openarmature.observability.correlation import current_fan_out_index_chain  # noqa: PLC0415
+
+    fail_count = int(cfg["fail_count_per_instance"])
     category = cfg.get("category", "provider_unavailable")
     success_compute = dict(cfg.get("success_compute", {}))
-    attempt_counter = [0]
+    # Keyed by the instance's fan-out lineage: the same on every retry of an
+    # instance, even one that rebuilds the subgraph state, and distinct across
+    # instances.
+    failures: dict[tuple[int | None, ...], int] = {}
+    first_call = [True]
 
     async def fn(state: Any) -> Mapping[str, Any]:
-        idx = attempt_counter[0]
-        attempt_counter[0] = idx + 1
-        if idx == 0:
+        if first_call[0]:
+            first_call[0] = False
             trace.append(node_name)
-        if fail_first_only and idx == 0:
+        instance = current_fan_out_index_chain()
+        failed = failures.get(instance, 0)
+        if failed < fail_count:
+            failures[instance] = failed + 1
             raise _CategorizedException(
-                message="flaky_instance_only first-attempt failure",
+                message=f"flaky_instance_only failure {failed + 1} of {fail_count}",
                 category=category,
             )
         if success_compute:
