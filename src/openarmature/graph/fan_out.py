@@ -32,7 +32,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Generator, Mapping, Sequence
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal, cast
@@ -68,7 +68,7 @@ ConcurrencyResolver = Callable[[Any], int | None]
 
 
 @contextmanager
-def _bind_instance_lineage(child_context: _InvocationContext) -> Iterator[None]:
+def _bind_instance_lineage(child_context: _InvocationContext) -> Generator[None, None, None]:
     """Bind the fan-out lineage ContextVars (the instance index and the
     per-depth index / branch chains) to ``child_context`` for the duration of
     the ``with`` block, resetting them on exit."""

@@ -28,7 +28,7 @@ from __future__ import annotations
 
 import contextlib
 import os
-from collections.abc import Iterator
+from collections.abc import Generator
 from typing import Any
 
 from opentelemetry.sdk.trace import SpanProcessor
@@ -55,7 +55,7 @@ class _NoEgressSpanProcessor(SpanProcessor):
 
 
 @contextlib.contextmanager
-def langfuse_sdk_without_egress() -> Iterator[None]:
+def langfuse_sdk_without_egress() -> Generator[None, None, None]:
     """Run with the SDK's exporting span processor replaced, and its cache clean.
 
     The per-credential client cache is process-global and outlives a case, so it
