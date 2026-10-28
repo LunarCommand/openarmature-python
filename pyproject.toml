@@ -155,7 +155,9 @@ reportPrivateUsage = false
 [tool.ruff]
 line-length = 110
 target-version = "py312"
-extend-exclude = ["openarmature-spec"]
+# Ruff formats Python blocks in Markdown by default. The docs blocks are laid out
+# for the page, and AGENTS.md and _patterns/ must match build_agents_md.py's output.
+extend-exclude = ["openarmature-spec", "*.md"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP"]
