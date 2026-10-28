@@ -337,36 +337,27 @@ def _make_flaky_by_index_fn(
 
     - ``fail_count_per_idx: N`` — fixture 020. Each fan-out instance
       fails its first N ATTEMPTS with a transient exception (so retry
-      middleware exercises the retry path). Counter is per instance —
-      reconstructed per node activation since each fan-out instance
-      gets its own subgraph invocation, so the closure is fresh.
+      middleware exercises the retry path).
     - ``fail_when_idx: N`` — fixture 019. The instance whose
       ``state.idx`` (item value) equals N fails; others succeed. No
       retry logic; this is the collect-policy test seam.
 
     Both shapes share ``category`` and ``success_compute``.
     """
+    from openarmature.observability.correlation import current_fan_out_index_chain  # noqa: PLC0415
+
     category = cfg.get("category", "provider_unavailable")
     success_compute = dict(cfg.get("success_compute", {}))
     fail_count_per_idx = cfg.get("fail_count_per_idx")
     fail_when_idx = cfg.get("fail_when_idx")
-    # Fixture-global attempt counter. Truly per-instance semantics
-    # would require an identifier stable across an instance's retries
-    # AND distinct across fan-out instances. id(state) works for
-    # NODE-LEVEL retry (state stable across retries) but not for
-    # INSTANCE-LEVEL retry (each instance retry constructs a fresh
-    # subgraph state). A state-field key would work in principle but
-    # the field name is fixture-specific. The current fixtures
-    # (020 node-level retry, 019 collect mode) pass with this global
-    # counter because the timing aligns; documenting the limitation
-    # here so a future fixture exercising the gap surfaces a real
-    # failure rather than silently miscounting.
-    attempt_counter = [0]
+    # One closure serves every instance, so the count is keyed by the
+    # instance's fan-out lineage, which stays the same across its retries.
+    failures: dict[tuple[int | None, ...], int] = {}
+    first_call = [True]
 
     async def fn(state: Any) -> Mapping[str, Any]:
-        idx = attempt_counter[0]
-        attempt_counter[0] = idx + 1
-        if idx == 0:
+        if first_call[0]:
+            first_call[0] = False
             trace.append(node_name)
         # fail_when_idx mode: fail when the instance's item value (read
         # from state.idx by convention) equals the configured int.
@@ -377,13 +368,16 @@ def _make_flaky_by_index_fn(
                     message=f"flaky_by_index fail_when_idx={fail_when_idx}",
                     category=category,
                 )
-        # fail_count_per_idx mode: fail the first N attempts (counted
-        # globally across the fan-out).
-        elif fail_count_per_idx is not None and idx < int(fail_count_per_idx):
-            raise _CategorizedException(
-                message=f"flaky_by_index failure at attempt {idx}",
-                category=category,
-            )
+        # fail_count_per_idx mode: fail each instance's first N attempts.
+        elif fail_count_per_idx is not None:
+            instance = current_fan_out_index_chain()
+            failed = failures.get(instance, 0)
+            if failed < int(fail_count_per_idx):
+                failures[instance] = failed + 1
+                raise _CategorizedException(
+                    message=f"flaky_by_index failure at attempt {failed}",
+                    category=category,
+                )
         if success_compute:
             return _resolve_success_compute(success_compute, state)
         return {}

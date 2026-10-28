@@ -16,6 +16,7 @@ build_graph adapter the graph-engine fixtures use.
 from __future__ import annotations
 
 import re
+from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any, cast
@@ -877,7 +878,7 @@ async def _run_one(spec: Mapping[str, Any], monkeypatch: pytest.MonkeyPatch) -> 
         assert captured_isolation == [], f"expected no FailureIsolatedEvent, got {captured_isolation}"
 
     if "observer_event_invariants" in expected:
-        _check_parallel_branches_invariants(
+        _check_observer_event_invariants(
             cast("Mapping[str, Any]", expected["observer_event_invariants"]),
             observer_fixtures,
             spec,
@@ -1099,17 +1100,36 @@ def _assert_final_state(
         )
 
 
-def _check_parallel_branches_invariants(
+# Plus one `<branch>_inner_attempt_indices_seen` per branch, matched by suffix.
+_OBSERVER_EVENT_INVARIANTS = frozenset(
+    {
+        "branch_started_event_order",
+        "fan_out_inner_events_carry_both_branch_name_and_fan_out_index",
+        "fan_out_inner_branch_name_seen",
+        "fan_out_inner_fan_out_indices_seen",
+        "plain_inner_events_carry_branch_name_but_no_fan_out_index",
+        "plain_inner_branch_name_seen",
+        "inner_events_have_fan_out_index",
+        "inner_events_attempt_indices_seen",
+        "fan_out_indices_seen",
+        "inner_event_pair_count_per_instance",
+    }
+)
+
+
+def _check_observer_event_invariants(
     invariants: Mapping[str, Any],
     observer_fixtures: Mapping[str, ObserverFixture],
     spec: Mapping[str, Any],
 ) -> None:
-    """Verify parallel-branches observer-event invariants for fixtures
-    036 (branch-middleware retry), 037 (determinism), 038 (compose with
-    fan-out). Each invariant name maps to one of the recognized shapes
-    below; an unknown name is skipped (forward-compat with new
-    fixtures the harness hasn't been taught yet).
-    """
+    """Check a fixture's ``observer_event_invariants`` against the events
+    its first observer recorded. A name with no check here fails."""
+    unknown = sorted(
+        name
+        for name in invariants
+        if name not in _OBSERVER_EVENT_INVARIANTS and not name.endswith("_inner_attempt_indices_seen")
+    )
+    assert not unknown, f"unhandled observer_event_invariants: {unknown}"
     if not observer_fixtures:
         return
     obs = next(iter(observer_fixtures.values()))
@@ -1174,6 +1194,41 @@ def _check_parallel_branches_invariants(
             assert plain_events, (
                 f"expected branch_name={plain_branch!r} inner events without fan_out_index; got none"
             )
+
+    # 020: events from inside the fan-out instances. The fan-out node's own
+    # pair is in the outer graph, so its namespace is one node long.
+    inner_events = [ev for ev in events if len(ev["namespace"]) > 1]
+    if "inner_events_have_fan_out_index" in invariants:
+        assert invariants["inner_events_have_fan_out_index"] is True, (
+            "inner_events_have_fan_out_index: only `true` is supported"
+        )
+        assert inner_events, "inner_events_have_fan_out_index: no inner events"
+        missing = [ev for ev in inner_events if "fan_out_index" not in ev]
+        assert not missing, f"inner events without fan_out_index: {missing}"
+    if "inner_events_attempt_indices_seen" in invariants:
+        attempts_seen = sorted({ev["attempt_index"] for ev in inner_events})
+        expected_attempts_seen = sorted(invariants["inner_events_attempt_indices_seen"])
+        assert attempts_seen == expected_attempts_seen, (
+            f"inner_events_attempt_indices_seen mismatch: actual={attempts_seen}, "
+            f"expected={expected_attempts_seen}"
+        )
+    if "fan_out_indices_seen" in invariants:
+        indices_seen = sorted({ev["fan_out_index"] for ev in inner_events if "fan_out_index" in ev})
+        expected_indices_seen = sorted(invariants["fan_out_indices_seen"])
+        assert indices_seen == expected_indices_seen, (
+            f"fan_out_indices_seen mismatch: actual={indices_seen}, expected={expected_indices_seen}"
+        )
+    if "inner_event_pair_count_per_instance" in invariants:
+        # The fixture's count is of events, two per attempt. One failure
+        # counter for the whole fan-out retries only the first instance,
+        # leaving the others at two.
+        expected_count = invariants["inner_event_pair_count_per_instance"]
+        per_instance = Counter(ev.get("fan_out_index") for ev in inner_events)
+        assert per_instance, "inner_event_pair_count_per_instance: no inner events"
+        assert all(count == expected_count for count in per_instance.values()), (
+            f"inner_event_pair_count_per_instance: expected {expected_count} events per instance, "
+            f"got {dict(per_instance)}"
+        )
 
 
 def _check_trace_records(
