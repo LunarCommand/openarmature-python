@@ -40,6 +40,12 @@ updates:
       interval: "monthly"
     cooldown:
       default-days: 7
+    # The pyproject.toml ranges ship with the package, so Dependabot only
+    # moves the lock and widening a range stays our decision. "all" adds the
+    # packages only the lock pins, which version updates otherwise skip.
+    versioning-strategy: "lockfile-only"
+    allow:
+      - dependency-type: "all"
     open-pull-requests-limit: 10
     commit-message:
       prefix: "chore"
