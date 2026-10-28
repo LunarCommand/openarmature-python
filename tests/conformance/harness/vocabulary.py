@@ -320,7 +320,7 @@ OUT_OF_SCOPE_MAPPINGS: dict[str, str] = {
 }
 
 
-class CaseMapping(NamedTuple):
+class MappingVocabulary(NamedTuple):
     models: tuple[str, ...] = ()
     extras: frozenset[str] = frozenset()
 
@@ -329,22 +329,22 @@ class CaseMapping(NamedTuple):
 # own, named for the directive, or `<directive>[]` for each entry of a list. The
 # same two obligations apply as one level down: an unknown key fails, and a key a
 # running fixture declares must be read.
-CASE_MAPPINGS: dict[str, CaseMapping] = {
-    "backends[]": CaseMapping(("tests.conformance.harness.prompt_management.FixtureBackendSpec",)),
-    "call": CaseMapping(
+CASE_MAPPINGS: dict[str, MappingVocabulary] = {
+    "backends[]": MappingVocabulary(("tests.conformance.harness.prompt_management.FixtureBackendSpec",)),
+    "call": MappingVocabulary(
         ("tests.conformance.harness.directives.LlmCallSpec",),
         frozenset({"config", "response_schema", "retry", "stream", "tool_choice"}),
     ),
-    "checkpointer": CaseMapping(extras=frozenset({"fan_out_internal_save_batching", "kind"})),
-    "clock_stub": CaseMapping(extras=frozenset({"advance_ms_per_call", "type"})),
-    "cohere_embedding_provider": CaseMapping(extras=frozenset({"api_key", "base_url", "model"})),
-    "cohere_rerank_provider": CaseMapping(extras=frozenset({"api_key", "base_url", "model"})),
-    "crash_injection": CaseMapping(extras=frozenset({"after_fan_out_instance", "after_node"})),
-    "direct_call": CaseMapping(extras=frozenset({"operation"})),
-    "edges[]": CaseMapping(("tests.conformance.harness.directives.EdgeSpec",)),
-    "every_save_assertions": CaseMapping(extras=frozenset({"schema_version"})),
-    "expected_construction_error": CaseMapping(extras=frozenset({"category"})),
-    "expected_error": CaseMapping(
+    "checkpointer": MappingVocabulary(extras=frozenset({"fan_out_internal_save_batching", "kind"})),
+    "clock_stub": MappingVocabulary(extras=frozenset({"advance_ms_per_call", "type"})),
+    "cohere_embedding_provider": MappingVocabulary(extras=frozenset({"api_key", "base_url", "model"})),
+    "cohere_rerank_provider": MappingVocabulary(extras=frozenset({"api_key", "base_url", "model"})),
+    "crash_injection": MappingVocabulary(extras=frozenset({"after_fan_out_instance", "after_node"})),
+    "direct_call": MappingVocabulary(extras=frozenset({"operation"})),
+    "edges[]": MappingVocabulary(("tests.conformance.harness.directives.EdgeSpec",)),
+    "every_save_assertions": MappingVocabulary(extras=frozenset({"schema_version"})),
+    "expected_construction_error": MappingVocabulary(extras=frozenset({"category"})),
+    "expected_error": MappingVocabulary(
         extras=frozenset(
             {
                 "category",
@@ -358,27 +358,29 @@ CASE_MAPPINGS: dict[str, CaseMapping] = {
             }
         )
     ),
-    "expected_message_equal": CaseMapping(extras=frozenset({"between", "message_indices"})),
-    "expected_shared_prefix": CaseMapping(extras=frozenset({"between", "message_index", "prefix"})),
-    "expected_wire_bytes_identical": CaseMapping(extras=frozenset({"calls"})),
-    "first_run_expected": CaseMapping(extras=frozenset({"langfuse_trace"})),
-    "first_run_expected_error": CaseMapping(extras=frozenset({"category", "raised_from"})),
-    "graph": CaseMapping(
+    "expected_message_equal": MappingVocabulary(extras=frozenset({"between", "message_indices"})),
+    "expected_shared_prefix": MappingVocabulary(extras=frozenset({"between", "message_index", "prefix"})),
+    "expected_wire_bytes_identical": MappingVocabulary(extras=frozenset({"calls"})),
+    "first_run_expected": MappingVocabulary(extras=frozenset({"langfuse_trace"})),
+    "first_run_expected_error": MappingVocabulary(extras=frozenset({"category", "raised_from"})),
+    "graph": MappingVocabulary(
         ("tests.conformance.harness.fixtures.SubgraphDefinition",),
         frozenset({"subgraph", "subgraphs"}),
     ),
-    "invocations[]": CaseMapping(
+    "invocations[]": MappingVocabulary(
         extras=frozenset({"drain", "expected", "initial_state", "name", "session_id"})
     ),
-    "invoke": CaseMapping(extras=frozenset({"drain"})),
-    "invoke_with": CaseMapping(extras=frozenset({"resume_invocation"})),
-    "jina_embedding_provider": CaseMapping(extras=frozenset({"api_key", "base_url", "model"})),
-    "jina_rerank_provider": CaseMapping(extras=frozenset({"api_key", "base_url", "model"})),
-    "label_resolver": CaseMapping(("tests.conformance.harness.prompt_management.FixtureLabelResolverSpec",)),
-    "langfuse_client": CaseMapping(
+    "invoke": MappingVocabulary(extras=frozenset({"drain"})),
+    "invoke_with": MappingVocabulary(extras=frozenset({"resume_invocation"})),
+    "jina_embedding_provider": MappingVocabulary(extras=frozenset({"api_key", "base_url", "model"})),
+    "jina_rerank_provider": MappingVocabulary(extras=frozenset({"api_key", "base_url", "model"})),
+    "label_resolver": MappingVocabulary(
+        ("tests.conformance.harness.prompt_management.FixtureLabelResolverSpec",)
+    ),
+    "langfuse_client": MappingVocabulary(
         extras=frozenset({"accept_shared_provider", "mode", "preexisting_same_key_client", "provider"})
     ),
-    "langfuse_observer": CaseMapping(
+    "langfuse_observer": MappingVocabulary(
         extras=frozenset(
             {
                 "disable_provider_payload",
@@ -389,27 +391,33 @@ CASE_MAPPINGS: dict[str, CaseMapping] = {
             }
         )
     ),
-    "langfuse_observer_config": CaseMapping(extras=frozenset({"disable_state_payload"})),
-    "manager": CaseMapping(("tests.conformance.harness.prompt_management.FixtureManagerSpec",)),
-    "middleware": CaseMapping(("tests.conformance.harness.directives.MiddlewareConfig",)),
-    "migrations[]": CaseMapping(extras=frozenset({"from_version", "migrate", "to_version"})),
-    "mock_embedding[]": CaseMapping(extras=frozenset({"body", "raises", "status"})),
-    "mock_llm[]": CaseMapping(("tests.conformance.harness.directives.MockResponse",), frozenset({"raises"})),
-    "mock_llm_stream[]": CaseMapping(extras=frozenset({"wire_attempts"})),
-    "mock_provider": CaseMapping(
+    "langfuse_observer_config": MappingVocabulary(extras=frozenset({"disable_state_payload"})),
+    "manager": MappingVocabulary(("tests.conformance.harness.prompt_management.FixtureManagerSpec",)),
+    "middleware": MappingVocabulary(("tests.conformance.harness.directives.MiddlewareConfig",)),
+    "migrations[]": MappingVocabulary(extras=frozenset({"from_version", "migrate", "to_version"})),
+    "mock_embedding[]": MappingVocabulary(extras=frozenset({"body", "raises", "status"})),
+    "mock_llm[]": MappingVocabulary(
+        ("tests.conformance.harness.directives.MockResponse",), frozenset({"raises"})
+    ),
+    "mock_llm_stream[]": MappingVocabulary(extras=frozenset({"wire_attempts"})),
+    "mock_provider": MappingVocabulary(
         ("tests.conformance.harness.directives.MockProviderConfig",), frozenset({"capabilities"})
     ),
-    "mock_rerank[]": CaseMapping(extras=frozenset({"body", "raises", "status"})),
-    "observers[]": CaseMapping(("tests.conformance.harness.directives.ObserverSpec",)),
-    "openai_embedding_provider": CaseMapping(
+    "mock_rerank[]": MappingVocabulary(extras=frozenset({"body", "raises", "status"})),
+    "observers[]": MappingVocabulary(("tests.conformance.harness.directives.ObserverSpec",)),
+    "openai_embedding_provider": MappingVocabulary(
         extras=frozenset({"api_key", "base_url", "chunk_size", "document_prefix", "model", "query_prefix"})
     ),
-    "otel_observer": CaseMapping(extras=frozenset({"disable_genai_semconv", "disable_provider_payload"})),
-    "prompt_backend": CaseMapping(extras=frozenset({"prompts", "type"})),
-    "provider": CaseMapping(extras=frozenset({"genai_system", "type"})),
-    "queryable_observers[]": CaseMapping(extras=frozenset({"kind", "name", "persists_across_invocations"})),
-    "runtime_state_subclass": CaseMapping(extras=frozenset({"schema_version"})),
-    "saved_record_assertions": CaseMapping(
+    "otel_observer": MappingVocabulary(
+        extras=frozenset({"disable_genai_semconv", "disable_provider_payload"})
+    ),
+    "prompt_backend": MappingVocabulary(extras=frozenset({"prompts", "type"})),
+    "provider": MappingVocabulary(extras=frozenset({"genai_system", "type"})),
+    "queryable_observers[]": MappingVocabulary(
+        extras=frozenset({"kind", "name", "persists_across_invocations"})
+    ),
+    "runtime_state_subclass": MappingVocabulary(extras=frozenset({"schema_version"})),
+    "saved_record_assertions": MappingVocabulary(
         extras=frozenset(
             {
                 "completed_positions",
@@ -421,29 +429,121 @@ CASE_MAPPINGS: dict[str, CaseMapping] = {
             }
         )
     ),
-    "secondary_manager": CaseMapping(("tests.conformance.harness.prompt_management.FixtureManagerSpec",)),
-    "seeded_record": CaseMapping(
+    "secondary_manager": MappingVocabulary(
+        ("tests.conformance.harness.prompt_management.FixtureManagerSpec",)
+    ),
+    "seeded_record": MappingVocabulary(
         extras=frozenset(
             {"completed_positions", "fan_out_progress", "parent_states", "schema_version", "state"}
         )
     ),
-    "sequential_invocations": CaseMapping(extras=frozenset({"invocations", "observer_persists_across"})),
-    "state": CaseMapping(("tests.conformance.harness.directives.StateSchema",)),
-    "tei_embedding_provider": CaseMapping(
+    "sequential_invocations": MappingVocabulary(
+        extras=frozenset({"invocations", "observer_persists_across"})
+    ),
+    "state": MappingVocabulary(("tests.conformance.harness.directives.StateSchema",)),
+    "tei_embedding_provider": MappingVocabulary(
         extras=frozenset(
             {"base_url", "chunk_size", "document_prefix", "input_type_prompt_map", "model", "query_prefix"}
         )
     ),
-    "tei_rerank_provider": CaseMapping(extras=frozenset({"base_url", "chunk_size", "model"})),
-    "tertiary_label_resolver": CaseMapping(
+    "tei_rerank_provider": MappingVocabulary(extras=frozenset({"base_url", "chunk_size", "model"})),
+    "tertiary_label_resolver": MappingVocabulary(
         ("tests.conformance.harness.prompt_management.FixtureLabelResolverSpec",)
     ),
-    "tertiary_manager": CaseMapping(("tests.conformance.harness.prompt_management.FixtureManagerSpec",)),
-    "typed_observers[]": CaseMapping(
+    "tertiary_manager": MappingVocabulary(
+        ("tests.conformance.harness.prompt_management.FixtureManagerSpec",)
+    ),
+    "typed_observers[]": MappingVocabulary(
         extras=frozenset(
             {"filter_event_type", "include_caller_metadata", "kind", "name", "retains_arrival_order"}
         )
     ),
+}
+
+# Node keys whose value is a mapping, or a list of mappings, are placed the same
+# way one level down. No node key holds a subgraph body or falls outside the
+# vocabulary rule, so a node mapping is either open or closed.
+NODE_OPEN_MAPPINGS: dict[str, str] = {
+    "augment_metadata": "metadata keys the node chooses",
+    "inputs": "state field names, mapped from parent to subgraph",
+    "outputs": "state field names, mapped from subgraph to parent",
+    "update": "state field names",
+    "update_from_field": "target state field names, plus the reserved `multiplier`",
+    "update_pure": "state field names",
+    "update_pure_from_state": "target state field names",
+}
+
+# Every other node mapping is a closed vocabulary and a position of its own,
+# `nodes.*.<key>`, or `nodes.*.<key>[]` for each entry of a list, held to the
+# same two obligations. The models are the `NodeSpec` field types; they do not
+# declare every key, and the extras add the rest.
+NODE_MAPPINGS: dict[str, MappingVocabulary] = {
+    "nodes.*.also_emits_via_global_tracer": MappingVocabulary(
+        ("tests.conformance.harness.directives.GlobalTracerSpec",)
+    ),
+    "nodes.*.calls_embed": MappingVocabulary(
+        ("tests.conformance.harness.directives.CallsEmbedSpec",),
+        frozenset({"config", "input_from_rendered_prompt", "model"}),
+    ),
+    "nodes.*.calls_llm": MappingVocabulary(
+        ("tests.conformance.harness.directives.CallsLlmSpec",),
+        frozenset({"model", "response", "response_schema", "retry", "stream", "tools"}),
+    ),
+    "nodes.*.calls_llm_from_wrapper": MappingVocabulary(
+        ("tests.conformance.harness.directives.CallsLlmFromWrapperSpec",)
+    ),
+    "nodes.*.calls_rerank": MappingVocabulary(
+        ("tests.conformance.harness.directives.CallsRerankSpec",),
+        frozenset({"query_from_rendered_prompt"}),
+    ),
+    "nodes.*.calls_tool": MappingVocabulary(("tests.conformance.harness.directives.CallsToolSpec",)),
+    "nodes.*.capture_queryable_observer_read_into": MappingVocabulary(
+        extras=frozenset({"method", "observer_name", "state_field"})
+    ),
+    "nodes.*.emits_log": MappingVocabulary(("tests.conformance.harness.directives.EmitsLogSpec",)),
+    "nodes.*.fan_out": MappingVocabulary(
+        ("tests.conformance.harness.directives.FanOutSpec",),
+        frozenset({"augment_metadata_from_field", "extra_outputs", "inner_subgraph", "inputs"}),
+    ),
+    "nodes.*.flaky": MappingVocabulary(
+        ("tests.conformance.harness.directives.FlakySpec",), frozenset({"category", "fail_count"})
+    ),
+    "nodes.*.flaky_by_index": MappingVocabulary(("tests.conformance.harness.directives.FlakyByIndexSpec",)),
+    "nodes.*.flaky_instance_only": MappingVocabulary(
+        ("tests.conformance.harness.directives.FlakyInstanceOnlySpec",)
+    ),
+    "nodes.*.flaky_per_index": MappingVocabulary(("tests.conformance.harness.directives.FlakyPerIndexSpec",)),
+    "nodes.*.flaky_resume_aware": MappingVocabulary(
+        ("tests.conformance.harness.directives.FlakyResumeAwareSpec",)
+    ),
+    "nodes.*.invoke_drain_events_for": MappingVocabulary(
+        ("tests.conformance.harness.directives.DrainEventsForSpec",)
+    ),
+    "nodes.*.middleware[]": MappingVocabulary(
+        (
+            "tests.conformance.harness.directives.ErrorRecoveryMiddleware",
+            "tests.conformance.harness.directives.FailureIsolationMiddleware",
+            "tests.conformance.harness.directives.RetryMiddleware",
+            "tests.conformance.harness.directives.ShortCircuitMiddleware",
+            "tests.conformance.harness.directives.TimingMiddleware",
+            "tests.conformance.harness.directives.TraceRecorderMiddleware",
+        )
+    ),
+    "nodes.*.parallel_branches": MappingVocabulary(
+        ("tests.conformance.harness.directives.ParallelBranchesSpec",)
+    ),
+    "nodes.*.per_attempt_behavior[]": MappingVocabulary(
+        extras=frozenset(
+            {"attempt", "augment_metadata", "capture_invocation_metadata_into", "raises", "succeeds"}
+        )
+    ),
+    "nodes.*.raises": MappingVocabulary(extras=frozenset({"exception_kind", "message"})),
+    "nodes.*.renders_prompt_group": MappingVocabulary(
+        extras=frozenset({"active_prompt", "group_name", "members"})
+    ),
+    "nodes.*.retry_middleware": MappingVocabulary(extras=frozenset({"classifier", "max_attempts"})),
+    "nodes.*.subgraph_call": MappingVocabulary(extras=frozenset({"outputs", "subgraph"})),
+    "nodes.*.then_drop_for_current_invocation": MappingVocabulary(extras=frozenset({"observer_name"})),
 }
 
 # Nested keys a running fixture declares and no owning runner reads, keyed by
@@ -499,6 +599,7 @@ POSITION_BLIND_READS: dict[tuple[str, str], tuple[str, ...]] = {
     ("call", "messages"): ("llm-provider",),
     ("call", "operation"): ("llm-provider",),
     ("call", "response_schema"): ("llm-provider",),
+    ("call", "retry"): ("llm-provider",),
     ("call", "tools"): ("llm-provider",),
     ("calls[]", "expected"): ("llm-provider",),
     ("calls[]", "expected_wire_request"): ("llm-provider",),
@@ -539,6 +640,7 @@ POSITION_BLIND_READS: dict[tuple[str, str], tuple[str, ...]] = {
     ),
     ("expected", "raises"): ("llm-provider",),
     ("expected", "recoverable_state"): ("pipeline-utilities",),
+    ("expected", "response"): ("llm-provider",),
     ("expected_construction_error", "category"): ("observability",),
     ("expected_error", "category"): (
         "graph-engine",
@@ -547,6 +649,10 @@ POSITION_BLIND_READS: dict[tuple[str, str], tuple[str, ...]] = {
         "retrieval-provider",
     ),
     ("expected_error", "execution_order"): ("graph-engine",),
+    ("expected_error", "message"): (
+        "graph-engine",
+        "pipeline-utilities",
+    ),
     ("expected_error", "raised_from"): (
         "graph-engine",
         "observability",
@@ -626,8 +732,16 @@ POSITION_BLIND_READS: dict[tuple[str, str], tuple[str, ...]] = {
         "observability",
         "retrieval-provider",
     ),
+    ("nodes.*", "augment_metadata"): ("observability",),
+    ("nodes.*", "capture_invocation_metadata_into"): ("observability",),
+    ("nodes.*", "inputs"): ("graph-engine",),
     ("nodes.*", "middleware"): (
         "observability",
+        "pipeline-utilities",
+    ),
+    ("nodes.*", "outputs"): (
+        "conformance-adapter",
+        "graph-engine",
         "pipeline-utilities",
     ),
     ("nodes.*", "raises"): (
@@ -642,6 +756,73 @@ POSITION_BLIND_READS: dict[tuple[str, str], tuple[str, ...]] = {
         "observability",
         "pipeline-utilities",
     ),
+    ("nodes.*.calls_embed", "config"): (
+        "observability",
+        "retrieval-provider",
+    ),
+    ("nodes.*.calls_embed", "model"): ("retrieval-provider",),
+    ("nodes.*.calls_embed", "stores_response_in"): (
+        "observability",
+        "retrieval-provider",
+    ),
+    ("nodes.*.calls_llm", "config"): ("observability",),
+    ("nodes.*.calls_llm", "messages"): ("observability",),
+    ("nodes.*.calls_llm", "model"): ("observability",),
+    ("nodes.*.calls_llm", "response"): ("observability",),
+    ("nodes.*.calls_llm", "response_schema"): ("observability",),
+    ("nodes.*.calls_llm", "stores_response_in"): ("observability",),
+    ("nodes.*.calls_llm", "tools"): ("observability",),
+    ("nodes.*.calls_llm_from_wrapper", "messages"): ("observability",),
+    ("nodes.*.calls_rerank", "config"): (
+        "observability",
+        "retrieval-provider",
+    ),
+    ("nodes.*.calls_rerank", "model"): ("retrieval-provider",),
+    ("nodes.*.calls_rerank", "stores_response_in"): (
+        "observability",
+        "retrieval-provider",
+    ),
+    ("nodes.*.emits_log", "message"): ("observability",),
+    ("nodes.*.fan_out", "error_policy"): (
+        "graph-engine",
+        "observability",
+        "pipeline-utilities",
+    ),
+    ("nodes.*.fan_out", "errors_field"): ("pipeline-utilities",),
+    ("nodes.*.fan_out", "subgraph"): (
+        "graph-engine",
+        "observability",
+        "pipeline-utilities",
+    ),
+    ("nodes.*.flaky", "category"): ("observability",),
+    ("nodes.*.flaky", "on_success"): (
+        "observability",
+        "pipeline-utilities",
+    ),
+    ("nodes.*.flaky_by_index", "category"): ("pipeline-utilities",),
+    ("nodes.*.flaky_by_index", "success_compute"): ("pipeline-utilities",),
+    ("nodes.*.flaky_instance_only", "category"): ("pipeline-utilities",),
+    ("nodes.*.flaky_instance_only", "success_compute"): ("pipeline-utilities",),
+    ("nodes.*.flaky_per_index", "success_compute"): ("pipeline-utilities",),
+    ("nodes.*.middleware[]", "classifier"): ("observability",),
+    ("nodes.*.middleware[]", "max_attempts"): ("observability",),
+    ("nodes.*.middleware[]", "type"): (
+        "observability",
+        "pipeline-utilities",
+    ),
+    ("nodes.*.parallel_branches", "error_policy"): (
+        "observability",
+        "pipeline-utilities",
+    ),
+    ("nodes.*.parallel_branches", "errors_field"): ("pipeline-utilities",),
+    ("nodes.*.per_attempt_behavior[]", "augment_metadata"): ("observability",),
+    ("nodes.*.per_attempt_behavior[]", "capture_invocation_metadata_into"): ("observability",),
+    ("nodes.*.per_attempt_behavior[]", "raises"): ("observability",),
+    ("nodes.*.raises", "message"): ("pipeline-utilities",),
+    ("nodes.*.retry_middleware", "classifier"): ("observability",),
+    ("nodes.*.retry_middleware", "max_attempts"): ("observability",),
+    ("nodes.*.subgraph_call", "outputs"): ("observability",),
+    ("nodes.*.subgraph_call", "subgraph"): ("observability",),
     ("observers[]", "name"): (
         "graph-engine",
         "pipeline-utilities",
