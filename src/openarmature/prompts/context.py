@@ -18,7 +18,7 @@ duration of the inner block; the same applies to
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Generator
 from contextlib import contextmanager
 from contextvars import ContextVar
 
@@ -36,7 +36,7 @@ _active_prompt_group: ContextVar[PromptGroup | None] = ContextVar(
 
 
 @contextmanager
-def with_active_prompt(result: PromptResult) -> Iterator[None]:
+def with_active_prompt(result: PromptResult) -> Generator[None, None, None]:
     """Mark ``result`` as the active prompt for downstream LLM calls.
 
     When the observability extra is installed and an LLM call fires
@@ -54,7 +54,7 @@ def with_active_prompt(result: PromptResult) -> Iterator[None]:
 
 
 @contextmanager
-def with_active_prompt_group(group: PromptGroup) -> Iterator[None]:
+def with_active_prompt_group(group: PromptGroup) -> Generator[None, None, None]:
     """Mark ``group`` as the active prompt group for downstream LLM calls.
 
     When an LLM call fires inside this context, the OTel observer

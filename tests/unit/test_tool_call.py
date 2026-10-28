@@ -8,7 +8,7 @@ same mechanism the engine sets up per invocation.
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Generator
 from contextlib import contextmanager
 from typing import Any
 
@@ -27,7 +27,7 @@ from openarmature.observability.correlation import (
 
 
 @contextmanager
-def _scope(namespace: tuple[str, ...] = ("run_tool",)) -> Iterator[list[Any]]:
+def _scope(namespace: tuple[str, ...] = ("run_tool",)) -> Generator[list[Any], None, None]:
     """Install a collecting dispatch + invocation/namespace identity;
     yield the captured-events list."""
     events: list[Any] = []

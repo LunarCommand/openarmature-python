@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import time
 import uuid
-from collections.abc import Iterator, Mapping
+from collections.abc import Generator, Mapping
 from contextlib import contextmanager
 from typing import Any
 
@@ -60,7 +60,7 @@ def with_tool_call(
     arguments: Mapping[str, Any] | None = None,
     *,
     tool_call_id: str | None = None,
-) -> Iterator[ToolCallScope]:
+) -> Generator[ToolCallScope, None, None]:
     """Instrument a tool execution inside a node body.
 
     Wrap the caller's tool execution in this scope and report the

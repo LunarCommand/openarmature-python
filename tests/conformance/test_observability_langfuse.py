@@ -20,7 +20,7 @@ import copy
 import json
 import logging
 import uuid
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Generator, Mapping, Sequence
 from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -3209,7 +3209,7 @@ def _assert_isolation_decision_emitter_exists() -> None:
 
 
 @contextlib.contextmanager
-def _caplog_at_warning() -> Iterator[list[Any]]:
+def _caplog_at_warning() -> Generator[list[Any], None, None]:
     """Capture openarmature's observability WARNING records for the case.
 
     Each captured record carries an ``otel_event_name`` attribute holding the
