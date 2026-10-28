@@ -46,6 +46,10 @@ updates:
     versioning-strategy: "lockfile-only"
     allow:
       - dependency-type: "all"
+    # conformance.toml publishes the langfuse version we verify against, and
+    # a test holds the lock to it, so langfuse only moves in a deliberate PR.
+    ignore:
+      - dependency-name: "langfuse"
     open-pull-requests-limit: 10
     commit-message:
       prefix: "chore"
