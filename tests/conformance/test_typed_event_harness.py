@@ -71,8 +71,8 @@ def _make_typed_event(**overrides: Any) -> LlmCompletionEvent:
 
 @dataclass(frozen=True)
 class NodeEvent:  # noqa: N801 — class-name matches the harness's string discriminator
-    """Stand-in for ``graph.events.NodeEvent`` shaped for the tests'
-    cause-chain walk. Only the field names the harness reads are
+    """Stand-in for ``graph.events.NodeEvent`` shaped for the tests of
+    the error-category check. Only the field names the harness reads are
     present; using a dataclass avoids depending on the real
     NodeEvent's full construction surface. Named ``NodeEvent``
     literally so the harness's ``type(event).__name__ == "NodeEvent"``
@@ -344,24 +344,13 @@ def test_assert_relative_order_filter_excludes_non_matching_node_name() -> None:
 
 
 # ---------------------------------------------------------------------------
-# _assert_node_completed_event_carries_error — cause-chain walk
+# _assert_node_completed_event_carries_error — the error's direct cause
 # ---------------------------------------------------------------------------
 
 
-def test_node_completed_event_error_category_via_direct_attribute() -> None:
-    # When the event's error directly carries a category, the walk
-    # finds it on the first hop.
-    err = ProviderUnavailable("down")
-    event = NodeEvent(node_name="ask", phase="completed", error=err)
-    _assert_node_completed_event_carries_error(
-        [event], {"node_name": "ask", "error_category": "provider_unavailable"}
-    )
-
-
-def test_node_completed_event_error_category_via_cause_chain() -> None:
-    # When the engine wraps the provider error in a NodeException-like
-    # parent that itself lacks ``category``, the walk follows
-    # ``__cause__`` to find the underlying ProviderUnavailable.
+def test_node_completed_event_error_category_on_the_direct_cause() -> None:
+    # The engine wraps the provider error; the category is read off the
+    # wrapper's direct cause.
     underlying = ProviderUnavailable("down")
     wrapper = Exception("wrapped")
     wrapper.__cause__ = underlying
@@ -369,6 +358,31 @@ def test_node_completed_event_error_category_via_cause_chain() -> None:
     _assert_node_completed_event_carries_error(
         [event], {"node_name": "ask", "error_category": "provider_unavailable"}
     )
+
+
+def test_node_completed_event_error_category_on_the_error_itself_fails() -> None:
+    # The event's own error is the wrapper, not the error the node raised.
+    err = ProviderUnavailable("down")
+    event = NodeEvent(node_name="ask", phase="completed", error=err)
+    with pytest.raises(AssertionError):
+        _assert_node_completed_event_carries_error(
+            [event], {"node_name": "ask", "error_category": "provider_unavailable"}
+        )
+
+
+def test_node_completed_event_error_category_below_the_direct_cause_fails() -> None:
+    # A category one link below the direct cause is not the link the recorder
+    # reads. Killed by walking the whole cause chain.
+    underlying = ProviderUnavailable("down")
+    carrier = Exception("carrier")
+    carrier.__cause__ = underlying
+    wrapper = Exception("wrapped")
+    wrapper.__cause__ = carrier
+    event = NodeEvent(node_name="ask", phase="completed", error=wrapper)
+    with pytest.raises(AssertionError):
+        _assert_node_completed_event_carries_error(
+            [event], {"node_name": "ask", "error_category": "provider_unavailable"}
+        )
 
 
 def test_node_completed_event_error_category_mismatch_fails() -> None:
