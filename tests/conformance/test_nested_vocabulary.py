@@ -26,14 +26,17 @@ from collections import Counter, defaultdict
 from collections.abc import Iterator
 from typing import Any, cast, get_args
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 from . import test_case_vocabulary as case_level
 from .harness.vocabulary import (
     CASE_MAPPINGS,
+    FORWARDING_BUILDERS,
     KNOWN_UNREAD_NESTED,
     NESTED_EXTRAS,
     NESTED_MODELS,
+    NODE_FORWARDED_MAPPINGS,
+    NODE_MAPPING_ALIASES,
     NODE_MAPPINGS,
     NODE_OPEN_MAPPINGS,
     OPEN_MAPPINGS,
@@ -106,6 +109,38 @@ def _captures(doc: dict[str, Any]) -> set[str]:
     return names
 
 
+def _node_position(path: str) -> str | None:
+    """The node position `path` names, directly or through an alias."""
+    position = NODE_MAPPING_ALIASES.get(path, path)
+    return position if position == "nodes.*" or position in NODE_MAPPINGS else None
+
+
+def _path_of(position: str) -> str:
+    return position.removesuffix("[]").removesuffix(".*")
+
+
+def _node_mapping_blocks(
+    position: str, where: str, block: dict[str, Any]
+) -> Iterator[tuple[str, str, dict[str, Any]]]:
+    """`(position, where, block)` for each closed node mapping inside `block`, at any depth."""
+    for key, value in block.items():
+        path = f"{position}.{key}"
+        children: list[tuple[str, str, dict[str, Any]]] = []
+        if (child := _node_position(path)) is not None and (mapping := _as_dict(value)) is not None:
+            children = [(child, f"{where}.{key}", mapping)]
+        elif (child := _node_position(f"{path}[]")) is not None:
+            children = [(child, f"{where}.{key}[{i}]", entry) for i, entry in enumerate(_as_dicts(value))]
+        elif (child := _node_position(f"{path}.*")) is not None:
+            children = [
+                (child, f"{where}.{key}.{name}", entry)
+                for name, named in (_as_dict(value) or {}).items()
+                if (entry := _as_dict(named)) is not None
+            ]
+        for child, child_where, child_block in children:
+            yield child, child_where, child_block
+            yield from _node_mapping_blocks(child, child_where, child_block)
+
+
 def _blocks(doc: dict[str, Any]) -> Iterator[tuple[str, str, dict[str, Any]]]:
     """`(position, where, block)` for every nested block a fixture carries."""
     for container in case_level._containers(doc):  # noqa: SLF001
@@ -126,13 +161,7 @@ def _blocks(doc: dict[str, Any]) -> Iterator[tuple[str, str, dict[str, Any]]]:
                     yield "expected", f"{where}.{list_key}[{i}]", expected
         for path, spec in _node_specs(container):
             yield "nodes.*", f"{where}.{path}", spec
-            for key, value in spec.items():
-                position = f"nodes.*.{key}"
-                if position in NODE_MAPPINGS and (block := _as_dict(value)) is not None:
-                    yield position, f"{where}.{path}.{key}", block
-                elif f"{position}[]" in NODE_MAPPINGS:
-                    for i, entry in enumerate(_as_dicts(value)):
-                        yield f"{position}[]", f"{where}.{path}.{key}[{i}]", entry
+            yield from _node_mapping_blocks("nodes.*", f"{where}.{path}", spec)
         for key, value in container.items():
             if key in CASE_MAPPINGS and (block := _as_dict(value)) is not None:
                 yield key, f"{where}.{key}", block
@@ -360,7 +389,7 @@ def _shape(position: str, where: str) -> str:
     if position in CASE_MAPPINGS:
         return "case-level mappings"
     if position in NODE_MAPPINGS:
-        return "node-level mappings"
+        return "node-level mappings" if position.count(".") == 2 else "nested node mappings"
     if position == "nodes.*":
         return "nodes" if path.startswith("nodes.") else "nodes in subgraph bodies"
     if position == "expected":
@@ -383,6 +412,7 @@ _SHAPE_FLOORS: dict[str, int] = {
     "nodes in subgraph bodies": 70,
     "case-level mappings": 445,
     "node-level mappings": 260,
+    "nested node mappings": 120,
 }
 
 
@@ -415,6 +445,10 @@ def test_the_registry_names_every_position_once() -> None:
     named = Counter(position for positions in registries.values() for position in positions)
     twice = sorted(position for position, count in named.items() if count > 1)
     assert not twice, f"{twice} are registered as more than one of {sorted(registries)}"
+    # An alias is a path of its own, onto a node position that exists.
+    for alias, target in NODE_MAPPING_ALIASES.items():
+        assert alias not in NODE_MAPPINGS, f"{alias} is both a node position and an alias"
+        assert target == "nodes.*" or target in NODE_MAPPINGS, f"alias {alias} names no position: {target}"
     # An extra the models already declare is a stale entry: it reads as a gap
     # in the model when there is none.
     for position, (_, extras) in _POSITIONS.items():
@@ -462,19 +496,20 @@ def test_every_case_level_mapping_is_placed() -> None:
 
 
 def test_every_node_level_mapping_is_placed() -> None:
+    # At every depth: inside a node spec, and inside each closed node mapping
+    # below it, since the walk descends only through closed ones.
     used = {
-        str(key)
+        f"{position}.{key}"
         for _, _, doc in case_level._fixture_docs()  # noqa: SLF001
-        for container in case_level._containers(doc)  # noqa: SLF001
-        for _, spec in _node_specs(container)
-        for key, value in spec.items()
+        for position, _, block in _blocks(doc)
+        if position == "nodes.*" or position in NODE_MAPPINGS
+        for key, value in block.items()
         if _holds_mappings(value)
     }
     groups = {
         "open": frozenset(NODE_OPEN_MAPPINGS),
-        "closed": frozenset(
-            position.removeprefix("nodes.*.").removesuffix("[]") for position in NODE_MAPPINGS
-        ),
+        "forwarded": frozenset(NODE_FORWARDED_MAPPINGS),
+        "closed": frozenset(_path_of(position) for position in [*NODE_MAPPINGS, *NODE_MAPPING_ALIASES]),
     }
     _assert_placed(
         "node-level",
@@ -483,6 +518,125 @@ def test_every_node_level_mapping_is_placed() -> None:
         "Place each in harness/vocabulary.py: NODE_MAPPINGS with its keys, "
         "or NODE_OPEN_MAPPINGS with the reason.",
     )
+
+
+def _forwarded_blocks() -> Iterator[tuple[str, str, str, dict[str, Any]]]:
+    """`(capability, fixture, path, mapping)` for each forwarded node mapping."""
+    for capability, fixture, doc in case_level._fixture_docs():  # noqa: SLF001
+        for position, _, block in _blocks(doc):
+            if position != "nodes.*" and position not in NODE_MAPPINGS:
+                continue
+            for key, value in block.items():
+                path = f"{position}.{key}"
+                if path in NODE_FORWARDED_MAPPINGS and (mapping := _as_dict(value)) is not None:
+                    yield capability, fixture, path, mapping
+
+
+def _forwarded_type(path: str) -> type[BaseModel]:
+    module, _, name = NODE_FORWARDED_MAPPINGS[path].rpartition(".")
+    return cast(type[BaseModel], getattr(importlib.import_module(module), name))
+
+
+def test_every_forwarded_key_is_a_field_of_its_type() -> None:
+    # The type rejects a field it does not declare, so its fields are the
+    # vocabulary. Dormant fixtures count, as for every recognized key.
+    reached: set[str] = set()
+    unknown: list[tuple[str, str, str]] = []
+    for _, fixture, path, mapping in _forwarded_blocks():
+        reached.add(path)
+        model = _forwarded_type(path)
+        assert model.model_config.get("extra") == "forbid", (
+            f"{model.__name__} accepts fields it does not declare"
+        )
+        fields = {field.alias or name for name, field in model.model_fields.items()}
+        unknown.extend((fixture, path, str(key)) for key in mapping if key not in fields)
+    assert reached == set(NODE_FORWARDED_MAPPINGS), (
+        f"no fixture forwards {sorted(set(NODE_FORWARDED_MAPPINGS) - reached)}"
+    )
+    assert not unknown, "forwarded key(s) the type does not declare:\n" + "\n".join(
+        f"  {fixture} at {path} carries {key!r}" for fixture, path, key in sorted(unknown)
+    )
+
+
+def _calls_unpacking_into(fn: ast.AST, type_name: str) -> bool:
+    """Whether `fn` calls `type_name` with a `**` argument."""
+    for node in ast.walk(fn):
+        if isinstance(node, ast.Call) and any(keyword.arg is None for keyword in node.keywords):
+            func = node.func
+            called = (
+                func.id
+                if isinstance(func, ast.Name)
+                else func.attr
+                if isinstance(func, ast.Attribute)
+                else None
+            )
+            if called == type_name:
+                return True
+    return False
+
+
+def _builders_in(runner: str, src: str, type_name: str) -> set[str]:
+    """`module.function` for each function in `src` that builds `type_name` from a mapping."""
+    module = runner.removesuffix(".py").replace("/", ".")
+    found: set[str] = set()
+    for node in ast.parse(src).body:
+        defs: list[tuple[str, ast.AST]] = []
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            defs.append((node.name, node))
+        elif isinstance(node, ast.ClassDef):
+            defs.extend(
+                (f"{node.name}.{member.name}", member)
+                for member in node.body
+                if isinstance(member, (ast.FunctionDef, ast.AsyncFunctionDef))
+            )
+        found.update(f"{module}.{name}" for name, fn in defs if _calls_unpacking_into(fn, type_name))
+    return found
+
+
+def test_every_builder_of_a_forwarded_type_is_declared() -> None:
+    # Building the type from a mapping is where a runner hands the mapping over,
+    # so every function in an owning runner that does it must be declared, and
+    # the next test checks each one passes the mapping whole. The type is matched
+    # by its exact name: `EmbeddingRuntimeConfig(**...)` builds no RuntimeConfig.
+    sources = case_level._runner_sources()  # noqa: SLF001
+    owners = case_level._runner_owners()  # noqa: SLF001
+    fixture_owners = case_level._fixture_owners()  # noqa: SLF001
+    executed = case_level._executed_fixture_ids()  # noqa: SLF001
+    runners: dict[str, set[str]] = defaultdict(set)
+    for capability, fixture, path, _ in _forwarded_blocks():
+        if fixture in executed:
+            runners[path] |= owners[capability] | fixture_owners.get(fixture, frozenset())
+    assert set(runners) == set(NODE_FORWARDED_MAPPINGS), (
+        f"no running fixture forwards {sorted(set(NODE_FORWARDED_MAPPINGS) - set(runners))}"
+    )
+    assert set(FORWARDING_BUILDERS) == set(NODE_FORWARDED_MAPPINGS), (
+        f"FORWARDING_BUILDERS names {sorted(FORWARDING_BUILDERS)}, the forwarded mappings are "
+        f"{sorted(NODE_FORWARDED_MAPPINGS)}"
+    )
+    for path in sorted(NODE_FORWARDED_MAPPINGS):
+        type_name = _forwarded_type(path).__name__
+        found = set[str]().union(*(_builders_in(r, sources[r], type_name) for r in runners[path]))
+        assert found == set(FORWARDING_BUILDERS[path]), (
+            f"{path}: owning runners build {type_name} from a mapping in {sorted(found)}, "
+            f"FORWARDING_BUILDERS declares {sorted(FORWARDING_BUILDERS[path])}"
+        )
+
+
+def test_every_forwarding_builder_passes_the_whole_mapping() -> None:
+    # A builder that copies only the keys it knows drops an unknown one in
+    # silence; one that passes the mapping whole lets the type reject it. Killed
+    # by the LLM config builders this replaced, which copied seven named keys.
+    dropped: list[str] = []
+    for builders in FORWARDING_BUILDERS.values():
+        for dotted in builders:
+            module, _, name = dotted.rpartition(".")
+            builder = getattr(importlib.import_module(module), name)
+            try:
+                builder({"_probe_unknown_key": 1})
+            except ValidationError:
+                continue
+            dropped.append(dotted)
+    assert not dropped, f"builder(s) that accept a key their type does not declare: {dropped}"
 
 
 def test_every_nested_key_is_recognized() -> None:

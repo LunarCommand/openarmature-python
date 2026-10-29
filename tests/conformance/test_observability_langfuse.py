@@ -1004,6 +1004,15 @@ def _build_039_case2(
         prompt_manager=prompt_manager,
         render_variables={},
     )
+    branch_specs = cast(
+        "dict[str, dict[str, Any]]",
+        case["inner_subgraphs"]["per_product"]["nodes"]["dispatcher"]["parallel_branches"]["branches"],
+    )
+
+    def branch_middleware(name: str) -> tuple[Any, ...]:
+        augment = cast("dict[str, str] | None", branch_specs[name].get("augment_metadata_from_outer_item"))
+        return (_make_augment_instance_middleware(augment, "oa_outer_item"),) if augment else ()
+
     per_product_state = build_state_cls(
         "PerProduct039C2",
         {
@@ -1019,9 +1028,9 @@ def _build_039_case2(
             "probe": BranchSpec(
                 subgraph=probe,
                 inputs={"oa_outer_item": "oa_outer_item"},
-                middleware=(_make_augment_instance_middleware({"note": "id"}, "oa_outer_item"),),
+                middleware=branch_middleware("probe"),
             ),
-            "baseline": BranchSpec(subgraph=baseline),
+            "baseline": BranchSpec(subgraph=baseline, middleware=branch_middleware("baseline")),
         },
     )
     pp_builder.add_edge("dispatcher", END)
@@ -2366,22 +2375,12 @@ def _materialize_messages(raw: list[dict[str, Any]]) -> list[Any]:
 def _runtime_config_from_spec(config_spec: dict[str, Any] | None) -> RuntimeConfig | None:
     if not config_spec:
         return None
-    declared = {
-        "temperature",
-        "max_tokens",
-        "top_p",
-        "seed",
-        "frequency_penalty",
-        "presence_penalty",
-        "stop_sequences",
-    }
-    kwargs = {k: v for k, v in config_spec.items() if k in declared}
-    extras = cast("dict[str, Any]", config_spec.get("extras") or {})
-    # The fixture's `extras` sub-block maps onto the config's own container
-    # (0122). Merging it into the declared kwargs would let an extras key naming
-    # a declared field rebind that field, which is the collision 0122 exists to
-    # make expressible.
-    return RuntimeConfig(**kwargs, extras=dict(extras))
+    # The whole block goes to RuntimeConfig, which rejects a key it does not
+    # declare. The fixture's `extras` sub-block stays the config's own container
+    # (0122): merging it into the fields would let an extras key naming a field
+    # rebind that field, which is the collision 0122 exists to make expressible.
+    fields: dict[str, Any] = {**config_spec, "extras": dict(config_spec.get("extras") or {})}
+    return RuntimeConfig(**fields)
 
 
 # ---------------------------------------------------------------------------

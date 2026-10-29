@@ -6705,25 +6705,11 @@ def _build_runtime_config(config_spec: Mapping[str, Any] | None) -> RuntimeConfi
         return None
     from openarmature.llm.response import RuntimeConfig
 
-    # The canonical sampling keys (observability §5.5.2) map to RuntimeConfig
-    # fields; everything under ``extras`` is the provider-specific extras bag
-    # (062 request_params, 063 request_extras). Mirrors the LLM-payload runner.
-    extras = cast("dict[str, Any]", config_spec.get("extras") or {})
-    kwargs: dict[str, Any] = {
-        k: v
-        for k, v in config_spec.items()
-        if k
-        in {
-            "temperature",
-            "max_tokens",
-            "top_p",
-            "seed",
-            "frequency_penalty",
-            "presence_penalty",
-            "stop_sequences",
-        }
-    }
-    return RuntimeConfig(**kwargs, extras=dict(extras))
+    # The whole block goes to RuntimeConfig, which rejects a key it does not
+    # declare. ``extras`` stays its own container, the provider-specific bag
+    # (062 request_params, 063 request_extras).
+    fields: dict[str, Any] = {**config_spec, "extras": dict(config_spec.get("extras") or {})}
+    return RuntimeConfig(**fields)
 
 
 def _tools_from_wire_spec(spec: Sequence[Mapping[str, Any]] | None) -> list[Tool] | None:

@@ -460,23 +460,59 @@ CASE_MAPPINGS: dict[str, MappingVocabulary] = {
     ),
 }
 
-# Node keys whose value is a mapping, or a list of mappings, are placed the same
-# way one level down. No node key holds a subgraph body or falls outside the
+_BACKOFF = MappingVocabulary(extras=frozenset({"seconds", "type"}))
+_MIDDLEWARE_MODELS = (
+    "tests.conformance.harness.directives.ErrorRecoveryMiddleware",
+    "tests.conformance.harness.directives.FailureIsolationMiddleware",
+    "tests.conformance.harness.directives.RetryMiddleware",
+    "tests.conformance.harness.directives.ShortCircuitMiddleware",
+    "tests.conformance.harness.directives.TimingMiddleware",
+    "tests.conformance.harness.directives.TraceRecorderMiddleware",
+)
+
+# Inside a node spec, and inside each closed node mapping below it, a key whose
+# value is a mapping, or a list of mappings, is placed by its path, such as
+# `nodes.*.update`. No node key holds a subgraph body or falls outside the
 # vocabulary rule, so a node mapping is either open or closed.
 NODE_OPEN_MAPPINGS: dict[str, str] = {
-    "augment_metadata": "metadata keys the node chooses",
-    "inputs": "state field names, mapped from parent to subgraph",
-    "outputs": "state field names, mapped from subgraph to parent",
-    "update": "state field names",
-    "update_from_field": "target state field names, plus the reserved `multiplier`",
-    "update_pure": "state field names",
-    "update_pure_from_state": "target state field names",
+    "nodes.*.augment_metadata": "metadata keys the node chooses",
+    "nodes.*.inputs": "state field names, mapped from parent to subgraph",
+    "nodes.*.outputs": "state field names, mapped from subgraph to parent",
+    "nodes.*.update": "state field names",
+    "nodes.*.update_from_field": "target state field names, plus the reserved `multiplier`",
+    "nodes.*.update_pure": "state field names",
+    "nodes.*.update_pure_from_state": "target state field names",
+    "nodes.*.calls_llm.response_schema": "a JSON Schema the call passes to the provider",
+    "nodes.*.calls_tool.arguments": "the tool's arguments",
+    "nodes.*.fan_out.augment_metadata_from_field": "metadata keys, each mapped to an item field",
+    "nodes.*.fan_out.extra_outputs": "state field names",
+    "nodes.*.fan_out.inputs": "state field names, mapped from parent to subgraph",
+    "nodes.*.flaky.on_success": "state field names",
+    "nodes.*.flaky.success_update": "state field names",
+    "nodes.*.flaky_by_index.success_compute": "state field names",
+    "nodes.*.flaky_instance_only.success_compute": "state field names",
+    "nodes.*.flaky_per_index.success_compute": "state field names",
+    "nodes.*.flaky_resume_aware.on_success": "state field names",
+    "nodes.*.middleware[].degraded_update": "state field names",
+    "nodes.*.per_attempt_behavior[].augment_metadata": "metadata keys the attempt chooses",
+    "nodes.*.subgraph_call.outputs": "state field names, mapped from subgraph to parent",
+    "nodes.*.calls_llm.tools[].parameters": "a JSON Schema for the tool's arguments",
+    "nodes.*.calls_llm.tools[].function.parameters": "a JSON Schema for the tool's arguments",
+    "nodes.*.calls_tool.mock_tool.returns": "the tool's return value",
+    "nodes.*.fan_out.instance_middleware[].degraded_update": "state field names",
+    "nodes.*.parallel_branches.branches.*.augment_metadata": "metadata keys the branch chooses",
+    "nodes.*.parallel_branches.branches.*.augment_metadata_from_outer_item": (
+        "metadata keys, each mapped to an outer item field"
+    ),
+    "nodes.*.parallel_branches.branches.*.middleware[].degraded_update": "state field names",
+    "nodes.*.parallel_branches.branches.*.outputs": "state field names, mapped from branch to parent",
 }
 
-# Every other node mapping is a closed vocabulary and a position of its own,
-# `nodes.*.<key>`, or `nodes.*.<key>[]` for each entry of a list, held to the
-# same two obligations. The models are the `NodeSpec` field types; they do not
-# declare every key, and the extras add the rest.
+# A closed node mapping is a position of its own, held to the same two
+# obligations: `<path>` for a mapping, `<path>[]` for each entry of a list, and
+# `<path>.*` for each value of a mapping keyed by names the fixture chooses. The
+# models are the field types of the mapping that holds it; they do not declare
+# every key, and the extras add the rest.
 NODE_MAPPINGS: dict[str, MappingVocabulary] = {
     "nodes.*.also_emits_via_global_tracer": MappingVocabulary(
         ("tests.conformance.harness.directives.GlobalTracerSpec",)
@@ -519,16 +555,9 @@ NODE_MAPPINGS: dict[str, MappingVocabulary] = {
     "nodes.*.invoke_drain_events_for": MappingVocabulary(
         ("tests.conformance.harness.directives.DrainEventsForSpec",)
     ),
-    "nodes.*.middleware[]": MappingVocabulary(
-        (
-            "tests.conformance.harness.directives.ErrorRecoveryMiddleware",
-            "tests.conformance.harness.directives.FailureIsolationMiddleware",
-            "tests.conformance.harness.directives.RetryMiddleware",
-            "tests.conformance.harness.directives.ShortCircuitMiddleware",
-            "tests.conformance.harness.directives.TimingMiddleware",
-            "tests.conformance.harness.directives.TraceRecorderMiddleware",
-        )
-    ),
+    "nodes.*.middleware[]": MappingVocabulary(_MIDDLEWARE_MODELS),
+    "nodes.*.middleware[].backoff": _BACKOFF,
+    "nodes.*.middleware[].classifier": MappingVocabulary(extras=frozenset({"transient_categories"})),
     "nodes.*.parallel_branches": MappingVocabulary(
         ("tests.conformance.harness.directives.ParallelBranchesSpec",)
     ),
@@ -544,6 +573,86 @@ NODE_MAPPINGS: dict[str, MappingVocabulary] = {
     "nodes.*.retry_middleware": MappingVocabulary(extras=frozenset({"classifier", "max_attempts"})),
     "nodes.*.subgraph_call": MappingVocabulary(extras=frozenset({"outputs", "subgraph"})),
     "nodes.*.then_drop_for_current_invocation": MappingVocabulary(extras=frozenset({"observer_name"})),
+    "nodes.*.calls_llm.messages[]": MappingVocabulary(
+        extras=frozenset({"content", "content_repeat", "role", "tool_call_id"})
+    ),
+    "nodes.*.calls_llm.messages[].content[]": MappingVocabulary(
+        extras=frozenset({"detail", "media_type", "source", "text", "type"})
+    ),
+    "nodes.*.calls_llm.messages[].content[].source": MappingVocabulary(
+        extras=frozenset({"base64_data_synthetic", "type"})
+    ),
+    "nodes.*.calls_llm.messages[].content[].source.base64_data_synthetic": MappingVocabulary(
+        extras=frozenset({"bytes"})
+    ),
+    "nodes.*.calls_llm.messages[].content_repeat": MappingVocabulary(extras=frozenset({"bytes", "char"})),
+    "nodes.*.calls_llm.retry": MappingVocabulary(extras=frozenset({"backoff", "max_attempts"})),
+    "nodes.*.calls_llm.retry.backoff": _BACKOFF,
+    "nodes.*.calls_llm.tools[]": MappingVocabulary(
+        extras=frozenset({"description", "function", "name", "parameters", "type"})
+    ),
+    "nodes.*.calls_llm.tools[].function": MappingVocabulary(
+        extras=frozenset({"description", "name", "parameters"})
+    ),
+    "nodes.*.calls_llm_from_wrapper.messages[]": MappingVocabulary(extras=frozenset({"content", "role"})),
+    "nodes.*.calls_tool.mock_tool": MappingVocabulary(("tests.conformance.harness.directives.MockToolSpec",)),
+    "nodes.*.calls_tool.mock_tool.raises": MappingVocabulary(extras=frozenset({"error_type", "message"})),
+    "nodes.*.fan_out.concurrency": MappingVocabulary(extras=frozenset({"callable", "field"})),
+    "nodes.*.fan_out.count": MappingVocabulary(extras=frozenset({"callable", "chunk_size", "field"})),
+    # `retry` is 053's entry, `{retry: {max_attempts: 3}}`, where every other
+    # fixture writes `{type: retry, ...}`. The runner does not apply it; see the
+    # unread ledger.
+    "nodes.*.fan_out.instance_middleware[]": MappingVocabulary(
+        _MIDDLEWARE_MODELS, frozenset({"catch", "retry"})
+    ),
+    "nodes.*.fan_out.instance_middleware[].backoff": _BACKOFF,
+    "nodes.*.fan_out.instance_middleware[].retry": MappingVocabulary(extras=frozenset({"max_attempts"})),
+    "nodes.*.flaky.failure_sequence[]": MappingVocabulary(
+        ("tests.conformance.harness.directives.FailureSpec",), frozenset({"cause"})
+    ),
+    "nodes.*.flaky.failure_sequence[].cause": MappingVocabulary(
+        extras=frozenset({"category", "cause", "message"})
+    ),
+    "nodes.*.parallel_branches.branches.*": MappingVocabulary(
+        ("tests.conformance.harness.directives.ParallelBranchSpec",),
+        frozenset({"augment_metadata", "augment_metadata_from_outer_item"}),
+    ),
+    "nodes.*.parallel_branches.branches.*.middleware[]": MappingVocabulary(_MIDDLEWARE_MODELS),
+    "nodes.*.parallel_branches.branches.*.middleware[].backoff": _BACKOFF,
+    "nodes.*.parallel_branches.branches.*.when": MappingVocabulary(extras=frozenset({"field"})),
+}
+
+# Node mappings a runner hands whole to an engine type that forbids unknown
+# fields, keyed by path to that type. The type's fields are the vocabulary, and
+# handing the mapping over is the read.
+NODE_FORWARDED_MAPPINGS: dict[str, str] = {
+    "nodes.*.calls_embed.config": "openarmature.retrieval.EmbeddingRuntimeConfig",
+    "nodes.*.calls_llm.config": "openarmature.llm.response.RuntimeConfig",
+    "nodes.*.calls_rerank.config": "openarmature.retrieval.RerankRuntimeConfig",
+}
+
+# The runner functions that hand each forwarded mapping to its type, held both
+# ways: every function in an owning runner that builds the type from a mapping is
+# listed, and each one passes the mapping whole.
+FORWARDING_BUILDERS: dict[str, tuple[str, ...]] = {
+    "nodes.*.calls_embed.config": (
+        "tests.conformance.test_observability._build_embedding_runtime_config",
+        "tests.conformance.test_retrieval_provider._build_config",
+    ),
+    "nodes.*.calls_llm.config": (
+        "tests.conformance.test_observability._build_runtime_config",
+        "tests.conformance.test_observability_langfuse._runtime_config_from_spec",
+    ),
+    "nodes.*.calls_rerank.config": (
+        "tests.conformance.test_observability._build_rerank_runtime_config",
+        "tests.conformance.test_retrieval_provider._build_rerank_config",
+    ),
+}
+
+# A path whose mapping has the shape of a registered position, mapped to it.
+NODE_MAPPING_ALIASES: dict[str, str] = {
+    # A callable branch runs its `call` as the branch's node body.
+    "nodes.*.parallel_branches.branches.*.call": "nodes.*",
 }
 
 # Nested keys a running fixture declares and no owning runner reads, keyed by
@@ -586,6 +695,13 @@ KNOWN_UNREAD_NESTED: dict[tuple[str, str], tuple[str, ...]] = {
     # observability: only 084's multi-invocation session case declares it, and
     # that case waits for the sessions capability (proposal 0020).
     ("invocations[]", "session_id"): ("084-langfuse-session-user-promotion",),
+    # pipeline-utilities: the checkpoint runner drives 053 through a
+    # flaky_per_index seam and does not apply its instance middleware, whose
+    # `{retry: {...}}` shape no other fixture uses. Awaiting a spec ruling on the
+    # shape.
+    ("nodes.*.fan_out.instance_middleware[]", "retry"): (
+        "053-checkpoint-fan-out-instance-middleware-retry-resume",
+    ),
 }
 
 # Nested keys a raw-YAML runner counts as read only because the key's string
@@ -618,6 +734,7 @@ POSITION_BLIND_READS: dict[tuple[str, str], tuple[str, ...]] = {
     ("cohere_rerank_provider", "base_url"): ("retrieval-provider",),
     ("cohere_rerank_provider", "model"): ("retrieval-provider",),
     ("direct_call", "operation"): ("observability",),
+    ("edges[]", "when"): ("observability",),
     ("every_save_assertions", "schema_version"): ("pipeline-utilities",),
     ("expected", "execution_order"): (
         "graph-engine",
@@ -663,6 +780,7 @@ POSITION_BLIND_READS: dict[tuple[str, str], tuple[str, ...]] = {
         "graph-engine",
         "pipeline-utilities",
     ),
+    ("expected_error", "transient"): ("pipeline-utilities",),
     ("first_run_expected", "langfuse_trace"): ("observability",),
     ("first_run_expected_error", "category"): (
         "observability",
@@ -772,7 +890,18 @@ POSITION_BLIND_READS: dict[tuple[str, str], tuple[str, ...]] = {
     ("nodes.*.calls_llm", "response_schema"): ("observability",),
     ("nodes.*.calls_llm", "stores_response_in"): ("observability",),
     ("nodes.*.calls_llm", "tools"): ("observability",),
+    ("nodes.*.calls_llm.messages[]", "content"): ("observability",),
+    ("nodes.*.calls_llm.messages[]", "role"): ("observability",),
+    ("nodes.*.calls_llm.messages[].content[]", "type"): ("observability",),
+    ("nodes.*.calls_llm.messages[].content[].source", "type"): ("observability",),
+    ("nodes.*.calls_llm.messages[].content[].source.base64_data_synthetic", "bytes"): ("observability",),
+    ("nodes.*.calls_llm.messages[].content_repeat", "bytes"): ("observability",),
+    ("nodes.*.calls_llm.tools[]", "type"): ("observability",),
+    ("nodes.*.calls_llm.tools[].function", "name"): ("observability",),
+    ("nodes.*.calls_llm.tools[].function", "parameters"): ("observability",),
     ("nodes.*.calls_llm_from_wrapper", "messages"): ("observability",),
+    ("nodes.*.calls_llm_from_wrapper.messages[]", "content"): ("observability",),
+    ("nodes.*.calls_llm_from_wrapper.messages[]", "role"): ("observability",),
     ("nodes.*.calls_rerank", "config"): (
         "observability",
         "retrieval-provider",
@@ -782,6 +911,9 @@ POSITION_BLIND_READS: dict[tuple[str, str], tuple[str, ...]] = {
         "observability",
         "retrieval-provider",
     ),
+    ("nodes.*.calls_tool", "tool_call_id"): ("observability",),
+    ("nodes.*.calls_tool.mock_tool", "raises"): ("observability",),
+    ("nodes.*.calls_tool.mock_tool.raises", "message"): ("observability",),
     ("nodes.*.emits_log", "message"): ("observability",),
     ("nodes.*.fan_out", "error_policy"): (
         "graph-engine",
@@ -794,27 +926,81 @@ POSITION_BLIND_READS: dict[tuple[str, str], tuple[str, ...]] = {
         "observability",
         "pipeline-utilities",
     ),
+    ("nodes.*.fan_out.concurrency", "callable"): ("pipeline-utilities",),
+    ("nodes.*.fan_out.concurrency", "field"): ("pipeline-utilities",),
+    ("nodes.*.fan_out.count", "callable"): ("pipeline-utilities",),
+    ("nodes.*.fan_out.count", "chunk_size"): ("pipeline-utilities",),
+    ("nodes.*.fan_out.count", "field"): ("pipeline-utilities",),
+    ("nodes.*.fan_out.instance_middleware[]", "backoff"): ("pipeline-utilities",),
+    ("nodes.*.fan_out.instance_middleware[]", "degraded_update"): ("pipeline-utilities",),
+    ("nodes.*.fan_out.instance_middleware[]", "event_name"): ("pipeline-utilities",),
+    ("nodes.*.fan_out.instance_middleware[]", "max_attempts"): ("pipeline-utilities",),
+    ("nodes.*.fan_out.instance_middleware[]", "type"): ("pipeline-utilities",),
+    ("nodes.*.fan_out.instance_middleware[].backoff", "seconds"): ("pipeline-utilities",),
+    ("nodes.*.fan_out.instance_middleware[].backoff", "type"): ("pipeline-utilities",),
+    ("nodes.*.fan_out.instance_middleware[].retry", "max_attempts"): ("pipeline-utilities",),
     ("nodes.*.flaky", "category"): ("observability",),
     ("nodes.*.flaky", "on_success"): (
         "observability",
         "pipeline-utilities",
     ),
+    ("nodes.*.flaky.failure_sequence[]", "category"): ("pipeline-utilities",),
+    ("nodes.*.flaky.failure_sequence[]", "message"): ("pipeline-utilities",),
+    ("nodes.*.flaky.failure_sequence[]", "transient"): ("pipeline-utilities",),
+    ("nodes.*.flaky.failure_sequence[].cause", "category"): ("pipeline-utilities",),
+    ("nodes.*.flaky.failure_sequence[].cause", "message"): ("pipeline-utilities",),
     ("nodes.*.flaky_by_index", "category"): ("pipeline-utilities",),
     ("nodes.*.flaky_by_index", "success_compute"): ("pipeline-utilities",),
     ("nodes.*.flaky_instance_only", "category"): ("pipeline-utilities",),
     ("nodes.*.flaky_instance_only", "success_compute"): ("pipeline-utilities",),
     ("nodes.*.flaky_per_index", "success_compute"): ("pipeline-utilities",),
+    ("nodes.*.middleware[]", "backoff"): ("observability",),
     ("nodes.*.middleware[]", "classifier"): ("observability",),
+    ("nodes.*.middleware[]", "degraded_update"): ("pipeline-utilities",),
+    ("nodes.*.middleware[]", "event_name"): ("pipeline-utilities",),
     ("nodes.*.middleware[]", "max_attempts"): ("observability",),
     ("nodes.*.middleware[]", "type"): (
         "observability",
         "pipeline-utilities",
     ),
+    ("nodes.*.middleware[].backoff", "seconds"): ("observability",),
+    ("nodes.*.middleware[].backoff", "type"): ("observability",),
     ("nodes.*.parallel_branches", "error_policy"): (
         "observability",
         "pipeline-utilities",
     ),
     ("nodes.*.parallel_branches", "errors_field"): ("pipeline-utilities",),
+    ("nodes.*.parallel_branches.branches.*", "augment_metadata"): ("observability",),
+    ("nodes.*.parallel_branches.branches.*", "call"): (
+        "observability",
+        "pipeline-utilities",
+    ),
+    ("nodes.*.parallel_branches.branches.*", "middleware"): ("pipeline-utilities",),
+    ("nodes.*.parallel_branches.branches.*", "outputs"): (
+        "graph-engine",
+        "observability",
+        "pipeline-utilities",
+    ),
+    ("nodes.*.parallel_branches.branches.*", "subgraph"): (
+        "graph-engine",
+        "observability",
+        "pipeline-utilities",
+    ),
+    ("nodes.*.parallel_branches.branches.*", "when"): (
+        "observability",
+        "pipeline-utilities",
+    ),
+    ("nodes.*.parallel_branches.branches.*.middleware[]", "backoff"): ("pipeline-utilities",),
+    ("nodes.*.parallel_branches.branches.*.middleware[]", "degraded_update"): ("pipeline-utilities",),
+    ("nodes.*.parallel_branches.branches.*.middleware[]", "event_name"): ("pipeline-utilities",),
+    ("nodes.*.parallel_branches.branches.*.middleware[]", "max_attempts"): ("pipeline-utilities",),
+    ("nodes.*.parallel_branches.branches.*.middleware[]", "type"): ("pipeline-utilities",),
+    ("nodes.*.parallel_branches.branches.*.middleware[].backoff", "seconds"): ("pipeline-utilities",),
+    ("nodes.*.parallel_branches.branches.*.middleware[].backoff", "type"): ("pipeline-utilities",),
+    ("nodes.*.parallel_branches.branches.*.when", "field"): (
+        "observability",
+        "pipeline-utilities",
+    ),
     ("nodes.*.per_attempt_behavior[]", "augment_metadata"): ("observability",),
     ("nodes.*.per_attempt_behavior[]", "capture_invocation_metadata_into"): ("observability",),
     ("nodes.*.per_attempt_behavior[]", "raises"): ("observability",),
