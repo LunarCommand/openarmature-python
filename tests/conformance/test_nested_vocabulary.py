@@ -106,6 +106,24 @@ def _captures(doc: dict[str, Any]) -> set[str]:
     return names
 
 
+def _node_mapping_blocks(
+    position: str, where: str, block: dict[str, Any]
+) -> Iterator[tuple[str, str, dict[str, Any]]]:
+    """`(position, where, block)` for each closed node mapping inside `block`, at any depth."""
+    for key, value in block.items():
+        path = f"{position}.{key}"
+        children: list[tuple[str, str, dict[str, Any]]] = []
+        if path in NODE_MAPPINGS and (mapping := _as_dict(value)) is not None:
+            children = [(path, f"{where}.{key}", mapping)]
+        elif f"{path}[]" in NODE_MAPPINGS:
+            children = [
+                (f"{path}[]", f"{where}.{key}[{i}]", entry) for i, entry in enumerate(_as_dicts(value))
+            ]
+        for child, child_where, child_block in children:
+            yield child, child_where, child_block
+            yield from _node_mapping_blocks(child, child_where, child_block)
+
+
 def _blocks(doc: dict[str, Any]) -> Iterator[tuple[str, str, dict[str, Any]]]:
     """`(position, where, block)` for every nested block a fixture carries."""
     for container in case_level._containers(doc):  # noqa: SLF001
@@ -126,13 +144,7 @@ def _blocks(doc: dict[str, Any]) -> Iterator[tuple[str, str, dict[str, Any]]]:
                     yield "expected", f"{where}.{list_key}[{i}]", expected
         for path, spec in _node_specs(container):
             yield "nodes.*", f"{where}.{path}", spec
-            for key, value in spec.items():
-                position = f"nodes.*.{key}"
-                if position in NODE_MAPPINGS and (block := _as_dict(value)) is not None:
-                    yield position, f"{where}.{path}.{key}", block
-                elif f"{position}[]" in NODE_MAPPINGS:
-                    for i, entry in enumerate(_as_dicts(value)):
-                        yield f"{position}[]", f"{where}.{path}.{key}[{i}]", entry
+            yield from _node_mapping_blocks("nodes.*", f"{where}.{path}", spec)
         for key, value in container.items():
             if key in CASE_MAPPINGS and (block := _as_dict(value)) is not None:
                 yield key, f"{where}.{key}", block
@@ -463,7 +475,7 @@ def test_every_case_level_mapping_is_placed() -> None:
 
 def test_every_node_level_mapping_is_placed() -> None:
     used = {
-        str(key)
+        f"nodes.*.{key}"
         for _, _, doc in case_level._fixture_docs()  # noqa: SLF001
         for container in case_level._containers(doc)  # noqa: SLF001
         for _, spec in _node_specs(container)
@@ -472,9 +484,7 @@ def test_every_node_level_mapping_is_placed() -> None:
     }
     groups = {
         "open": frozenset(NODE_OPEN_MAPPINGS),
-        "closed": frozenset(
-            position.removeprefix("nodes.*.").removesuffix("[]") for position in NODE_MAPPINGS
-        ),
+        "closed": frozenset(position.removesuffix("[]") for position in NODE_MAPPINGS),
     }
     _assert_placed(
         "node-level",

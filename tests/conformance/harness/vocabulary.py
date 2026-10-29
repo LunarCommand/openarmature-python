@@ -460,23 +460,24 @@ CASE_MAPPINGS: dict[str, MappingVocabulary] = {
     ),
 }
 
-# Node keys whose value is a mapping, or a list of mappings, are placed the same
-# way one level down. No node key holds a subgraph body or falls outside the
+# Inside a node spec, and inside each closed node mapping below it, a key whose
+# value is a mapping, or a list of mappings, is placed by its path, such as
+# `nodes.*.update`. No node key holds a subgraph body or falls outside the
 # vocabulary rule, so a node mapping is either open or closed.
 NODE_OPEN_MAPPINGS: dict[str, str] = {
-    "augment_metadata": "metadata keys the node chooses",
-    "inputs": "state field names, mapped from parent to subgraph",
-    "outputs": "state field names, mapped from subgraph to parent",
-    "update": "state field names",
-    "update_from_field": "target state field names, plus the reserved `multiplier`",
-    "update_pure": "state field names",
-    "update_pure_from_state": "target state field names",
+    "nodes.*.augment_metadata": "metadata keys the node chooses",
+    "nodes.*.inputs": "state field names, mapped from parent to subgraph",
+    "nodes.*.outputs": "state field names, mapped from subgraph to parent",
+    "nodes.*.update": "state field names",
+    "nodes.*.update_from_field": "target state field names, plus the reserved `multiplier`",
+    "nodes.*.update_pure": "state field names",
+    "nodes.*.update_pure_from_state": "target state field names",
 }
 
 # Every other node mapping is a closed vocabulary and a position of its own,
-# `nodes.*.<key>`, or `nodes.*.<key>[]` for each entry of a list, held to the
-# same two obligations. The models are the `NodeSpec` field types; they do not
-# declare every key, and the extras add the rest.
+# held to the same two obligations: `<path>` for a mapping, `<path>[]` for each
+# entry of a list. The models are the field types of the mapping that holds it;
+# they do not declare every key, and the extras add the rest.
 NODE_MAPPINGS: dict[str, MappingVocabulary] = {
     "nodes.*.also_emits_via_global_tracer": MappingVocabulary(
         ("tests.conformance.harness.directives.GlobalTracerSpec",)
