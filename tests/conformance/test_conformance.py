@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import time
 import warnings
+from collections import Counter, defaultdict
 from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any, cast
@@ -477,10 +478,15 @@ async def _run_runtime_case(spec: Mapping[str, Any], fixture_id: str) -> None:
                         f"invocation {inv_idx} observer {name!r}",
                     )
 
+            label = f"invocation {inv_idx}: "
             # Per-invocation invariants (e.g.,
             # `drain_returned_within_timeout` on the timed first
             # invocation in fixture 024).
             inv_invariants: dict[str, Any] = inv_expected.get("invariants") or {}
+            if not drain_nodes:
+                _assert_generic_invariants(
+                    inv_invariants, frozenset({"drain_returned_within_timeout"}), label
+                )
             if inv_invariants.get("drain_returned_within_timeout"):
                 assert inv_timeout is not None
                 assert inv_drain_elapsed < inv_timeout + 0.4, (
@@ -488,7 +494,6 @@ async def _run_runtime_case(spec: Mapping[str, Any], fixture_id: str) -> None:
                     f"elapsed={inv_drain_elapsed:.3f}s, timeout={inv_timeout}s"
                 )
 
-            label = f"invocation {inv_idx}: "
             _assert_node_drains(inv_expected, drain_harness, inv_idx, label)
             if drain_nodes:
                 own = [d for d in drain_harness.drains if d.invocation_index == inv_idx]
@@ -500,6 +505,10 @@ async def _run_runtime_case(spec: Mapping[str, Any], fixture_id: str) -> None:
         top_invariants: dict[str, Any] = spec.get("invariants") or {}
         if drain_nodes:
             _check_drain_invariants(top_invariants, drain_harness.drains, drain_harness, "")
+        else:
+            _assert_generic_invariants(
+                top_invariants, frozenset({"second_invocation_drain_independent_of_first"}), ""
+            )
         if top_invariants.get("second_invocation_drain_independent_of_first"):
             # The fact that we reached this point with all per-invocation
             # assertions passing IS the proof of cross-invocation
@@ -520,6 +529,9 @@ async def _run_runtime_case(spec: Mapping[str, Any], fixture_id: str) -> None:
         assert excinfo.value.category == nested_error["category"]
         if "message" in nested_error:
             assert str(excinfo.value.__cause__) == nested_error["message"]
+        if not drain_nodes:
+            # This path evaluates none of the success path's invariants.
+            _assert_generic_invariants(expected.get("invariants") or {}, frozenset(), "")
     else:
         # Happy path (001–006, 011, 012, 013, 015, 022–025).
         # `invoke.drain.timeout_seconds` is the proposal 0010 drain
@@ -582,6 +594,18 @@ async def _run_runtime_case(spec: Mapping[str, Any], fixture_id: str) -> None:
         # is a fixture-level assertion the harness verifies separately
         # from drain_summary.
         invariants: dict[str, Any] = expected.get("invariants") or {}
+        if not drain_nodes:
+            _assert_generic_invariants(
+                invariants,
+                frozenset(
+                    {
+                        "drain_returned_within_timeout",
+                        "graph_state_intact_after_timeout",
+                        "drain_waited_for_all_events",
+                    }
+                ),
+                "",
+            )
         if invariants.get("drain_returned_within_timeout"):
             assert timeout is not None, "drain_returned_within_timeout invariant requires a timeout"
             # Allow generous slack for cancellation settlement + CI
@@ -644,66 +668,209 @@ async def _run_runtime_case(spec: Mapping[str, Any], fixture_id: str) -> None:
             )
 
 
-# ---------------------------------------------------------------------------
-# Fixture 020 — observer edge-error events (proposal 0012 / spec v0.9.0)
-#
-# Two sub-cases verifying §3 step 3 (revised) + §6 (revised): edge-resolution
-# failures (routing_error, edge_exception) land on the preceding node's
-# completed event with `error` populated, sharing the started/completed pair
-# rather than producing a separate event pair.
-#
-# Custom driver (rather than the generic harness) because fixture 020's
-# edge-condition `callable:` directives (`state_field_read`, `edge_raises`)
-# don't match the adapter DSL's `if_field/equals/then/else` shape — these
-# directives are spec-defined just for this fixture's two sub-cases. The
-# semantic intent is captured directly here.
-# ---------------------------------------------------------------------------
+_Events = list[dict[str, Any]]
+_Select = Callable[[_Events], _Events]
+_EventInvariant = Callable[[Any, _Events], None]
+
+# 017's identity, as its comment states it.
+_IDENTITY_017 = ("namespace", "fan_out_index", "attempt_index", "phase")
+# graph-engine section 6's identity, and the same with 039's chains added.
+_SCALAR_IDENTITY = ("namespace", "branch_name", "fan_out_index", "attempt_index", "phase")
+_CHAIN_IDENTITY = (*_SCALAR_IDENTITY, "fan_out_index_chain", "branch_name_chain")
+
+
+def _of_node(node: str) -> _Select:
+    # A predicate names a node by its name alone, which reaches a nested node
+    # as well as a top-level one, so the name has to pick out a single node.
+    def select(events: _Events) -> _Events:
+        selected = [ev for ev in events if ev["node_name"] == node]
+        namespaces = sorted({tuple(ev["namespace"]) for ev in selected})
+        assert len(namespaces) <= 1, (
+            f"node name {node!r} matches events under several namespaces: {namespaces}"
+        )
+        return selected
+
+    return select
+
+
+def _inner(events: _Events) -> _Events:
+    # An inner event is one from below the top-level node.
+    return [ev for ev in events if len(ev["namespace"]) > 1]
+
+
+def _identity(ev: Mapping[str, Any], keys: tuple[str, ...]) -> tuple[Any, ...]:
+    # The namespace and the chains are lists, so they become tuples to hash.
+    values = [ev.get(key) for key in keys]
+    return tuple(tuple(cast("list[Any]", v)) if isinstance(v, list) else v for v in values)
+
+
+def _innermost(chain: list[Any]) -> Any:
+    return next((element for element in reversed(chain) if element is not None), None)
+
+
+def _scalar_is_innermost(ev: Mapping[str, Any]) -> bool:
+    # 039's leaf chains form a full grid, so a reversed chain still matches the
+    # chains it lists. This comparison is what catches the reversal.
+    return ev.get("fan_out_index") == _innermost(ev["fan_out_index_chain"])
+
+
+def _event_count(select: _Select) -> _EventInvariant:
+    def check(expected: Any, events: _Events) -> None:
+        got = len(select(events))
+        assert got == expected, f"{got} events, expected {expected}"
+
+    return check
+
+
+def _values_seen(select: _Select, key: str) -> _EventInvariant:
+    def check(expected: Any, events: _Events) -> None:
+        # An event missing the key counts as None and fails the match.
+        seen = {ev.get(key) for ev in select(events)}
+        assert seen == set(expected), f"{key} values seen: {sorted(seen, key=repr)}, expected {expected}"
+
+    return check
+
+
+def _chains_seen(select: _Select, key: str) -> _EventInvariant:
+    def check(expected: Any, events: _Events) -> None:
+        seen = {tuple(ev[key]) for ev in select(events)}
+        want = {tuple(chain) for chain in expected}
+        assert seen == want, f"{key}s seen: {sorted(seen, key=repr)}, expected {expected}"
+
+    return check
+
+
+def _flag(check: Callable[[_Events], None]) -> _EventInvariant:
+    def run(value: Any, events: _Events) -> None:
+        assert value is True, f"only `true` is supported; got {value!r}"
+        check(events)
+
+    return run
+
+
+def _all(select: _Select, holds: Callable[[dict[str, Any]], bool]) -> _EventInvariant:
+    def check(events: _Events) -> None:
+        selected = select(events)
+        assert selected, "no events to check"
+        failing = [_identity(ev, _CHAIN_IDENTITY) for ev in selected if not holds(ev)]
+        assert not failing, f"{len(failing)} of {len(selected)} events fail, by {_CHAIN_IDENTITY}: {failing}"
+
+    return _flag(check)
+
+
+def _key_absent(select: _Select, key: str) -> _EventInvariant:
+    return _all(select, lambda ev: key not in ev)
+
+
+def _identities_unique(select: _Select, keys: tuple[str, ...]) -> _EventInvariant:
+    def check(events: _Events) -> None:
+        selected = select(events)
+        assert selected, "no events to check"
+        counts = Counter(_identity(ev, keys) for ev in selected)
+        repeated = sorted((identity for identity, n in counts.items() if n > 1), key=repr)
+        assert not repeated, f"identities {keys} repeat: {repeated}"
+
+    return _flag(check)
+
+
+def _scalar_identity_spans_outer_instances(select: _Select) -> _EventInvariant:
+    def check(events: _Events) -> None:
+        selected = select(events)
+        assert selected, "no events to check"
+        outer_instances: dict[tuple[Any, ...], set[Any]] = defaultdict(set)
+        for ev in selected:
+            chain = cast("list[Any]", ev["fan_out_index_chain"])
+            outer_instances[_identity(ev, _SCALAR_IDENTITY)].add(chain[0] if chain else None)
+        assert any(len(instances) > 1 for instances in outer_instances.values()), (
+            "no scalar identity is shared by events from different outer instances"
+        )
+
+    return _flag(check)
+
+
+def _outermost_events_have_no_branch_name(config: Any, events: _Events) -> None:
+    nodes = cast("list[str]", config.get("nodes") or [])
+    assert nodes, "names no nodes"
+    for node in nodes:
+        node_events = _of_node(node)(events)
+        assert node_events, f"node {node!r} produced no events"
+        carried = [ev["branch_name"] for ev in node_events if "branch_name" in ev]
+        assert not carried, f"outermost node {node!r} events MUST NOT carry branch_name; got {carried}"
+
+
+def _inner_events_carry_correct_branch_name(config: Any, events: _Events) -> None:
+    branches = cast("dict[str, str]", config)
+    assert branches, "names no nodes"
+    for node, branch in branches.items():
+        node_events = _of_node(node)(events)
+        assert node_events, f"node {node!r} produced no events"
+        got = [ev.get("branch_name") for ev in node_events]
+        assert all(name == branch for name in got), (
+            f"inner node {node!r} expected branch_name={branch!r}, got {got}"
+        )
+
+
+# The predicates graph-engine fixtures declare under `observer_event_invariants`.
+# Per conformance-adapter section 5.9 these are fixture-specific predicates the
+# adapter MUST implement; 017 and 039 define theirs in their comments and .md.
+_EVENT_INVARIANTS: dict[str, _EventInvariant] = {
+    # 017
+    "pre_node_events_count": _event_count(_of_node("pre")),
+    "pre_node_fan_out_index_absent": _key_absent(_of_node("pre"), "fan_out_index"),
+    "process_node_events_count": _event_count(_of_node("process")),
+    "process_node_fan_out_index_absent": _key_absent(_of_node("process"), "fan_out_index"),
+    "inner_event_count": _event_count(_inner),
+    "inner_fan_out_indices_seen": _values_seen(_inner, "fan_out_index"),
+    "inner_attempt_indices_seen": _values_seen(_inner, "attempt_index"),
+    "inner_event_identities_unique": _identities_unique(_inner, _IDENTITY_017),
+    # 021
+    "outermost_events_have_no_branch_name": _outermost_events_have_no_branch_name,
+    "inner_events_carry_correct_branch_name": _inner_events_carry_correct_branch_name,
+    # 039
+    "outer_fan_out_node_events_count": _event_count(_of_node("outer_fan_out")),
+    "outer_fan_out_node_fan_out_index_chain_empty": _all(
+        _of_node("outer_fan_out"), lambda ev: ev["fan_out_index_chain"] == []
+    ),
+    "outer_fan_out_node_fan_out_index_absent": _key_absent(_of_node("outer_fan_out"), "fan_out_index"),
+    "inner_fan_out_node_events_count": _event_count(_of_node("inner_fan_out")),
+    "inner_fan_out_node_fan_out_index_chains_seen": _chains_seen(
+        _of_node("inner_fan_out"), "fan_out_index_chain"
+    ),
+    "inner_fan_out_node_branch_name_chains_seen": _chains_seen(
+        _of_node("inner_fan_out"), "branch_name_chain"
+    ),
+    "inner_fan_out_node_scalar_fan_out_index_equals_innermost_chain_element": _all(
+        _of_node("inner_fan_out"), _scalar_is_innermost
+    ),
+    "inner_fan_out_node_scalar_branch_name_absent": _key_absent(_of_node("inner_fan_out"), "branch_name"),
+    "leaf_node_events_count": _event_count(_of_node("leaf")),
+    "leaf_fan_out_index_chains_seen": _chains_seen(_of_node("leaf"), "fan_out_index_chain"),
+    "leaf_branch_name_chains_seen": _chains_seen(_of_node("leaf"), "branch_name_chain"),
+    "leaf_scalar_fan_out_index_equals_innermost_chain_element": _all(_of_node("leaf"), _scalar_is_innermost),
+    "leaf_scalar_branch_name_absent": _key_absent(_of_node("leaf"), "branch_name"),
+    "leaf_event_identities_unique_by_chain": _identities_unique(_of_node("leaf"), _CHAIN_IDENTITY),
+    "leaf_scalar_fan_out_index_not_unique_across_outer_instances": _scalar_identity_spans_outer_instances(
+        _of_node("leaf")
+    ),
+}
 
 
 def _check_event_invariants(
     invariants: Mapping[str, Any],
     observer_fixtures: Mapping[str, ObserverFixture],
 ) -> None:
-    """Verify ``observer_event_invariants`` block contents against the
-    captured observer events. Each named invariant has a recognized
-    shape used by one or more fixtures (021 parallel-branches
-    branch_name on inner-node events).
-
-    Fixtures consult the first observer's events as the canonical
-    stream; multi-observer fixtures author their assertions against the
-    `observer_events` block instead.
-    """
-    if not observer_fixtures:
-        return
-    first_obs = next(iter(observer_fixtures.values()))
-    events = first_obs.events
-
-    no_branch_name_cfg = cast(
-        "dict[str, Any] | None",
-        invariants.get("outermost_events_have_no_branch_name"),
-    )
-    if no_branch_name_cfg is not None:
-        node_names = cast("list[str]", no_branch_name_cfg.get("nodes") or [])
-        for ev in events:
-            if ev["node_name"] in node_names:
-                assert "branch_name" not in ev, (
-                    f"outermost node {ev['node_name']!r} event MUST NOT carry "
-                    f"branch_name; got {ev.get('branch_name')!r}"
-                )
-
-    inner_branch_cfg = cast(
-        "dict[str, str] | None",
-        invariants.get("inner_events_carry_correct_branch_name"),
-    )
-    if inner_branch_cfg is not None:
-        for ev in events:
-            expected_branch = inner_branch_cfg.get(ev["node_name"])
-            if expected_branch is None:
-                continue
-            assert ev.get("branch_name") == expected_branch, (
-                f"inner node {ev['node_name']!r} expected branch_name={expected_branch!r}, "
-                f"got {ev.get('branch_name')!r}"
-            )
+    """Check ``observer_event_invariants`` against the events the first
+    observer recorded; multi-observer fixtures assert against
+    ``observer_events`` instead. A name with no check here fails."""
+    unknown = sorted(set(invariants) - set(_EVENT_INVARIANTS))
+    assert not unknown, f"unhandled observer_event_invariants: {unknown}"
+    assert observer_fixtures, "observer_event_invariants needs an observer to check against"
+    events = next(iter(observer_fixtures.values())).events
+    for name, value in invariants.items():
+        try:
+            _EVENT_INVARIANTS[name](value, events)
+        except AssertionError as e:
+            raise AssertionError(f"observer_event_invariants {name}: {e}") from e
 
 
 def _drain_nodes(graph_spec: Mapping[str, Any]) -> set[str]:
@@ -723,8 +890,8 @@ def _drain_of(harness: DrainHarness, node: str, invocation_index: int) -> NodeDr
 
 def _snapshot_predicate(snapshot: list[dict[str, Any]], name: str) -> Any:
     # The `node_accumulator_snapshot_invariants` predicates fixtures 032 and
-    # 033 declare. An inner event is one from below the top-level node.
-    inner = [e for e in snapshot if len(e["namespace"]) > 1]
+    # 033 declare.
+    inner = _inner(snapshot)
     if name == "inner_event_count":
         return len(inner)
     for predicate, key in (
@@ -739,10 +906,10 @@ def _snapshot_predicate(snapshot: list[dict[str, Any]], name: str) -> Any:
     for suffix, phase in (("_started_present", "started"), ("_completed_present", "completed")):
         if name.endswith(suffix):
             node = name.removesuffix(suffix)
-            return any(e["namespace"] == [node] and e["phase"] == phase for e in snapshot)
+            return any(e["phase"] == phase for e in _of_node(node)(snapshot))
     if name.endswith("_node_events_count"):
         node = name.removesuffix("_node_events_count")
-        return sum(e["namespace"] == [node] for e in snapshot)
+        return len(_of_node(node)(snapshot))
     raise AssertionError(f"unknown accumulator snapshot predicate {name!r}")
 
 
@@ -922,6 +1089,32 @@ def _check_drain_invariants(
             check(drains, harness)
         except AssertionError as e:
             raise AssertionError(f"{label}invariant {name!r}: {e}") from e
+
+
+def _assert_generic_invariants(block: Mapping[str, Any], handled: frozenset[str], label: str) -> None:
+    """Fail on an invariant name outside ``handled``, or one not set to
+    true. Not for a drain fixture, whose block ``_check_drain_invariants``
+    checks name by name."""
+    unknown = sorted(set(block) - handled)
+    assert not unknown, f"{label}unhandled invariant(s): {unknown}"
+    for name, value in block.items():
+        assert value is True, f"{label}invariant {name}: only `true` is supported; got {value!r}"
+
+
+# ---------------------------------------------------------------------------
+# Fixture 020 — observer edge-error events (proposal 0012 / spec v0.9.0)
+#
+# Two sub-cases verifying §3 step 3 (revised) + §6 (revised): edge-resolution
+# failures (routing_error, edge_exception) land on the preceding node's
+# completed event with `error` populated, sharing the started/completed pair
+# rather than producing a separate event pair.
+#
+# Custom driver (rather than the generic harness) because fixture 020's
+# edge-condition `callable:` directives (`state_field_read`, `edge_raises`)
+# don't match the adapter DSL's `if_field/equals/then/else` shape — these
+# directives are spec-defined just for this fixture's two sub-cases. The
+# semantic intent is captured directly here.
+# ---------------------------------------------------------------------------
 
 
 async def _run_fixture_020(spec: Mapping[str, Any]) -> None:
