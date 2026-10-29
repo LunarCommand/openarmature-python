@@ -529,6 +529,9 @@ async def _run_runtime_case(spec: Mapping[str, Any], fixture_id: str) -> None:
         assert excinfo.value.category == nested_error["category"]
         if "message" in nested_error:
             assert str(excinfo.value.__cause__) == nested_error["message"]
+        if not drain_nodes:
+            # This path evaluates none of the success path's invariants.
+            _assert_generic_invariants(expected.get("invariants") or {}, frozenset(), "")
     else:
         # Happy path (001–006, 011, 012, 013, 015, 022–025).
         # `invoke.drain.timeout_seconds` is the proposal 0010 drain
