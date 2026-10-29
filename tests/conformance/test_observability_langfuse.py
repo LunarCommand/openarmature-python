@@ -1875,18 +1875,13 @@ async def _run_langfuse_134_case1(case: Mapping[str, Any]) -> None:
 async def _run_langfuse_134_case2(case: Mapping[str, Any]) -> None:
     # Case 2 (mirrors OTel 133): the `guard` node's BODY returns marker=1; a
     # WRAPPER issues one orphan provider.complete and DISCARDS the response. The
-    # harness realizes the fixture's "per-node `guard` middleware" as INSTANCE
-    # middleware on the inner fan-out -- the same realization as the OTel 133
-    # harness (see the note there). ONE axis, forced by the observers' real
-    # timing; the orphan SEMANTIC and the oracle observation tree are preserved:
-    #   1. Instance middleware, not per-node middleware on `guard`: a per-node
-    #      wrapper's call carries guard's lineage and binds to guard's own
-    #      observation, not orphaned. The fan-out instance wrapper keeps the
-    #      orphan call's lineage at the fan-out boundary, so its Generation falls
-    #      back to the nearest enclosing wrapper -- the inner fan-out INSTANCE Span
-    #      observation -- a sibling of the `guard` Span. `leaf_sg` is the single
-    #      `guard` node, so the instance wrapper IS guard's wrapper; the directive
-    #      is read from the `guard` node spec.
+    # wrapper is node middleware on `guard`, as conformance-adapter §5.1 defines
+    # the primitive, so its call carries guard's lineage; the engine's record
+    # that it was issued outside the node body is what keeps its Generation off
+    # guard's observation. It falls back to the nearest enclosing wrapper, the
+    # inner fan-out INSTANCE Span observation, a sibling of the `guard` Span.
+    # `leaf_sg` is the single `guard` node, and the directive is read from its
+    # spec.
     #
     # The phase is the fixture's. This driver used to hardcode POST because the
     # observer created the inner instance observation lazily, so a pre-phase
@@ -1978,10 +1973,10 @@ async def _run_langfuse_134_case2(case: Mapping[str, Any]) -> None:
         return dict(update_map)
 
     async def _wrapper_mw(state: Any, next_call: Any) -> Mapping[str, Any]:
-        # The phase comes from the fixture: at `pre` the inner subgraph `guard`
-        # has not run, at `post` its observation has closed, and either way the
-        # orphan Generation falls back to the inner fan-out INSTANCE Span
-        # observation (see the realization note above).
+        # Node middleware on `guard`. The phase comes from the fixture: at `pre`
+        # the call precedes guard's observation, at `post` it follows it, and
+        # either way the orphan Generation falls back to the inner fan-out
+        # INSTANCE Span observation.
         #
         # Section 5.1's barrier only bites at `pre`: at `post` the node body has
         # already run and its `started` event has synthesized the dispatch
@@ -1995,13 +1990,11 @@ async def _run_langfuse_134_case2(case: Mapping[str, Any]) -> None:
 
     leaf_sg = (
         GraphBuilder(leaf_state_cls)
-        .add_node("guard", _guard_body)
+        .add_node("guard", _guard_body, middleware=[_wrapper_mw])
         .add_edge("guard", END)
         .set_entry("guard")
         .compile()
     )
-    # Attach the orphan-call wrapper as INSTANCE middleware on the inner fan-out
-    # (see the realization note above).
     mid_spec = cast("dict[str, Any]", subgraphs_spec["mid"])
     mid_state_cls = build_state_cls(
         "Mid134C2", cast("dict[str, dict[str, Any]]", mid_spec["state"]["fields"])
@@ -2020,7 +2013,6 @@ async def _run_langfuse_134_case2(case: Mapping[str, Any]) -> None:
             target_field=cast("str", inner_fo["target_field"]),
             error_policy=cast("str", inner_fo.get("error_policy", "fail_fast")),
             subgraph_identity=cast("str", inner_fo["subgraph"]),
-            instance_middleware=[_wrapper_mw],
         )
         .add_edge("inner_fan_out", END)
         .set_entry("inner_fan_out")
