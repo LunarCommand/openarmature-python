@@ -631,6 +631,24 @@ NODE_FORWARDED_MAPPINGS: dict[str, str] = {
     "nodes.*.calls_rerank.config": "openarmature.retrieval.RerankRuntimeConfig",
 }
 
+# The runner functions that hand each forwarded mapping to its type, held both
+# ways: every function in an owning runner that builds the type from a mapping is
+# listed, and each one passes the mapping whole.
+FORWARDING_BUILDERS: dict[str, tuple[str, ...]] = {
+    "nodes.*.calls_embed.config": (
+        "tests.conformance.test_observability._build_embedding_runtime_config",
+        "tests.conformance.test_retrieval_provider._build_config",
+    ),
+    "nodes.*.calls_llm.config": (
+        "tests.conformance.test_observability._build_runtime_config",
+        "tests.conformance.test_observability_langfuse._runtime_config_from_spec",
+    ),
+    "nodes.*.calls_rerank.config": (
+        "tests.conformance.test_observability._build_rerank_runtime_config",
+        "tests.conformance.test_retrieval_provider._build_rerank_config",
+    ),
+}
+
 # A path whose mapping has the shape of a registered position, mapped to it.
 NODE_MAPPING_ALIASES: dict[str, str] = {
     # A callable branch runs its `call` as the branch's node body.

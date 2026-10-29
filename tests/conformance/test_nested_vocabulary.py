@@ -26,11 +26,12 @@ from collections import Counter, defaultdict
 from collections.abc import Iterator
 from typing import Any, cast, get_args
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 from . import test_case_vocabulary as case_level
 from .harness.vocabulary import (
     CASE_MAPPINGS,
+    FORWARDING_BUILDERS,
     KNOWN_UNREAD_NESTED,
     NESTED_EXTRAS,
     NESTED_MODELS,
@@ -557,25 +558,85 @@ def test_every_forwarded_key_is_a_field_of_its_type() -> None:
     )
 
 
-def test_every_forwarded_mapping_is_handed_to_its_type() -> None:
-    # Handing the mapping to the type is the read, so a runner that owns a
-    # running fixture declaring it has to build the type from a mapping.
+def _calls_unpacking_into(fn: ast.AST, type_name: str) -> bool:
+    """Whether `fn` calls `type_name` with a `**` argument."""
+    for node in ast.walk(fn):
+        if isinstance(node, ast.Call) and any(keyword.arg is None for keyword in node.keywords):
+            func = node.func
+            called = (
+                func.id
+                if isinstance(func, ast.Name)
+                else func.attr
+                if isinstance(func, ast.Attribute)
+                else None
+            )
+            if called == type_name:
+                return True
+    return False
+
+
+def _builders_in(runner: str, src: str, type_name: str) -> set[str]:
+    """`module.function` for each function in `src` that builds `type_name` from a mapping."""
+    module = runner.removesuffix(".py").replace("/", ".")
+    found: set[str] = set()
+    for node in ast.parse(src).body:
+        defs: list[tuple[str, ast.AST]] = []
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            defs.append((node.name, node))
+        elif isinstance(node, ast.ClassDef):
+            defs.extend(
+                (f"{node.name}.{member.name}", member)
+                for member in node.body
+                if isinstance(member, (ast.FunctionDef, ast.AsyncFunctionDef))
+            )
+        found.update(f"{module}.{name}" for name, fn in defs if _calls_unpacking_into(fn, type_name))
+    return found
+
+
+def test_every_builder_of_a_forwarded_type_is_declared() -> None:
+    # Building the type from a mapping is where a runner hands the mapping over,
+    # so every function in an owning runner that does it must be declared, and
+    # the next test checks each one passes the mapping whole. The type is matched
+    # by its exact name: `EmbeddingRuntimeConfig(**...)` builds no RuntimeConfig.
     sources = case_level._runner_sources()  # noqa: SLF001
     owners = case_level._runner_owners()  # noqa: SLF001
     fixture_owners = case_level._fixture_owners()  # noqa: SLF001
     executed = case_level._executed_fixture_ids()  # noqa: SLF001
-    missing = sorted(
-        {
-            (capability, path)
-            for capability, fixture, path, _ in _forwarded_blocks()
-            if fixture in executed
-            and not any(
-                f"{_forwarded_type(path).__name__}(**" in sources[runner]
-                for runner in owners[capability] | fixture_owners.get(fixture, frozenset())
-            )
-        }
+    runners: dict[str, set[str]] = defaultdict(set)
+    for capability, fixture, path, _ in _forwarded_blocks():
+        if fixture in executed:
+            runners[path] |= owners[capability] | fixture_owners.get(fixture, frozenset())
+    assert set(runners) == set(NODE_FORWARDED_MAPPINGS), (
+        f"no running fixture forwards {sorted(set(NODE_FORWARDED_MAPPINGS) - set(runners))}"
     )
-    assert not missing, f"no owning runner builds the type from the mapping: {missing}"
+    assert set(FORWARDING_BUILDERS) == set(NODE_FORWARDED_MAPPINGS), (
+        f"FORWARDING_BUILDERS names {sorted(FORWARDING_BUILDERS)}, the forwarded mappings are "
+        f"{sorted(NODE_FORWARDED_MAPPINGS)}"
+    )
+    for path in sorted(NODE_FORWARDED_MAPPINGS):
+        type_name = _forwarded_type(path).__name__
+        found = set[str]().union(*(_builders_in(r, sources[r], type_name) for r in runners[path]))
+        assert found == set(FORWARDING_BUILDERS[path]), (
+            f"{path}: owning runners build {type_name} from a mapping in {sorted(found)}, "
+            f"FORWARDING_BUILDERS declares {sorted(FORWARDING_BUILDERS[path])}"
+        )
+
+
+def test_every_forwarding_builder_passes_the_whole_mapping() -> None:
+    # A builder that copies only the keys it knows drops an unknown one in
+    # silence; one that passes the mapping whole lets the type reject it. Killed
+    # by the LLM config builders this replaced, which copied seven named keys.
+    dropped: list[str] = []
+    for builders in FORWARDING_BUILDERS.values():
+        for dotted in builders:
+            module, _, name = dotted.rpartition(".")
+            builder = getattr(importlib.import_module(module), name)
+            try:
+                builder({"_probe_unknown_key": 1})
+            except ValidationError:
+                continue
+            dropped.append(dotted)
+    assert not dropped, f"builder(s) that accept a key their type does not declare: {dropped}"
 
 
 def test_every_nested_key_is_recognized() -> None:
