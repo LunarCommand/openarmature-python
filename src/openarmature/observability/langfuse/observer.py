@@ -2407,10 +2407,14 @@ class LangfuseObserver:
         event: LineageEvent | None = None,
         start_time: datetime | None = None,
     ) -> str | None:
-        # Exact-match the calling node's observation first. If it is not open
-        # (a middleware or wrapper call) take the §5.5 orphan fallback: parent
-        # under the nearest enclosing wrapper on the lineage chain, else the
-        # Trace.
+        from openarmature.observability.correlation import _issued_from_node_body
+
+        # A call from the node body parents under the calling node's
+        # observation. A call from middleware or a wrapper takes the §5.5 orphan
+        # fallback even while that observation is open: the nearest enclosing
+        # wrapper on the lineage chain, else the Trace. The engine records which
+        # at dispatch; an event it did not dispatch carries no record and keeps
+        # the open-observation lookup.
         key: _StackKey = (
             calling_namespace_prefix,
             calling_attempt_index,
@@ -2419,11 +2423,12 @@ class LangfuseObserver:
             calling_fan_out_index_chain,
             calling_branch_name_chain,
         )
-        observation = inv_state.open_observations.get(key)
+        from_body = _issued_from_node_body(event) if event is not None else None
+        observation = inv_state.open_observations.get(key) if from_body is not False else None
         if observation is not None:
             return observation.handle.id
-        # ORPHAN PATH ONLY: the calling node's observation is not open, so this
-        # is a call from a wrapper. Materialize any dispatch observation the
+        # ORPHAN PATH ONLY: the call does not parent under its calling node.
+        # Materialize any dispatch observation the
         # calling lineage sits inside before walking for it, so the answer does
         # not depend on whether the wrapper's first inner node has drained.
         if event is not None:

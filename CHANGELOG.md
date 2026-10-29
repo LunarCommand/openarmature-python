@@ -4,6 +4,12 @@ All notable changes to `openarmature-python` are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). The package follows [Semantic Versioning](https://semver.org/); pre-1.0 minor bumps may carry behavioral changes per [spec governance](https://github.com/LunarCommand/openarmature-spec/blob/main/GOVERNANCE.md).
 
+## [Unreleased]
+
+### Fixed
+
+- **A provider call made by a node's middleware no longer parents under that node's span** (observability §5.5, proposal 0124). A guardrail or classifier call issued from node middleware, before or after `next()`, now sits under the nearest fan-out instance or branch span around the node, or the invocation span when there is none, on both the OTel and Langfuse observers. Before, both observers attached it to the calling node's span whenever that span was open: after `next()` that was every time, on both observers, because the node's completed event waits for its middleware to return, and before `next()` it depended on scheduling on OTel. The choice is now structural: when the call's event is dispatched, the engine records whether it came from the node's body, and only a body call parents under the node. Calls from the node body are unchanged.
+
 ## [0.17.0] - 2026-10-04
 
 ### Added
