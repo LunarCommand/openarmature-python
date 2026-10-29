@@ -1064,6 +1064,8 @@ def _record_event(event: NodeEvent) -> dict[str, Any]:
         "pre_state": event.pre_state.model_dump(),
         "parent_states": [ps.model_dump() for ps in event.parent_states],
         "attempt_index": event.attempt_index,
+        "fan_out_index_chain": list(event.fan_out_index_chain),
+        "branch_name_chain": list(event.branch_name_chain),
     }
     if event.post_state is not None:
         rec["post_state"] = event.post_state.model_dump()
