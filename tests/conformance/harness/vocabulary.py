@@ -684,11 +684,6 @@ KNOWN_UNREAD_NESTED: dict[tuple[str, str], tuple[str, ...]] = {
     ("nodes.*.fan_out.instance_middleware[]", "retry"): (
         "053-checkpoint-fan-out-instance-middleware-retry-resume",
     ),
-    # observability: the Langfuse runner builds 039's probe branch with the
-    # augmentation written out rather than read from the fixture.
-    ("nodes.*.parallel_branches.branches.*", "augment_metadata_from_outer_item"): (
-        "039-nested-lineage-augmentation",
-    ),
 }
 
 # Nested keys a raw-YAML runner counts as read only because the key's string

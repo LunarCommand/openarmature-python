@@ -1004,6 +1004,15 @@ def _build_039_case2(
         prompt_manager=prompt_manager,
         render_variables={},
     )
+    branch_specs = cast(
+        "dict[str, dict[str, Any]]",
+        case["inner_subgraphs"]["per_product"]["nodes"]["dispatcher"]["parallel_branches"]["branches"],
+    )
+
+    def branch_middleware(name: str) -> tuple[Any, ...]:
+        augment = cast("dict[str, str] | None", branch_specs[name].get("augment_metadata_from_outer_item"))
+        return (_make_augment_instance_middleware(augment, "oa_outer_item"),) if augment else ()
+
     per_product_state = build_state_cls(
         "PerProduct039C2",
         {
@@ -1019,9 +1028,9 @@ def _build_039_case2(
             "probe": BranchSpec(
                 subgraph=probe,
                 inputs={"oa_outer_item": "oa_outer_item"},
-                middleware=(_make_augment_instance_middleware({"note": "id"}, "oa_outer_item"),),
+                middleware=branch_middleware("probe"),
             ),
-            "baseline": BranchSpec(subgraph=baseline),
+            "baseline": BranchSpec(subgraph=baseline, middleware=branch_middleware("baseline")),
         },
     )
     pp_builder.add_edge("dispatcher", END)
