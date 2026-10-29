@@ -151,6 +151,9 @@ class _OpenObservation:
     handle: LangfuseSpanHandle | LangfuseGenerationHandle
     fan_out_index_chain: tuple[int | None, ...] = ()
     branch_name_chain: tuple[str | None, ...] = ()
+    # §5.7: a callable parallel branch's own observation, which is also its
+    # per-branch dispatch.
+    callable_branch: bool = False
 
 
 def _observation_chain_on_path(
@@ -735,6 +738,11 @@ class LangfuseObserver:
             handle=handle,
             fan_out_index_chain=event.fan_out_index_chain,
             branch_name_chain=event.branch_name_chain,
+            callable_branch=(
+                event.branch_name is not None
+                and event.parallel_branches_config is None
+                and event.namespace in inv_state.parallel_branches_parent_node_name
+            ),
         )
 
     def _handle_completed(self, event: NodeEvent) -> None:
@@ -2424,8 +2432,10 @@ class LangfuseObserver:
             calling_branch_name_chain,
         )
         from_body = _issued_from_node_body(event) if event is not None else None
-        observation = inv_state.open_observations.get(key) if from_body is not False else None
-        if observation is not None:
+        observation = inv_state.open_observations.get(key)
+        # A callable branch's observation is its branch dispatch, so it is also
+        # the enclosing wrapper of a call from the branch's middleware.
+        if observation is not None and (from_body is not False or observation.callable_branch):
             return observation.handle.id
         # ORPHAN PATH ONLY: the call does not parent under its calling node.
         # Materialize any dispatch observation the

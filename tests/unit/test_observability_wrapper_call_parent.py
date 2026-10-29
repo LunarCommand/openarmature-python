@@ -28,7 +28,7 @@ from opentelemetry.sdk.trace import ReadableSpan
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
-from openarmature.graph import END, CompiledGraph, GraphBuilder, State
+from openarmature.graph import END, BranchSpec, CompiledGraph, GraphBuilder, State
 from openarmature.llm import OpenAIProvider, UserMessage
 from openarmature.observability.langfuse import InMemoryLangfuseClient, LangfuseObserver
 from openarmature.observability.otel import OTelObserver
@@ -173,6 +173,69 @@ async def test_wrapper_call_parents_under_the_fan_out_instance_on_langfuse(
     assert parent.name != "guard", "a call from guard's middleware parented under guard's own observation"
     assert (parent.metadata or {}).get("fan_out_parent_node_name") == "a", (
         f"expected the fan-out instance observation of `a`, got {parent.name!r} with {parent.metadata}"
+    )
+
+
+_CALLABLE_SITES = pytest.mark.parametrize("site", ["callable", "middleware-pre", "middleware-post"])
+
+
+def _callable_branch_graph(provider: OpenAIProvider, *, site: str) -> CompiledGraph[_Top]:
+    """A parallel-branches node `pb` whose one branch `leg` is a callable. The
+    provider call comes from the callable, or from the branch's middleware
+    before or after `next()`."""
+
+    async def _leg(_s: _Top) -> dict[str, Any]:
+        if site == "callable":
+            await provider.complete([UserMessage(content="from the callable")])
+        return {}
+
+    async def _middleware(state: Any, next_call: Any) -> Any:
+        if site == "middleware-pre":
+            await provider.complete([UserMessage(content="before the callable")])
+        result = await next_call(state)
+        if site == "middleware-post":
+            await provider.complete([UserMessage(content="after the callable")])
+        return result
+
+    return (
+        GraphBuilder(_Top)
+        .add_parallel_branches_node("pb", branches={"leg": BranchSpec(call=_leg, middleware=(_middleware,))})
+        .add_edge("pb", END)
+        .set_entry("pb")
+        .compile()
+    )
+
+
+# Every one of these calls sits at the parallel-branches namespace itself.
+# Killed by an enclosing-wrapper walk over proper ancestors only.
+@_CALLABLE_SITES
+async def test_a_callable_branch_call_parents_under_the_branch_on_otel(site: str) -> None:
+    provider = _provider()
+    spans = await _otel_spans(_callable_branch_graph(provider, site=site), _Top(), provider)
+    legs = [s for s in spans if s.name == "leg"]
+    assert len(legs) == 1, f"expected one span for branch `leg`, got {len(legs)}"
+    assert _otel_llm_parent(spans) is legs[0], "the provider span is not under the branch span"
+
+
+# Killed by dropping the callable-branch condition from the provider-parent
+# resolver: the fallback then opens a second `leg`, which takes the generation.
+@_CALLABLE_SITES
+async def test_a_callable_branch_call_parents_under_the_branch_on_langfuse(site: str) -> None:
+    provider = _provider()
+    graph = _callable_branch_graph(provider, site=site)
+    client = InMemoryLangfuseClient()
+    graph.attach_observer(LangfuseObserver(client=client))
+    try:
+        await graph.invoke(_Top())
+        await graph.drain()
+    finally:
+        await provider.aclose()
+    (trace,) = client.traces.values()
+    legs = [o for o in trace.observations if o.name == "leg"]
+    assert len(legs) == 1, f"expected one observation for branch `leg`, got {len(legs)}"
+    (generation,) = [o for o in trace.observations if o.type == "generation"]
+    assert generation.parent_observation_id == legs[0].id, (
+        "the generation is not under the branch observation"
     )
 
 
