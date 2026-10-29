@@ -54,7 +54,7 @@ from openarmature.observability.correlation import (  # noqa: E402
 )
 from openarmature.observability.otel import OTelObserver  # noqa: E402
 
-from .adapter import build_graph  # noqa: E402
+from .adapter import build_graph, error_cause_category  # noqa: E402
 from .harness.mock_messages import message_for  # noqa: E402
 from .harness.subgraph_placement import resolve_subgraphs  # noqa: E402
 
@@ -8068,13 +8068,14 @@ def _assert_node_completed_event_carries_error(
     spec: Mapping[str, Any],
 ) -> None:
     """Failure-path assertion (fixture 053): the calling node's
-    completed NodeEvent carries an error whose cause chain bottoms
-    out in an llm-provider category matching the expectation.
-    The engine wraps the underlying ProviderUnavailable (etc.) in a
-    NodeException; walk ``__cause__`` to reach the categorized cause.
-    """
+    completed NodeEvent carries an error whose direct cause, the error
+    the node raised, has the expected category."""
     node_name = cast("str", spec["node_name"])
     expected_category = cast("str", spec["error_category"])
+    # The recorder reads the same link, so the two cannot disagree. Walking
+    # the whole chain would also accept the wrapper's own category, or a link
+    # below the one the node raised.
+    seen: list[str | None] = []
     for event in events:
         if type(event).__name__ != "NodeEvent":
             continue
@@ -8083,16 +8084,14 @@ def _assert_node_completed_event_carries_error(
         if getattr(event, "phase", None) != "completed":
             continue
         error: Any = getattr(event, "error", None)
-        # Walk the cause chain for a category attribute. The
-        # NodeException wrapper itself is uncategorized; the
-        # LlmProviderError underneath carries the canonical category.
-        while error is not None:
-            category = getattr(error, "category", None)
-            if category == expected_category:
-                return
-            error = getattr(error, "__cause__", None)
+        if error is None:
+            continue
+        seen.append(error_cause_category(error))
+        if seen[-1] == expected_category:
+            return
     raise AssertionError(
-        f"no NodeEvent(completed, node_name={node_name!r}) with error category {expected_category!r} found"
+        f"no NodeEvent(completed, node_name={node_name!r}) whose error's direct cause has category "
+        f"{expected_category!r}; direct-cause categories seen: {seen}"
     )
 
 

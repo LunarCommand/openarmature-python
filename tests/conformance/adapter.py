@@ -1051,6 +1051,12 @@ class ObserverFixture:
     raised: int = 0
 
 
+def error_cause_category(error: BaseException) -> str | None:
+    """Return the category of ``error``'s direct cause, the error the node
+    raised and the engine wrapped, or ``None`` when it carries none."""
+    return getattr(error.__cause__, "category", None)
+
+
 def _record_event(event: NodeEvent) -> dict[str, Any]:
     """Convert a NodeEvent into a dict matching the YAML expected shape."""
     rec: dict[str, Any] = {
@@ -1068,8 +1074,7 @@ def _record_event(event: NodeEvent) -> dict[str, Any]:
         rec["post_state"] = event.post_state.model_dump()
     if event.error is not None:
         rec["error"] = event.error.category
-        # The category the node raised, which the engine's error wraps.
-        cause_category = getattr(event.error.__cause__, "category", None)
+        cause_category = error_cause_category(event.error)
         if cause_category is not None:
             rec["error_category"] = cause_category
     if event.fan_out_index is not None:
