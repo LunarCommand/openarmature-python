@@ -478,10 +478,15 @@ async def _run_runtime_case(spec: Mapping[str, Any], fixture_id: str) -> None:
                         f"invocation {inv_idx} observer {name!r}",
                     )
 
+            label = f"invocation {inv_idx}: "
             # Per-invocation invariants (e.g.,
             # `drain_returned_within_timeout` on the timed first
             # invocation in fixture 024).
             inv_invariants: dict[str, Any] = inv_expected.get("invariants") or {}
+            if not drain_nodes:
+                _assert_generic_invariants(
+                    inv_invariants, frozenset({"drain_returned_within_timeout"}), label
+                )
             if inv_invariants.get("drain_returned_within_timeout"):
                 assert inv_timeout is not None
                 assert inv_drain_elapsed < inv_timeout + 0.4, (
@@ -489,7 +494,6 @@ async def _run_runtime_case(spec: Mapping[str, Any], fixture_id: str) -> None:
                     f"elapsed={inv_drain_elapsed:.3f}s, timeout={inv_timeout}s"
                 )
 
-            label = f"invocation {inv_idx}: "
             _assert_node_drains(inv_expected, drain_harness, inv_idx, label)
             if drain_nodes:
                 own = [d for d in drain_harness.drains if d.invocation_index == inv_idx]
@@ -501,6 +505,10 @@ async def _run_runtime_case(spec: Mapping[str, Any], fixture_id: str) -> None:
         top_invariants: dict[str, Any] = spec.get("invariants") or {}
         if drain_nodes:
             _check_drain_invariants(top_invariants, drain_harness.drains, drain_harness, "")
+        else:
+            _assert_generic_invariants(
+                top_invariants, frozenset({"second_invocation_drain_independent_of_first"}), ""
+            )
         if top_invariants.get("second_invocation_drain_independent_of_first"):
             # The fact that we reached this point with all per-invocation
             # assertions passing IS the proof of cross-invocation
@@ -583,6 +591,18 @@ async def _run_runtime_case(spec: Mapping[str, Any], fixture_id: str) -> None:
         # is a fixture-level assertion the harness verifies separately
         # from drain_summary.
         invariants: dict[str, Any] = expected.get("invariants") or {}
+        if not drain_nodes:
+            _assert_generic_invariants(
+                invariants,
+                frozenset(
+                    {
+                        "drain_returned_within_timeout",
+                        "graph_state_intact_after_timeout",
+                        "drain_waited_for_all_events",
+                    }
+                ),
+                "",
+            )
         if invariants.get("drain_returned_within_timeout"):
             assert timeout is not None, "drain_returned_within_timeout invariant requires a timeout"
             # Allow generous slack for cancellation settlement + CI
@@ -1056,6 +1076,16 @@ def _check_drain_invariants(
             check(drains, harness)
         except AssertionError as e:
             raise AssertionError(f"{label}invariant {name!r}: {e}") from e
+
+
+def _assert_generic_invariants(block: Mapping[str, Any], handled: frozenset[str], label: str) -> None:
+    """Fail on an invariant name outside ``handled``, or one not set to
+    true. Not for a drain fixture, whose block ``_check_drain_invariants``
+    checks name by name."""
+    unknown = sorted(set(block) - handled)
+    assert not unknown, f"{label}unhandled invariant(s): {unknown}"
+    for name, value in block.items():
+        assert value is True, f"{label}invariant {name}: only `true` is supported; got {value!r}"
 
 
 # ---------------------------------------------------------------------------
