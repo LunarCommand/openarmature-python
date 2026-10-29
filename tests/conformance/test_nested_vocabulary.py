@@ -34,6 +34,8 @@ from .harness.vocabulary import (
     KNOWN_UNREAD_NESTED,
     NESTED_EXTRAS,
     NESTED_MODELS,
+    NODE_MAPPINGS,
+    NODE_OPEN_MAPPINGS,
     OPEN_MAPPINGS,
     OUT_OF_SCOPE_MAPPINGS,
     POSITION_BLIND_READS,
@@ -60,10 +62,11 @@ _FIXTURE_MODELS: dict[str, str] = {
 Declared = tuple[str, str, str, str, str]
 
 # Every position's models and extra keys: the nested positions and each closed
-# case-level mapping.
+# case-level and node-level mapping.
 _POSITIONS: dict[str, tuple[tuple[str, ...], frozenset[str]]] = {
     **{position: (NESTED_MODELS[position], NESTED_EXTRAS[position]) for position in NESTED_MODELS},
     **{position: (mapping.models, mapping.extras) for position, mapping in CASE_MAPPINGS.items()},
+    **{position: (mapping.models, mapping.extras) for position, mapping in NODE_MAPPINGS.items()},
 }
 
 
@@ -123,6 +126,13 @@ def _blocks(doc: dict[str, Any]) -> Iterator[tuple[str, str, dict[str, Any]]]:
                     yield "expected", f"{where}.{list_key}[{i}]", expected
         for path, spec in _node_specs(container):
             yield "nodes.*", f"{where}.{path}", spec
+            for key, value in spec.items():
+                position = f"nodes.*.{key}"
+                if position in NODE_MAPPINGS and (block := _as_dict(value)) is not None:
+                    yield position, f"{where}.{path}.{key}", block
+                elif f"{position}[]" in NODE_MAPPINGS:
+                    for i, entry in enumerate(_as_dicts(value)):
+                        yield f"{position}[]", f"{where}.{path}.{key}[{i}]", entry
         for key, value in container.items():
             if key in CASE_MAPPINGS and (block := _as_dict(value)) is not None:
                 yield key, f"{where}.{key}", block
@@ -349,6 +359,8 @@ def _shape(position: str, where: str) -> str:
     _, _, path = where.partition(".")
     if position in CASE_MAPPINGS:
         return "case-level mappings"
+    if position in NODE_MAPPINGS:
+        return "node-level mappings"
     if position == "nodes.*":
         return "nodes" if path.startswith("nodes.") else "nodes in subgraph bodies"
     if position == "expected":
@@ -370,6 +382,7 @@ _SHAPE_FLOORS: dict[str, int] = {
     "nodes": 325,
     "nodes in subgraph bodies": 70,
     "case-level mappings": 445,
+    "node-level mappings": 260,
 }
 
 
@@ -394,8 +407,14 @@ def test_the_registry_names_every_position_once() -> None:
     assert set(NESTED_MODELS) == set(NESTED_EXTRAS), (
         f"NESTED_MODELS {sorted(NESTED_MODELS)} and NESTED_EXTRAS {sorted(NESTED_EXTRAS)} disagree"
     )
-    both = sorted(set(NESTED_MODELS) & set(CASE_MAPPINGS))
-    assert not both, f"{both} are registered as both a nested position and a case-level mapping"
+    registries = {
+        "nested": set(NESTED_MODELS),
+        "case-level": set(CASE_MAPPINGS),
+        "node-level": set(NODE_MAPPINGS),
+    }
+    named = Counter(position for positions in registries.values() for position in positions)
+    twice = sorted(position for position, count in named.items() if count > 1)
+    assert not twice, f"{twice} are registered as more than one of {sorted(registries)}"
     # An extra the models already declare is a stale entry: it reads as a gap
     # in the model when there is none.
     for position, (_, extras) in _POSITIONS.items():
@@ -403,32 +422,67 @@ def test_the_registry_names_every_position_once() -> None:
         assert not redundant, f"{position}: {redundant} are model fields; drop them from its extras"
 
 
+def _holds_mappings(value: Any) -> bool:
+    entries = _as_dicts(value)
+    return _as_dict(value) is not None or bool(entries and len(entries) == len(value))
+
+
+def _assert_placed(level: str, used: set[str], groups: dict[str, frozenset[str]], hint: str) -> None:
+    placed = Counter(name for names in groups.values() for name in names)
+    twice = sorted(name for name, count in placed.items() if count > 1)
+    assert not twice, f"{level} mapping(s) placed in more than one group: {twice}"
+    unplaced = sorted(used - set(placed))
+    assert not unplaced, f"{level} mapping(s) in no group: {unplaced}\n{hint}"
+    stale = sorted(set(placed) - used)
+    assert not stale, f"no fixture declares these as a {level} mapping any more; remove them: {stale}"
+
+
 def test_every_case_level_mapping_is_placed() -> None:
     # The classification is a decision per directive. A mapping nothing places
     # would have its keys go unchecked with no record that anyone chose that.
-    used: set[str] = set()
-    for _, _, doc in case_level._fixture_docs():  # noqa: SLF001
-        for container in case_level._containers(doc):  # noqa: SLF001
-            for key, value in container.items():
-                entries = _as_dicts(value)
-                if _as_dict(value) is not None or (entries and len(entries) == len(value)):
-                    used.add(str(key))
+    used = {
+        str(key)
+        for _, _, doc in case_level._fixture_docs()  # noqa: SLF001
+        for container in case_level._containers(doc)  # noqa: SLF001
+        for key, value in container.items()
+        if _holds_mappings(value)
+    }
     groups = {
         "walked": WALKED_MAPPINGS,
         "open": frozenset(OPEN_MAPPINGS),
         "out of scope": frozenset(OUT_OF_SCOPE_MAPPINGS),
         "closed": frozenset(position.removesuffix("[]") for position in CASE_MAPPINGS),
     }
-    placed = Counter(name for names in groups.values() for name in names)
-    twice = sorted(name for name, count in placed.items() if count > 1)
-    assert not twice, f"case-level mapping(s) placed in more than one group: {twice}"
-    unplaced = sorted(used - set(placed))
-    assert not unplaced, (
-        f"case-level mapping(s) in no group: {unplaced}\n"
-        "Place each in harness/vocabulary.py: CASE_MAPPINGS with its keys, or OPEN_MAPPINGS with the reason."
+    _assert_placed(
+        "case-level",
+        used,
+        groups,
+        "Place each in harness/vocabulary.py: CASE_MAPPINGS with its keys, or OPEN_MAPPINGS with the reason.",
     )
-    stale = sorted(set(placed) - used)
-    assert not stale, f"no fixture declares these as a mapping any more; remove them: {stale}"
+
+
+def test_every_node_level_mapping_is_placed() -> None:
+    used = {
+        str(key)
+        for _, _, doc in case_level._fixture_docs()  # noqa: SLF001
+        for container in case_level._containers(doc)  # noqa: SLF001
+        for _, spec in _node_specs(container)
+        for key, value in spec.items()
+        if _holds_mappings(value)
+    }
+    groups = {
+        "open": frozenset(NODE_OPEN_MAPPINGS),
+        "closed": frozenset(
+            position.removeprefix("nodes.*.").removesuffix("[]") for position in NODE_MAPPINGS
+        ),
+    }
+    _assert_placed(
+        "node-level",
+        used,
+        groups,
+        "Place each in harness/vocabulary.py: NODE_MAPPINGS with its keys, "
+        "or NODE_OPEN_MAPPINGS with the reason.",
+    )
 
 
 def test_every_nested_key_is_recognized() -> None:

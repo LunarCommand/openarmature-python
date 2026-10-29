@@ -61,6 +61,7 @@ from .harness.subgraph_placement import resolve_subgraphs  # noqa: E402
 if TYPE_CHECKING:
     from opentelemetry.sdk.trace import ReadableSpan
 
+    from openarmature.llm import Tool
     from openarmature.llm.response import RuntimeConfig
 
 
@@ -1876,6 +1877,14 @@ def _make_metadata_node_body(node_spec: Mapping[str, Any], types_seen: dict[str,
     per_attempt = cast("list[dict[str, Any]] | None", node_spec.get("per_attempt_behavior"))
     if per_attempt is not None:
         by_attempt = {int(b["attempt"]): b for b in per_attempt}
+        for n, behavior in by_attempt.items():
+            # `succeeds` states the attempt's outcome, and only `raises` makes an
+            # attempt fail here, so the two have to agree.
+            if "succeeds" in behavior:
+                assert behavior["succeeds"] is ("raises" not in behavior), (
+                    f"attempt {n} declares succeeds={behavior['succeeds']!r} "
+                    f"{'with' if 'raises' in behavior else 'without'} `raises`"
+                )
         attempts: list[int] = []
 
         async def _retry_body(_s: Any) -> dict[str, Any]:
@@ -6645,6 +6654,7 @@ def _build_simple_llm_graph(
         messages = []
 
     response_schema = cast("dict[str, Any] | None", calls_llm_spec.get("response_schema"))
+    tools = _tools_from_wire_spec(cast("list[dict[str, Any]] | None", calls_llm_spec.get("tools")))
 
     async def ask_body(_s: Any) -> dict[str, str]:
         response = await _complete_with_optional_prompt(
@@ -6653,6 +6663,7 @@ def _build_simple_llm_graph(
             config=runtime_config,
             prompt_result=prompt_result,
             response_schema=response_schema,
+            tools=tools,
         )
         return {stores_in: response.message.content or ""}
 
@@ -6713,6 +6724,31 @@ def _build_runtime_config(config_spec: Mapping[str, Any] | None) -> RuntimeConfi
         }
     }
     return RuntimeConfig(**kwargs, extras=dict(extras))
+
+
+def _tools_from_wire_spec(spec: Sequence[Mapping[str, Any]] | None) -> list[Tool] | None:
+    """Build the tools a ``calls_llm.tools`` block declares in the OpenAI wire
+    shape, ``{type: function, function: {name, description, parameters}}``."""
+    if not spec:
+        return None
+    from openarmature.llm import Tool
+
+    tools: list[Tool] = []
+    for entry in spec:
+        assert entry.get("type") == "function", (
+            f"unsupported tool type in calls_llm.tools: {entry.get('type')!r}"
+        )
+        function = cast("dict[str, Any]", entry["function"])
+        # Tool requires a description and the wire shape does not, so an omitted
+        # one is sent empty.
+        tools.append(
+            Tool(
+                name=cast("str", function["name"]),
+                description=cast("str", function.get("description", "")),
+                parameters=cast("dict[str, Any]", function["parameters"]),
+            )
+        )
+    return tools
 
 
 def _require_text_content(role: object, content: object) -> str:
@@ -6805,6 +6841,7 @@ async def _complete_with_optional_prompt(
     config: Any,
     prompt_result: Any,
     response_schema: Any = None,
+    tools: Any = None,
 ) -> Any:
     """Call ``provider.complete`` inside the active-prompt context when the node
     rendered a prompt, otherwise call it directly.
@@ -6819,8 +6856,10 @@ async def _complete_with_optional_prompt(
         # Inside with_active_prompt so the provider stamps active_prompt onto
         # the typed event.
         with with_active_prompt(prompt_result):
-            return await provider.complete(messages, config=config, response_schema=response_schema)
-    return await provider.complete(messages, config=config, response_schema=response_schema)
+            return await provider.complete(
+                messages, tools=tools, config=config, response_schema=response_schema
+            )
+    return await provider.complete(messages, tools=tools, config=config, response_schema=response_schema)
 
 
 def _build_chain_llm_graph(
