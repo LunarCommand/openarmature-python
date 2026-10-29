@@ -677,7 +677,17 @@ _CHAIN_IDENTITY = (*_SCALAR_IDENTITY, "fan_out_index_chain", "branch_name_chain"
 
 
 def _of_node(node: str) -> _Select:
-    return lambda events: [ev for ev in events if ev["node_name"] == node]
+    # A predicate names a node by its name alone, which reaches a nested node
+    # as well as a top-level one, so the name has to pick out a single node.
+    def select(events: _Events) -> _Events:
+        selected = [ev for ev in events if ev["node_name"] == node]
+        namespaces = sorted({tuple(ev["namespace"]) for ev in selected})
+        assert len(namespaces) <= 1, (
+            f"node name {node!r} matches events under several namespaces: {namespaces}"
+        )
+        return selected
+
+    return select
 
 
 def _inner(events: _Events) -> _Events:
@@ -877,8 +887,8 @@ def _drain_of(harness: DrainHarness, node: str, invocation_index: int) -> NodeDr
 
 def _snapshot_predicate(snapshot: list[dict[str, Any]], name: str) -> Any:
     # The `node_accumulator_snapshot_invariants` predicates fixtures 032 and
-    # 033 declare. An inner event is one from below the top-level node.
-    inner = [e for e in snapshot if len(e["namespace"]) > 1]
+    # 033 declare.
+    inner = _inner(snapshot)
     if name == "inner_event_count":
         return len(inner)
     for predicate, key in (
@@ -893,10 +903,10 @@ def _snapshot_predicate(snapshot: list[dict[str, Any]], name: str) -> Any:
     for suffix, phase in (("_started_present", "started"), ("_completed_present", "completed")):
         if name.endswith(suffix):
             node = name.removesuffix(suffix)
-            return any(e["namespace"] == [node] and e["phase"] == phase for e in snapshot)
+            return any(e["phase"] == phase for e in _of_node(node)(snapshot))
     if name.endswith("_node_events_count"):
         node = name.removesuffix("_node_events_count")
-        return sum(e["namespace"] == [node] for e in snapshot)
+        return len(_of_node(node)(snapshot))
     raise AssertionError(f"unknown accumulator snapshot predicate {name!r}")
 
 
