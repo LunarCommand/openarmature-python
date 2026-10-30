@@ -29,6 +29,7 @@ from typing import Any, cast, get_args
 from pydantic import BaseModel, ValidationError
 
 from . import test_case_vocabulary as case_level
+from .harness.fixture_walk import CALL_LISTS, as_dict, as_dicts, blocks, containers
 from .harness.vocabulary import (
     CASE_MAPPINGS,
     FORWARDING_BUILDERS,
@@ -44,10 +45,6 @@ from .harness.vocabulary import (
     POSITION_BLIND_READS,
     WALKED_MAPPINGS,
 )
-
-_CALL_LISTS = ("calls", "secondary_calls", "tertiary_calls")
-_SINGULAR_BODIES = ("subgraph", "subgraph_with_idx", "graph")
-_PLURAL_BODIES = ("subgraphs", "inner_subgraphs")
 
 # Runners that validate their fixtures into a strict model and read the parsed
 # result by attribute, paired with that model's name. Only in these runners does
@@ -73,101 +70,19 @@ _POSITIONS: dict[str, tuple[tuple[str, ...], frozenset[str]]] = {
 }
 
 
-def _as_dict(value: Any) -> dict[str, Any] | None:
-    return cast("dict[str, Any]", value) if isinstance(value, dict) else None
-
-
-def _as_dicts(value: Any) -> list[dict[str, Any]]:
-    if not isinstance(value, list):
-        return []
-    return [cast("dict[str, Any]", v) for v in cast("list[Any]", value) if isinstance(v, dict)]
-
-
-def _node_specs(body: dict[str, Any], path: str = "") -> Iterator[tuple[str, dict[str, Any]]]:
-    """`(path, spec)` for every node in a body and the subgraph bodies below it."""
-    nodes = _as_dict(body.get("nodes")) or {}
-    for name, spec in nodes.items():
-        if (node := _as_dict(spec)) is not None:
-            yield f"{path}nodes.{name}", node
-    for key in _SINGULAR_BODIES:
-        if (inner := _as_dict(body.get(key))) is not None:
-            yield from _node_specs(inner, f"{path}{key}.")
-    for key in _PLURAL_BODIES:
-        for name, inner in (_as_dict(body.get(key)) or {}).items():
-            if (one := _as_dict(inner)) is not None:
-                yield from _node_specs(one, f"{path}{key}.{name}.")
-
-
 def _captures(doc: dict[str, Any]) -> set[str]:
     """Every `capture_as` name the fixture declares, in any call list."""
     names: set[str] = set()
-    for container in case_level._containers(doc):  # noqa: SLF001
-        for list_key in _CALL_LISTS:
-            for call in _as_dicts(container.get(list_key)):
+    for container in containers(doc):
+        for list_key in CALL_LISTS:
+            for call in as_dicts(container.get(list_key)):
                 if isinstance(call.get("capture_as"), str):
                     names.add(call["capture_as"])
     return names
 
 
-def _node_position(path: str) -> str | None:
-    """The node position `path` names, directly or through an alias."""
-    position = NODE_MAPPING_ALIASES.get(path, path)
-    return position if position == "nodes.*" or position in NODE_MAPPINGS else None
-
-
 def _path_of(position: str) -> str:
     return position.removesuffix("[]").removesuffix(".*")
-
-
-def _node_mapping_blocks(
-    position: str, where: str, block: dict[str, Any]
-) -> Iterator[tuple[str, str, dict[str, Any]]]:
-    """`(position, where, block)` for each closed node mapping inside `block`, at any depth."""
-    for key, value in block.items():
-        path = f"{position}.{key}"
-        children: list[tuple[str, str, dict[str, Any]]] = []
-        if (child := _node_position(path)) is not None and (mapping := _as_dict(value)) is not None:
-            children = [(child, f"{where}.{key}", mapping)]
-        elif (child := _node_position(f"{path}[]")) is not None:
-            children = [(child, f"{where}.{key}[{i}]", entry) for i, entry in enumerate(_as_dicts(value))]
-        elif (child := _node_position(f"{path}.*")) is not None:
-            children = [
-                (child, f"{where}.{key}.{name}", entry)
-                for name, named in (_as_dict(value) or {}).items()
-                if (entry := _as_dict(named)) is not None
-            ]
-        for child, child_where, child_block in children:
-            yield child, child_where, child_block
-            yield from _node_mapping_blocks(child, child_where, child_block)
-
-
-def _blocks(doc: dict[str, Any]) -> Iterator[tuple[str, str, dict[str, Any]]]:
-    """`(position, where, block)` for every nested block a fixture carries."""
-    for container in case_level._containers(doc):  # noqa: SLF001
-        where = "<root>" if container is doc else str(container.get("name", "<unnamed>"))
-        if (expected := _as_dict(container.get("expected"))) is not None:
-            yield "expected", where, expected
-        if (resume := _as_dict(container.get("resume"))) is not None:
-            yield "resume", f"{where}.resume", resume
-            if (resumed := _as_dict(resume.get("expected"))) is not None:
-                yield "expected", f"{where}.resume", resumed
-        for i, invocation in enumerate(_as_dicts(container.get("invocations"))):
-            if (expected := _as_dict(invocation.get("expected"))) is not None:
-                yield "expected", f"{where}.invocations[{i}]", expected
-        for list_key in _CALL_LISTS:
-            for i, call in enumerate(_as_dicts(container.get(list_key))):
-                yield "calls[]", f"{where}.{list_key}[{i}]", call
-                if (expected := _as_dict(call.get("expected"))) is not None:
-                    yield "expected", f"{where}.{list_key}[{i}]", expected
-        for path, spec in _node_specs(container):
-            yield "nodes.*", f"{where}.{path}", spec
-            yield from _node_mapping_blocks("nodes.*", f"{where}.{path}", spec)
-        for key, value in container.items():
-            if key in CASE_MAPPINGS and (block := _as_dict(value)) is not None:
-                yield key, f"{where}.{key}", block
-            elif f"{key}[]" in CASE_MAPPINGS:
-                for i, entry in enumerate(_as_dicts(value)):
-                    yield f"{key}[]", f"{where}.{key}[{i}]", entry
 
 
 def _declared() -> list[Declared]:
@@ -176,7 +91,7 @@ def _declared() -> list[Declared]:
         # prompt-management keys its top-level `expected` by capture name as
         # well as by assertion, and a capture name is data, not vocabulary.
         data_keys: set[str] = _captures(doc) if capability == "prompt-management" else set()
-        for position, where, block in _blocks(doc):
+        for position, where, block in blocks(doc):
             for key in block:
                 if position == "expected" and key in data_keys:
                     continue
@@ -370,7 +285,7 @@ def _position_blind() -> dict[tuple[str, str], set[str]]:
     case_keys = {
         str(key)
         for _, _, doc in case_level._fixture_docs()  # noqa: SLF001
-        for container in case_level._containers(doc)  # noqa: SLF001
+        for container in containers(doc)
         for key in container
     }
     return {
@@ -457,8 +372,8 @@ def test_the_registry_names_every_position_once() -> None:
 
 
 def _holds_mappings(value: Any) -> bool:
-    entries = _as_dicts(value)
-    return _as_dict(value) is not None or bool(entries and len(entries) == len(value))
+    entries = as_dicts(value)
+    return as_dict(value) is not None or bool(entries and len(entries) == len(value))
 
 
 def _assert_placed(level: str, used: set[str], groups: dict[str, frozenset[str]], hint: str) -> None:
@@ -477,7 +392,7 @@ def test_every_case_level_mapping_is_placed() -> None:
     used = {
         str(key)
         for _, _, doc in case_level._fixture_docs()  # noqa: SLF001
-        for container in case_level._containers(doc)  # noqa: SLF001
+        for container in containers(doc)
         for key, value in container.items()
         if _holds_mappings(value)
     }
@@ -501,7 +416,7 @@ def test_every_node_level_mapping_is_placed() -> None:
     used = {
         f"{position}.{key}"
         for _, _, doc in case_level._fixture_docs()  # noqa: SLF001
-        for position, _, block in _blocks(doc)
+        for position, _, block in blocks(doc)
         if position == "nodes.*" or position in NODE_MAPPINGS
         for key, value in block.items()
         if _holds_mappings(value)
@@ -523,12 +438,12 @@ def test_every_node_level_mapping_is_placed() -> None:
 def _forwarded_blocks() -> Iterator[tuple[str, str, str, dict[str, Any]]]:
     """`(capability, fixture, path, mapping)` for each forwarded node mapping."""
     for capability, fixture, doc in case_level._fixture_docs():  # noqa: SLF001
-        for position, _, block in _blocks(doc):
+        for position, _, block in blocks(doc):
             if position != "nodes.*" and position not in NODE_MAPPINGS:
                 continue
             for key, value in block.items():
                 path = f"{position}.{key}"
-                if path in NODE_FORWARDED_MAPPINGS and (mapping := _as_dict(value)) is not None:
+                if path in NODE_FORWARDED_MAPPINGS and (mapping := as_dict(value)) is not None:
                     yield capability, fixture, path, mapping
 
 
@@ -698,7 +613,7 @@ def test_a_block_with_unread_invariants_carries_a_read_directive() -> None:
     for _, fixture, doc in case_level._fixture_docs():  # noqa: SLF001
         if fixture not in ledgered:
             continue
-        for position, where, block in _blocks(doc):
+        for position, where, block in blocks(doc):
             if position != "expected" or "invariants" not in block:
                 continue
             walked.add(fixture)
