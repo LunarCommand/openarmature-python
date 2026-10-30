@@ -699,8 +699,12 @@ When an `OpenAIProvider` (or any [custom Provider](../model-providers/authoring.
 that wires the dispatch hook) is used inside a graph with `OTelObserver`
 attached, each `provider.complete()` attempt emits a dedicated span
 named `openarmature.llm.complete`, parented under the calling node's
-span. A call without retry emits one span; a call-level `retry=` that
-retries emits [one span per attempt](#per-attempt-spans-under-call-level-retry).
+span when the node's body makes the call. A call made by the node's
+middleware, such as a guardrail check before `next()`, parents under the
+nearest fan-out instance or branch span around the node instead, or the
+invocation span when there is none. A call without retry emits one
+span; a call-level `retry=` that retries emits
+[one span per attempt](#per-attempt-spans-under-call-level-retry).
 Each span carries two attribute families.
 
 **`openarmature.llm.*` (always on).** The framework's canonical
@@ -1255,6 +1259,11 @@ for a runnable demo.
   parameters lifted by inclusion per §8.4.3), `usage` (input /
   output / total tokens), and `metadata.finish_reason` /
   `system` / `response_model` / `response_id`.
+- **Generation parent.** A Generation sits under the calling node's
+  Span observation when the node's body makes the call. A call made by
+  the node's middleware sits under the nearest fan-out instance or
+  branch observation around the node instead, or directly under the
+  Trace when there is none, matching the OTel tree.
 
 ### Payload + truncation
 

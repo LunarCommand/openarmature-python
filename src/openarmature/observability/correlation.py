@@ -392,6 +392,46 @@ def _reset_branch_name_chain(token: Token[tuple[str | None, ...]]) -> None:
     _branch_name_chain_var.reset(token)
 
 
+# ---------------------------------------------------------------------------
+# Node-body scope. observability §5.5 parents a provider call issued from a
+# node body under the calling node's span, and one issued from middleware or a
+# wrapper under the nearest enclosing wrapper, whatever spans happen to be open.
+# This is the structural fact that tells the two apart. The engine sets it False
+# where each node's middleware chain begins and True around a function node's
+# ``node.run``, both by token, so middleware never inherits an enclosing body's
+# value and a body gets its own value back after anything nested returns.
+# Private: no public typed event carries it.
+# ---------------------------------------------------------------------------
+
+_in_node_body_var: ContextVar[bool] = ContextVar("openarmature.in_node_body", default=False)
+
+# Set on an event by ``_record_call_site``. Not a field of any event type.
+_CALL_SITE_ATTR = "_issued_from_node_body"
+
+
+def _set_in_node_body(value: bool) -> Token[bool]:
+    """Set the scope.  Internal — engine-only."""
+    return _in_node_body_var.set(value)
+
+
+def _reset_in_node_body(token: Token[bool]) -> None:
+    _in_node_body_var.reset(token)
+
+
+def _record_call_site(event: object) -> None:
+    """Record on ``event`` whether the code emitting it is a node body.
+    Internal: the engine calls it as it dispatches the event."""
+    object.__setattr__(event, _CALL_SITE_ATTR, _in_node_body_var.get())
+
+
+def _issued_from_node_body(event: object) -> bool | None:
+    """Whether ``event`` was emitted from a node body, or ``None`` when it
+    did not come through the engine's dispatch.  Internal: for the bundled
+    observers."""
+    value = getattr(event, _CALL_SITE_ATTR, None)
+    return value if isinstance(value, bool) else None
+
+
 _attempt_index_var: ContextVar[int] = ContextVar("openarmature.attempt_index", default=0)
 
 
@@ -553,6 +593,8 @@ __all__ = [
     # pyright's strict ``reportUnusedFunction`` flagging them as
     # dead. Underscore-prefixed; not part of the user-facing API.
     "_current_terminal_attempt_index",
+    "_issued_from_node_body",
+    "_record_call_site",
     "_record_terminal_attempt_index",
     "_reset_active_dispatch",
     "_reset_active_observer_span",
@@ -563,6 +605,7 @@ __all__ = [
     "_reset_correlation_id",
     "_reset_fan_out_index",
     "_reset_fan_out_index_chain",
+    "_reset_in_node_body",
     "_reset_invocation_id",
     "_reset_namespace_prefix",
     "_reset_terminal_attempt_index",
@@ -575,6 +618,7 @@ __all__ = [
     "_set_correlation_id",
     "_set_fan_out_index",
     "_set_fan_out_index_chain",
+    "_set_in_node_body",
     "_set_invocation_id",
     "_set_namespace_prefix",
     "_set_terminal_attempt_index",

@@ -62,12 +62,14 @@ from openarmature.checkpoint.protocol import (
     NodePosition,
 )
 from openarmature.observability.correlation import (
+    _record_call_site,
     _reset_active_dispatch,
     _reset_active_observers,
     _reset_branch_name_chain,
     _reset_correlation_id,
     _reset_fan_out_index,
     _reset_fan_out_index_chain,
+    _reset_in_node_body,
     _reset_invocation_id,
     _reset_namespace_prefix,
     _set_active_dispatch,
@@ -77,6 +79,7 @@ from openarmature.observability.correlation import (
     _set_correlation_id,
     _set_fan_out_index,
     _set_fan_out_index_chain,
+    _set_in_node_body,
     _set_invocation_id,
     _set_namespace_prefix,
     current_active_observer_span,
@@ -112,6 +115,7 @@ from .observer import (
     _DRAIN_SENTINEL,
     DrainSummary,
     Observer,
+    ObserverEvent,
     RemoveHandle,
     SubscribedObserver,
     _coerce_subscribed,
@@ -276,6 +280,15 @@ class _StepResult[StateT: State]:
 
     state: StateT
     finalize_completed: Callable[[RuntimeGraphError | None], None]
+
+
+def _dispatch_from_call_site(context: _InvocationContext, event: ObserverEvent) -> None:
+    """Enqueue an event a capability emits through ``current_dispatch()``,
+    recording on it whether the call came from a node body."""
+    # Recorded here, in the caller's context. The delivery worker runs in its
+    # own context and would read its own value.
+    _record_call_site(event)
+    _dispatch(context, event)
 
 
 def _no_op_finalize(_edge_error: RuntimeGraphError | None) -> None:
@@ -1536,6 +1549,7 @@ class CompiledGraph[StateT: State]:
             # ``prepare_sync`` can't reveal this node's span as a
             # stale value to the engine's read.
             otel_token = _attach_active_observer_span()
+            in_body_token = _set_in_node_body(True)
             try:
                 try:
                     partial = await node.run(s)
@@ -1552,6 +1566,7 @@ class CompiledGraph[StateT: State]:
                     )
                     raise
             finally:
+                _reset_in_node_body(in_body_token)
                 _detach_active_observer_span(otel_token)
                 _set_active_observer_span(None)
 
@@ -1595,7 +1610,8 @@ class CompiledGraph[StateT: State]:
         # All four reset in ``try/finally`` so an exception escaping
         # the chain still restores the prior values.
         observers_token = _set_active_observers(context.full_observers())
-        dispatch_token = _set_active_dispatch(lambda event: _dispatch(context, event))
+        dispatch_token = _set_active_dispatch(lambda event: _dispatch_from_call_site(context, event))
+        body_token = _set_in_node_body(False)
         namespace_token = _set_namespace_prefix(namespace)
         fan_out_token = _set_fan_out_index(context.fan_out_index)
         # Per proposal 0045 (v0.37.0): drive the per-depth chain
@@ -1628,6 +1644,7 @@ class CompiledGraph[StateT: State]:
             _reset_fan_out_index_chain(fan_out_chain_token)
             _reset_fan_out_index(fan_out_token)
             _reset_namespace_prefix(namespace_token)
+            _reset_in_node_body(body_token)
             _reset_active_dispatch(dispatch_token)
             _reset_active_observers(observers_token)
         # Engine's canonical merge uses the ORIGINAL state per §2: "the
@@ -1742,7 +1759,8 @@ class CompiledGraph[StateT: State]:
         # (inner ``_step_function_node`` calls own their own).
         namespace = context.namespace_prefix + (current,)
         observers_token = _set_active_observers(context.full_observers())
-        dispatch_token = _set_active_dispatch(lambda event: _dispatch(context, event))
+        dispatch_token = _set_active_dispatch(lambda event: _dispatch_from_call_site(context, event))
+        body_token = _set_in_node_body(False)
         namespace_token = _set_namespace_prefix(namespace)
         fan_out_token = _set_fan_out_index(context.fan_out_index)
         # Per proposal 0045: drive per-depth chain ContextVars.
@@ -1766,6 +1784,7 @@ class CompiledGraph[StateT: State]:
             _reset_fan_out_index_chain(fan_out_chain_token)
             _reset_fan_out_index(fan_out_token)
             _reset_namespace_prefix(namespace_token)
+            _reset_in_node_body(body_token)
             _reset_active_dispatch(dispatch_token)
             _reset_active_observers(observers_token)
         merged = _merge_partial(state, final_partial, self.reducers, current)
@@ -2015,7 +2034,8 @@ class CompiledGraph[StateT: State]:
         # values get set when the inner subgraph descends with the
         # instance's index in its own context.
         observers_token = _set_active_observers(context.full_observers())
-        dispatch_token = _set_active_dispatch(lambda event: _dispatch(context, event))
+        dispatch_token = _set_active_dispatch(lambda event: _dispatch_from_call_site(context, event))
+        body_token = _set_in_node_body(False)
         namespace_token = _set_namespace_prefix(namespace)
         fan_out_token = _set_fan_out_index(context.fan_out_index)
         # Per proposal 0045: drive per-depth chain ContextVars.
@@ -2056,6 +2076,7 @@ class CompiledGraph[StateT: State]:
                 _reset_fan_out_index_chain(fan_out_chain_token)
                 _reset_fan_out_index(fan_out_token)
                 _reset_namespace_prefix(namespace_token)
+                _reset_in_node_body(body_token)
                 _reset_active_dispatch(dispatch_token)
                 _reset_active_observers(observers_token)
             merged_outer = _merge_partial(state, final_partial, self.reducers, current)
@@ -2249,7 +2270,8 @@ class CompiledGraph[StateT: State]:
         )
 
         observers_token = _set_active_observers(context.full_observers())
-        dispatch_token = _set_active_dispatch(lambda event: _dispatch(context, event))
+        dispatch_token = _set_active_dispatch(lambda event: _dispatch_from_call_site(context, event))
+        body_token = _set_in_node_body(False)
         namespace_token = _set_namespace_prefix(namespace)
         fan_out_token = _set_fan_out_index(context.fan_out_index)
         # Per proposal 0045: drive per-depth chain ContextVars.
@@ -2267,6 +2289,7 @@ class CompiledGraph[StateT: State]:
             _reset_fan_out_index_chain(fan_out_chain_token)
             _reset_fan_out_index(fan_out_token)
             _reset_namespace_prefix(namespace_token)
+            _reset_in_node_body(body_token)
             _reset_active_dispatch(dispatch_token)
             _reset_active_observers(observers_token)
         merged_outer = _merge_partial(state, final_partial, self.reducers, current)

@@ -2299,12 +2299,18 @@ class OTelObserver:
         """Look up the calling node's span using the calling-node
         identity, falling back through the per-instance fan-out dispatch
         span, subgraph dispatch / detached root, and the invocation span."""
-        # 1. Direct match on the calling node's ``_StackKey`` -- the
-        #    lineage-disambiguated calling-node span (proposal 0084 §5.5
-        #    "Lineage-resolved parent"). Keyed by the full enclosing fan-out /
-        #    branch chain so a nested provider call parents under ITS OWN
-        #    calling node's span, not a sibling in another concurrent outer
-        #    instance that shares the innermost scalar fan_out_index.
+        from openarmature.observability.correlation import _issued_from_node_body
+
+        # 1. A call from the node body parents under the calling node's span,
+        #    matched on its ``_StackKey`` -- the lineage-disambiguated
+        #    calling-node span (proposal 0084 §5.5 "Lineage-resolved parent").
+        #    Keyed by the full enclosing fan-out / branch chain so a nested
+        #    provider call parents under ITS OWN calling node's span, not a
+        #    sibling in another concurrent outer instance that shares the
+        #    innermost scalar fan_out_index. A call from middleware or a wrapper
+        #    never parents there, even while that span is open (§5.5 *Resolution
+        #    is structural*). The engine records which at dispatch; an event it
+        #    did not dispatch carries no record and keeps the open-span lookup.
         calling_key: _StackKey = (
             calling_namespace_prefix,
             calling_attempt_index,
@@ -2313,13 +2319,14 @@ class OTelObserver:
             calling_fan_out_index_chain,
             calling_branch_name_chain,
         )
-        calling = inv_state.open_spans.get(calling_key)
+        from_body = _issued_from_node_body(event) if event is not None else None
+        calling = inv_state.open_spans.get(calling_key) if from_body is not False else None
         if calling is not None:
             return set_span_in_context(calling.span)
         # 2. Orphan fallback (proposal 0084 §5.5 "Lineage-resolved parent"):
-        #    the calling-node span is not open -- a call issued from middleware
-        #    (pre/post phase) or a wrapper rather than the node body -- so the
-        #    provider span parents under the nearest enclosing wrapper per §4.3,
+        #    a call issued from middleware (pre/post phase) or a wrapper rather
+        #    than the node body, so the provider span parents under the nearest
+        #    enclosing wrapper per §4.3,
         #    resolved via the lineage chain to the correct inner instance (not
         #    the old top-level-scalar shortcut, which mis-resolves to a
         #    coincidentally-indexed sibling under nested concurrency). This is
@@ -2327,8 +2334,8 @@ class OTelObserver:
         #    call and an in-body call on the same lineage resolve to the same
         #    enclosing parent; it subsumes the former per-instance / subgraph /
         #    invocation / empty-context fallbacks.
-        # ORPHAN PATH ONLY: the calling node's span is not open, so this is a
-        # call from a wrapper. Materialize any dispatch span the calling lineage
+        # ORPHAN PATH ONLY: the call does not parent under its calling node.
+        # Materialize any dispatch span the calling lineage
         # sits inside before walking for it, so the answer does not depend on
         # whether the wrapper's first inner node has drained yet.
         if event is not None:

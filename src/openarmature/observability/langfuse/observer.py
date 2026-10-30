@@ -151,6 +151,9 @@ class _OpenObservation:
     handle: LangfuseSpanHandle | LangfuseGenerationHandle
     fan_out_index_chain: tuple[int | None, ...] = ()
     branch_name_chain: tuple[str | None, ...] = ()
+    # §5.7: a callable parallel branch's own observation, which is also its
+    # per-branch dispatch.
+    callable_branch: bool = False
 
 
 def _observation_chain_on_path(
@@ -735,6 +738,11 @@ class LangfuseObserver:
             handle=handle,
             fan_out_index_chain=event.fan_out_index_chain,
             branch_name_chain=event.branch_name_chain,
+            callable_branch=(
+                event.branch_name is not None
+                and event.parallel_branches_config is None
+                and event.namespace in inv_state.parallel_branches_parent_node_name
+            ),
         )
 
     def _handle_completed(self, event: NodeEvent) -> None:
@@ -2407,10 +2415,14 @@ class LangfuseObserver:
         event: LineageEvent | None = None,
         start_time: datetime | None = None,
     ) -> str | None:
-        # Exact-match the calling node's observation first. If it is not open
-        # (a middleware or wrapper call) take the §5.5 orphan fallback: parent
-        # under the nearest enclosing wrapper on the lineage chain, else the
-        # Trace.
+        from openarmature.observability.correlation import _issued_from_node_body
+
+        # A call from the node body parents under the calling node's
+        # observation. A call from middleware or a wrapper takes the §5.5 orphan
+        # fallback even while that observation is open: the nearest enclosing
+        # wrapper on the lineage chain, else the Trace. The engine records which
+        # at dispatch; an event it did not dispatch carries no record and keeps
+        # the open-observation lookup.
         key: _StackKey = (
             calling_namespace_prefix,
             calling_attempt_index,
@@ -2419,11 +2431,14 @@ class LangfuseObserver:
             calling_fan_out_index_chain,
             calling_branch_name_chain,
         )
+        from_body = _issued_from_node_body(event) if event is not None else None
         observation = inv_state.open_observations.get(key)
-        if observation is not None:
+        # A callable branch's observation is its branch dispatch, so it is also
+        # the enclosing wrapper of a call from the branch's middleware.
+        if observation is not None and (from_body is not False or observation.callable_branch):
             return observation.handle.id
-        # ORPHAN PATH ONLY: the calling node's observation is not open, so this
-        # is a call from a wrapper. Materialize any dispatch observation the
+        # ORPHAN PATH ONLY: the call does not parent under its calling node.
+        # Materialize any dispatch observation the
         # calling lineage sits inside before walking for it, so the answer does
         # not depend on whether the wrapper's first inner node has drained.
         if event is not None:

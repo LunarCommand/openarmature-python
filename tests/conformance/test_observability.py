@@ -3082,22 +3082,13 @@ async def _run_fixture_133_case(case: Mapping[str, Any], spec: Mapping[str, Any]
     # issues exactly one orphan provider.complete and DISCARDS the response,
     # modelling a guardrail / classifier side call.
     #
-    # Realization note (this harness deviates from the fixture's literal
-    # "per-node `guard` middleware" on ONE axis, forced by the observers' real
-    # timing; the orphan SEMANTIC -- no open calling-node span -- and the oracle
-    # span_tree are preserved):
-    #
-    #   1. INSTANCE middleware on the inner fan-out, not per-node middleware on
-    #      `guard`. A per-node wrapper's call carries guard's own lineage, so the
-    #      observer binds it to guard's span (the OTel observer opens node spans
-    #      synchronously via ``prepare_sync`` before the async worker resolves the
-    #      provider event), and it parents under guard, not orphaned. The fan-out
-    #      instance wrapper keeps the orphan call's lineage at the fan-out
-    #      boundary (off the leaf node), so its span falls back to the nearest
-    #      enclosing wrapper -- the inner fan-out INSTANCE span -- exactly as §5.5
-    #      intends, a sibling of the later `guard` node span. `leaf_sg` is the
-    #      single `guard` node, so the instance wrapper IS guard's wrapper; the
-    #      `calls_llm_from_wrapper` directive is read from the `guard` node spec.
+    # The wrapper is node middleware on `guard`, as conformance-adapter §5.1
+    # defines the primitive, so its call carries guard's own lineage. What keeps
+    # it off guard's span is the engine's record that it was issued outside the
+    # node body: the OTel observer opens node spans synchronously via
+    # ``prepare_sync``, so without the barrier guard's span can already be open
+    # when the provider event resolves. `leaf_sg` is the single `guard` node, and
+    # the `calls_llm_from_wrapper` directive is read from its spec.
     #
     # The phase is the fixture's, not the harness's. This driver used to hardcode
     # POST because the Langfuse observer created the inner instance observation
@@ -3217,10 +3208,10 @@ async def _run_fixture_133_case(case: Mapping[str, Any], spec: Mapping[str, Any]
         return dict(update_map)
 
     async def _wrapper_mw(state: Any, next_call: Any) -> Mapping[str, Any]:
-        # Instance middleware on the inner fan-out. The phase comes from the
-        # fixture: at `pre` the calling node's span is not yet open, at `post` it
-        # has already closed, and either way the orphan provider span falls back
-        # to the nearest enclosing wrapper, the inner fan-out INSTANCE span.
+        # Node middleware on `guard`. The phase comes from the fixture: at `pre`
+        # the call precedes guard's span, at `post` it follows it, and either way
+        # the orphan provider span falls back to the nearest enclosing wrapper,
+        # the inner fan-out INSTANCE span.
         #
         # Section 5.1's barrier only bites at `pre`: at `post` the node body has
         # already run and its `started` event has synthesized the dispatch span,
@@ -3234,14 +3225,13 @@ async def _run_fixture_133_case(case: Mapping[str, Any], spec: Mapping[str, Any]
 
     leaf_sg = (
         GraphBuilder(leaf_state_cls)
-        .add_node("guard", _guard_body)
+        .add_node("guard", _guard_body, middleware=[_wrapper_mw])
         .add_edge("guard", END)
         .set_entry("guard")
         .compile()
     )
 
-    # ---- Middle subgraph: the inner fan-out over `leaf_sg`, with the orphan-call
-    # wrapper attached as INSTANCE middleware (see the realization note above).
+    # ---- Middle subgraph: the inner fan-out over `leaf_sg`.
     mid_spec = cast("dict[str, Any]", subgraphs_spec["mid"])
     mid_state_cls = build_state_cls("Mid_133", cast("dict[str, dict[str, Any]]", mid_spec["state"]["fields"]))
     inner_fo = cast("dict[str, Any]", mid_spec["nodes"]["inner_fan_out"]["fan_out"])
@@ -3255,7 +3245,6 @@ async def _run_fixture_133_case(case: Mapping[str, Any], spec: Mapping[str, Any]
             collect_field=cast("str", inner_fo["collect_field"]),
             target_field=cast("str", inner_fo["target_field"]),
             error_policy=cast("str", inner_fo.get("error_policy", "fail_fast")),
-            instance_middleware=[_wrapper_mw],
         )
         .add_edge("inner_fan_out", END)
         .set_entry("inner_fan_out")
@@ -7555,50 +7544,42 @@ async def _run_orphan_fallback_case(case: Mapping[str, Any], spec: Mapping[str, 
 
             return _mw
 
-        # ---- Attach each orphan wrapper to whatever ENCLOSES its subgraph,
-        # which is what the fixtures mean by "the nearest enclosing wrapper": a
-        # fan-out target takes INSTANCE middleware, a parallel branch takes
-        # BRANCH middleware. Not node middleware on the guard, which runs
-        # entirely inside the node span in both phases.
-        instance_mw: dict[str, dict[str, list[Any]]] = {}
-        branch_mw: dict[str, dict[str, list[Any]]] = {}
+        # ---- Attach each orphan wrapper as node middleware on the node that
+        # declares it (conformance-adapter section 5.1). At `pre` it runs before
+        # the node's `started` dispatch, so the node's span is not yet open.
+        node_mw: dict[str, dict[str, list[Any]]] = {}
         # Parallel-branches hosts live in the case AND in subgraphs, so a
         # wrapper-bearing subgraph used as a branch of a nested pb node is found
         # too; looking only at `case["nodes"]` tripped a misleading assertion.
-        host_nodes: list[tuple[str | None, str, dict[str, Any]]] = []
-        for name, ns in cast("dict[str, Any]", case.get("nodes") or {}).items():
-            host_nodes.append((None, name, cast("dict[str, Any]", ns)))
-        for sg_name, sg in subgraph_specs.items():
-            sg_nodes = cast("dict[str, Any]", cast("dict[str, Any]", sg).get("nodes") or {})
-            for name, ns in sg_nodes.items():
-                host_nodes.append((sg_name, name, cast("dict[str, Any]", ns)))
+        host_nodes: list[dict[str, Any]] = [
+            cast("dict[str, Any]", ns) for ns in cast("dict[str, Any]", case.get("nodes") or {}).values()
+        ]
+        for sg in subgraph_specs.values():
+            host_nodes.extend(
+                cast("dict[str, Any]", ns)
+                for ns in cast("dict[str, Any]", cast("dict[str, Any]", sg).get("nodes") or {}).values()
+            )
         for sg_name, sg_spec in subgraph_specs.items():
             found = _wrapper_bearing_node(cast("Mapping[str, Any]", sg_spec))
             if found is None:
                 continue
-            _node_name, wrapper_spec = found
-            mw = _make_orphan_mw(wrapper_spec)
-            attached = False
-            for host_sg, host_node, host_spec in host_nodes:
-                fan_out = cast("dict[str, Any]", host_spec.get("fan_out") or {})
-                if fan_out.get("subgraph") == sg_name:
-                    assert host_sg is not None, (
-                        f"fan-out node {host_node!r} targeting {sg_name!r} sits at the case level, "
-                        f"where this driver has no instance-middleware seam"
-                    )
-                    instance_mw.setdefault(host_sg, {}).setdefault(host_node, []).append(mw)
-                    attached = True
-                host_pb = cast("dict[str, Any]", host_spec.get("parallel_branches") or {})
-                branches = cast("dict[str, Any]", host_pb.get("branches") or {})
-                for branch_name, branch_cfg in branches.items():
-                    if cast("dict[str, Any]", branch_cfg).get("subgraph") == sg_name:
-                        assert host_sg is None, (
-                            f"parallel-branches node {host_node!r} is nested inside subgraph "
-                            f"{host_sg!r}; this driver attaches branch middleware at the case level only"
-                        )
-                        branch_mw.setdefault(host_node, {}).setdefault(branch_name, []).append(mw)
-                        attached = True
-            assert attached, (
+            node_name, wrapper_spec = found
+            node_mw.setdefault(sg_name, {}).setdefault(node_name, []).append(_make_orphan_mw(wrapper_spec))
+            # The orphan parents under the dispatch span enclosing its subgraph,
+            # which only a fan-out instance or a parallel branch opens: a plain
+            # subgraph host would need the subgraph span 0124 does not yet open.
+            hosted = any(
+                cast("dict[str, Any]", host.get("fan_out") or {}).get("subgraph") == sg_name
+                or any(
+                    cast("dict[str, Any]", branch).get("subgraph") == sg_name
+                    for branch in cast(
+                        "dict[str, Any]",
+                        cast("dict[str, Any]", host.get("parallel_branches") or {}).get("branches") or {},
+                    ).values()
+                )
+                for host in host_nodes
+            )
+            assert hosted, (
                 f"subgraph {sg_name!r} declares `calls_llm_from_wrapper` but is neither a fan-out "
                 f"target nor a parallel branch, so it has no enclosing wrapper to orphan against"
             )
@@ -7621,7 +7602,7 @@ async def _run_orphan_fallback_case(case: Mapping[str, Any], spec: Mapping[str, 
                     subgraphs=dict(compiled),
                     trace=[],
                     model_name=f"Sub_{sg_name}",
-                    fan_out_instance_middleware=instance_mw.get(sg_name, {}),
+                    node_middleware=node_mw.get(sg_name, {}),
                 )
                 compiled[sg_name] = built_sg.builder.compile()
                 del remaining[sg_name]
@@ -7631,7 +7612,7 @@ async def _run_orphan_fallback_case(case: Mapping[str, Any], spec: Mapping[str, 
                 f"compiled so far: {sorted(compiled)}"
             )
 
-        built = build_graph(case, subgraphs=compiled, trace=[], parallel_branches_branch_middleware=branch_mw)
+        built = build_graph(case, subgraphs=compiled, trace=[])
         graph = built.builder.compile()
         graph.attach_observer(observer)
         invocation_id = str(uuid.uuid4())
