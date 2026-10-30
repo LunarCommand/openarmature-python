@@ -44,7 +44,6 @@ from pathlib import Path
 from typing import Any, NamedTuple, cast
 
 import pytest
-import yaml
 
 from openarmature.checkpoint import (
     Checkpointer,
@@ -67,6 +66,7 @@ from openarmature.graph import (
 from openarmature.llm import TRANSIENT_CATEGORIES
 
 from .adapter import ObserverFixture, build_graph, make_observer_fn, raised_from_node
+from .harness import read_trace
 from .harness.subgraph_placement import resolve_subgraphs
 
 CONFORMANCE_DIR = (
@@ -107,8 +107,7 @@ def _fixture_id(path: Path) -> str:
 
 
 def _load(path: Path) -> dict[str, Any]:
-    with path.open() as f:
-        return cast("dict[str, Any]", yaml.safe_load(f))
+    return read_trace.load(path)
 
 
 # ---------------------------------------------------------------------------

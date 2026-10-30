@@ -29,7 +29,6 @@ from typing import Any, cast
 
 import httpx
 import pytest
-import yaml
 from pydantic import SecretStr
 
 from openarmature.graph import END, BranchSpec, ExplicitMapping, GraphBuilder
@@ -55,6 +54,7 @@ from openarmature.prompts.context import with_active_prompt
 from tests.conformance.test_observability import _observer_kwargs_for_case
 
 from .adapter import build_graph, build_state_cls
+from .harness import read_trace
 from .harness.capabilities import (
     assert_case_asserts_something,
     assert_some_case_ran,
@@ -465,7 +465,7 @@ def _fixture_id(path: Path) -> str:
 
 
 def _load(path: Path) -> dict[str, Any]:
-    spec = cast("dict[str, Any]", yaml.safe_load(path.read_text()))
+    spec = read_trace.load(path)
     for entry in cast("list[Any]", spec.get("cases") or [spec]):
         if isinstance(entry, dict):
             _normalize_observer_config(cast("dict[str, Any]", entry))

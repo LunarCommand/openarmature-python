@@ -123,8 +123,10 @@ _UNIT_DRIVEN: tuple[tuple[str, str], ...] = (
 )
 
 # This module and the registry it reads: scanning them would let a key count as
-# read because it is registered.
-_SELF = frozenset({"test_case_vocabulary.py", "vocabulary.py"})
+# read because it is registered. The read trace and its walk too: every runner
+# loads through them, and their lookups are the harness walking each fixture,
+# so scanning them would count a key as read by every runner.
+_SELF = frozenset({"test_case_vocabulary.py", "vocabulary.py", "read_trace.py", "fixture_walk.py"})
 
 _BODY_KEYS = ("subgraph", "subgraph_with_idx", "subgraphs", "inner_subgraphs")
 

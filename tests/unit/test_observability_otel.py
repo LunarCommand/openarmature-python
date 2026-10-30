@@ -2016,7 +2016,6 @@ async def test_call_level_retry_fixture_per_attempt_spans(fixture_id: str) -> No
     import json
 
     import httpx
-    import yaml
     from opentelemetry.trace import StatusCode
 
     from openarmature.graph.events import LlmRetryAttemptEvent
@@ -2030,11 +2029,12 @@ async def test_call_level_retry_fixture_per_attempt_spans(fixture_id: str) -> No
         _set_active_dispatch,
         _set_invocation_id,
     )
+    from tests.conformance.harness import read_trace
 
     fixture_dir = (
         Path(__file__).resolve().parents[2] / "openarmature-spec" / "spec" / "llm-provider" / "conformance"
     )
-    spec = cast("dict[str, Any]", yaml.safe_load((fixture_dir / f"{fixture_id}.yaml").read_text()))
+    spec = read_trace.load(fixture_dir / f"{fixture_id}.yaml")
     responses = cast("list[dict[str, Any]]", spec["mock_provider"]["responses"])
     call = cast("dict[str, Any]", spec["call"])
     expected = cast("dict[str, Any]", spec["expected"])
@@ -2161,7 +2161,6 @@ async def test_call_level_reask_retry_fixture(fixture_id: str) -> None:
     import json
 
     import httpx
-    import yaml
     from opentelemetry.trace import StatusCode
 
     from openarmature.graph.events import LlmRetryAttemptEvent
@@ -2176,11 +2175,12 @@ async def test_call_level_reask_retry_fixture(fixture_id: str) -> None:
         _set_active_dispatch,
         _set_invocation_id,
     )
+    from tests.conformance.harness import read_trace
 
     fixture_dir = (
         Path(__file__).resolve().parents[2] / "openarmature-spec" / "spec" / "llm-provider" / "conformance"
     )
-    spec = cast("dict[str, Any]", yaml.safe_load((fixture_dir / f"{fixture_id}.yaml").read_text()))
+    spec = read_trace.load(fixture_dir / f"{fixture_id}.yaml")
     responses = cast("list[dict[str, Any]]", spec["mock_provider"]["responses"])
     call = cast("dict[str, Any]", spec["call"])
     expected = cast("dict[str, Any]", spec["expected"])

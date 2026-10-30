@@ -40,7 +40,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
 import pytest
-import yaml
 
 # Skip the entire module if the ``otel`` extras aren't installed —
 # importing ``openarmature.observability.otel`` raises ImportError at
@@ -55,6 +54,7 @@ from openarmature.observability.correlation import (  # noqa: E402
 from openarmature.observability.otel import OTelObserver  # noqa: E402
 
 from .adapter import build_graph, error_cause_category  # noqa: E402
+from .harness import read_trace  # noqa: E402
 from .harness.mock_messages import message_for  # noqa: E402
 from .harness.subgraph_placement import resolve_subgraphs  # noqa: E402
 
@@ -628,8 +628,7 @@ def _fixture_id(path: Path) -> str:
 
 
 def _load(path: Path) -> dict[str, Any]:
-    with path.open() as f:
-        return cast("dict[str, Any]", yaml.safe_load(f))
+    return read_trace.load(path)
 
 
 def test_observability_fixture_coverage_is_complete() -> None:

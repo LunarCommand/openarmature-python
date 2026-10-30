@@ -17,7 +17,6 @@ from pathlib import Path
 from typing import Any, cast
 
 import pytest
-import yaml
 
 from openarmature.graph import (
     END,
@@ -44,6 +43,7 @@ from .adapter import (
     build_graph,
     make_observer_fn,
 )
+from .harness import read_trace
 from .harness.subgraph_placement import resolve_subgraphs
 
 CONFORMANCE_DIR = (
@@ -52,8 +52,7 @@ CONFORMANCE_DIR = (
 
 
 def _load(path: Path) -> dict[str, Any]:
-    with path.open() as f:
-        return yaml.safe_load(f)
+    return read_trace.load(path)
 
 
 def _fixture_paths() -> list[Path]:

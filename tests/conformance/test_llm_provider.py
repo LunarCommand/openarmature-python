@@ -25,7 +25,6 @@ from typing import Any, Literal, cast
 
 import httpx
 import pytest
-import yaml
 from pydantic import ValidationError
 
 from openarmature.llm import (
@@ -54,6 +53,7 @@ from .harness import (
     assert_system_references_schema,
     assert_tool_choice_absent,
     match_wire_body,
+    read_trace,
     request_body,
 )
 
@@ -182,8 +182,7 @@ def _fixture_id(path: Path) -> str:
 
 
 def _load(path: Path) -> dict[str, Any]:
-    with path.open() as f:
-        return cast("dict[str, Any]", yaml.safe_load(f))
+    return read_trace.load(path)
 
 
 # ---------------------------------------------------------------------------
