@@ -25,7 +25,6 @@ from typing import Any, Literal, cast
 
 import httpx
 import pytest
-import yaml
 from pydantic import ValidationError
 
 from openarmature.llm import (
@@ -54,6 +53,7 @@ from .harness import (
     assert_system_references_schema,
     assert_tool_choice_absent,
     match_wire_body,
+    read_trace,
     request_body,
 )
 
@@ -182,8 +182,7 @@ def _fixture_id(path: Path) -> str:
 
 
 def _load(path: Path) -> dict[str, Any]:
-    with path.open() as f:
-        return cast("dict[str, Any]", yaml.safe_load(f))
+    return read_trace.load(path)
 
 
 # ---------------------------------------------------------------------------
@@ -613,7 +612,9 @@ def _iter_calls(spec: Mapping[str, Any]) -> Iterator[Mapping[str, Any]]:
     if "calls" in spec:
         yield from cast("list[Mapping[str, Any]]", spec["calls"])
     elif "call" in spec:
-        call = dict(cast("Mapping[str, Any]", spec["call"]))
+        # `.copy()` rather than `dict()`: the copy keeps recording the keys read
+        # from it, which the nested read check counts.
+        call = cast("dict[str, Any]", spec["call"]).copy()
         for key in _CASE_LEVEL_CALL_KEYS:
             if key in spec and key not in call:
                 call[key] = spec[key]

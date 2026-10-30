@@ -17,10 +17,10 @@ from pathlib import Path
 from typing import Any, cast
 
 import pytest
-import yaml
 
 from ._deferral import skip_if_deferred
 from .adapter import build_graph
+from .harness import read_trace
 from .harness.subgraph_placement import graph_spec_for, resolve_subgraphs
 
 CONFORMANCE_DIR = (
@@ -39,7 +39,7 @@ def _fixture_id(path: Path) -> str:
 
 
 def _load(path: Path) -> dict[str, Any]:
-    return cast("dict[str, Any]", yaml.safe_load(path.read_text()))
+    return read_trace.load(path)
 
 
 async def _run_case(case: dict[str, Any], document: dict[str, Any]) -> None:

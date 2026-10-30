@@ -45,6 +45,7 @@ import pytest
 import yaml
 
 from .harness import fixtures as fixture_models
+from .harness.fixture_walk import containers
 from .harness.fixtures import CaseSpec, SubgraphDefinition
 from .harness.vocabulary import (
     PENDING_ADOPTION,
@@ -122,8 +123,10 @@ _UNIT_DRIVEN: tuple[tuple[str, str], ...] = (
 )
 
 # This module and the registry it reads: scanning them would let a key count as
-# read because it is registered.
-_SELF = frozenset({"test_case_vocabulary.py", "vocabulary.py"})
+# read because it is registered. The read trace and its walk too: every runner
+# loads through them, and their lookups are the harness walking each fixture,
+# so scanning them would count a key as read by every runner.
+_SELF = frozenset({"test_case_vocabulary.py", "vocabulary.py", "read_trace.py", "fixture_walk.py"})
 
 _BODY_KEYS = ("subgraph", "subgraph_with_idx", "subgraphs", "inner_subgraphs")
 
@@ -246,19 +249,6 @@ def _submodule_loads(src: str) -> list[tuple[str, str | None]]:
     return loads
 
 
-# The root counts: a fixture with no `cases:` list carries every directive
-# there, and the document-root models that would forbid an unknown key are
-# applied only by `test_fixture_parsing`, which parses `loader.CAPABILITIES`
-# alone and skips its own deferrals.
-def _containers(doc: dict[str, Any]) -> list[dict[str, Any]]:
-    """The document root and each of its cases, as directive-bearing containers."""
-    out = [doc]
-    cases = doc.get("cases")
-    if isinstance(cases, list):
-        out.extend(cast("dict[str, Any]", c) for c in cast("list[Any]", cases) if isinstance(c, dict))
-    return out
-
-
 def _fixture_docs() -> list[tuple[str, str, dict[str, Any]]]:
     """`(capability, fixture, document)` for every fixture in a run directory."""
     out: list[tuple[str, str, dict[str, Any]]] = []
@@ -297,7 +287,7 @@ def _declared_keys() -> list[tuple[str, str, str, str]]:
     """`(capability, fixture, where, key)` for every directive the corpus declares."""
     out: list[tuple[str, str, str, str]] = []
     for capability, fixture, doc in _fixture_docs():
-        for container in _containers(doc):
+        for container in containers(doc):
             where = "<root>" if container is doc else str(container.get("name", "<unnamed>"))
             out.extend((capability, fixture, where, key) for key in container)
     return out

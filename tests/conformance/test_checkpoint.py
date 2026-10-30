@@ -44,7 +44,6 @@ from pathlib import Path
 from typing import Any, NamedTuple, cast
 
 import pytest
-import yaml
 
 from openarmature.checkpoint import (
     Checkpointer,
@@ -67,6 +66,7 @@ from openarmature.graph import (
 from openarmature.llm import TRANSIENT_CATEGORIES
 
 from .adapter import ObserverFixture, build_graph, make_observer_fn, raised_from_node
+from .harness import read_trace
 from .harness.subgraph_placement import resolve_subgraphs
 
 CONFORMANCE_DIR = (
@@ -107,8 +107,7 @@ def _fixture_id(path: Path) -> str:
 
 
 def _load(path: Path) -> dict[str, Any]:
-    with path.open() as f:
-        return cast("dict[str, Any]", yaml.safe_load(f))
+    return read_trace.load(path)
 
 
 # ---------------------------------------------------------------------------
@@ -995,7 +994,10 @@ async def _run_one_case(spec: Mapping[str, Any], *, top_level: Mapping[str, Any]
             "every_save_assertions declared but no saves were captured during the invocation"
         )
         for save_idx, saved_record in enumerate(capturing.saves):
-            for key, expected_value in every_save_block.items():
+            # Read by name rather than through `.items()`, which the nested
+            # read check cannot see.
+            for key in every_save_block:
+                expected_value = every_save_block[key]
                 actual_value = getattr(saved_record, key, None)
                 assert actual_value == expected_value, (
                     f"every_save_assertions: save[{save_idx}].{key} mismatch — "

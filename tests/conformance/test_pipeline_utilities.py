@@ -22,7 +22,6 @@ from pathlib import Path
 from typing import Any, cast
 
 import pytest
-import yaml
 
 from openarmature.graph import (
     CompileError,
@@ -45,6 +44,7 @@ from openarmature.graph.middleware import (
 )
 
 from .adapter import ObserverFixture, assert_events_match, build_graph, make_observer_fn, raised_from_node
+from .harness import read_trace
 from .harness.subgraph_placement import resolve_subgraphs
 from .middleware_seam import (
     ErrorRaiserMiddleware,
@@ -75,8 +75,7 @@ _UNSUPPORTED_NODE_DIRECTIVES = frozenset(
 
 
 def _load(path: Path) -> dict[str, Any]:
-    with path.open() as f:
-        return yaml.safe_load(f)
+    return read_trace.load(path)
 
 
 # Fan-out (proposal 0005 PU side) covers fixtures 017-023.
@@ -575,8 +574,11 @@ async def test_pipeline_utility_fixture(
             # ``expected_compile_error``. Flatten it to the top level the rest
             # of this runner reads from.
             if "graph" in merged:
-                graph_block = cast("dict[str, Any]", merged.pop("graph"))
-                merged = {**graph_block, **merged}
+                # Flattened onto a copy of the graph block, which keeps
+                # recording the keys this runner reads from it.
+                flattened = cast("dict[str, Any]", merged.pop("graph")).copy()
+                flattened.update(merged)
+                merged = flattened
             for k, v in shared_subgraph_blocks.items():
                 merged.setdefault(k, v)
             # Section 5.4 ranks per NAME. `setdefault` keeps the case's whole

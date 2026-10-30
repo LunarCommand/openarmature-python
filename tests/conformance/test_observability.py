@@ -40,7 +40,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
 import pytest
-import yaml
 
 # Skip the entire module if the ``otel`` extras aren't installed —
 # importing ``openarmature.observability.otel`` raises ImportError at
@@ -55,6 +54,7 @@ from openarmature.observability.correlation import (  # noqa: E402
 from openarmature.observability.otel import OTelObserver  # noqa: E402
 
 from .adapter import build_graph, error_cause_category  # noqa: E402
+from .harness import read_trace  # noqa: E402
 from .harness.mock_messages import message_for  # noqa: E402
 from .harness.subgraph_placement import resolve_subgraphs  # noqa: E402
 
@@ -628,8 +628,7 @@ def _fixture_id(path: Path) -> str:
 
 
 def _load(path: Path) -> dict[str, Any]:
-    with path.open() as f:
-        return cast("dict[str, Any]", yaml.safe_load(f))
+    return read_trace.load(path)
 
 
 def test_observability_fixture_coverage_is_complete() -> None:
@@ -1857,14 +1856,17 @@ def _apply_metadata_directives(
 
     update: dict[str, Any] = {}
     should_raise = False
-    for key, val in directives.items():
+    # Each value is read by name rather than through `.items()`, which the
+    # nested read check cannot see.
+    for key in directives:
         assert key in _METADATA_DIRECTIVE_KEYS, f"unrecognized metadata directive {key!r}"
         if key == "augment_metadata":
-            set_invocation_metadata(**cast("dict[str, Any]", val))
+            set_invocation_metadata(**cast("dict[str, Any]", directives[key]))
         elif key == "capture_invocation_metadata_into":
+            into = cast("str", directives[key])
             read = get_invocation_metadata()
-            types_seen[cast("str", val)] = type(read)
-            update[cast("str", val)] = dict(read)
+            types_seen[into] = type(read)
+            update[into] = dict(read)
         elif key == "raises":
             should_raise = True
             break

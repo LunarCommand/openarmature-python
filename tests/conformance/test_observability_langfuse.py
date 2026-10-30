@@ -29,7 +29,6 @@ from typing import Any, cast
 
 import httpx
 import pytest
-import yaml
 from pydantic import SecretStr
 
 from openarmature.graph import END, BranchSpec, ExplicitMapping, GraphBuilder
@@ -55,6 +54,7 @@ from openarmature.prompts.context import with_active_prompt
 from tests.conformance.test_observability import _observer_kwargs_for_case
 
 from .adapter import build_graph, build_state_cls
+from .harness import read_trace
 from .harness.capabilities import (
     assert_case_asserts_something,
     assert_some_case_ran,
@@ -465,7 +465,7 @@ def _fixture_id(path: Path) -> str:
 
 
 def _load(path: Path) -> dict[str, Any]:
-    spec = cast("dict[str, Any]", yaml.safe_load(path.read_text()))
+    spec = read_trace.load(path)
     for entry in cast("list[Any]", spec.get("cases") or [spec]):
         if isinstance(entry, dict):
             _normalize_observer_config(cast("dict[str, Any]", entry))
@@ -483,8 +483,10 @@ def _normalize_observer_config(case: dict[str, Any]) -> None:
     config = case.pop("langfuse_observer_config", None)
     if config is None:
         return
-    merged = dict(cast("dict[str, Any]", case.get("langfuse_observer") or {}))
-    merged.update(cast("dict[str, Any]", config))
+    # Built on a copy of the config block, which keeps recording the keys read
+    # from it for the nested read check.
+    merged = cast("dict[str, Any]", config).copy()
+    merged.update({**cast("dict[str, Any]", case.get("langfuse_observer") or {}), **config})
     case["langfuse_observer"] = merged
 
 

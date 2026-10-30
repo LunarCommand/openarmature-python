@@ -20,7 +20,6 @@ from typing import Any, cast
 
 import httpx
 import pytest
-import yaml
 
 from openarmature.llm import LlmProviderError
 from openarmature.observability.correlation import (
@@ -43,7 +42,7 @@ from openarmature.retrieval import (
 )
 
 from ._deferral import skip_if_deferred
-from .harness import as_record_mapping
+from .harness import as_record_mapping, read_trace
 
 # The wire endpoint each mapping posts to, keyed by the fixture's ``mapping``
 # directive (None => the harness-internal default). The wire-capture assertion
@@ -112,8 +111,7 @@ def _fixture_id(path: Path) -> str:
 
 
 def _load(path: Path) -> dict[str, Any]:
-    with path.open() as f:
-        return cast("dict[str, Any]", yaml.safe_load(f))
+    return read_trace.load(path)
 
 
 def _build_handler(

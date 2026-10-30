@@ -43,7 +43,6 @@ from pathlib import Path
 from typing import Any, cast
 
 import pytest
-import yaml
 
 from openarmature.checkpoint import (
     CheckpointError,
@@ -57,6 +56,7 @@ from openarmature.checkpoint import (
 from openarmature.graph import END, GraphBuilder, State
 
 from .adapter import build_state_cls
+from .harness import read_trace
 
 CONFORMANCE_DIR = (
     Path(__file__).resolve().parents[2] / "openarmature-spec" / "spec" / "pipeline-utilities" / "conformance"
@@ -440,8 +440,7 @@ async def test_state_migration_fixture(fixture_path: Path, tmp_path: Path) -> No
     list runs as a sub-case under one parametrize id (matching how
     test_checkpoint.py handles the cases-shape fixtures).
     """
-    with fixture_path.open() as f:
-        spec = cast("dict[str, Any]", yaml.safe_load(f))
+    spec = read_trace.load(fixture_path)
     cases = spec.get("cases", [])
     for case in cases:
         case_name = case.get("name", "<unnamed>")
