@@ -994,7 +994,10 @@ async def _run_one_case(spec: Mapping[str, Any], *, top_level: Mapping[str, Any]
             "every_save_assertions declared but no saves were captured during the invocation"
         )
         for save_idx, saved_record in enumerate(capturing.saves):
-            for key, expected_value in every_save_block.items():
+            # Read by name rather than through `.items()`, which the nested
+            # read check cannot see.
+            for key in every_save_block:
+                expected_value = every_save_block[key]
                 actual_value = getattr(saved_record, key, None)
                 assert actual_value == expected_value, (
                     f"every_save_assertions: save[{save_idx}].{key} mismatch — "

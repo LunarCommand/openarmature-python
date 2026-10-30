@@ -16,19 +16,27 @@ Two things differ from the case level, both deliberately:
   models at run time;
 * keys already known to be unread sit in a ledger that may only shrink, so the
   check holds the line now and each wiring PR removes its entries.
+
+The read check judges what the runners actually read in this session. Each one
+loads its fixtures through `harness.read_trace`, which records every key looked
+up in a nested block against that block's position, so the check runs after
+every runner. On a partial run it skips, and under CI it fails instead.
 """
 
 from __future__ import annotations
 
 import ast
 import importlib
+import os
 from collections import Counter, defaultdict
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from typing import Any, cast, get_args
 
+import pytest
 from pydantic import BaseModel, ValidationError
 
 from . import test_case_vocabulary as case_level
+from .harness import read_trace
 from .harness.fixture_walk import CALL_LISTS, as_dict, as_dicts, blocks, containers
 from .harness.vocabulary import (
     CASE_MAPPINGS,
@@ -42,7 +50,6 @@ from .harness.vocabulary import (
     NODE_OPEN_MAPPINGS,
     OPEN_MAPPINGS,
     OUT_OF_SCOPE_MAPPINGS,
-    POSITION_BLIND_READS,
     WALKED_MAPPINGS,
 )
 
@@ -237,62 +244,82 @@ def _read_as_attribute(reads: set[tuple[str, str]], position: str, key: str) -> 
     return any((target.rpartition(".")[2], key) in reads for target in _POSITIONS[position][0])
 
 
-def _reads() -> tuple[dict[tuple[str, str], set[str]], dict[tuple[str, str], set[str]]]:
-    """`(unread, literal)`, both keyed by `(position, key)` on running fixtures.
+Traced = Mapping[tuple[str, str, str], frozenset[tuple[str, str]]]
+Reads = dict[str, set[tuple[str, str]]]
+Unread = dict[tuple[str, str], set[str]]
 
-    `unread` maps to the fixtures declaring a key no owning runner reads.
-    `literal` maps to the capabilities whose runner counts as reading it only
-    because the key's string appears there.
+
+def _owned(traced: Traced) -> tuple[Reads, Reads, set[tuple[str, str]]]:
+    """The traced `(position, key)` reads that count, by capability and by fixture,
+    and the `(capability, fixture)` pairs a runner owning the capability loaded.
+
+    A runner that owns a capability vouches for every fixture in it, and one
+    that loads a single named fixture for that fixture alone. A read by any
+    other runner counts for nothing.
     """
-    read = case_level._owner_reads()  # noqa: SLF001
-    attributes = _attribute_reads()
     owners = case_level._runner_owners()  # noqa: SLF001
     fixture_owners = case_level._fixture_owners()  # noqa: SLF001
+    by_capability: Reads = defaultdict(set)
+    by_fixture: Reads = defaultdict(set)
+    loaded: set[tuple[str, str]] = set()
+    for (capability, fixture, runner), pairs in traced.items():
+        if runner in owners.get(capability, frozenset()):
+            by_capability[capability] |= pairs
+            loaded.add((capability, fixture))
+        elif runner in fixture_owners.get(fixture, frozenset()):
+            by_fixture[fixture] |= pairs
+    return by_capability, by_fixture, loaded
+
+
+def _unread(traced: Traced) -> Unread:
+    """The fixtures declaring each `(position, key)` no owning runner read, on running fixtures."""
+    by_capability, by_fixture, _ = _owned(traced)
+    attributes = _attribute_reads()
     executed = case_level._executed_fixture_ids()  # noqa: SLF001
     read_via = set(case_level.READ_VIA)
-    unread: dict[tuple[str, str], set[str]] = defaultdict(set)
-    literal: dict[tuple[str, str], set[str]] = defaultdict(set)
+    unread: Unread = defaultdict(set)
     for capability, fixture, position, _, key in _declared():
         if fixture not in executed or key in read_via:
             continue
-        # A model-parsed runner reads its nested keys as model fields, so a
-        # string literal there is some other mapping's key: `fetched_prompt["label"]`
-        # would vouch for a call's own `label`.
+        # A model-parsed runner reads its fixture as model fields rather than
+        # through the trace, so its reads are found in its source instead.
         if capability in attributes:
             if not _read_as_attribute(attributes[capability], position, key):
                 unread[(position, key)].add(fixture)
             continue
-        if read(key, owners[capability] | fixture_owners.get(fixture, frozenset())):
-            literal[(position, key)].add(capability)
-            continue
-        unread[(position, key)].add(fixture)
-    return unread, literal
+        if (position, key) not in by_capability[capability] and (position, key) not in by_fixture[fixture]:
+            unread[(position, key)].add(fixture)
+    return unread
 
 
-def _unread() -> dict[tuple[str, str], set[str]]:
-    return _reads()[0]
+@pytest.fixture(scope="session")
+def unread_nested() -> Unread:
+    """The nested keys no owning runner read this session, by `(position, key)`.
 
-
-def _position_blind() -> dict[tuple[str, str], set[str]]:
-    """Literal-only reads of a key that also occurs at another position or at case level.
-
-    The string match cannot tell which mapping the runner read it from, so a
-    read of `resume.expected` would equally vouch for `calls[].expected`.
+    The conformance conftest runs every test using this after the rest of the
+    session.
     """
-    nested_positions: dict[str, set[str]] = defaultdict(set)
-    for _, _, position, _, key in _declared():
-        nested_positions[key].add(position)
-    case_keys = {
-        str(key)
-        for _, _, doc in case_level._fixture_docs()  # noqa: SLF001
-        for container in containers(doc)
-        for key in container
-    }
-    return {
-        (position, key): capabilities
-        for (position, key), capabilities in _reads()[1].items()
-        if len(nested_positions[key]) > 1 or key in case_keys
-    }
+    traced = read_trace.reads()
+    _, _, loaded = _owned(traced)
+    executed = case_level._executed_fixture_ids()  # noqa: SLF001
+    missing = sorted(
+        fixture
+        for capability, fixture, _ in case_level._fixture_docs()  # noqa: SLF001
+        if fixture in executed
+        and capability not in _MODEL_PARSED_RUNNERS
+        and (capability, fixture) not in loaded
+    )
+    if missing:
+        reason = (
+            f"{len(missing)} running fixture(s) were not loaded by an owning runner this session, "
+            f"{missing[0]} first; the nested read check needs the whole suite"
+        )
+        # CI always runs the whole suite, so there a missing load means a runner
+        # stopped loading through the trace rather than a partial run.
+        if os.environ.get("CI"):
+            pytest.fail(reason)
+        pytest.skip(reason)
+    return _unread(traced)
 
 
 # Each container shape the walk descends into, with a floor of fixtures it must
@@ -570,30 +597,29 @@ def test_every_nested_key_is_recognized() -> None:
     )
 
 
-def test_every_nested_key_on_a_running_fixture_is_read() -> None:
-    unread = _unread()
+def test_every_nested_key_on_a_running_fixture_is_read(unread_nested: Unread) -> None:
     unledgered = sorted(
         (position, key, fixture)
-        for (position, key), fixtures in unread.items()
+        for (position, key), fixtures in unread_nested.items()
         for fixture in fixtures - set(KNOWN_UNREAD_NESTED.get((position, key), ()))
     )
     assert not unledgered, (
-        "nested key(s) declared by a running fixture that no owning runner reads:\n"
+        "nested key(s) declared by a running fixture that no owning runner read:\n"
         + "\n".join(f"  {f} declares {k!r} at {p}" for p, k, f in unledgered)
-        + "\nWire the key in that capability's runner."
+        + "\nWire the key in that capability's runner. A read from a copy made with dict(...) "
+        "or {**...} is not recorded; copy the block with .copy() instead."
     )
 
 
-def test_the_unread_ledger_only_names_keys_that_are_still_unread() -> None:
+def test_the_unread_ledger_only_names_keys_that_are_still_unread(unread_nested: Unread) -> None:
     # The ratchet. An entry outliving its gap -- the key got wired, or the
     # fixture stopped running -- would let a later regression of the same key
     # land in silence.
-    unread = _unread()
     stale = sorted(
         (position, key, fixture)
         for (position, key), fixtures in KNOWN_UNREAD_NESTED.items()
         for fixture in fixtures
-        if fixture not in unread.get((position, key), set())
+        if fixture not in unread_nested.get((position, key), set())
     )
     assert not stale, (
         "KNOWN_UNREAD_NESTED names gaps that are gone:\n"
@@ -602,11 +628,10 @@ def test_the_unread_ledger_only_names_keys_that_are_still_unread() -> None:
     )
 
 
-def test_a_block_with_unread_invariants_carries_a_read_directive() -> None:
+def test_a_block_with_unread_invariants_carries_a_read_directive(unread_nested: Unread) -> None:
     # The `invariants` ledger entry holds only while each block it covers also
     # carries a directive the runner reads. Predicates alone assert nothing, so
     # a block of them and nothing else would pass as coverage under the entry.
-    unread = _unread()
     ledgered = set(KNOWN_UNREAD_NESTED.get(("expected", "invariants"), ()))
     walked: set[str] = set()
     bare: list[tuple[str, str]] = []
@@ -618,7 +643,7 @@ def test_a_block_with_unread_invariants_carries_a_read_directive() -> None:
                 continue
             walked.add(fixture)
             siblings = [str(key) for key in block if key != "invariants"]
-            if all(fixture in unread.get((position, key), set()) for key in siblings):
+            if all(fixture in unread_nested.get((position, key), set()) for key in siblings):
                 bare.append((fixture, where))
     # Non-vacuity on the INPUT: a ledgered fixture whose block the walk misses
     # would pass here unchecked.
@@ -630,30 +655,38 @@ def test_a_block_with_unread_invariants_carries_a_read_directive() -> None:
     )
 
 
-def test_position_blind_reads_are_all_ledgered() -> None:
-    # A raw-YAML runner's read is matched on the bare key string, so where the
-    # same key occurs at more than one level, one read vouches for all of them.
-    # Those pairs are recorded, both ways: a new one is a silent pass landing
-    # unseen, and a stale entry hides the next one under its name.
-    blind = _position_blind()
-    recorded = {pair: set(capabilities) for pair, capabilities in POSITION_BLIND_READS.items()}
-    unrecorded = sorted(
-        (position, key, capability)
-        for (position, key), capabilities in blind.items()
-        for capability in capabilities - recorded.get((position, key), set())
-    )
-    stale = sorted(
-        (position, key, capability)
-        for (position, key), capabilities in recorded.items()
-        for capability in capabilities - blind.get((position, key), set())
-    )
-    assert not unrecorded, (
-        "nested key(s) read only through a string that also names another position:\n"
-        + "\n".join(f"  {c} at {p} for {k!r}" for p, k, c in unrecorded)
-        + "\nRead the key from its own mapping, or add it to POSITION_BLIND_READS."
-    )
-    assert not stale, (
-        "POSITION_BLIND_READS names pairs that are no longer position-blind:\n"
-        + "\n".join(f"  {c} at {p} for {k!r}" for p, k, c in stale)
-        + "\nRemove the entries."
+def test_every_owning_runner_loads_its_fixtures_through_the_trace() -> None:
+    # A runner that parses its fixtures any other way records nothing, so each
+    # nested key only it reads would show as unread. prompt-management reads its
+    # fixtures as a model and is checked from its source instead.
+    sources = case_level._runner_sources()  # noqa: SLF001
+    owners = case_level._runner_owners()  # noqa: SLF001
+    fixture_owners = case_level._fixture_owners()  # noqa: SLF001
+    owning = {
+        path
+        for capability, paths in owners.items()
+        if capability not in _MODEL_PARSED_RUNNERS
+        for path in paths
+    } | {path for paths in fixture_owners.values() for path in paths}
+    assert len(owning) >= 8, f"found only {sorted(owning)} as owning runners; the ownership scan is broken"
+    untraced: list[str] = []
+    for path in sorted(owning):
+        called = {
+            (node.func.value.id, node.func.attr)
+            for node in ast.walk(ast.parse(sources[path]))
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and isinstance(node.func.value, ast.Name)
+        }
+        parses = sorted(
+            f"yaml.{attr}" for module, attr in called if module == "yaml" and attr.endswith("load")
+        )
+        if parses:
+            untraced.append(f"{path} parses with {', '.join(parses)}")
+        elif ("read_trace", "load") not in called:
+            untraced.append(f"{path} never calls read_trace.load")
+    assert not untraced, (
+        "owning runner(s) that load fixtures outside the read trace:\n"
+        + "\n".join(f"  {line}" for line in untraced)
+        + "\nLoad each fixture with read_trace.load."
     )

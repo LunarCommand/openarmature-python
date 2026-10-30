@@ -612,7 +612,9 @@ def _iter_calls(spec: Mapping[str, Any]) -> Iterator[Mapping[str, Any]]:
     if "calls" in spec:
         yield from cast("list[Mapping[str, Any]]", spec["calls"])
     elif "call" in spec:
-        call = dict(cast("Mapping[str, Any]", spec["call"]))
+        # `.copy()` rather than `dict()`: the copy keeps recording the keys read
+        # from it, which the nested read check counts.
+        call = cast("dict[str, Any]", spec["call"]).copy()
         for key in _CASE_LEVEL_CALL_KEYS:
             if key in spec and key not in call:
                 call[key] = spec[key]

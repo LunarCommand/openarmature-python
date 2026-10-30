@@ -1856,14 +1856,17 @@ def _apply_metadata_directives(
 
     update: dict[str, Any] = {}
     should_raise = False
-    for key, val in directives.items():
+    # Each value is read by name rather than through `.items()`, which the
+    # nested read check cannot see.
+    for key in directives:
         assert key in _METADATA_DIRECTIVE_KEYS, f"unrecognized metadata directive {key!r}"
         if key == "augment_metadata":
-            set_invocation_metadata(**cast("dict[str, Any]", val))
+            set_invocation_metadata(**cast("dict[str, Any]", directives[key]))
         elif key == "capture_invocation_metadata_into":
+            into = cast("str", directives[key])
             read = get_invocation_metadata()
-            types_seen[cast("str", val)] = type(read)
-            update[cast("str", val)] = dict(read)
+            types_seen[into] = type(read)
+            update[into] = dict(read)
         elif key == "raises":
             should_raise = True
             break

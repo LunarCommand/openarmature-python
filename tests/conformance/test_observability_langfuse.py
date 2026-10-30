@@ -483,8 +483,10 @@ def _normalize_observer_config(case: dict[str, Any]) -> None:
     config = case.pop("langfuse_observer_config", None)
     if config is None:
         return
-    merged = dict(cast("dict[str, Any]", case.get("langfuse_observer") or {}))
-    merged.update(cast("dict[str, Any]", config))
+    # Built on a copy of the config block, which keeps recording the keys read
+    # from it for the nested read check.
+    merged = cast("dict[str, Any]", config).copy()
+    merged.update({**cast("dict[str, Any]", case.get("langfuse_observer") or {}), **config})
     case["langfuse_observer"] = merged
 
 

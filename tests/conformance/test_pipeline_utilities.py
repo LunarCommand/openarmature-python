@@ -574,8 +574,11 @@ async def test_pipeline_utility_fixture(
             # ``expected_compile_error``. Flatten it to the top level the rest
             # of this runner reads from.
             if "graph" in merged:
-                graph_block = cast("dict[str, Any]", merged.pop("graph"))
-                merged = {**graph_block, **merged}
+                # Flattened onto a copy of the graph block, which keeps
+                # recording the keys this runner reads from it.
+                flattened = cast("dict[str, Any]", merged.pop("graph")).copy()
+                flattened.update(merged)
+                merged = flattened
             for k, v in shared_subgraph_blocks.items():
                 merged.setdefault(k, v)
             # Section 5.4 ranks per NAME. `setdefault` keeps the case's whole
