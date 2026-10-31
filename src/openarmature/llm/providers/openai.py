@@ -86,6 +86,7 @@ from openarmature.observability.correlation import (
 from openarmature.observability.metadata import AttributeValue, current_invocation_metadata
 
 from .._event_fields import _request_extras_from_config, _request_params_from_config, serialize_messages
+from .._schema_violations import describe, model_violations, schema_violations
 
 # ``current_prompt_group`` / ``current_prompt_result`` are imported
 # lazily inside :meth:`OpenAIProvider.complete` to avoid a module-load
@@ -1517,78 +1518,25 @@ def _derive_schema_name(schema: dict[str, Any]) -> str:
     return f"oa_schema_{hashlib.sha256(canonical).hexdigest()[:16]}"
 
 
-# Parse the model's content string as JSON, then validate against
-# the schema. The dict-schema path uses jsonschema; the BaseModel-class
-# path uses Pydantic's native validator (which produces an instance
-# of the supplied class).
+# Parse the model's content string as JSON, then validate it against the
+# schema. The dict-schema path returns the dict; the BaseModel-class path then
+# runs the class's own validation, which produces the instance.
 def _parse_and_validate(
     content: str,
     schema_dict: dict[str, Any],
     schema_class: type[BaseModel] | None,
 ) -> ParsedValue:
     try:
-        loaded = json.loads(content)
-    except json.JSONDecodeError as exc:
+        loaded = json.loads(content, parse_constant=_reject_non_json_constant)
+    except ValueError as exc:
         raise StructuredOutputInvalid(
             "response content is not valid JSON",
             response_schema=schema_dict,
             output_content=content,
-            error_message=str(exc),
+            error_message=f"not well-formed JSON: {exc}",
         ) from exc
-    if not isinstance(loaded, dict):
-        raise StructuredOutputInvalid(
-            "response JSON is not an object",
-            response_schema=schema_dict,
-            output_content=content,
-            error_message=f"top-level type is {type(loaded).__name__}, expected object",
-        )
-    parsed_dict = cast("dict[str, Any]", loaded)
-
-    # Pydantic-class path: validate and return the BaseModel instance.
-    if schema_class is not None:
-        # Validate against the generated JSON Schema FIRST so the
-        # class path enforces the same strict per-type checks as the
-        # dict path. Pydantic's default model_validate is coercive
-        # (it accepts "30" for an int field), which would silently
-        # accept responses that fail the wire schema. Running
-        # jsonschema first matches the dict-schema path's strictness;
-        # model_validate then constructs the typed instance.
-        try:
-            jsonschema.validate(instance=parsed_dict, schema=schema_dict)
-        except jsonschema.ValidationError as exc:
-            raise StructuredOutputInvalid(
-                "response failed JSON Schema validation",
-                response_schema=schema_dict,
-                output_content=content,
-                error_message=_format_jsonschema_failure(exc),
-            ) from exc
-        except jsonschema.SchemaError as exc:
-            raise StructuredOutputInvalid(
-                "response could not be validated against the supplied schema",
-                response_schema=schema_dict,
-                output_content=content,
-                error_message=str(exc),
-            ) from exc
-        try:
-            return schema_class.model_validate(parsed_dict)
-        except ValidationError as exc:
-            raise StructuredOutputInvalid(
-                "response failed Pydantic validation",
-                response_schema=schema_dict,
-                output_content=content,
-                error_message=str(exc),
-            ) from exc
-
-    # Dict-schema path: jsonschema validation, return the dict.
     try:
-        jsonschema.validate(instance=parsed_dict, schema=schema_dict)
-    except jsonschema.ValidationError as exc:
-        raise StructuredOutputInvalid(
-            "response failed JSON Schema validation",
-            response_schema=schema_dict,
-            output_content=content,
-            error_message=_format_jsonschema_failure(exc),
-        ) from exc
+        violations = schema_violations(loaded, schema_dict)
     except jsonschema.SchemaError as exc:
         # Safety net: validate_response_schema's pre-validation should
         # have caught this, but any schema-side exception (including
@@ -1600,17 +1548,35 @@ def _parse_and_validate(
             output_content=content,
             error_message=str(exc),
         ) from exc
-    return parsed_dict
+    if violations:
+        raise StructuredOutputInvalid(
+            "response failed JSON Schema validation",
+            response_schema=schema_dict,
+            output_content=content,
+            error_message=describe(violations),
+        )
+    # validate_response_schema requires the schema's top level to be an
+    # object, so content that passed is a dict.
+    parsed_dict = cast("dict[str, Any]", loaded)
+    if schema_class is None:
+        return parsed_dict
+    # The JSON Schema check above runs first so the class path is as strict
+    # as the dict path: Pydantic's default model_validate is coercive (it
+    # accepts "30" for an int field).
+    try:
+        return schema_class.model_validate(parsed_dict)
+    except ValidationError as exc:
+        raise StructuredOutputInvalid(
+            "response failed Pydantic validation",
+            response_schema=schema_dict,
+            output_content=content,
+            error_message=describe(model_violations(exc, parsed_dict)),
+        ) from exc
 
 
-def _format_jsonschema_failure(exc: jsonschema.ValidationError) -> str:
-    """jsonschema.ValidationError.message describes the value mismatch
-    (e.g., "'30' is not of type 'integer'") but doesn't include the
-    failing field path. Prefix with ``json_path`` (e.g., ``$.age``) so
-    the error_message string carries both, matching the dict-
-    schema and class-schema paths.
-    """
-    return f"{exc.json_path}: {exc.message}"
+def _reject_non_json_constant(name: str) -> Any:
+    # Python's parser accepts NaN and Infinity; RFC 8259 has no literals for them.
+    raise ValueError(f"{name} is not a JSON value")
 
 
 _SCHEMA_DIRECTIVE_TEMPLATE = (

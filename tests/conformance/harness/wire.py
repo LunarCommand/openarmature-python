@@ -23,6 +23,8 @@ from typing import Any, cast
 
 import httpx
 
+from .mock_messages import FixtureSchemaInvalid
+
 WILDCARD = "*"
 
 
@@ -175,9 +177,10 @@ def assert_error_carries(exc: BaseException, carries: Mapping[str, Any]) -> None
                     f"carries check failed: {attr!r} is not a string (got {type(actual).__name__}); "
                     f"cannot substring-match {expected!r}"
                 )
-            if expected not in actual:
+            missing = [needle for needle in mention_list(key, expected) if needle not in actual]
+            if missing:
                 raise AssertionError(
-                    f"carries check failed: {attr!r}={actual!r} does not mention {expected!r}"
+                    f"carries check failed: {attr!r}={actual!r} does not mention {missing!r}"
                 )
         else:
             actual = _get_carries_attr(exc, key)
@@ -204,6 +207,18 @@ def assert_error_carries(exc: BaseException, carries: Mapping[str, Any]) -> None
                 raise AssertionError(
                     f"carries check failed: {key!r} actual={actual!r}, expected={expected!r}"
                 )
+
+
+# conformance-adapter §5.12 / §5.13: a `_mentions` value is a string or a non-empty
+# list, and a list asserts every substring.
+def mention_list(key: str, expected: Any) -> list[str]:
+    if isinstance(expected, str):
+        return [expected]
+    if isinstance(expected, list):
+        needles = cast("list[Any]", expected)
+        if needles and all(isinstance(needle, str) for needle in needles):
+            return cast("list[str]", needles)
+    raise FixtureSchemaInvalid(f"{key}: expected a string or a non-empty list of strings, got {expected!r}")
 
 
 def as_record_mapping(value: Any) -> Mapping[str, Any] | None:

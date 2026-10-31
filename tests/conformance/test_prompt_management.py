@@ -52,6 +52,7 @@ from .harness.prompt_management import (
     ManagerTarget,
     PromptManagementFixture,
 )
+from .harness.wire import mention_list
 
 _CAPABILITY_DIR = CONFORMANCE_ROOT / "prompt-management" / "conformance"
 
@@ -453,9 +454,10 @@ def _assert_per_call(
             for key, expected_value in carries.items():
                 if key == "description_mentions":
                     description = getattr(raised, "description", "") or str(raised)
-                    assert expected_value in description, (
-                        f"expected description to mention {expected_value!r}, got {description!r}"
-                    )
+                    missing = [
+                        needle for needle in mention_list(key, expected_value) if needle not in description
+                    ]
+                    assert not missing, f"expected description to mention {missing!r}, got {description!r}"
                     continue
                 actual_attr = getattr(raised, key, None)
                 assert actual_attr == expected_value, (
