@@ -648,6 +648,10 @@ _DEFERRED_FIXTURES: dict[str, str] = {
     "prompt-management/037-token-budget-unrecognized-key-ignored": (
         "Proposal 0109 token_budget extra-key fixture model; rides the v0.17.0 fixture-wiring PR"
     ),
+    # Proposal 0126 (v0.119.0) fixture shape.
+    "observability/161-structured-output-schema-not-honored": (
+        "Proposal 0126 fixture shape not modeled by the typed fixture models; rides the 0126 arc"
+    ),
 }
 
 
