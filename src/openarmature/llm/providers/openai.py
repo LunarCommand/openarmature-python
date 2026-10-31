@@ -83,8 +83,9 @@ from openarmature.observability.correlation import (
     current_invocation_id,
     current_namespace_prefix,
 )
-from openarmature.observability.llm_event import serialize_tool_calls
 from openarmature.observability.metadata import AttributeValue, current_invocation_metadata
+
+from .._event_fields import _request_extras_from_config, _request_params_from_config, serialize_messages
 
 # ``current_prompt_group`` / ``current_prompt_result`` are imported
 # lazily inside :meth:`OpenAIProvider.complete` to avoid a module-load
@@ -500,12 +501,12 @@ class OpenAIProvider:
             validate_tool_choice(tool_choice, tools)
             schema_dict, schema_class = _normalize_response_schema(response_schema)
             # Image redaction (per §5.5.5) happens inside
-            # ``_serialize_messages_for_payload`` — image bytes never
+            # ``serialize_messages`` — image bytes never
             # leave the provider in event form. ``input_messages``
             # mirrors the caller's messages list; the wire-side body
             # may be augmented (schema directive on the fallback path)
             # but the OBSERVED messages are the spec-§3 logical inputs.
-            serialized_messages = _serialize_messages_for_payload(messages)
+            serialized_messages = serialize_messages(messages)
             # On the fallback path, the wire-side messages list is an
             # augmented COPY of the caller's messages — original
             # messages MUST NOT be mutated.
@@ -1956,105 +1957,6 @@ def _looks_like_model_not_loaded(message: object) -> bool:
         return False
     lower = message.lower()
     return "not loaded" in lower or "loading" in lower
-
-
-# ---------------------------------------------------------------------------
-# Observability §5.5 LLM provider span event helpers
-# ---------------------------------------------------------------------------
-
-
-# Inline image sources are redacted in this step per observability
-# §5.5.5: ImageSourceInline → {"type": "inline_redacted",
-# "byte_count": N} where N is the byte length of the original base64
-# string. media_type stays at the image-block level per llm-provider
-# §3.1.2; detail is preserved when present.
-#
-# Redaction lives here (provider-side) rather than observer-side so
-# inline image bytes never leave the provider in event form —
-# defense-in-depth that applies to every observer consuming the
-# payload, not just OA's own. URL-form images pass through unchanged.
-def _serialize_messages_for_payload(messages: Sequence[Message]) -> list[dict[str, Any]]:
-    """Render a list of typed :class:`Message` instances into the
-    plain-dict shape carried on the typed LLM events' ``input_messages``
-    field (LlmCompletionEvent / LlmFailedEvent)."""
-    out: list[dict[str, Any]] = []
-    for msg in messages:
-        if isinstance(msg, SystemMessage):
-            out.append({"role": "system", "content": msg.content})
-        elif isinstance(msg, UserMessage):
-            if isinstance(msg.content, str):
-                out.append({"role": "user", "content": msg.content})
-            else:
-                rendered_blocks: list[dict[str, Any]] = []
-                for block in msg.content:
-                    if isinstance(block, TextBlock):
-                        rendered_blocks.append({"type": "text", "text": block.text})
-                    else:  # ImageBlock
-                        # The ImageBlock validator already guarantees
-                        # media_type when source is inline.
-                        if isinstance(block.source, ImageSourceInline):
-                            byte_count = len(block.source.base64_data)
-                            source_record: dict[str, Any] = {
-                                "type": "inline_redacted",
-                                "byte_count": byte_count,
-                            }
-                        else:
-                            source_record = {"type": "url", "url": block.source.url}
-                        image_record: dict[str, Any] = {
-                            "type": "image",
-                            "source": source_record,
-                        }
-                        if block.media_type is not None:
-                            image_record["media_type"] = block.media_type
-                        if block.detail is not None:
-                            image_record["detail"] = block.detail
-                        rendered_blocks.append(image_record)
-                out.append({"role": "user", "content": rendered_blocks})
-        elif isinstance(msg, AssistantMessage):
-            entry: dict[str, Any] = {"role": "assistant", "content": msg.content}
-            if msg.tool_calls:
-                entry["tool_calls"] = serialize_tool_calls(msg.tool_calls)
-            out.append(entry)
-        else:  # ToolMessage
-            out.append({"role": "tool", "content": msg.content, "tool_call_id": msg.tool_call_id})
-    return out
-
-
-# Only set fields appear in the result. Absence is meaningful per
-# observability §5.5.2: "the field was not supplied for this call"
-# — distinct from "supplied with a zero value."
-def _request_params_from_config(config: RuntimeConfig | None) -> dict[str, Any]:
-    """Extract the cross-vendor request parameters from a
-    ``RuntimeConfig`` for emission as ``gen_ai.request.*`` attributes."""
-    if config is None:
-        return {}
-    out: dict[str, Any] = {}
-    if config.temperature is not None:
-        out["temperature"] = config.temperature
-    if config.max_tokens is not None:
-        out["max_tokens"] = config.max_tokens
-    if config.top_p is not None:
-        out["top_p"] = config.top_p
-    if config.seed is not None:
-        out["seed"] = config.seed
-    # Three fields promoted in proposal 0032; surfaced under their
-    # cross-vendor declared names so the observer emits
-    # gen_ai.request.{frequency_penalty,presence_penalty,stop_sequences}.
-    if config.frequency_penalty is not None:
-        out["frequency_penalty"] = config.frequency_penalty
-    if config.presence_penalty is not None:
-        out["presence_penalty"] = config.presence_penalty
-    if config.stop_sequences is not None:
-        out["stop_sequences"] = config.stop_sequences
-    return out
-
-
-def _request_extras_from_config(config: RuntimeConfig | None) -> dict[str, Any]:
-    """Return the ``RuntimeConfig`` extras pass-through bag as a plain
-    dict; empty when no extras are set or when ``config`` is None."""
-    if config is None:
-        return {}
-    return dict(config.extras)
 
 
 __all__ = [

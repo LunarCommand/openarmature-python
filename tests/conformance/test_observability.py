@@ -4589,11 +4589,11 @@ def _materialize_messages(
             raise AssertionError(f"unsupported role in payload fixture: {role!r}")
 
     # Compute the full serialization (what the observer would emit
-    # before truncation). The provider's _serialize_messages_for_payload
-    # is the canonical encoder; mirror its shape via the same import.
-    from openarmature.llm.providers.openai import _serialize_messages_for_payload
+    # before truncation). serialize_messages is the canonical encoder the
+    # provider uses; mirror its shape via the same import.
+    from openarmature.llm import serialize_messages
 
-    plain = _serialize_messages_for_payload(out)
+    plain = serialize_messages(out)
     import json
 
     full_serial_target = json.dumps(plain, sort_keys=True, separators=(",", ":"), ensure_ascii=False)

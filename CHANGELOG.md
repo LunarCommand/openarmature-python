@@ -6,6 +6,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). The
 
 ## [Unreleased]
 
+### Added
+
+- **`serialize_messages` for provider authors** (observability §5.5.5, §8.7). `openarmature.llm.serialize_messages` renders a message list into the plain-dict shape the typed LLM events carry in `input_messages`, with each inline image's bytes replaced by the `{"type": "inline_redacted", "byte_count": N}` placeholder both the OTel and the Langfuse mappings require; `media_type` and `detail` are kept, and a URL image passes through unchanged. The bundled `OpenAIProvider` uses it, and a third-party provider can pass its result straight to `input_messages` instead of reimplementing the redaction.
+
 ### Removed
 
 - **The legacy sentinel-namespace LLM event surface** (observability §5.5.7). `LLM_NAMESPACE` and `LlmEventPayload` are no longer exported from `openarmature.observability`. They described the `NodeEvent` pair LLM providers emitted before v0.13.0. Since then the bundled `OpenAIProvider` has not emitted it and the bundled observers have not read it, so the pair only connected a third-party provider to a third-party observer that were both still on the old pattern; §5.5.7 leaves the length of that transition to each implementation. This is a breaking change: emit and consume the typed LLM events (`LlmCompletionEvent`, `LlmFailedEvent`, `LlmRetryAttemptEvent`) instead, filtering by type rather than by namespace. The payload's `genai_system` field, which defaulted to `"openai"`, goes with it. On the typed events the provider name, `provider`, has no default, so a provider cannot report another provider's name by omission.

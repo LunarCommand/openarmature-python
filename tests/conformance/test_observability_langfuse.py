@@ -2945,7 +2945,7 @@ def _assert_observation(
         # either way, parse-to-shape MUST succeed and match.
         parsed = _parse_messages(actual.input)
         # The actual messages are produced by the LLM provider's
-        # _serialize_messages_for_payload which carries the full §3 shape
+        # serialize_messages, which carries the full §3 shape
         # (including ``content`` as either str or block list). Loose
         # subset compare on role+content for fixture parity.
         for expected_msg, parsed_msg in zip(expected_messages, parsed, strict=False):

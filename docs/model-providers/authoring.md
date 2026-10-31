@@ -232,6 +232,7 @@ of:
   import uuid
 
   from openarmature.graph.events import LlmCompletionEvent, LlmFailedEvent
+  from openarmature.llm import serialize_messages
   from openarmature.llm.errors import LlmProviderError
   from openarmature.observability.correlation import (
       current_attempt_index,
@@ -256,7 +257,7 @@ of:
       request_extras = self._project_request_extras(config)
 
       try:
-          serialized_messages = self._serialize_messages(messages)
+          serialized_messages = serialize_messages(messages)
           response = await self._wire_call(messages, tools, config)
       except LlmProviderError as exc:
           # Alongside the exception — caller-side flow unchanged
@@ -334,6 +335,8 @@ of:
   [Observability: Inline image
   redaction](../concepts/observability.md#inline-image-redaction-always-on))
   so observers consuming the typed events cannot leak raw bytes.
+  `serialize_messages` from `openarmature.llm`, which the sketch
+  above uses, renders that field with the redaction applied.
 - **Lenient response parsing** under `finish_reason="error"`.
   Degraded responses surface what they can; tool-call arguments that
   fail to parse populate `arguments=None` instead of raising.
