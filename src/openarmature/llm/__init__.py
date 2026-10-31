@@ -24,6 +24,7 @@ classifiers don't have to reach into ``openarmature.llm.errors``.
 
 from typing import TYPE_CHECKING
 
+from ._event_fields import serialize_messages
 from .errors import (
     PROVIDER_AUTHENTICATION,
     PROVIDER_INVALID_MODEL,
@@ -127,6 +128,7 @@ __all__ = [
     "UserMessage",
     "classify_http_error",
     "parse_retry_after",
+    "serialize_messages",
     "strict_mode_supported",
     "validate_message_list",
     "validate_response_schema",

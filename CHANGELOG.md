@@ -6,6 +6,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). The
 
 ## [Unreleased]
 
+### Added
+
+- **`serialize_messages` for provider authors** (observability §5.5.5, §8.7). `openarmature.llm.serialize_messages` renders a message list into the plain-dict shape the typed LLM events carry in `input_messages`, with each inline image's bytes replaced by the `{"type": "inline_redacted", "byte_count": N}` placeholder both the OTel and the Langfuse mappings require; `media_type` and `detail` are kept, and a URL image passes through unchanged. The bundled `OpenAIProvider` uses it, and a third-party provider can pass its result straight to `input_messages` instead of reimplementing the redaction.
+
+### Removed
+
+- **The legacy sentinel-namespace LLM event surface** (observability §5.5.7). `LLM_NAMESPACE` and `LlmEventPayload` are no longer exported from `openarmature.observability`. They described the `NodeEvent` pair LLM providers emitted before v0.13.0. Since then the bundled `OpenAIProvider` has not emitted it and the bundled observers have not read it, so the pair only connected a third-party provider to a third-party observer that were both still on the old pattern; §5.5.7 leaves the length of that transition to each implementation. This is a breaking change: emit and consume the typed LLM events (`LlmCompletionEvent`, `LlmFailedEvent`, `LlmRetryAttemptEvent`) instead, filtering by type rather than by namespace. The payload's `genai_system` field, which defaulted to `"openai"`, goes with it. On the typed events the provider name, `provider`, has no default, so a provider cannot report another provider's name by omission.
+
 ### Fixed
 
 - **A provider call made by a node's middleware no longer parents under that node's span** (observability §5.5, proposal 0124). A guardrail or classifier call issued from node middleware, before or after `next()`, now sits under the nearest fan-out instance or branch span around the node, or the invocation span when there is none, on both the OTel and Langfuse observers. Before, both observers attached it to the calling node's span whenever that span was open: after `next()` that was every time, on both observers, because the node's completed event waits for its middleware to return, and before `next()` it depended on scheduling on OTel. The choice is now structural: when the call's event is dispatched, the engine records whether it came from the node's body, and only a body call parents under the node. Calls from the node body are unchanged.

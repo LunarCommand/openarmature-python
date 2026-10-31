@@ -232,6 +232,7 @@ of:
   import uuid
 
   from openarmature.graph.events import LlmCompletionEvent, LlmFailedEvent
+  from openarmature.llm import serialize_messages
   from openarmature.llm.errors import LlmProviderError
   from openarmature.observability.correlation import (
       current_attempt_index,
@@ -256,7 +257,7 @@ of:
       request_extras = self._project_request_extras(config)
 
       try:
-          serialized_messages = self._serialize_messages(messages)
+          serialized_messages = serialize_messages(messages)
           response = await self._wire_call(messages, tools, config)
       except LlmProviderError as exc:
           # Alongside the exception — caller-side flow unchanged
@@ -334,15 +335,8 @@ of:
   [Observability: Inline image
   redaction](../concepts/observability.md#inline-image-redaction-always-on))
   so observers consuming the typed events cannot leak raw bytes.
-
-  **Legacy sentinel-namespace pattern** (`LLM_NAMESPACE` +
-  `LlmEventPayload` dispatched as a `NodeEvent` pair) remains in
-  the public API as a documented compatibility surface. The bundled
-  `OpenAIProvider` retired it in v0.13.0; the bundled OTel and
-  Langfuse observers no longer recognize it. New providers should
-  emit typed events directly; the sentinel pattern is preserved for
-  providers shipped before the v0.13.0 migration that haven't yet
-  switched.
+  `serialize_messages` from `openarmature.llm`, which the sketch
+  above uses, renders that field with the redaction applied.
 - **Lenient response parsing** under `finish_reason="error"`.
   Degraded responses surface what they can; tool-call arguments that
   fail to parse populate `arguments=None` instead of raising.

@@ -446,7 +446,7 @@ class InvocationCompletedEvent:
 # applying at RENDERING, symmetric with the §5.5.1 span attribute path. A custom
 # §9 observer therefore owns its own redaction posture. Inline image bytes are
 # redacted per §5.5.5 before population, by the provider's
-# `_serialize_messages_for_payload`.
+# `serialize_messages`.
 @dataclass(frozen=True)
 class LlmCompletionEvent:
     """A typed LLM provider call event delivered to observers.

@@ -2622,7 +2622,7 @@ async def test_llm_completion_event_input_messages_redacts_inline_image_bytes() 
     # input_messages before population. The serializer replaces the
     # ImageSourceInline source with {"type": "inline_redacted",
     # "byte_count": N}; the raw base64_data must never appear on the
-    # typed event. Catches regressions in _serialize_messages_for_payload
+    # typed event. Catches regressions in serialize_messages
     # that would leak bytes through the typed-event surface.
     from openarmature.llm import ImageBlock, ImageSourceInline, TextBlock
 
