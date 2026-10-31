@@ -236,6 +236,7 @@ NESTED_EXTRAS: dict[str, frozenset[str]] = {
             "invoke_rejects_at_api_boundary",
             "llm_span_attributes",
             "llm_span_attributes_absent",
+            "log_records_absent",
             "no_langfuse_observations_emitted",
             "no_spans_emitted",
             "node_completed_event_carries_error",
@@ -409,7 +410,7 @@ CASE_MAPPINGS: dict[str, MappingVocabulary] = {
         extras=frozenset({"api_key", "base_url", "chunk_size", "document_prefix", "model", "query_prefix"})
     ),
     "otel_observer": MappingVocabulary(
-        extras=frozenset({"disable_genai_semconv", "disable_provider_payload"})
+        extras=frozenset({"attached", "disable_genai_semconv", "disable_provider_payload"})
     ),
     "prompt_backend": MappingVocabulary(extras=frozenset({"prompts", "type"})),
     "provider": MappingVocabulary(extras=frozenset({"genai_system", "type"})),
@@ -586,8 +587,14 @@ NODE_MAPPINGS: dict[str, MappingVocabulary] = {
         extras=frozenset({"bytes"})
     ),
     "nodes.*.calls_llm.messages[].content_repeat": MappingVocabulary(extras=frozenset({"bytes", "char"})),
-    "nodes.*.calls_llm.retry": MappingVocabulary(extras=frozenset({"backoff", "max_attempts"})),
+    "nodes.*.calls_llm.retry": MappingVocabulary(
+        extras=frozenset({"backoff", "max_attempts", "per_attempt_override", "reask"})
+    ),
     "nodes.*.calls_llm.retry.backoff": _BACKOFF,
+    "nodes.*.calls_llm.retry.per_attempt_override[]": MappingVocabulary(
+        ("openarmature.llm.response.RuntimeConfig",)
+    ),
+    "nodes.*.calls_llm.retry.reask": MappingVocabulary(extras=frozenset({"template"})),
     "nodes.*.calls_llm.tools[]": MappingVocabulary(
         extras=frozenset({"description", "function", "name", "parameters", "type"})
     ),

@@ -481,6 +481,12 @@ _DEFERRED_FIXTURES: dict[str, str] = {
         "threading per_node_mw into add_parallel_branches_node, NOT a failure path in the 110 "
         "driver -- that driver is reached and would still see an unretried raise"
     ),
+    # Proposal 0126 (structured-output failure reports, spec v0.119.0) is
+    # not-yet in conformance.toml.
+    "161-structured-output-schema-not-honored": (
+        "proposal 0126 not implemented (not-yet): no schema_not_honored diagnostic and no "
+        "structured_output_path, and the harness lacks the directives the fixture uses"
+    ),
     # Proposal 0109 (spec v0.104.0) token-budget failure-path parity.
 }
 
