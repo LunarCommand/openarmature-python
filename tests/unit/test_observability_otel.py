@@ -889,52 +889,6 @@ async def test_llm_span_emits_cache_creation_attribute_when_payload_carries_it()
     assert attrs.get("openarmature.llm.cache_creation.input_tokens") == 5
 
 
-async def test_disable_llm_spans_skips_llm_provider_span() -> None:
-    """``disable_llm_spans=True`` MUST suppress the LLM-provider span
-    emission while leaving all other spans intact."""
-    from openarmature.graph.events import NodeEvent
-
-    # We don't drive a real provider here; instead we emit a synthetic
-    # LLM event through the observer's __call__ and assert no span was
-    # produced. This isolates the disable_llm_spans branch from the
-    # provider's own queue-dispatch wiring.
-    from openarmature.observability.llm_event import LlmEventPayload
-
-    exporter = InMemorySpanExporter()
-    observer = OTelObserver(
-        span_processor=SimpleSpanProcessor(exporter),
-        disable_llm_spans=True,
-    )
-    # ``step=-1`` mirrors the synthetic value ``OpenAIProvider._llm_event``
-    # mints (openai.py:643) — LLM-provider events aren't tied to graph step
-    # sequencing.
-    started = NodeEvent(
-        node_name="openarmature.llm.complete",
-        namespace=("openarmature.llm.complete",),
-        step=-1,
-        phase="started",
-        pre_state=LlmEventPayload(call_id="test-call-1", model="test-m"),
-        post_state=None,
-        error=None,
-        parent_states=(),
-    )
-    completed = NodeEvent(
-        node_name="openarmature.llm.complete",
-        namespace=("openarmature.llm.complete",),
-        step=-1,
-        phase="completed",
-        pre_state=LlmEventPayload(call_id="test-call-1", model="test-m", finish_reason="stop"),
-        post_state=None,
-        error=None,
-        parent_states=(),
-    )
-    await observer(started)
-    await observer(completed)
-    observer.shutdown()
-    llm_spans = [s for s in exporter.get_finished_spans() if s.name == "openarmature.llm.complete"]
-    assert llm_spans == []
-
-
 async def test_llm_span_duration_matches_typed_event_latency() -> None:
     # Proposal 0049 + PR 3b: the success-path span's duration is
     # back-dated using LlmCompletionEvent.latency_ms, so observers see
@@ -3196,7 +3150,7 @@ async def test_prompt_context_propagates_cross_task_via_provider_complete() -> N
     Post-fix the provider captures ``current_prompt_result()`` at
     dispatch time (in the node task's Context, where
     ``with_active_prompt`` IS active) and puts the snapshot on the
-    ``LlmEventPayload``. The observer reads from the payload, not from
+    ``LlmCompletionEvent``. The observer reads from the event, not from
     a ContextVar.
     """
     import json

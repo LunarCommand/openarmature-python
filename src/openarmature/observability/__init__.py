@@ -43,14 +43,6 @@ from .diagnostics import (
     event_name_of,
 )
 
-# v0.17.0 (proposal 0024 / friction-roundup #9): publish the LLM event
-# contract so third-party Provider implementations and custom observers
-# can interoperate against a stable shape. Both names live in
-# ``observability.llm_event`` — backend-agnostic — so importing the
-# core observability package never drags the OTel backend (and its
-# ``opentelemetry-sdk`` dependency) along.
-from .llm_event import LLM_NAMESPACE, LlmEventPayload
-
 # v0.10.0 (proposal 0034): caller-supplied invocation metadata surface.
 # `set_invocation_metadata` is the public augmentation helper users
 # call from inside node bodies / middleware / observers;
@@ -75,8 +67,6 @@ __all__ = [
     "LANGFUSE_PAYLOAD_SUPPRESSED",
     "LANGFUSE_SHARED_PROVIDER_ACCEPTED",
     "LANGFUSE_SHARED_PROVIDER_NO_PAYLOAD",
-    "LLM_NAMESPACE",
-    "LlmEventPayload",
     "TOKEN_BUDGET_EXCEEDED",
     "ToolCallScope",
     "current_active_observers",

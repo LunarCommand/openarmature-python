@@ -1087,35 +1087,6 @@ stable surface for per-call consumption (token accounting, failure
 tracking). An observer that only cares about per-call outcomes can
 ignore `LlmRetryAttemptEvent`.
 
-#### Legacy sentinel-namespace pattern (compatibility surface)
-
-`openarmature.observability.LLM_NAMESPACE` and
-`openarmature.observability.LlmEventPayload` remain in the public
-API as a documented compatibility surface for custom providers and
-observers that haven't migrated to typed events. The bundled
-`OpenAIProvider` no longer emits the sentinel `NodeEvent` pair; the
-bundled OTel and Langfuse observers no longer recognize it. If
-you're writing a downstream observer that needs to interoperate
-with custom providers still using the sentinel pattern, the legacy
-shape is:
-
-```python
-from openarmature.graph.events import NodeEvent
-from openarmature.observability import LLM_NAMESPACE, LlmEventPayload
-
-async def legacy_llm_observer(event):
-    if not isinstance(event, NodeEvent):
-        return
-    if event.namespace != LLM_NAMESPACE:
-        return
-    payload = event.pre_state
-    if not isinstance(payload, LlmEventPayload):
-        return
-    # payload.model, payload.input_messages, …
-```
-
-New code should prefer the typed-event path above.
-
 ### Flushing under fast teardown
 
 `OTelObserver.shutdown()` calls `provider.shutdown()` on the private
