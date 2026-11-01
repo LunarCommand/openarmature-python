@@ -8,16 +8,25 @@
 
 from __future__ import annotations
 
+import re
 from collections import defaultdict
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from typing import Any, cast
 from urllib.parse import quote
 
-from jsonschema import Draft3Validator, Draft4Validator, Draft6Validator, Draft7Validator, ValidationError
+from jsonschema import (
+    Draft3Validator,
+    Draft4Validator,
+    Draft6Validator,
+    Draft7Validator,
+    Draft202012Validator,
+    ValidationError,
+)
 from jsonschema.exceptions import UnknownType
 from jsonschema.protocols import Validator
 from pydantic import ValidationError as ModelValidationError
+from referencing import Registry
 
 from .provider import (
     _LIST_OF_SUBSCHEMA_KEYWORDS,
@@ -48,18 +57,36 @@ def schema_violations(instance: Any, schema: dict[str, Any]) -> list[Violation]:
     """Every violation ``instance`` commits against ``schema``, in a stable order."""
     validator_class = _validator_class(schema)
     prepared = schema
-    # Draft-03 has no `not`, so its false subschemas stay as written and are
-    # reported at the parent.
+    # Draft-03 has no `not`, so its false subschemas stay as written, and
+    # _extras places what a false additionalProperties or additionalItems excludes.
     if "not" in validator_class.VALIDATORS:
         prepared = cast("dict[str, Any]", _false_as_never(schema))
-    validator = validator_class(prepared)
+    # jsonschema's default registry fetches a remote $ref over the network, and
+    # validate_response_schema does not reach every position a $ref can sit in.
+    validator = validator_class(prepared, registry=Registry())
+    expanded: set[tuple[Path, Path]] = set()
     found: dict[tuple[Path, str], Violation] = {}
     for error in validator.iter_errors(instance):
+        if _repeats(error, expanded):
+            continue
         # Every error rejects the content, so one that none of the cases below
         # recognize is reported as jsonschema states it.
-        for violation in list(_violations(error, validator, prepared)) or [_as_stated(error)]:
+        violations = list(_violations(error, validator, prepared, expanded))
+        for violation in violations or [_as_stated(error, tuple(error.absolute_path))]:
             found.setdefault((violation.path, violation.description), violation)
     return sorted(found.values(), key=_order)
+
+
+# jsonschema reports a missing property once per name, and every one of those
+# reports carries the whole list, so each list is expanded only the first time.
+def _repeats(error: ValidationError, expanded: set[tuple[Path, Path]]) -> bool:
+    if error.validator not in ("required", "dependentRequired", "dependencies"):
+        return False
+    key = (tuple(error.absolute_path), tuple(error.absolute_schema_path))
+    if key in expanded:
+        return True
+    expanded.add(key)
+    return False
 
 
 def response_violations(instance: Any, schema: dict[str, Any]) -> list[Violation]:
@@ -77,7 +104,9 @@ def model_violations(exc: ModelValidationError, instance: Any) -> list[Violation
     """The violations a Pydantic model's own validation reported, at their places in ``instance``."""
     found: dict[tuple[Path, str], Violation] = {}
     for error in exc.errors():
-        path = _instance_path(error["loc"], instance, error["input"], missing=error["type"] == "missing")
+        # A model-level validator can report a missing value with no location.
+        missing = error["type"] == "missing" and bool(error["loc"])
+        path = _instance_path(error["loc"], instance, error["input"], missing=missing)
         violation = Violation(path, error["msg"])
         found.setdefault((violation.path, violation.description), violation)
     return sorted(found.values(), key=_order)
@@ -99,11 +128,11 @@ def _instance_path(loc: tuple[int | str, ...], instance: Any, reported: Any, *, 
         key = (position, id(node))
         if key not in best:
             score, path = read(position + 1, node)
-            child = _child(node, places[position])
+            place, child = _child(node, places[position])
             if child is not _ABSENT:
                 (found, count), rest = read(position + 1, child)
                 if (found, count + 1) > score:
-                    score, path = (found, count + 1), (places[position], *rest)
+                    score, path = (found, count + 1), (place, *rest)
             best[key] = (score, path)
         return best[key]
 
@@ -114,14 +143,21 @@ def _instance_path(loc: tuple[int | str, ...], instance: Any, reported: Any, *, 
 _ABSENT = object()
 
 
-def _child(node: Any, token: int | str) -> Any:
+def _child(node: Any, token: int | str) -> tuple[int | str, Any]:
     if isinstance(node, dict) and isinstance(token, str):
-        return cast("dict[str, Any]", node).get(token, _ABSENT)
+        entries = cast("dict[str, Any]", node)
+        if token in entries:
+            return token, entries[token]
+        if "\ufffd" in token:
+            # Pydantic writes a lone surrogate in a key as U+FFFD, one per byte.
+            for name, value in entries.items():
+                if name.encode("utf-8", "surrogatepass").decode("utf-8", "replace") == token:
+                    return name, value
     if isinstance(node, list) and isinstance(token, int):
         items = cast("list[Any]", node)
         if 0 <= token < len(items):
-            return items[token]
-    return _ABSENT
+            return token, items[token]
+    return token, _ABSENT
 
 
 def describe(violations: list[Violation]) -> str:
@@ -177,20 +213,27 @@ def _keywords(schema_path: Iterable[str | int]) -> list[str | int]:
     return keywords
 
 
-def _violations(error: ValidationError, validator: Validator, root: dict[str, Any]) -> Iterator[Violation]:
+def _violations(
+    error: ValidationError, validator: Validator, root: dict[str, Any], expanded: set[tuple[Path, Path]]
+) -> Iterator[Violation]:
     path: Path = tuple(error.absolute_path)
     keyword = error.validator
     instance: Any = error.instance
-    # A name has no location of its own, so the object it names carries it and
-    # the description says which name.
     under_property_names = "propertyNames" in _keywords(error.absolute_schema_path)
-    subject = f"property name {instance!r} " if under_property_names else ""
+    subject = ""
+    if under_property_names:
+        # llm-provider §7: a property the schema does not allow sits at its own
+        # location, and the description says it is the name that failed.
+        path = (*path, instance)
+        subject = f"property name {instance!r} "
     if keyword in ("anyOf", "oneOf"):
-        yield from _union_violations(error, validator, root, path, subject)
+        yield from _union_violations(error, validator, root, path, subject, expanded)
     elif keyword == "not" and error.validator_value == {}:
         yield Violation(path, _excluded(error, subject))
     elif under_property_names:
-        yield _as_stated(error, subject)
+        yield _as_stated(error, path, subject)
+    elif keyword in ("additionalProperties", "additionalItems") and error.validator_value is False:
+        yield from _extras(error, path)
     elif keyword == "required":
         yield from _missing(path, error.instance, error.validator_value, "required property is missing")
     elif keyword in ("dependentRequired", "dependencies"):
@@ -202,23 +245,45 @@ def _violations(error: ValidationError, validator: Validator, root: dict[str, An
                     names = [needed] if isinstance(needed, str) else needed
                     yield from _missing(path, present, names, f"property required by {name!r} is missing")
     elif keyword in ("unevaluatedProperties", "unevaluatedItems"):
-        yield from _unevaluated(error, validator, path)
+        yield from _unevaluated(error, validator, root, path)
     elif keyword == "type":
         expected = _type_names(error.validator_value)
         yield Violation(path, f"expected type {expected}, got {_json_type(error.instance)}")
     else:
-        yield _as_stated(error)
+        yield _as_stated(error, path)
 
 
-def _as_stated(error: ValidationError, subject: str = "") -> Violation:
+def _as_stated(error: ValidationError, path: Path, subject: str = "") -> Violation:
     return Violation(
-        tuple(error.absolute_path),
-        f"{subject}fails {error.validator}{_bound(error.validator_value)}: {error.message}",
+        path, f"{subject}fails {error.validator}{_bound(error.validator_value)}: {_clip(error.message)}"
     )
 
 
+# Draft-03 has no `not`, so a false additionalProperties or additionalItems stays
+# as written, and jsonschema reports everything it excludes once, at the parent.
+def _extras(error: ValidationError, path: Path) -> Iterator[Violation]:
+    instance: Any = error.instance
+    schema = cast("dict[str, Any]", error.schema)
+    if error.validator == "additionalProperties" and isinstance(instance, dict):
+        declared = cast("dict[str, Any]", schema.get("properties", {}))
+        patterns = cast("dict[str, Any]", schema.get("patternProperties", {}))
+        for key in cast("dict[str, Any]", instance):
+            if key not in declared and not any(re.search(pattern, key) for pattern in patterns):
+                yield Violation((*path, key), "property is not allowed (additionalProperties: false)")
+    elif error.validator == "additionalItems" and isinstance(instance, list):
+        items = schema.get("items")
+        if isinstance(items, list):
+            for index in range(len(cast("list[Any]", items)), len(cast("list[Any]", instance))):
+                yield Violation((*path, index), "item is not allowed (additionalItems: false)")
+
+
 def _union_violations(
-    error: ValidationError, validator: Validator, root: dict[str, Any], path: Path, subject: str
+    error: ValidationError,
+    validator: Validator,
+    root: dict[str, Any],
+    path: Path,
+    subject: str,
+    expanded: set[tuple[Path, Path]],
 ) -> Iterator[Violation]:
     if not error.context:
         # A oneOf more than one member satisfies: the composite's own constraint.
@@ -241,7 +306,8 @@ def _union_violations(
         by_member[sub_error.relative_schema_path[0]].append(sub_error)
     for index in admitted:
         for sub_error in by_member[index]:
-            yield from _violations(sub_error, validator, root)
+            if not _repeats(sub_error, expanded):
+                yield from _violations(sub_error, validator, root, expanded)
 
 
 def _admits(validator: Validator, root: dict[str, Any], member: Any, instance: Any) -> bool:
@@ -290,12 +356,22 @@ def _missing(path: Path, instance: Any, names: Any, description: str) -> Iterato
 
 # jsonschema reports unevaluatedProperties / unevaluatedItems: false once, at the
 # parent, and keeps the per-key evaluation in a private module. It is used here to
-# place each excluded property or element at its own location. If it moves, the
-# violation stays at the parent, whose message still names each one.
-def _unevaluated(error: ValidationError, validator: Validator, path: Path) -> Iterator[Violation]:
+# place each excluded property or element at its own location, in a 2020-12 schema
+# whose references all resolve from the root: the helpers are handed the root
+# validator, and 2019-09 evaluates with different ones. Otherwise, or if the
+# helpers fail, the violation stays at the parent, whose message names each one.
+def _unevaluated(
+    error: ValidationError, validator: Validator, root: dict[str, Any], path: Path
+) -> Iterator[Violation]:
     instance: Any = error.instance
-    if error.validator_value is False:
-        try:
+    excluded: list[str | int] = []
+    description = ""
+    try:
+        if (
+            error.validator_value is False
+            and isinstance(validator, Draft202012Validator)
+            and not _has_nested_scope(root)
+        ):
             from jsonschema import _utils  # noqa: PLC0415
 
             jsonschema_utils = cast("Any", _utils)
@@ -304,7 +380,7 @@ def _unevaluated(error: ValidationError, validator: Validator, path: Path) -> It
                 evaluated = set(
                     jsonschema_utils.find_evaluated_property_keys_by_schema(validator, keys, error.schema)
                 )
-                excluded: list[str | int] = [key for key in keys if key not in evaluated]
+                excluded = [key for key in keys if key not in evaluated]
                 description = "property is not allowed (unevaluatedProperties: false)"
             elif error.validator == "unevaluatedItems" and isinstance(instance, list):
                 items = cast("list[Any]", instance)
@@ -313,17 +389,27 @@ def _unevaluated(error: ValidationError, validator: Validator, path: Path) -> It
                 )
                 excluded = [index for index in range(len(items)) if index not in evaluated_indexes]
                 description = "item is not allowed (unevaluatedItems: false)"
-            else:
-                excluded = []
-                description = ""
-        except (AttributeError, ImportError, TypeError):
-            excluded = []
-            description = ""
-        if excluded:
-            for token in excluded:
-                yield Violation((*path, token), description)
-            return
-    yield Violation(path, f"fails {error.validator}: {error.message}")
+    except Exception:
+        excluded = []
+    if excluded:
+        for token in excluded:
+            yield Violation((*path, token), description)
+        return
+    yield _as_stated(error, path)
+
+
+# A nested $id starts a resource whose references resolve against it, and a
+# dynamic reference depends on the scopes it was reached through, so the root
+# validator can follow neither.
+def _has_nested_scope(node: Any, *, nested: bool = False) -> bool:
+    if isinstance(node, dict):
+        entries = cast("dict[str, Any]", node)
+        if (nested and "$id" in entries) or "$dynamicRef" in entries:
+            return True
+        return any(_has_nested_scope(value, nested=True) for value in entries.values())
+    if isinstance(node, list):
+        return any(_has_nested_scope(entry, nested=True) for entry in cast("list[Any]", node))
+    return False
 
 
 def _excluded(error: ValidationError, subject: str) -> str:
@@ -363,6 +449,16 @@ def _json_type(instance: Any) -> str:
     return type(instance).__name__
 
 
+# jsonschema's messages repr the content they reject and the keyword's value in
+# full, so a large array or enum would repeat whole in every violation. The
+# location and the constraint come before the message and are never cut.
+_MESSAGE_LIMIT = 200
+
+
+def _clip(text: str) -> str:
+    return text if len(text) <= _MESSAGE_LIMIT else text[: _MESSAGE_LIMIT - 3] + "..."
+
+
 def _bound(value: Any) -> str:
     # The keyword's own value, where it is a bound (minItems 2, pattern '^a').
     # jsonschema's message for a count rule does not state it.
@@ -376,9 +472,12 @@ def _bound(value: Any) -> str:
 
 
 # RFC 6901 §3 escapes "~" and "/" inside a reference token; §6 then percent-encodes
-# the pointer for use as a URI fragment.
+# what RFC 3986's fragment rule does not allow. A lone surrogate, which JSON text
+# can carry, is encoded as its surrogate bytes, so that every key has a pointer.
 def _fragment_token(token: str | int) -> str:
-    return quote(str(token).replace("~", "~0").replace("/", "~1"), safe="!$&'()*+,;=:@")
+    return quote(
+        str(token).replace("~", "~0").replace("/", "~1"), safe="!$&'()*+,;=:@?", errors="surrogatepass"
+    )
 
 
 def _order(violation: Violation) -> tuple[Any, ...]:

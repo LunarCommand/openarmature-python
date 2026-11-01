@@ -10,6 +10,7 @@ does not reach.
 
 from __future__ import annotations
 
+import urllib.request
 from collections.abc import Iterator
 from typing import Annotated, Any, Literal
 
@@ -17,9 +18,12 @@ import jsonschema.validators
 import pytest
 from jsonschema import Draft7Validator, Draft202012Validator
 from jsonschema import _utils as jsonschema_utils
-from pydantic import BaseModel, Field, ValidationError, field_validator
+from jsonschema.exceptions import UnknownType
+from pydantic import AfterValidator, BaseModel, Field, ValidationError, field_validator, model_validator
+from pydantic_core import PydanticCustomError
 
 import openarmature.llm._schema_violations as violations_module
+import openarmature.llm.providers.openai as openai_module
 from openarmature.llm._schema_violations import describe, model_violations, schema_violations
 from openarmature.llm.errors import StructuredOutputInvalid
 from openarmature.llm.provider import _validator_class
@@ -103,8 +107,8 @@ def _described(instance: Any, schema: dict[str, Any]) -> str:
         pytest.param(
             {"ok": 1, "toolong": 2},
             {"type": "object", "propertyNames": {"maxLength": 3}},
-            "1 violation: #: property name 'toolong' fails maxLength 3: 'toolong' is too long",
-            id="property-names-at-the-object",
+            "1 violation: #/toolong: property name 'toolong' fails maxLength 3: 'toolong' is too long",
+            id="property-name-at-its-property",
         ),
         pytest.param(
             {"propertyNames": {}},
@@ -121,40 +125,41 @@ def _described(instance: Any, schema: dict[str, Any]) -> str:
                 "type": "object",
                 "properties": {"properties": {"type": "object", "propertyNames": {"maxLength": 3}}},
             },
-            "1 violation: #/properties: property name 'toolong' fails maxLength 3: 'toolong' is too long",
+            "1 violation: #/properties/toolong: "
+            "property name 'toolong' fails maxLength 3: 'toolong' is too long",
             id="property-names-under-a-property-called-properties",
         ),
         pytest.param(
             {"zzz": 1},
             {"type": "object", "propertyNames": {"anyOf": [{"pattern": "^a"}, {"maxLength": 2}]}},
-            "2 violations: #: property name 'zzz' fails maxLength 2: 'zzz' is too long; "
-            "#: property name 'zzz' fails pattern '^a': 'zzz' does not match '^a'",
+            "2 violations: #/zzz: property name 'zzz' fails maxLength 2: 'zzz' is too long; "
+            "#/zzz: property name 'zzz' fails pattern '^a': 'zzz' does not match '^a'",
             id="union-under-property-names-expanded",
         ),
         pytest.param(
             {"abc": 1},
             {"type": "object", "propertyNames": {"oneOf": [{"maxLength": 5}, {"pattern": "^a"}]}},
-            "1 violation: #: property name 'abc' matches more than one oneOf member",
+            "1 violation: #/abc: property name 'abc' matches more than one oneOf member",
             id="property-name-matching-two-oneof-members",
         ),
         pytest.param(
             {"zzz": 1},
             {"type": "object", "propertyNames": {"anyOf": [{"type": "integer"}, {"type": "null"}]}},
-            "1 violation: #: property name 'zzz' matches none of the anyOf member types (integer, null)",
+            "1 violation: #/zzz: property name 'zzz' matches none of the anyOf member types (integer, null)",
             id="property-name-matching-no-member-type",
         ),
         pytest.param(
             {"a": 1, "b": 2},
             {"type": "object", "propertyNames": False},
-            "2 violations: #: property name 'a' is not allowed (propertyNames: false); "
-            "#: property name 'b' is not allowed (propertyNames: false)",
+            "2 violations: #/a: property name 'a' is not allowed (propertyNames: false); "
+            "#/b: property name 'b' is not allowed (propertyNames: false)",
             id="false-property-names",
         ),
         pytest.param(
             {"zzz": 1},
             {"type": "object", "propertyNames": {"anyOf": [False, {"maxLength": 2}]}},
-            "2 violations: #: property name 'zzz' fails maxLength 2: 'zzz' is too long; "
-            "#: property name 'zzz' is not allowed (false schema)",
+            "2 violations: #/zzz: property name 'zzz' fails maxLength 2: 'zzz' is too long; "
+            "#/zzz: property name 'zzz' is not allowed (false schema)",
             id="false-union-member-under-property-names",
         ),
         pytest.param(
@@ -183,20 +188,23 @@ def _described(instance: Any, schema: dict[str, Any]) -> str:
             id="false-entry-in-a-list-of-items",
         ),
         pytest.param(
-            # Draft-03 has no `not`, so {"not": {}} would accept anything.
-            {"a": "x", "b": 1},
+            # Draft-03 has no `not`, so {"not": {}} would accept anything, and the
+            # excluded properties are found from the schema instead. x1 matches a
+            # pattern, so it is allowed.
+            {"a": "x", "b": 1, "c": 2, "x1": 3},
             {
                 "$schema": _DRAFT_03,
                 "type": "object",
                 "properties": {"a": {"type": "string"}},
+                "patternProperties": {"^x": {}},
                 "additionalProperties": False,
             },
-            "1 violation: #: fails additionalProperties: "
-            "Additional properties are not allowed ('b' was unexpected)",
+            "2 violations: #/b: property is not allowed (additionalProperties: false); "
+            "#/c: property is not allowed (additionalProperties: false)",
             id="draft-03-additional-properties-false",
         ),
         pytest.param(
-            {"t": ["x", 1]},
+            {"t": ["x", 1, 2]},
             {
                 "$schema": _DRAFT_03,
                 "type": "object",
@@ -204,7 +212,8 @@ def _described(instance: Any, schema: dict[str, Any]) -> str:
                     "t": {"type": "array", "items": [{"type": "string"}], "additionalItems": False}
                 },
             },
-            "1 violation: #/t: fails additionalItems: Additional items are not allowed (1 was unexpected)",
+            "2 violations: #/t/1: item is not allowed (additionalItems: false); "
+            "#/t/2: item is not allowed (additionalItems: false)",
             id="draft-03-additional-items-false",
         ),
         pytest.param(
@@ -224,18 +233,21 @@ def _described(instance: Any, schema: dict[str, Any]) -> str:
             id="draft-03-single-name-dependency",
         ),
         pytest.param(
-            {"a/b": 1, "m~n": 1, "c%d": 1},
+            # A fragment may hold "?" as it is, so it is not percent-encoded.
+            {"a/b": 1, "m~n": 1, "c%d": 1, "what?": 1},
             {
                 "type": "object",
                 "properties": {
                     "a/b": {"type": "string"},
                     "m~n": {"type": "string"},
                     "c%d": {"type": "string"},
+                    "what?": {"type": "string"},
                 },
             },
-            "3 violations: #/a~1b: expected type string, got integer; "
+            "4 violations: #/a~1b: expected type string, got integer; "
             "#/c%25d: expected type string, got integer; "
-            "#/m~0n: expected type string, got integer",
+            "#/m~0n: expected type string, got integer; "
+            "#/what?: expected type string, got integer",
             id="pointer-escaping",
         ),
         pytest.param(
@@ -325,6 +337,10 @@ def test_a_schema_declaring_no_draft_is_read_as_2020_12(monkeypatch: pytest.Monk
     [
         pytest.param('{"a": NaN}', "not well-formed JSON: NaN is not a JSON value", id="nan-is-malformed"),
         pytest.param("[1, 2]", "1 violation: #: expected type object, got array", id="non-object-top-level"),
+        # Python reads both as infinity, which no JSON number is.
+        pytest.param('{"a": 1e400}', "number out of range: 1e400", id="past-a-float"),
+        pytest.param('{"a": -1e400}', "number out of range: -1e400", id="past-a-float-negative"),
+        pytest.param("[" * 200_000, "JSON nested too deeply to parse", id="nested-too-deeply"),
     ],
 )
 def test_content_failures_before_any_property(content: str, expected: str) -> None:
@@ -334,7 +350,7 @@ def test_content_failures_before_any_property(content: str, expected: str) -> No
 
 
 def test_content_that_is_not_an_object_is_rejected_whatever_the_draft_applies() -> None:
-    # Drafts 4 to 7 ignore every sibling of a $ref, so this root type never
+    # Drafts 3 to 7 ignore every sibling of a $ref, so this root type never
     # applies. Killed by dropping the object check in response_violations.
     schema: dict[str, Any] = {
         "$schema": _DRAFT_07,
@@ -345,6 +361,141 @@ def test_content_that_is_not_an_object_is_rejected_whatever_the_draft_applies() 
     with pytest.raises(StructuredOutputInvalid) as excinfo:
         _parse_and_validate("null", schema, None)
     assert excinfo.value.error_message == "1 violation: #: expected type object, got null"
+
+
+class _Ledger(BaseModel):
+    m: dict[str, int]
+
+
+@pytest.mark.parametrize("schema_class", [None, _Ledger])
+def test_a_key_that_is_a_lone_surrogate_still_has_a_pointer(schema_class: type[BaseModel] | None) -> None:
+    # JSON text can escape a lone surrogate, which UTF-8 cannot encode. Killed by
+    # percent-encoding strictly, which fails while the pointer is written.
+    with pytest.raises(StructuredOutputInvalid) as excinfo:
+        _parse_and_validate('{"m": {"\\ud800": "x"}}', _Ledger.model_json_schema(), schema_class)
+    assert excinfo.value.error_message == "1 violation: #/m/%ED%A0%80: expected type integer, got string"
+
+
+def _positive(value: int) -> int:
+    if value <= 0:
+        raise ValueError("must be positive")
+    return value
+
+
+class _PositiveLedger(BaseModel):
+    m: dict[str, Annotated[int, AfterValidator(_positive)]]
+
+
+def test_a_model_error_at_a_lone_surrogate_key_sits_at_that_key() -> None:
+    # Pydantic writes the key in its location with U+FFFD in place of the
+    # surrogate. Killed by matching keys exactly, which leaves it at #/m.
+    with pytest.raises(StructuredOutputInvalid) as excinfo:
+        _parse_and_validate(
+            '{"m": {"a\\ud800": -1, "ok": 1}}', _PositiveLedger.model_json_schema(), _PositiveLedger
+        )
+    assert excinfo.value.error_message == "1 violation: #/m/a%ED%A0%80: Value error, must be positive"
+
+
+def test_a_remote_reference_is_never_fetched(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A $ref inside draft-07 dependencies is one validate_response_schema does
+    # not reach. Killed by validating with jsonschema's default registry, which
+    # fetches it.
+    fetched: list[Any] = []
+
+    def urlopen(*args: Any, **_: Any) -> Any:
+        fetched.append(args)
+        raise OSError("no network here")
+
+    monkeypatch.setattr(urllib.request, "urlopen", urlopen)
+    schema = {
+        "$schema": _DRAFT_07,
+        "type": "object",
+        "dependencies": {"a": {"$ref": "https://example.com/remote.json"}},
+    }
+    with pytest.raises(StructuredOutputInvalid) as excinfo:
+        _parse_and_validate('{"a": 1}', schema, None)
+    assert excinfo.value.error_message.startswith("could not be validated: ")
+    assert fetched == []
+
+
+@pytest.mark.parametrize(
+    ("content", "schema", "cause"),
+    [
+        pytest.param(
+            '{"a": [' + ", ".join(["0"] * 1000) + "]}",
+            {"$schema": _DRAFT_03, "type": "object", "properties": {"a": {"type": "money"}}},
+            UnknownType,
+            id="unknown-draft-03-type",
+        ),
+        pytest.param(
+            '{"c":' * 300 + "{}" + "}" * 300,
+            {"type": "object", "properties": {"c": {"$ref": "#"}}, "required": ["x"]},
+            RecursionError,
+            id="past-the-recursion-limit",
+        ),
+    ],
+)
+def test_validation_that_cannot_finish_is_still_structured_output_invalid(
+    content: str, schema: dict[str, Any], cause: type[BaseException]
+) -> None:
+    with pytest.raises(StructuredOutputInvalid) as excinfo:
+        _parse_and_validate(content, schema, None)
+    assert excinfo.value.error_message.startswith("could not be validated: ")
+    assert isinstance(excinfo.value.__cause__, cause)
+    # jsonschema's UnknownType text quotes the instance whole.
+    assert len(excinfo.value.error_message) < len(content)
+
+
+def test_a_message_does_not_grow_with_the_value_it_quotes() -> None:
+    # jsonschema's enum message lists every allowed value. Killed by quoting the
+    # message whole, which makes the longer enum's description longer.
+    def described(size: int) -> str:
+        schema = {"type": "object", "properties": {"code": {"enum": [f"code-{n:04d}" for n in range(size)]}}}
+        [violation] = schema_violations({"code": "x"}, schema)
+        return violation.description
+
+    shorter, longer = described(100), described(1000)
+    assert len(shorter) == len(longer)
+    assert longer.startswith("fails enum: 'x' is not one of ['code-0000', ")
+
+
+@pytest.mark.parametrize(
+    ("site", "lists"),
+    [
+        pytest.param({"type": "object", "required": ["a", "b", "c"]}, 1, id="object"),
+        pytest.param(
+            {"anyOf": [{"type": "object", "required": ["a", "b", "c"]}, {"type": "null"}]},
+            1,
+            id="union-member",
+        ),
+        # Killed by keying the expansion on the object alone, which skips the
+        # second list.
+        pytest.param(
+            {"type": "object", "allOf": [{"required": ["a", "b"]}, {"required": ["c"]}]},
+            2,
+            id="two-lists",
+        ),
+    ],
+)
+def test_a_required_list_is_expanded_once_per_object(
+    monkeypatch: pytest.MonkeyPatch, site: dict[str, Any], lists: int
+) -> None:
+    # jsonschema reports each missing name on its own, and each report carries the
+    # whole list. Killed by expanding a list for every report.
+    calls: list[Any] = []
+    original = violations_module._missing
+
+    def counted(*args: Any) -> Iterator[Any]:
+        calls.append(args)
+        return original(*args)
+
+    monkeypatch.setattr(violations_module, "_missing", counted)
+    schema = {"type": "object", "properties": {"s": site}}
+    assert _described({"s": {}}, schema) == (
+        "3 violations: #/s/a: required property is missing; #/s/b: required property is missing; "
+        "#/s/c: required property is missing"
+    )
+    assert len(calls) == lists
 
 
 def test_a_failure_only_the_model_catches_sits_at_its_field() -> None:
@@ -361,6 +512,47 @@ def test_a_failure_only_the_model_catches_sits_at_its_field() -> None:
     with pytest.raises(StructuredOutputInvalid) as excinfo:
         _parse_and_validate('{"name": "rex9"}', Pet.model_json_schema(), Pet)
     assert excinfo.value.error_message == "1 violation: #/name: Value error, name must not contain digits"
+
+
+def test_a_missing_value_with_no_location_sits_at_the_root() -> None:
+    # A model-level validator can report "missing" with an empty location.
+    # Killed by reading the missing name from the location regardless.
+    class Contact(BaseModel):
+        email: str | None = None
+        phone: str | None = None
+
+        @model_validator(mode="after")
+        def _reachable(self) -> Contact:
+            if not (self.email or self.phone):
+                raise PydanticCustomError("missing", "email or phone is required")
+            return self
+
+    with pytest.raises(StructuredOutputInvalid) as excinfo:
+        _parse_and_validate("{}", Contact.model_json_schema(), Contact)
+    assert excinfo.value.error_message == "1 violation: #: email or phone is required"
+
+
+def test_a_model_failure_that_cannot_be_described_keeps_pydantic_text(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Pet(BaseModel):
+        name: str
+
+        @field_validator("name")
+        @classmethod
+        def _no_digits(cls, value: str) -> str:
+            if any(ch.isdigit() for ch in value):
+                raise ValueError("name must not contain digits")
+            return value
+
+    def undescribable(*_: Any) -> list[Any]:
+        raise RuntimeError("no location")
+
+    monkeypatch.setattr(openai_module, "model_violations", undescribable)
+    with pytest.raises(StructuredOutputInvalid) as excinfo:
+        _parse_and_validate('{"name": "rex9"}', Pet.model_json_schema(), Pet)
+    assert excinfo.value.error_message.startswith("1 validation error for Pet")
+    assert "name must not contain digits" in excinfo.value.error_message
 
 
 def test_a_model_error_inside_a_union_sits_at_its_place_in_the_response() -> None:
@@ -453,17 +645,93 @@ def test_a_tie_is_read_as_a_member_name_when_the_input_is_not_in_the_response() 
     )
 
 
-def test_unevaluated_keywords_fall_back_to_the_parent_without_the_private_helpers(
-    monkeypatch: pytest.MonkeyPatch,
+@pytest.mark.parametrize("failure", ["missing", "raising"])
+def test_unevaluated_keywords_fall_back_to_the_parent_when_the_private_helpers_fail(
+    monkeypatch: pytest.MonkeyPatch, failure: str
 ) -> None:
-    # The per-key evaluation lives in a private jsonschema module. Without it the
+    # The per-key evaluation lives in a private jsonschema module. When it is
+    # gone, or raises (as it does for a reference it cannot resolve), the
     # violation stays at the parent, whose message names each excluded property.
-    monkeypatch.delattr(jsonschema_utils, "find_evaluated_property_keys_by_schema")
+    if failure == "missing":
+        monkeypatch.delattr(jsonschema_utils, "find_evaluated_property_keys_by_schema")
+    else:
+
+        def unresolvable(*_: Any) -> Any:
+            raise LookupError("no such anchor")
+
+        monkeypatch.setattr(jsonschema_utils, "find_evaluated_property_keys_by_schema", unresolvable)
     schema = {"type": "object", "properties": {"a": True}, "unevaluatedProperties": False}
     assert _described({"a": 1, "b": 2}, schema) == (
         "1 violation: #: fails unevaluatedProperties: "
         "Unevaluated properties are not allowed ('b' was unexpected)"
     )
+
+
+@pytest.mark.parametrize(
+    ("instance", "schema", "pointers"),
+    [
+        pytest.param(
+            {"a": 1, "b": 2},
+            {
+                "$id": "https://example.com/root",
+                "type": "object",
+                "properties": {"a": True},
+                "unevaluatedProperties": False,
+            },
+            ["#/b"],
+            id="root-resource",
+        ),
+        pytest.param(
+            {"inner": {"a": 1, "b": 2}},
+            {
+                "type": "object",
+                "properties": {
+                    "inner": {
+                        "$id": "https://example.com/inner",
+                        "type": "object",
+                        "properties": {"a": True},
+                        "unevaluatedProperties": False,
+                    }
+                },
+            },
+            ["#/inner"],
+            id="nested-resource",
+        ),
+        pytest.param(
+            {"a": 1, "b": 2},
+            {
+                "type": "object",
+                "$defs": {"base": {"$dynamicAnchor": "base", "properties": {"a": True}}},
+                "$dynamicRef": "#base",
+                "unevaluatedProperties": False,
+            },
+            ["#"],
+            id="dynamic-reference",
+        ),
+        pytest.param(
+            {"a": 1, "b": 2},
+            {
+                "$schema": "https://json-schema.org/draft/2019-09/schema",
+                "type": "object",
+                "properties": {"a": True},
+                "unevaluatedProperties": False,
+            },
+            ["#"],
+            id="draft-2019-09",
+        ),
+    ],
+)
+def test_unevaluated_keywords_are_placed_per_key_only_where_the_helpers_apply(
+    instance: Any, schema: dict[str, Any], pointers: list[str]
+) -> None:
+    # The helpers resolve every reference from the root validator, and 2019-09
+    # evaluates with helpers of its own. Each parent case is killed by dropping
+    # its check, and the root resource by also treating a root $id as nested.
+    # Which keys jsonschema counts as unevaluated under $dynamicRef differs
+    # between its releases, so only the placement is asserted.
+    violations = schema_violations(instance, schema)
+    assert [violation.pointer for violation in violations] == pointers
+    assert all("unevaluatedProperties" in violation.description for violation in violations)
 
 
 def test_the_private_jsonschema_helpers_still_exist() -> None:

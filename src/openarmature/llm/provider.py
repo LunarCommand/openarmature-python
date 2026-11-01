@@ -329,8 +329,9 @@ def validate_response_schema(schema: object) -> None:
 
 
 # llm-provider §5: a response_schema that declares no $schema is read as JSON
-# Schema draft 2020-12, while a declared $schema is honored. validator_for's own
-# fallback is the library's newest draft, which may move past 2020-12.
+# Schema draft 2020-12. A declared $schema is honored when jsonschema recognizes
+# its URI, and any other is read as 2020-12 as well. validator_for's own fallback
+# is the library's newest draft, which may move past 2020-12.
 def _validator_class(schema: dict[str, Any]) -> type[Validator]:
     return validator_for(schema, default=Draft202012Validator)
 

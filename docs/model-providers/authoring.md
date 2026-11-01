@@ -214,6 +214,12 @@ of:
   the response against the schema before returning. Populate
   `Response.parsed` with the validated value;
   raise `StructuredOutputInvalid` on parse or validation failure.
+  Its `error_message` lists every violation the content commits, each
+  with its location as a JSON Pointer in URI-fragment form
+  (`#/site/lat`) and the constraint that failed, naming the expected
+  type for a type violation; content that cannot be parsed is one
+  violation with no location (§7). A single validator message, such
+  as `str(jsonschema_error)`, names only one violation and falls short.
   Use `validate_response_schema` and `strict_mode_supported` from
   `openarmature.llm` to share the provider-agnostic boundary checks.
 - **Observability events.** Opt-in typed-event dispatch around the
