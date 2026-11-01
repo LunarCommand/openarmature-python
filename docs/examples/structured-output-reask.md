@@ -74,9 +74,8 @@ whether it recovers.
   resending it the schema tells it nothing. A complete-and-wrong
   reply usually never saw the schema at all.
 - **Sending the schema, not only the objection.** `error_message`
-  names the first violation validation found, so a correction
-  quoting only it spends an attempt per wrong field. The schema is
-  the whole contract at once.
+  names every violation, but only what was wrong. The schema is the
+  whole contract at once, and says what right looks like.
 - `LlmRetryConfig(per_attempt_override=...)` applying a config
   schedule to retries only. Attempt 0 runs the caller's config
   untouched; each retry merges the next entry over it, and a

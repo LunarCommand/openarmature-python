@@ -63,13 +63,11 @@ What the builder puts in the correction is what decides whether it recovers.
   a truncated reply understood the schema and ran out of room, so repeating
   the schema at it adds nothing, while a complete-and-wrong reply usually
   never saw the schema at all.
-- **Send the schema, not only the objection.** ``error_message`` names the
-  first violation validation found, so a correction quoting only it spends an
-  attempt per wrong field and will not converge inside a small budget.
-  ``response_schema`` carries the whole contract, which clears every problem
-  in one round and says what right looks like rather than only what was
-  wrong. That is the more useful thing to tell a model that invented its own
-  field names because it was never shown the schema.
+- **Send the schema, not only the objection.** ``error_message`` names every
+  violation, but only what was wrong. ``response_schema`` carries the whole
+  contract, which says what right looks like. That is the more useful thing to
+  tell a model that invented its own field names because it was never shown
+  the schema.
 - ``LlmRetryConfig(per_attempt_override=...)`` is a schedule of partial
   configs applied to retries only. Attempt 0 runs the caller's config
   untouched; each retry merges the next entry over it. A schedule shorter
@@ -201,10 +199,10 @@ def build_correction(exc: StructuredOutputInvalid) -> str:
     # putting it in the prompt, so a reply with invented field names is what a
     # request that did neither looks like.
     #
-    # Send the schema, not just the objection. `error_message` names the first
-    # violation only, so quoting it alone costs a round per wrong field. The
-    # schema is the whole contract at once, and it says what right looks like
-    # rather than what was wrong, which is what a model that never saw it needs.
+    # Send the schema, not just the objection. `error_message` names every
+    # violation, but only what was wrong. The schema is the whole contract at
+    # once, and it says what right looks like, which is what a model that never
+    # saw it needs.
     return (
         "That reply did not match the required schema. The validator said: "
         f"{exc.error_message}\n\n"

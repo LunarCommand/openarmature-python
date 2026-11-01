@@ -48,6 +48,7 @@ from __future__ import annotations
 import re
 import subprocess
 import sys
+import tomllib
 from pathlib import Path
 
 # Make ``openarmature`` importable without requiring an editable install
@@ -194,6 +195,18 @@ def _extract_sections_1_2(spec_text: str) -> str:
     return "\n".join(out).rstrip()
 
 
+_COUNT_WORDS = ("none", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten")
+
+
+def _partial_count() -> str:
+    """How many proposals ``conformance.toml`` records as ``partial``, as a word."""
+    # Counted from the manifest so the sentence cannot drift from it.
+    with (REPO_ROOT / "conformance.toml").open("rb") as handle:
+        proposals = tomllib.load(handle).get("proposals", {})
+    count = sum(1 for entry in proposals.values() if entry.get("status") == "partial")
+    return _COUNT_WORDS[count] if count < len(_COUNT_WORDS) else str(count)
+
+
 def _capability_summaries(spec_tag: str) -> str:
     # Long-string entries use explicit ``+`` concat (not Python's
     # implicit adjacent-string-literal concat) so CodeQL / static
@@ -216,7 +229,7 @@ def _capability_summaries(spec_tag: str) -> str:
             + "Check it before planning against a behaviour from an accepted "
             + "proposal: the spec text above includes proposals this implementation "
             + "may not ship yet, and a `partial` entry says which half is missing. "
-            + "This release has two. "
+            + f"This release has {_partial_count()}. "
             + "For the full spec text (execution model, error semantics, "
             + "determinism, observer hooks, etc.) see the linked docs site._"
         ),

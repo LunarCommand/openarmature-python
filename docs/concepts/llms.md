@@ -216,12 +216,10 @@ endpoint that enforces it cannot return a wrong shape. One that accepts
 neither channel open, and a model that was never told the field names
 invents plausible ones. A stronger model does not fix that.
 
-**Send the schema, not only the objection.** `error_message` names the
-first violation validation found, so a correction quoting only it can
-cost one attempt per wrong field and will not converge inside a small
-budget. It also says what was wrong rather than what right looks like,
-and a model that returns an invented shape has usually never seen the
-schema. `StructuredOutputInvalid` carries `response_schema`, so a builder
+**Send the schema, not only the objection.** `error_message` names every
+violation, each with its location, but it says what was wrong rather than
+what right looks like, and a model that returns an invented shape has
+usually never seen the schema. `StructuredOutputInvalid` carries `response_schema`, so a builder
 can send the contract itself and clear every problem in one round:
 
 ```python
@@ -767,7 +765,8 @@ can handle them.
 when a model returns content that fails to parse as JSON, or parses
 but fails to validate against the supplied schema. The exception
 carries the requested `response_schema`, the `output_content` the model
-produced, and an `error_message`. It is non-transient by default
+produced, and an `error_message` describing every violation, each at its
+JSON Pointer location (`#/site/lat`). It is non-transient by default
 because a model that emits non-conforming output on a given prompt
 usually emits the same non-conforming output on retry. Useful retry
 strategies for this case involve changing the prompt or doubling

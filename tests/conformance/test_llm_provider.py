@@ -170,10 +170,9 @@ _DEFERRED_FIXTURES: dict[str, str] = {
     "080-managed-gemini-stop-merge": (
         "Proposal 0108 stop merge; Gemini provider not implemented (0038 not-yet)"
     ),
-    # Proposal 0126 (structured-output failure reports, spec v0.119.0) is
-    # not-yet in conformance.toml.
-    "082-structured-output-error-message-completeness": "Proposal 0126 not implemented (not-yet)",
-    "083-openai-refusal-finish-reason": "Proposal 0126 not implemented (not-yet)",
+    # Proposal 0126 (structured-output failure reports, spec v0.119.0): the
+    # OpenAI refusal mapping is not implemented yet.
+    "083-openai-refusal-finish-reason": "Proposal 0126's refusal mapping not implemented",
 }
 
 

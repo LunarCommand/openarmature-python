@@ -2080,8 +2080,12 @@ def _assert_reask_carries(exc: Any, carries: dict[str, Any]) -> None:
         if key.endswith("_present"):
             assert (getattr(exc, key[:-8], None) is not None) == bool(want), f"carries {key}"
         elif key.endswith("_mentions"):
+            from tests.conformance.harness.wire import mention_list
+
             actual = getattr(exc, key[:-9], None)
-            assert isinstance(actual, str) and want in actual, f"carries {key}: {actual!r} lacks {want!r}"
+            assert isinstance(actual, str), f"carries {key}: {actual!r} is not a string"
+            missing = [needle for needle in mention_list(key, want) if needle not in actual]
+            assert not missing, f"carries {key}: {actual!r} lacks {missing!r}"
         else:
             actual: Any = getattr(exc, key, None)
             if isinstance(want, dict):

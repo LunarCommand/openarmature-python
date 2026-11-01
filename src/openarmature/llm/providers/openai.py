@@ -54,6 +54,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import math
 import re
 import time
 import uuid
@@ -62,7 +63,6 @@ from typing import TYPE_CHECKING, Any, Literal, cast
 from urllib.parse import urlparse
 
 import httpx
-import jsonschema
 from pydantic import BaseModel, ValidationError
 
 from openarmature._managed_extras import ManagedArm, apply_managed_extras
@@ -86,6 +86,7 @@ from openarmature.observability.correlation import (
 from openarmature.observability.metadata import AttributeValue, current_invocation_metadata
 
 from .._event_fields import _request_extras_from_config, _request_params_from_config, serialize_messages
+from .._schema_violations import _clip, describe, model_violations, response_violations
 
 # ``current_prompt_group`` / ``current_prompt_result`` are imported
 # lazily inside :meth:`OpenAIProvider.complete` to avoid a module-load
@@ -1517,100 +1518,96 @@ def _derive_schema_name(schema: dict[str, Any]) -> str:
     return f"oa_schema_{hashlib.sha256(canonical).hexdigest()[:16]}"
 
 
-# Parse the model's content string as JSON, then validate against
-# the schema. The dict-schema path uses jsonschema; the BaseModel-class
-# path uses Pydantic's native validator (which produces an instance
-# of the supplied class).
+# Parse the model's content string as JSON, then validate it against the
+# schema. The dict-schema path returns the dict; the BaseModel-class path then
+# runs the class's own validation, which produces the instance.
 def _parse_and_validate(
     content: str,
     schema_dict: dict[str, Any],
     schema_class: type[BaseModel] | None,
 ) -> ParsedValue:
     try:
-        loaded = json.loads(content)
-    except json.JSONDecodeError as exc:
+        loaded = json.loads(content, parse_constant=_reject_non_json_constant, parse_float=_finite_float)
+    except (ValueError, RecursionError) as exc:
         raise StructuredOutputInvalid(
             "response content is not valid JSON",
             response_schema=schema_dict,
             output_content=content,
-            error_message=str(exc),
+            error_message=_unparsed(exc),
         ) from exc
-    if not isinstance(loaded, dict):
-        raise StructuredOutputInvalid(
-            "response JSON is not an object",
-            response_schema=schema_dict,
-            output_content=content,
-            error_message=f"top-level type is {type(loaded).__name__}, expected object",
-        )
-    parsed_dict = cast("dict[str, Any]", loaded)
-
-    # Pydantic-class path: validate and return the BaseModel instance.
-    if schema_class is not None:
-        # Validate against the generated JSON Schema FIRST so the
-        # class path enforces the same strict per-type checks as the
-        # dict path. Pydantic's default model_validate is coercive
-        # (it accepts "30" for an int field), which would silently
-        # accept responses that fail the wire schema. Running
-        # jsonschema first matches the dict-schema path's strictness;
-        # model_validate then constructs the typed instance.
-        try:
-            jsonschema.validate(instance=parsed_dict, schema=schema_dict)
-        except jsonschema.ValidationError as exc:
-            raise StructuredOutputInvalid(
-                "response failed JSON Schema validation",
-                response_schema=schema_dict,
-                output_content=content,
-                error_message=_format_jsonschema_failure(exc),
-            ) from exc
-        except jsonschema.SchemaError as exc:
-            raise StructuredOutputInvalid(
-                "response could not be validated against the supplied schema",
-                response_schema=schema_dict,
-                output_content=content,
-                error_message=str(exc),
-            ) from exc
-        try:
-            return schema_class.model_validate(parsed_dict)
-        except ValidationError as exc:
-            raise StructuredOutputInvalid(
-                "response failed Pydantic validation",
-                response_schema=schema_dict,
-                output_content=content,
-                error_message=str(exc),
-            ) from exc
-
-    # Dict-schema path: jsonschema validation, return the dict.
     try:
-        jsonschema.validate(instance=parsed_dict, schema=schema_dict)
-    except jsonschema.ValidationError as exc:
-        raise StructuredOutputInvalid(
-            "response failed JSON Schema validation",
-            response_schema=schema_dict,
-            output_content=content,
-            error_message=_format_jsonschema_failure(exc),
-        ) from exc
-    except jsonschema.SchemaError as exc:
-        # Safety net: validate_response_schema's pre-validation should
-        # have caught this, but any schema-side exception (including
-        # ref-resolution failures via the `referencing` library) MUST
-        # still map to the canonical taxonomy rather than leak raw.
+        violations = response_violations(loaded, schema_dict)
+        error_message = describe(violations) if violations else ""
+    except Exception as exc:
+        # llm-provider §7: validation that cannot finish is still a
+        # structured_output_invalid. It raises for, say, an unknown draft-03
+        # type, content nested past the recursion limit, or a reference
+        # validate_response_schema does not walk.
         raise StructuredOutputInvalid(
             "response could not be validated against the supplied schema",
             response_schema=schema_dict,
             output_content=content,
-            error_message=str(exc),
+            error_message=f"could not be validated: {_clip(str(exc))}",
         ) from exc
-    return parsed_dict
+    if violations:
+        raise StructuredOutputInvalid(
+            "response failed JSON Schema validation",
+            response_schema=schema_dict,
+            output_content=content,
+            error_message=error_message,
+        )
+    # response_violations rejects content that is not an object.
+    parsed_dict = cast("dict[str, Any]", loaded)
+    if schema_class is None:
+        return parsed_dict
+    # The JSON Schema check above runs first so the class path is as strict
+    # as the dict path: Pydantic's default model_validate is coercive (it
+    # accepts "30" for an int field).
+    try:
+        return schema_class.model_validate(parsed_dict)
+    except ValidationError as exc:
+        raise StructuredOutputInvalid(
+            "response failed Pydantic validation",
+            response_schema=schema_dict,
+            output_content=content,
+            error_message=_model_failure(exc, parsed_dict),
+        ) from exc
 
 
-def _format_jsonschema_failure(exc: jsonschema.ValidationError) -> str:
-    """jsonschema.ValidationError.message describes the value mismatch
-    (e.g., "'30' is not of type 'integer'") but doesn't include the
-    failing field path. Prefix with ``json_path`` (e.g., ``$.age``) so
-    the error_message string carries both, matching the dict-
-    schema and class-schema paths.
-    """
-    return f"{exc.json_path}: {exc.message}"
+def _model_failure(exc: ValidationError, instance: dict[str, Any]) -> str:
+    try:
+        return describe(model_violations(exc, instance))
+    except Exception:
+        # Pydantic's own text still names each failure, without a pointer.
+        return str(exc)
+
+
+# llm-provider §7: content that cannot be parsed is one violation with no
+# location. RFC 8259 §6 and §9 let a parser limit the range of numbers and the
+# depth of nesting, and content past those limits is reported the same way.
+def _unparsed(exc: ValueError | RecursionError) -> str:
+    if isinstance(exc, RecursionError):
+        return "JSON nested too deeply to parse"
+    if isinstance(exc, _OutOfRange):
+        return f"number out of range: {exc}"
+    return f"not well-formed JSON: {exc}"
+
+
+def _reject_non_json_constant(name: str) -> Any:
+    # Python's parser accepts NaN and Infinity; RFC 8259 has no literals for them.
+    raise ValueError(f"{name} is not a JSON value")
+
+
+class _OutOfRange(ValueError):
+    pass
+
+
+def _finite_float(text: str) -> float:
+    # Python reads a number past a float's range, such as 1e400, as infinity.
+    value = float(text)
+    if not math.isfinite(value):
+        raise _OutOfRange(text)
+    return value
 
 
 _SCHEMA_DIRECTIVE_TEMPLATE = (

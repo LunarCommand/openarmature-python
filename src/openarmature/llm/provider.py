@@ -42,6 +42,8 @@ from typing import TYPE_CHECKING, Any, Protocol, cast
 from urllib.parse import unquote
 
 import jsonschema
+from jsonschema import Draft202012Validator
+from jsonschema.protocols import Validator
 from jsonschema.validators import validator_for
 from pydantic import BaseModel
 
@@ -286,7 +288,8 @@ def validate_tool_choice(
 # complete() to be a valid JSON Schema with a top-level type "object".
 # The boundary check here validates BOTH constraints: structural
 # (must be a dict with top-level type: "object") AND full JSON Schema
-# validity via Draft202012Validator.check_schema(). The runtime
+# validity via its draft's check_schema(), 2020-12 unless the schema
+# declares another. The runtime
 # validator on the parse path only handles instance-against-schema
 # failures; malformed schemas fail here rather than escaping at decode
 # time as jsonschema.SchemaError.
@@ -312,13 +315,9 @@ def validate_response_schema(schema: object) -> None:
     # instance-against-schema failures and is handled separately on the
     # parse path.
     try:
-        # Pick the validator class the runtime would use, so the
-        # boundary check uses the same metaschema as
-        # jsonschema.validate(). validator_for reads the schema's
-        # $schema URL; absent that, it defaults to the latest
-        # supported draft.
-        validator_cls = validator_for(schema_dict)
-        validator_cls.check_schema(schema_dict)
+        # The same validator class the response is validated with, so the
+        # boundary check uses the same metaschema.
+        _validator_class(schema_dict).check_schema(schema_dict)
     except jsonschema.SchemaError as exc:
         raise ProviderInvalidRequest(f"response_schema: not a valid JSON Schema: {exc.message}") from exc
     # check_schema() validates the schema's own syntax but does not
@@ -327,6 +326,14 @@ def validate_response_schema(schema: object) -> None:
     # broken refs fail here rather than escaping at parse time as
     # raw referencing-library exceptions.
     _check_refs_resolvable(schema_dict)
+
+
+# llm-provider §5: a response_schema that declares no $schema is read as JSON
+# Schema draft 2020-12. A declared $schema is honored when jsonschema recognizes
+# its URI, and any other is read as 2020-12 as well. validator_for's own fallback
+# is the library's newest draft, which may move past 2020-12.
+def _validator_class(schema: dict[str, Any]) -> type[Validator]:
+    return validator_for(schema, default=Draft202012Validator)
 
 
 # Subschema-bearing keywords by container shape. Used by

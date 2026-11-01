@@ -165,7 +165,8 @@ retryable for one call, a builder reading `exc.output_content`,
 `exc.error_message`, `exc.finish_reason` and `exc.response_schema` and
 branching on which failure it got (the two arms need different information,
 not just different wording, and the schema-mismatch arm sends the schema
-itself, since `error_message` names only the first violation),
+itself, since `error_message` says what was wrong but not what right looks
+like),
 `LlmRetryConfig(per_attempt_override=...)` applying a config schedule to
 retries only, the framework appending the model's reply and the correction as
 an alternating transcript while authoring no prompt of its own, and reask
