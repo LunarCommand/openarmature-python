@@ -144,6 +144,20 @@ def _described(instance: Any, schema: dict[str, Any]) -> str:
             id="property-name-matching-no-member-type",
         ),
         pytest.param(
+            {"a": 1, "b": 2},
+            {"type": "object", "propertyNames": False},
+            "2 violations: #: property name 'a' is not allowed (propertyNames: false); "
+            "#: property name 'b' is not allowed (propertyNames: false)",
+            id="false-property-names",
+        ),
+        pytest.param(
+            {"zzz": 1},
+            {"type": "object", "propertyNames": {"anyOf": [False, {"maxLength": 2}]}},
+            "2 violations: #: property name 'zzz' fails maxLength 2: 'zzz' is too long; "
+            "#: property name 'zzz' is not allowed (false schema)",
+            id="false-union-member-under-property-names",
+        ),
+        pytest.param(
             # additionalItems means nothing in 2020-12, so this violation exists
             # only if the declared draft is honored.
             {"a": ["x", 1]},

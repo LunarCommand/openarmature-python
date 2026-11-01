@@ -187,6 +187,8 @@ def _violations(error: ValidationError, validator: Validator, root: dict[str, An
     subject = f"property name {instance!r} " if under_property_names else ""
     if keyword in ("anyOf", "oneOf"):
         yield from _union_violations(error, validator, root, path, subject)
+    elif keyword == "not" and error.validator_value == {}:
+        yield Violation(path, _excluded(error, subject))
     elif under_property_names:
         yield _as_stated(error, subject)
     elif keyword == "required":
@@ -201,8 +203,6 @@ def _violations(error: ValidationError, validator: Validator, root: dict[str, An
                     yield from _missing(path, present, names, f"property required by {name!r} is missing")
     elif keyword in ("unevaluatedProperties", "unevaluatedItems"):
         yield from _unevaluated(error, validator, path)
-    elif keyword == "not" and error.validator_value == {}:
-        yield Violation(path, _excluded(error))
     elif keyword == "type":
         expected = _type_names(error.validator_value)
         yield Violation(path, f"expected type {expected}, got {_json_type(error.instance)}")
@@ -326,9 +326,12 @@ def _unevaluated(error: ValidationError, validator: Validator, path: Path) -> It
     yield Violation(path, f"fails {error.validator}: {error.message}")
 
 
-def _excluded(error: ValidationError) -> str:
+def _excluded(error: ValidationError, subject: str) -> str:
     keywords = _keywords(error.absolute_schema_path)
     parent = keywords[-2] if len(keywords) >= 2 else None
+    if subject:
+        reason = "propertyNames: false" if parent == "propertyNames" else "false schema"
+        return f"{subject}is not allowed ({reason})"
     if parent == "additionalProperties":
         return "property is not allowed (additionalProperties: false)"
     if parent in ("items", "additionalItems"):
