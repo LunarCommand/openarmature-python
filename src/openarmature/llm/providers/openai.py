@@ -86,7 +86,7 @@ from openarmature.observability.correlation import (
 from openarmature.observability.metadata import AttributeValue, current_invocation_metadata
 
 from .._event_fields import _request_extras_from_config, _request_params_from_config, serialize_messages
-from .._schema_violations import describe, model_violations, schema_violations
+from .._schema_violations import describe, model_violations, response_violations
 
 # ``current_prompt_group`` / ``current_prompt_result`` are imported
 # lazily inside :meth:`OpenAIProvider.complete` to avoid a module-load
@@ -1536,7 +1536,7 @@ def _parse_and_validate(
             error_message=f"not well-formed JSON: {exc}",
         ) from exc
     try:
-        violations = schema_violations(loaded, schema_dict)
+        violations = response_violations(loaded, schema_dict)
     except jsonschema.SchemaError as exc:
         # Safety net: validate_response_schema's pre-validation should
         # have caught this, but any schema-side exception (including
@@ -1555,8 +1555,7 @@ def _parse_and_validate(
             output_content=content,
             error_message=describe(violations),
         )
-    # validate_response_schema requires the schema's top level to be an
-    # object, so content that passed is a dict.
+    # response_violations rejects content that is not an object.
     parsed_dict = cast("dict[str, Any]", loaded)
     if schema_class is None:
         return parsed_dict
