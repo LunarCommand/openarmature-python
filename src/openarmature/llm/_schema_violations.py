@@ -25,6 +25,7 @@ from jsonschema import (
 )
 from jsonschema.exceptions import UnknownType
 from jsonschema.protocols import Validator
+from jsonschema.validators import validator_for
 from pydantic import ValidationError as ModelValidationError
 from referencing import Registry
 
@@ -38,6 +39,7 @@ from .provider import (
 )
 
 Path = tuple[str | int, ...]
+_Expanded = set[tuple[Path, Path, int]]
 
 
 @dataclass(frozen=True)
@@ -46,6 +48,9 @@ class Violation:
 
     path: Path
     description: str
+    # jsonschema's own wording, kept whole so that two constraints whose wording is
+    # cut to the same words when written out stay two violations.
+    detail: str = ""
 
     @property
     def pointer(self) -> str:
@@ -56,16 +61,12 @@ class Violation:
 def schema_violations(instance: Any, schema: dict[str, Any]) -> list[Violation]:
     """Every violation ``instance`` commits against ``schema``, in a stable order."""
     validator_class = _validator_class(schema)
-    prepared = schema
-    # Draft-03 has no `not`, so its false subschemas stay as written, and
-    # _extras places what a false additionalProperties or additionalItems excludes.
-    if "not" in validator_class.VALIDATORS:
-        prepared = cast("dict[str, Any]", _false_as_never(schema))
+    prepared = cast("dict[str, Any]", _false_as_never(schema, validator_class))
     # jsonschema's default registry fetches a remote $ref over the network, and
     # validate_response_schema does not reach every position a $ref can sit in.
     validator = validator_class(prepared, registry=Registry())
-    expanded: set[tuple[Path, Path]] = set()
-    found: dict[tuple[Path, str], Violation] = {}
+    expanded: _Expanded = set()
+    found: dict[tuple[Path, str, str], Violation] = {}
     for error in validator.iter_errors(instance):
         if _repeats(error, expanded):
             continue
@@ -73,16 +74,18 @@ def schema_violations(instance: Any, schema: dict[str, Any]) -> list[Violation]:
         # recognize is reported as jsonschema states it.
         violations = list(_violations(error, validator, prepared, expanded))
         for violation in violations or [_as_stated(error, tuple(error.absolute_path))]:
-            found.setdefault((violation.path, violation.description), violation)
+            found.setdefault((violation.path, violation.description, violation.detail), violation)
     return sorted(found.values(), key=_order)
 
 
 # jsonschema reports a missing property once per name, and every one of those
 # reports carries the whole list, so each list is expanded only the first time.
-def _repeats(error: ValidationError, expanded: set[tuple[Path, Path]]) -> bool:
+# The list is part of the key because jsonschema leaves $ref out of the schema
+# path, so a referenced list and a sibling one can share a path.
+def _repeats(error: ValidationError, expanded: _Expanded) -> bool:
     if error.validator not in ("required", "dependentRequired", "dependencies"):
         return False
-    key = (tuple(error.absolute_path), tuple(error.absolute_schema_path))
+    key = (tuple(error.absolute_path), tuple(error.absolute_schema_path), id(error.validator_value))
     if key in expanded:
         return True
     expanded.add(key)
@@ -163,7 +166,12 @@ def _child(node: Any, token: int | str) -> tuple[int | str, Any]:
 def describe(violations: list[Violation]) -> str:
     """One line naming every violation, for ``StructuredOutputInvalid.error_message``."""
     count = f"{len(violations)} violation{'' if len(violations) == 1 else 's'}"
-    return f"{count}: " + "; ".join(f"{v.pointer}: {v.description}" for v in violations)
+    return f"{count}: " + "; ".join(_line(violation) for violation in violations)
+
+
+def _line(violation: Violation) -> str:
+    line = f"{violation.pointer}: {violation.description}"
+    return f"{line}: {_clip(violation.detail)}" if violation.detail else line
 
 
 # A false subschema rejects everything, as {"not": {}} does. jsonschema reports a
@@ -176,24 +184,30 @@ _SINGLE = (_SINGLE_SUBSCHEMA_KEYWORDS - {"unevaluatedItems", "unevaluatedPropert
 _MAP = _MAP_OF_SUBSCHEMA_KEYWORDS | {"dependencies"}
 
 
-def _false_as_never(node: Any) -> Any:
+# jsonschema reads each subschema's own $schema as it descends, falling back to the
+# enclosing draft, so the rewrite does the same and leaves a false alone wherever
+# that draft has no `not`. That is draft-03, whose false additionalProperties and
+# additionalItems _extras places instead.
+def _false_as_never(node: Any, validator_class: type[Validator]) -> Any:
     if node is False:
-        return {"not": {}}
+        return {"not": {}} if "not" in validator_class.VALIDATORS else node
     if not isinstance(node, dict):
         return node
+    entries = cast("dict[str, Any]", node)
+    validator_class = validator_for(entries, default=validator_class)
     out: dict[str, Any] = {}
-    for key, value in cast("dict[str, Any]", node).items():
+    for key, value in entries.items():
         if key in _SINGLE and isinstance(value, dict | bool):
-            out[key] = _false_as_never(value)
+            out[key] = _false_as_never(value, validator_class)
         elif key == "items" and isinstance(value, list):
-            out[key] = [_false_as_never(entry) for entry in cast("list[Any]", value)]
+            out[key] = [_false_as_never(entry, validator_class) for entry in cast("list[Any]", value)]
         elif key in _MAP and isinstance(value, dict):
             out[key] = {
-                name: entry if isinstance(entry, list) else _false_as_never(entry)
+                name: entry if isinstance(entry, list) else _false_as_never(entry, validator_class)
                 for name, entry in cast("dict[str, Any]", value).items()
             }
         elif key in _LIST_OF_SUBSCHEMA_KEYWORDS and isinstance(value, list):
-            out[key] = [_false_as_never(entry) for entry in cast("list[Any]", value)]
+            out[key] = [_false_as_never(entry, validator_class) for entry in cast("list[Any]", value)]
         else:
             out[key] = value
     return out
@@ -214,7 +228,7 @@ def _keywords(schema_path: Iterable[str | int]) -> list[str | int]:
 
 
 def _violations(
-    error: ValidationError, validator: Validator, root: dict[str, Any], expanded: set[tuple[Path, Path]]
+    error: ValidationError, validator: Validator, root: dict[str, Any], expanded: _Expanded
 ) -> Iterator[Violation]:
     path: Path = tuple(error.absolute_path)
     keyword = error.validator
@@ -254,9 +268,7 @@ def _violations(
 
 
 def _as_stated(error: ValidationError, path: Path, subject: str = "") -> Violation:
-    return Violation(
-        path, f"{subject}fails {error.validator}{_bound(error.validator_value)}: {_clip(error.message)}"
-    )
+    return Violation(path, f"{subject}fails {error.validator}{_bound(error.validator_value)}", error.message)
 
 
 # Draft-03 has no `not`, so a false additionalProperties or additionalItems stays
@@ -283,7 +295,7 @@ def _union_violations(
     root: dict[str, Any],
     path: Path,
     subject: str,
-    expanded: set[tuple[Path, Path]],
+    expanded: _Expanded,
 ) -> Iterator[Violation]:
     if not error.context:
         # A oneOf more than one member satisfies: the composite's own constraint.
@@ -401,15 +413,25 @@ def _unevaluated(
 # A nested $id starts a resource whose references resolve against it, and a
 # dynamic reference depends on the scopes it was reached through, so the root
 # validator can follow neither.
-def _has_nested_scope(node: Any, *, nested: bool = False) -> bool:
-    if isinstance(node, dict):
-        entries = cast("dict[str, Any]", node)
-        if (nested and "$id" in entries) or "$dynamicRef" in entries:
-            return True
-        return any(_has_nested_scope(value, nested=True) for value in entries.values())
-    if isinstance(node, list):
-        return any(_has_nested_scope(entry, nested=True) for entry in cast("list[Any]", node))
-    return False
+def _has_nested_scope(schema: Any, *, nested: bool = False) -> bool:
+    if not isinstance(schema, dict):
+        return False
+    entries = cast("dict[str, Any]", schema)
+    if (nested and "$id" in entries) or "$dynamicRef" in entries:
+        return True
+    return any(_has_nested_scope(subschema, nested=True) for subschema in _subschemas(entries))
+
+
+# The subschemas a schema object holds, found by keyword, so that a property name,
+# a pattern, or data such as const and default is never read as a schema.
+def _subschemas(schema: dict[str, Any]) -> Iterator[Any]:
+    for key, value in schema.items():
+        if isinstance(value, dict) and (key in _SINGLE_SUBSCHEMA_KEYWORDS or key == "additionalItems"):
+            yield value
+        elif isinstance(value, dict) and key in _MAP:
+            yield from cast("dict[str, Any]", value).values()
+        elif isinstance(value, list) and (key == "items" or key in _LIST_OF_SUBSCHEMA_KEYWORDS):
+            yield from cast("list[Any]", value)
 
 
 def _excluded(error: ValidationError, subject: str) -> str:
@@ -483,4 +505,4 @@ def _fragment_token(token: str | int) -> str:
 def _order(violation: Violation) -> tuple[Any, ...]:
     # Array indexes sort numerically and before names, so #/rows/2 precedes #/rows/10.
     path_key = tuple((0, token) if isinstance(token, int) else (1, str(token)) for token in violation.path)
-    return (path_key, violation.description)
+    return (path_key, violation.description, violation.detail)

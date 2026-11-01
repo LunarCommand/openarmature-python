@@ -22,9 +22,7 @@ from jsonschema.exceptions import UnknownType
 from pydantic import AfterValidator, BaseModel, Field, ValidationError, field_validator, model_validator
 from pydantic_core import PydanticCustomError
 
-import openarmature.llm._schema_violations as violations_module
-import openarmature.llm.providers.openai as openai_module
-from openarmature.llm._schema_violations import describe, model_violations, schema_violations
+from openarmature.llm._schema_violations import _missing, describe, model_violations, schema_violations
 from openarmature.llm.errors import StructuredOutputInvalid
 from openarmature.llm.provider import _validator_class
 from openarmature.llm.providers.openai import _parse_and_validate
@@ -33,6 +31,7 @@ _DRAFT_03 = "http://json-schema.org/draft-03/schema#"
 _DRAFT_04 = "http://json-schema.org/draft-04/schema#"
 _DRAFT_06 = "http://json-schema.org/draft-06/schema#"
 _DRAFT_07 = "http://json-schema.org/draft-07/schema#"
+_DRAFT_2020_12 = "https://json-schema.org/draft/2020-12/schema"
 
 
 def _described(instance: Any, schema: dict[str, Any]) -> str:
@@ -217,6 +216,30 @@ def _described(instance: Any, schema: dict[str, Any]) -> str:
             id="draft-03-additional-items-false",
         ),
         pytest.param(
+            # jsonschema validates a subschema by its own $schema, and draft-03
+            # has no `not`, so a rewritten false here would accept anything.
+            {"site": {"extra": 1}},
+            {
+                "type": "object",
+                "properties": {
+                    "site": {"$schema": _DRAFT_03, "type": "object", "additionalProperties": False}
+                },
+            },
+            "1 violation: #/site/extra: property is not allowed (additionalProperties: false)",
+            id="embedded-draft-03",
+        ),
+        pytest.param(
+            {"t": [1, 2]},
+            {
+                "$schema": _DRAFT_03,
+                "type": "object",
+                "properties": {"t": {"$schema": _DRAFT_2020_12, "type": "array", "items": False}},
+            },
+            "2 violations: #/t/0: item is not allowed (items: false); "
+            "#/t/1: item is not allowed (items: false)",
+            id="embedded-2020-12-in-draft-03",
+        ),
+        pytest.param(
             {},
             {
                 "$schema": _DRAFT_03,
@@ -261,6 +284,14 @@ def _described(instance: Any, schema: dict[str, Any]) -> str:
             },
             "1 violation: #/x: expected type number, got string",
             id="allof-duplicate-listed-once",
+        ),
+        pytest.param(
+            # jsonschema leaves $ref out of the schema path, so both required
+            # lists report at the same path.
+            {},
+            {"type": "object", "$defs": {"A": {"required": ["a"]}}, "$ref": "#/$defs/A", "required": ["b"]},
+            "2 violations: #/a: required property is missing; #/b: required property is missing",
+            id="referenced-and-sibling-required",
         ),
     ],
 )
@@ -311,7 +342,7 @@ def test_an_error_no_case_recognizes_is_still_reported(monkeypatch: pytest.Monke
     def recognize_nothing(*_: Any) -> Iterator[Any]:
         return iter(())
 
-    monkeypatch.setattr(violations_module, "_violations", recognize_nothing)
+    monkeypatch.setattr("openarmature.llm._schema_violations._violations", recognize_nothing)
     schema = {"type": "object", "properties": {"a": {"type": "integer"}}}
     assert _described({"a": "x"}, schema) == (
         "1 violation: #/a: fails type 'integer': 'x' is not of type 'integer'"
@@ -447,16 +478,26 @@ def test_validation_that_cannot_finish_is_still_structured_output_invalid(
 
 
 def test_a_message_does_not_grow_with_the_value_it_quotes() -> None:
-    # jsonschema's enum message lists every allowed value. Killed by quoting the
-    # message whole, which makes the longer enum's description longer.
+    # jsonschema's enum message lists every allowed value. Killed by writing the
+    # message whole, which makes the longer enum's line longer.
     def described(size: int) -> str:
         schema = {"type": "object", "properties": {"code": {"enum": [f"code-{n:04d}" for n in range(size)]}}}
-        [violation] = schema_violations({"code": "x"}, schema)
-        return violation.description
+        return _described({"code": "x"}, schema)
 
     shorter, longer = described(100), described(1000)
     assert len(shorter) == len(longer)
-    assert longer.startswith("fails enum: 'x' is not one of ['code-0000', ")
+    assert longer.startswith("1 violation: #/code: fails enum: 'x' is not one of ['code-0000', ")
+
+
+def test_two_constraints_cut_to_the_same_words_stay_two_violations() -> None:
+    # Both messages start with the same forty values, past the point where they
+    # are cut. Killed by de-duplicating on the cut text.
+    shared = [f"code-{n:04d}" for n in range(40)]
+    schema = {
+        "type": "object",
+        "properties": {"c": {"allOf": [{"enum": [*shared, "x-one"]}, {"enum": [*shared, "x-two"]}]}},
+    }
+    assert [violation.pointer for violation in schema_violations({"c": "nope"}, schema)] == ["#/c", "#/c"]
 
 
 @pytest.mark.parametrize(
@@ -483,13 +524,12 @@ def test_a_required_list_is_expanded_once_per_object(
     # jsonschema reports each missing name on its own, and each report carries the
     # whole list. Killed by expanding a list for every report.
     calls: list[Any] = []
-    original = violations_module._missing
 
     def counted(*args: Any) -> Iterator[Any]:
         calls.append(args)
-        return original(*args)
+        return _missing(*args)
 
-    monkeypatch.setattr(violations_module, "_missing", counted)
+    monkeypatch.setattr("openarmature.llm._schema_violations._missing", counted)
     schema = {"type": "object", "properties": {"s": site}}
     assert _described({"s": {}}, schema) == (
         "3 violations: #/s/a: required property is missing; #/s/b: required property is missing; "
@@ -548,7 +588,7 @@ def test_a_model_failure_that_cannot_be_described_keeps_pydantic_text(
     def undescribable(*_: Any) -> list[Any]:
         raise RuntimeError("no location")
 
-    monkeypatch.setattr(openai_module, "model_violations", undescribable)
+    monkeypatch.setattr("openarmature.llm.providers.openai.model_violations", undescribable)
     with pytest.raises(StructuredOutputInvalid) as excinfo:
         _parse_and_validate('{"name": "rex9"}', Pet.model_json_schema(), Pet)
     assert excinfo.value.error_message.startswith("1 validation error for Pet")
@@ -682,6 +722,27 @@ def test_unevaluated_keywords_fall_back_to_the_parent_when_the_private_helpers_f
             id="root-resource",
         ),
         pytest.param(
+            {"a": 1, "b": 2},
+            {
+                "type": "object",
+                "properties": {"$id": {"type": "string"}, "a": True},
+                "unevaluatedProperties": False,
+            },
+            ["#/b"],
+            id="property-named-id",
+        ),
+        pytest.param(
+            {"a": 1, "b": 2},
+            {
+                "type": "object",
+                "properties": {"a": True},
+                "default": {"$dynamicRef": "#x"},
+                "unevaluatedProperties": False,
+            },
+            ["#/b"],
+            id="dynamic-reference-in-data",
+        ),
+        pytest.param(
             {"inner": {"a": 1, "b": 2}},
             {
                 "type": "object",
@@ -726,7 +787,8 @@ def test_unevaluated_keywords_are_placed_per_key_only_where_the_helpers_apply(
 ) -> None:
     # The helpers resolve every reference from the root validator, and 2019-09
     # evaluates with helpers of its own. Each parent case is killed by dropping
-    # its check, and the root resource by also treating a root $id as nested.
+    # its check, the root resource by also treating a root $id as nested, and the
+    # name and data cases by reading every value as a schema.
     # Which keys jsonschema counts as unevaluated under $dynamicRef differs
     # between its releases, so only the placement is asserted.
     violations = schema_violations(instance, schema)
