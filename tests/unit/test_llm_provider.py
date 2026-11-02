@@ -1506,6 +1506,127 @@ def test_structured_output_builder_projects_empty_content_to_none() -> None:
     assert event.output_content is None
 
 
+async def test_a_refusal_beside_tool_calls_leaves_the_message_as_sent() -> None:
+    # The refusal rule applies only to a message with no tool calls, and fixture
+    # 083 has no case with both. Killed by dropping the tool-calls check.
+    def _refusal_with_tool_call(_req: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "id": "cc-refusal",
+                "object": "chat.completion",
+                "created": 1700000000,
+                "model": "m",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": None,
+                            "refusal": "I can't help with that.",
+                            "tool_calls": [
+                                {
+                                    "id": "call_a",
+                                    "type": "function",
+                                    "function": {"name": "lookup", "arguments": "{}"},
+                                }
+                            ],
+                        },
+                        "finish_reason": "tool_calls",
+                    }
+                ],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+            },
+        )
+
+    provider = OpenAIProvider(
+        base_url="http://test",
+        model="m",
+        api_key="k",
+        transport=httpx.MockTransport(_refusal_with_tool_call),
+    )
+    try:
+        response = await provider.complete(
+            [UserMessage(content="Look it up.")], tools=[Tool(name="lookup", description="", parameters={})]
+        )
+    finally:
+        await provider.aclose()
+    assert response.finish_reason == "tool_calls"
+    assert response.message.content == ""
+    assert [call.name for call in response.message.tool_calls or []] == ["lookup"]
+
+
+async def test_a_refusal_replaces_content_sent_beside_it() -> None:
+    # The refusal is the content even when OpenAI also sent some, and fixture 083
+    # sends none. Killed by applying the refusal only to empty content.
+    def _refusal_with_content(_req: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "id": "cc-refusal-content",
+                "object": "chat.completion",
+                "created": 1700000000,
+                "model": "m",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": "partial",
+                            "refusal": "I can't help with that.",
+                        },
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+            },
+        )
+
+    provider = OpenAIProvider(
+        base_url="http://test",
+        model="m",
+        api_key="k",
+        transport=httpx.MockTransport(_refusal_with_content),
+    )
+    try:
+        response = await provider.complete([UserMessage(content="Generate the record.")])
+    finally:
+        await provider.aclose()
+    assert response.finish_reason == "content_filter"
+    assert response.message.content == "I can't help with that."
+    assert response.raw["choices"][0]["message"]["content"] == "partial"
+
+
+@pytest.mark.parametrize("message", [None, [], "text"])
+async def test_a_malformed_message_raises_provider_invalid_response(message: object) -> None:
+    # The refusal check reads the message before it is parsed, so it has to sit
+    # inside the parse's guard. Killed by moving the check out of the try.
+    def _malformed(_req: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "id": "cc-malformed",
+                "object": "chat.completion",
+                "created": 1700000000,
+                "model": "m",
+                "choices": [{"index": 0, "message": message, "finish_reason": "stop"}],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+            },
+        )
+
+    provider = OpenAIProvider(
+        base_url="http://test",
+        model="m",
+        api_key="k",
+        transport=httpx.MockTransport(_malformed),
+    )
+    try:
+        with pytest.raises(ProviderInvalidResponse):
+            await provider.complete([UserMessage(content="Say hello.")])
+    finally:
+        await provider.aclose()
+
+
 async def test_complete_populates_output_tool_calls_on_typed_events() -> None:
     # Proposal 0076: provider.complete() populates output_tool_calls
     # (the ToolCall records) on BOTH the terminal LlmCompletionEvent and
