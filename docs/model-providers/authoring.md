@@ -188,6 +188,9 @@ delegates.
 - [ ] Return one of: `"stop"`, `"length"`, `"tool_calls"`,
       `"content_filter"`, `"error"`. Map the wire format's
       finish-reason vocabulary to these five.
+- [ ] If the wire format reports a refusal apart from the content,
+      as OpenAI's `refusal` field does, return `"content_filter"`
+      with the refusal text as the message's content (§8.1.2).
 
 ## Beyond the skeleton
 

@@ -56,6 +56,7 @@ from .harness import (
     read_trace,
     request_body,
 )
+from .harness.capabilities import assert_some_case_ran, report_recognized_skip
 
 CONFORMANCE_DIR = (
     Path(__file__).resolve().parents[2] / "openarmature-spec" / "spec" / "llm-provider" / "conformance"
@@ -170,9 +171,21 @@ _DEFERRED_FIXTURES: dict[str, str] = {
     "080-managed-gemini-stop-merge": (
         "Proposal 0108 stop merge; Gemini provider not implemented (0038 not-yet)"
     ),
-    # Proposal 0126 (structured-output failure reports, spec v0.119.0): the
-    # OpenAI refusal mapping is not implemented yet.
-    "083-openai-refusal-finish-reason": "Proposal 0126's refusal mapping not implemented",
+}
+
+# Per-case deferrals within an otherwise-activated fixture, keyed by
+# ``(fixture_stem, case_name)``. The case loop skips a matching case and reports
+# it as a RecognizedSkip, so the deferral shows on a passing run; a pytest.skip
+# would also hide the sibling cases that do run.
+_DEFERRED_CASES: dict[tuple[str, str], str] = {
+    # Proposal 0126's streamed refusal (llm-provider §8.1.6) needs streaming,
+    # which is proposal 0062.
+    ("083-openai-refusal-finish-reason", "streamed_refusal_maps_to_content_filter"): (
+        "streamed refusal; streaming not implemented (0062)"
+    ),
+    ("083-openai-refusal-finish-reason", "streamed_null_refusal_leaves_content_and_stop"): (
+        "streamed refusal; streaming not implemented (0062)"
+    ),
 }
 
 
@@ -195,11 +208,13 @@ def _load(path: Path) -> dict[str, Any]:
 
 def _build_handler(
     responses: list[Mapping[str, Any]],
-) -> tuple[httpx.MockTransport, list[httpx.Request]]:
+) -> tuple[httpx.MockTransport, list[httpx.Request], dict[int, Any]]:
     """Build an httpx.MockTransport that hands back the configured
     responses in order, plus a list that captures each outbound
-    request for round-trip assertions."""
+    request for round-trip assertions and the body served to each
+    request, keyed by the request's ``id``."""
     captured: list[httpx.Request] = []
+    served: dict[int, Any] = {}
     iterator = iter(responses)
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -208,6 +223,7 @@ def _build_handler(
             spec = next(iterator)
         except StopIteration as exc:
             raise AssertionError(f"mock provider exhausted at request {len(captured)}") from exc
+        served[id(request)] = spec.get("body")
         if spec.get("connection_failure"):
             # Simulate connect error before any HTTP response.
             raise httpx.ConnectError("simulated connection failure")
@@ -224,14 +240,14 @@ def _build_handler(
             extensions={},
         )
 
-    return httpx.MockTransport(handler), captured
+    return httpx.MockTransport(handler), captured, served
 
 
 def _build_provider(
     mock_provider_cfg: Mapping[str, Any],
     *,
     model: str = "test-model",
-) -> tuple[OpenAIProvider, list[httpx.Request]]:
+) -> tuple[OpenAIProvider, list[httpx.Request], dict[int, Any]]:
     # Some fixtures (007 ready-check) use ``health_endpoint`` instead
     # of ``responses`` — that's the same shape, just one entry.
     readiness_probe: Literal["models", "chat_completions", "both"] = "chat_completions"
@@ -258,7 +274,7 @@ def _build_provider(
             "list[Mapping[str, Any]]",
             mock_provider_cfg.get("responses") or [],
         )
-    transport, captured = _build_handler(responses)
+    transport, captured, served = _build_handler(responses)
     # ``capabilities.supports_native_response_format: false`` switches
     # the provider into prompt-augmentation fallback mode for structured
     # output. Absent or true ⇒ native path (default).
@@ -273,7 +289,7 @@ def _build_provider(
         force_prompt_augmentation_fallback=force_fallback,
         readiness_probe=readiness_probe,
     )
-    return provider, captured
+    return provider, captured, served
 
 
 # ---------------------------------------------------------------------------
@@ -461,10 +477,11 @@ def _last_chat_completions_request(
     return None
 
 
-def _assert_response_matches(actual: Response, expected: Mapping[str, Any]) -> None:
+def _assert_response_matches(actual: Response, expected: Mapping[str, Any], served_body: Any) -> None:
     """Verify ``actual`` matches the fixture's ``expected.response``
-    block. ``raw_check.required_keys`` is enforced as a presence-only
-    check (other keys MAY also be present)."""
+    block. Each ``raw_check.required_keys`` key must appear in ``raw``
+    with the value the mock served for this call (other keys MAY also
+    be present)."""
     expected_msg = cast("Mapping[str, Any]", expected.get("message") or {})
     if "content" in expected_msg:
         # YAML loads `null` as None — the spec sometimes uses null for
@@ -516,9 +533,17 @@ def _assert_response_matches(actual: Response, expected: Mapping[str, Any]) -> N
         )
     raw_check = expected.get("raw_check")
     if raw_check:
+        # Fixture 001 defines required_keys as a subset assertion: each key
+        # appears in raw with the same value as the mock body.
+        assert isinstance(served_body, Mapping), "raw_check found no body served to this call"
+        body = cast("Mapping[str, Any]", served_body)
         required = cast("list[str]", raw_check.get("required_keys") or [])
         for key in required:
             assert key in actual.raw, f"raw missing required key {key!r}"
+            assert actual.raw[key] == body.get(key), (
+                f"raw[{key!r}] is not the value the mock served: raw={actual.raw[key]!r}, "
+                f"served={body.get(key)!r}"
+            )
     if "parsed" in expected:
         expected_parsed = expected["parsed"]
         actual_parsed = actual.parsed
@@ -557,12 +582,21 @@ async def test_llm_provider_fixture(fixture_path: Path) -> None:
     spec = _load(fixture_path)
 
     if "cases" in spec:
+        excluded: dict[str, str] = {}
+        ran = 0
         for case in cast("list[dict[str, Any]]", spec["cases"]):
-            case_name = case.get("name", "<unnamed>")
+            case_name = cast("str", case.get("name") or "<unnamed>")
+            deferral = _DEFERRED_CASES.get((fixture_id, case_name))
+            if deferral is not None:
+                excluded[case_name] = f"per-case deferral: {deferral}"
+                report_recognized_skip(fixture_id, case_name, f"per-case deferral: {deferral}")
+                continue
+            ran += 1
             try:
                 await _run_one_case(case)
             except AssertionError as e:
                 raise AssertionError(f"case {case_name!r}: {e}") from e
+        assert_some_case_ran(fixture_id, ran, excluded)
         return
 
     await _run_one_case(spec)
@@ -577,10 +611,10 @@ async def _run_one_case(spec: Mapping[str, Any]) -> None:
     - top-level ``mock_provider:`` configures the wire mock
     """
     mock_cfg = cast("Mapping[str, Any]", spec.get("mock_provider") or {})
-    provider, captured = _build_provider(mock_cfg)
+    provider, captured, served = _build_provider(mock_cfg)
     try:
         for call_spec in _iter_calls(spec):
-            await _run_one_call(provider, call_spec, captured)
+            await _run_one_call(provider, call_spec, captured, served)
     finally:
         await provider.aclose()
 
@@ -630,6 +664,7 @@ async def _run_one_call(
     provider: OpenAIProvider,
     call_spec: Mapping[str, Any],
     captured: list[httpx.Request],
+    served: Mapping[int, Any],
 ) -> None:
     operation = call_spec.get("operation", "complete")
     expected = cast("Mapping[str, Any]", call_spec.get("expected") or {})
@@ -695,7 +730,12 @@ async def _run_one_call(
                 ),
                 retry_mw_cfg,
             )
-            _assert_response_matches(response, cast("Mapping[str, Any]", expected.get("response") or {}))
+            last_request = _last_chat_completions_request(captured, wire_count_before)
+            _assert_response_matches(
+                response,
+                cast("Mapping[str, Any]", expected.get("response") or {}),
+                served.get(id(last_request)) if last_request is not None else None,
+            )
             if expected.get("caller_messages_unmodified") is True:
                 post_snapshot = [m.model_dump(mode="json") for m in messages]
                 assert post_snapshot == messages_snapshot, (

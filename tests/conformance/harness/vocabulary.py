@@ -667,6 +667,9 @@ NODE_MAPPING_ALIASES: dict[str, str] = {
 # a new unread key fails, and an entry that stops being unread -- because the key
 # was wired, or the fixture stopped running -- fails until it is removed.
 KNOWN_UNREAD_NESTED: dict[tuple[str, str], tuple[str, ...]] = {
+    # llm-provider: only 083's two streamed cases declare this, and they wait for
+    # streaming (proposal 0062).
+    ("call", "stream"): ("083-openai-refusal-finish-reason",),
     # pipeline-utilities: the fixture expects the recovered node's event to carry
     # post_state, which graph-engine section 6 dispatch timing and fixture 061 do
     # not allow. Awaiting a spec ruling.

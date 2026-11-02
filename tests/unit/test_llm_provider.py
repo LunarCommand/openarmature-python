@@ -1506,6 +1506,56 @@ def test_structured_output_builder_projects_empty_content_to_none() -> None:
     assert event.output_content is None
 
 
+async def test_a_refusal_beside_tool_calls_leaves_the_message_as_sent() -> None:
+    # The refusal rule applies only to a message with no tool calls, and fixture
+    # 083 has no case with both. Killed by dropping the tool-calls check.
+    def _refusal_with_tool_call(_req: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "id": "cc-refusal",
+                "object": "chat.completion",
+                "created": 1700000000,
+                "model": "m",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": None,
+                            "refusal": "I can't help with that.",
+                            "tool_calls": [
+                                {
+                                    "id": "call_a",
+                                    "type": "function",
+                                    "function": {"name": "lookup", "arguments": "{}"},
+                                }
+                            ],
+                        },
+                        "finish_reason": "tool_calls",
+                    }
+                ],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+            },
+        )
+
+    provider = OpenAIProvider(
+        base_url="http://test",
+        model="m",
+        api_key="k",
+        transport=httpx.MockTransport(_refusal_with_tool_call),
+    )
+    try:
+        response = await provider.complete(
+            [UserMessage(content="Look it up.")], tools=[Tool(name="lookup", description="", parameters={})]
+        )
+    finally:
+        await provider.aclose()
+    assert response.finish_reason == "tool_calls"
+    assert response.message.content == ""
+    assert [call.name for call in response.message.tool_calls or []] == ["lookup"]
+
+
 async def test_complete_populates_output_tool_calls_on_typed_events() -> None:
     # Proposal 0076: provider.complete() populates output_tool_calls
     # (the ToolCall records) on BOTH the terminal LlmCompletionEvent and
