@@ -1556,6 +1556,47 @@ async def test_a_refusal_beside_tool_calls_leaves_the_message_as_sent() -> None:
     assert [call.name for call in response.message.tool_calls or []] == ["lookup"]
 
 
+async def test_a_refusal_replaces_content_sent_beside_it() -> None:
+    # The refusal is the content even when OpenAI also sent some, and fixture 083
+    # sends none. Killed by applying the refusal only to empty content.
+    def _refusal_with_content(_req: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "id": "cc-refusal-content",
+                "object": "chat.completion",
+                "created": 1700000000,
+                "model": "m",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": "partial",
+                            "refusal": "I can't help with that.",
+                        },
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+            },
+        )
+
+    provider = OpenAIProvider(
+        base_url="http://test",
+        model="m",
+        api_key="k",
+        transport=httpx.MockTransport(_refusal_with_content),
+    )
+    try:
+        response = await provider.complete([UserMessage(content="Generate the record.")])
+    finally:
+        await provider.aclose()
+    assert response.finish_reason == "content_filter"
+    assert response.message.content == "I can't help with that."
+    assert response.raw["choices"][0]["message"]["content"] == "partial"
+
+
 @pytest.mark.parametrize("message", [None, [], "text"])
 async def test_a_malformed_message_raises_provider_invalid_response(message: object) -> None:
     # The refusal check reads the message before it is parsed, so it has to sit
