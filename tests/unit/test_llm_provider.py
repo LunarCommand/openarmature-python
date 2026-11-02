@@ -1556,6 +1556,36 @@ async def test_a_refusal_beside_tool_calls_leaves_the_message_as_sent() -> None:
     assert [call.name for call in response.message.tool_calls or []] == ["lookup"]
 
 
+@pytest.mark.parametrize("message", [None, [], "text"])
+async def test_a_malformed_message_raises_provider_invalid_response(message: object) -> None:
+    # The refusal check reads the message before it is parsed, so it has to sit
+    # inside the parse's guard. Killed by moving the check out of the try.
+    def _malformed(_req: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "id": "cc-malformed",
+                "object": "chat.completion",
+                "created": 1700000000,
+                "model": "m",
+                "choices": [{"index": 0, "message": message, "finish_reason": "stop"}],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+            },
+        )
+
+    provider = OpenAIProvider(
+        base_url="http://test",
+        model="m",
+        api_key="k",
+        transport=httpx.MockTransport(_malformed),
+    )
+    try:
+        with pytest.raises(ProviderInvalidResponse):
+            await provider.complete([UserMessage(content="Say hello.")])
+    finally:
+        await provider.aclose()
+
+
 async def test_complete_populates_output_tool_calls_on_typed_events() -> None:
     # Proposal 0076: provider.complete() populates output_tool_calls
     # (the ToolCall records) on BOTH the terminal LlmCompletionEvent and

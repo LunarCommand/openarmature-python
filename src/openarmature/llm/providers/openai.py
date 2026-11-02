@@ -1320,20 +1320,20 @@ class OpenAIProvider:
             finish_reason = "error"
         finish_reason_typed = cast(FinishReason, finish_reason)
 
-        # §8.1.2: a non-empty refusal on a message with no tool calls is the
-        # message's content, and the finish_reason is "content_filter" whatever
-        # OpenAI reported. OpenAI sends a null or empty refusal on ordinary
-        # messages, and that changes nothing. The message is copied rather than
-        # changed in place because `raw` keeps the response as received.
-        refusal = wire_msg.get("refusal")
-        if isinstance(refusal, str) and refusal and not wire_msg.get("tool_calls"):
-            wire_msg = {**wire_msg, "content": refusal}
-            finish_reason_typed = "content_filter"
-
         # Build the assistant message. Tool calls under
         # finish_reason="error" may carry malformed argument JSON per
         # §3 — surface as `arguments=None` rather than raising.
         try:
+            # §8.1.2: a non-empty refusal on a message with no tool calls is the
+            # message's content, and the finish_reason is "content_filter" whatever
+            # OpenAI reported. OpenAI sends a null or empty refusal on ordinary
+            # messages, and that changes nothing. The message is copied rather than
+            # changed in place because `raw` keeps the response as received, and the
+            # check sits in this try because a malformed message is no dict.
+            refusal = wire_msg.get("refusal")
+            if isinstance(refusal, str) and refusal and not wire_msg.get("tool_calls"):
+                wire_msg = {**wire_msg, "content": refusal}
+                finish_reason_typed = "content_filter"
             assistant_msg = _wire_to_assistant_message(
                 wire_msg, lenient_args=(finish_reason_typed == "error")
             )
