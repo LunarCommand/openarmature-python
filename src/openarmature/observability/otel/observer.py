@@ -1656,6 +1656,12 @@ class OTelObserver:
         # only on retry attempts (None on the base attempt 0).
         if event.retry_reason is not None:
             attrs["openarmature.llm.retry_reason"] = event.retry_reason
+        # §5.5: set exactly when a schema was supplied and a request was sent.
+        # The provider dispatches this event only for an attempt that sent its
+        # request, so a set path is the whole condition. Not payload, so neither
+        # disable flag gates it.
+        if event.structured_output_path is not None:
+            attrs["openarmature.llm.structured_output.path"] = event.structured_output_path
         cid = current_correlation_id()
         if cid is not None:
             attrs["openarmature.correlation_id"] = cid

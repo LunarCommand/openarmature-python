@@ -782,6 +782,35 @@ async def test_structured_output_failure_span_renders_response_surface() -> None
     assert attrs["gen_ai.response.id"] == "cc-xyz"
 
 
+@pytest.mark.parametrize("path", ["native", None])
+async def test_llm_span_carries_the_structured_output_path_ungated(path: str | None) -> None:
+    # observability §5.5: the path attribute is set when the attempt's request
+    # had a path and absent otherwise. It is a baseline attribute rather than
+    # payload or GenAI semconv, so the observer here sets both disable flags.
+    from openarmature.observability.correlation import _reset_invocation_id, _set_invocation_id
+    from tests._helpers.typed_event import make_retry_attempt_event
+
+    exporter = InMemorySpanExporter()
+    observer = OTelObserver(
+        span_processor=SimpleSpanProcessor(exporter),
+        disable_provider_payload=True,
+        disable_genai_semconv=True,
+    )
+    token = _set_invocation_id("inv-path")
+    try:
+        await observer(make_retry_attempt_event(structured_output_path=path))
+    finally:
+        _reset_invocation_id(token)
+    observer.shutdown()
+
+    span = next(s for s in exporter.get_finished_spans() if s.name == "openarmature.llm.complete")
+    attrs = dict(span.attributes or {})
+    if path is None:
+        assert "openarmature.llm.structured_output.path" not in attrs
+    else:
+        assert attrs["openarmature.llm.structured_output.path"] == path
+
+
 async def test_structured_output_failure_span_redacts_output_when_payload_disabled() -> None:
     # Payload-gated: with disable_provider_payload=True, output.content is
     # redacted while finish_reason / usage / ERROR status stay (proposal 0082).
@@ -2285,6 +2314,97 @@ async def test_call_level_reask_retry_fixture(fixture_id: str) -> None:
             assert span_attrs.get("openarmature.error.category") == exp_span["error_category"]
         else:
             assert span.status.status_code == StatusCode.OK
+
+
+async def test_each_attempt_span_describes_its_own_request() -> None:
+    # observability §5.5.2 and llm-provider §7.1: each attempt's span describes
+    # its own request, so the override's stop sequence shows on the retry's span
+    # and not on the first one's. Both carry the path. Driven through the
+    # provider, since each attempt's request comes from its retry loop rather
+    # than from anything the observer computes.
+    import httpx
+
+    from openarmature.graph.events import LlmRetryAttemptEvent
+    from openarmature.graph.middleware import deterministic_backoff
+    from openarmature.llm import LlmRetryConfig, RuntimeConfig
+    from openarmature.llm.errors import StructuredOutputInvalid
+    from openarmature.llm.messages import UserMessage
+    from openarmature.llm.providers.openai import OpenAIProvider
+    from openarmature.observability.correlation import (
+        _reset_active_dispatch,
+        _reset_invocation_id,
+        _set_active_dispatch,
+        _set_invocation_id,
+    )
+
+    def handler(_req: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "id": "cc-1",
+                "object": "chat.completion",
+                "model": "gpt-test",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "Alice is thirty"},
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {"prompt_tokens": 20, "completion_tokens": 4, "total_tokens": 24},
+            },
+        )
+
+    schema = {
+        "type": "object",
+        "properties": {"name": {"type": "string"}, "age": {"type": "integer"}},
+        "required": ["name", "age"],
+        "additionalProperties": False,
+    }
+    captured: list[Any] = []
+    disp_token = _set_active_dispatch(captured.append)
+    inv_token = _set_invocation_id("inv-own-request")
+    try:
+        provider = OpenAIProvider(
+            base_url="http://test", model="gpt-test", api_key="k", transport=httpx.MockTransport(handler)
+        )
+        try:
+            with pytest.raises(StructuredOutputInvalid):
+                await provider.complete(
+                    [UserMessage(content="Generate a person record.")],
+                    response_schema=schema,
+                    retry=LlmRetryConfig(
+                        max_attempts=2,
+                        backoff=deterministic_backoff(0),
+                        reask=lambda _e: "Return only the JSON object.",
+                        per_attempt_override=[RuntimeConfig(stop_sequences=["END"])],
+                    ),
+                )
+        finally:
+            await provider.aclose()
+    finally:
+        _reset_invocation_id(inv_token)
+        _reset_active_dispatch(disp_token)
+
+    exporter = InMemorySpanExporter()
+    observer = OTelObserver(span_processor=SimpleSpanProcessor(exporter))
+    inv_token = _set_invocation_id("inv-own-request")
+    try:
+        for event in captured:
+            if isinstance(event, LlmRetryAttemptEvent):
+                await observer(event)
+    finally:
+        _reset_invocation_id(inv_token)
+    observer.shutdown()
+
+    finished = exporter.get_finished_spans()
+    spans = [dict(s.attributes or {}) for s in finished if s.name == "openarmature.llm.complete"]
+    by_index = {attrs["openarmature.llm.attempt_index"]: attrs for attrs in spans}
+    assert set(by_index) == {0, 1}
+    assert by_index[0]["openarmature.llm.structured_output.path"] == "native"
+    assert by_index[1]["openarmature.llm.structured_output.path"] == "native"
+    assert "gen_ai.request.stop_sequences" not in by_index[0]
+    assert by_index[1]["gen_ai.request.stop_sequences"] == ("END",)
 
 
 # ---------------------------------------------------------------------------
