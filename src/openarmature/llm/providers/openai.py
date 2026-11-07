@@ -607,7 +607,7 @@ class OpenAIProvider:
                         llm_attempt_index=idx,
                         latency_ms=attempt_latency_ms,
                         call_id=call_id,
-                        request=reported,
+                        request=_as_sent(reported, attempt_exc),
                         active_prompt=active_prompt,
                         active_prompt_group=active_prompt_group,
                         token_budget=(active_prompt.token_budget if active_prompt is not None else None),
@@ -635,7 +635,7 @@ class OpenAIProvider:
                         exc,
                         latency_ms_failed,
                         call_id=call_id,
-                        request=reported,
+                        request=_as_sent(reported, exc),
                         active_prompt=active_prompt,
                         active_prompt_group=active_prompt_group,
                         token_budget=(active_prompt.token_budget if active_prompt is not None else None),
@@ -1549,6 +1549,27 @@ def _structured_output_path(
     if fallback:
         return "prompt_augmentation"
     return "native" if strict else "native_unenforced"
+
+
+# Raised before any of the request is written: no connection opened, none came
+# free in the pool, the proxy refused the tunnel, or no transport serves the
+# URL's scheme.
+_UNSENT_TRANSPORT_ERRORS = (
+    httpx.ConnectError,
+    httpx.ConnectTimeout,
+    httpx.PoolTimeout,
+    httpx.ProxyError,
+    httpx.UnsupportedProtocol,
+)
+
+
+# graph-engine §6: a request that was never sent reports no path. A failure
+# after the connection opened keeps it, since the provider may have received
+# some or all of the request.
+def _as_sent(request: _EventRequest, exc: LlmProviderError | None) -> _EventRequest:
+    if exc is not None and isinstance(exc.__cause__, _UNSENT_TRANSPORT_ERRORS):
+        return replace(request, structured_output_path=None)
+    return request
 
 
 # Parse the model's content string as JSON, then validate it against the

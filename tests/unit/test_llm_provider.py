@@ -2559,6 +2559,89 @@ async def test_events_carry_the_schema_directive_the_fallback_sent() -> None:
     assert caller_messages == [UserMessage(content="Generate a person record.")]
 
 
+@pytest.mark.parametrize(
+    ("error", "path"),
+    [
+        pytest.param(httpx.ConnectError, None, id="connect-error"),
+        pytest.param(httpx.ConnectTimeout, None, id="connect-timeout"),
+        pytest.param(httpx.PoolTimeout, None, id="pool-timeout"),
+        pytest.param(httpx.ProxyError, None, id="proxy-error"),
+        pytest.param(httpx.UnsupportedProtocol, None, id="unsupported-protocol"),
+        pytest.param(httpx.WriteError, "native", id="write-error"),
+        pytest.param(httpx.ReadTimeout, "native", id="read-timeout"),
+    ],
+)
+async def test_a_transport_failure_reports_the_path_only_if_sending_began(
+    error: type[httpx.TransportError], path: str | None
+) -> None:
+    # graph-engine §6: the path is null when no request was sent. httpx raises
+    # the first five before writing any of the request. A write error may have
+    # sent part of it, and a read timeout comes after all of it, so both keep
+    # the path. Those two controls are what show the five nulls are not the
+    # field's default showing through.
+    def handler(_req: httpx.Request) -> httpx.Response:
+        raise error("boom")
+
+    events, token = _collecting_dispatch()
+    provider = OpenAIProvider(
+        base_url="http://test", model="m", api_key="k", transport=httpx.MockTransport(handler)
+    )
+    try:
+        with pytest.raises(ProviderUnavailable):
+            await provider.complete([UserMessage(content="go")], response_schema=_PERSON_SCHEMA)
+    finally:
+        await provider.aclose()
+        _release_dispatch(token)
+
+    attempt = next(e for e in events if isinstance(e, LlmRetryAttemptEvent))
+    failed = next(e for e in events if isinstance(e, LlmFailedEvent))
+    assert attempt.structured_output_path == path
+    assert failed.structured_output_path == path
+
+
+async def test_a_retry_after_a_connection_failure_reports_its_own_path() -> None:
+    # Attempt 0's connection never opens, so its event describes its request
+    # with no path. Attempt 1 goes out with the override's temperature and
+    # reports "native", as does the call.
+    from openarmature.llm import LlmRetryConfig
+
+    calls = [0]
+
+    def handler(_req: httpx.Request) -> httpx.Response:
+        calls[0] += 1
+        if calls[0] == 1:
+            raise httpx.ConnectError("refused")
+        return httpx.Response(200, json=_person_completion('{"name":"Alice","age":30}'))
+
+    events, token = _collecting_dispatch()
+    provider = OpenAIProvider(
+        base_url="http://test", model="m", api_key="k", transport=httpx.MockTransport(handler)
+    )
+    try:
+        await provider.complete(
+            [UserMessage(content="go")],
+            config=RuntimeConfig(temperature=0.2),
+            response_schema=_PERSON_SCHEMA,
+            retry=LlmRetryConfig(
+                max_attempts=2,
+                backoff=deterministic_backoff(0),
+                per_attempt_override=[RuntimeConfig(temperature=0.3)],
+            ),
+        )
+    finally:
+        await provider.aclose()
+        _release_dispatch(token)
+
+    attempts = [e for e in events if isinstance(e, LlmRetryAttemptEvent)]
+    assert [(a.request_params, a.structured_output_path) for a in attempts] == [
+        ({"temperature": 0.2}, None),
+        ({"temperature": 0.3}, "native"),
+    ]
+    completion = next(e for e in events if isinstance(e, LlmCompletionEvent))
+    assert completion.request_params == {"temperature": 0.3}
+    assert completion.structured_output_path == "native"
+
+
 # ---------------------------------------------------------------------------
 # Proposal 0058: per-category field-mapping + pre-send + mutual exclusion
 # ---------------------------------------------------------------------------

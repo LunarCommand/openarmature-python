@@ -2407,6 +2407,92 @@ async def test_each_attempt_span_describes_its_own_request() -> None:
     assert by_index[1]["gen_ai.request.stop_sequences"] == ("END",)
 
 
+async def test_an_attempt_never_sent_has_no_path_attribute() -> None:
+    # observability §5.5: the path attribute is set only when a request was
+    # sent. Attempt 0's connection never opens, so its span has none, and
+    # attempt 1's carries "native". Driven through the provider, which is what
+    # decides whether a request went out.
+    import httpx
+
+    from openarmature.graph.events import LlmRetryAttemptEvent
+    from openarmature.graph.middleware import deterministic_backoff
+    from openarmature.llm import LlmRetryConfig
+    from openarmature.llm.messages import UserMessage
+    from openarmature.llm.providers.openai import OpenAIProvider
+    from openarmature.observability.correlation import (
+        _reset_active_dispatch,
+        _reset_invocation_id,
+        _set_active_dispatch,
+        _set_invocation_id,
+    )
+
+    calls = [0]
+
+    def handler(_req: httpx.Request) -> httpx.Response:
+        calls[0] += 1
+        if calls[0] == 1:
+            raise httpx.ConnectError("refused")
+        return httpx.Response(
+            200,
+            json={
+                "id": "cc-1",
+                "object": "chat.completion",
+                "model": "gpt-test",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": '{"name":"Alice","age":30}'},
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {"prompt_tokens": 20, "completion_tokens": 4, "total_tokens": 24},
+            },
+        )
+
+    schema = {
+        "type": "object",
+        "properties": {"name": {"type": "string"}, "age": {"type": "integer"}},
+        "required": ["name", "age"],
+        "additionalProperties": False,
+    }
+    captured: list[Any] = []
+    disp_token = _set_active_dispatch(captured.append)
+    inv_token = _set_invocation_id("inv-never-sent")
+    try:
+        provider = OpenAIProvider(
+            base_url="http://test", model="gpt-test", api_key="k", transport=httpx.MockTransport(handler)
+        )
+        try:
+            await provider.complete(
+                [UserMessage(content="Generate a person record.")],
+                response_schema=schema,
+                retry=LlmRetryConfig(max_attempts=2, backoff=deterministic_backoff(0)),
+            )
+        finally:
+            await provider.aclose()
+    finally:
+        _reset_invocation_id(inv_token)
+        _reset_active_dispatch(disp_token)
+
+    exporter = InMemorySpanExporter()
+    observer = OTelObserver(span_processor=SimpleSpanProcessor(exporter))
+    inv_token = _set_invocation_id("inv-never-sent")
+    try:
+        for event in captured:
+            if isinstance(event, LlmRetryAttemptEvent):
+                await observer(event)
+    finally:
+        _reset_invocation_id(inv_token)
+    observer.shutdown()
+
+    finished = exporter.get_finished_spans()
+    spans = [dict(s.attributes or {}) for s in finished if s.name == "openarmature.llm.complete"]
+    by_index = {attrs["openarmature.llm.attempt_index"]: attrs for attrs in spans}
+    assert set(by_index) == {0, 1}
+    assert "openarmature.llm.structured_output.path" not in by_index[0]
+    assert by_index[1]["openarmature.llm.structured_output.path"] == "native"
+
+
 # ---------------------------------------------------------------------------
 # §7 log bridge: correlation_id injection
 # ---------------------------------------------------------------------------

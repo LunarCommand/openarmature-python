@@ -349,7 +349,8 @@ of:
     appear as sent. If your provider retries inside one call, the
     call's event describes the last attempt's request. A call you
     reject before sending carries the caller's messages and a `None`
-    `structured_output_path`.
+    `structured_output_path`. A request whose connection never opened
+    was not sent either, so its events also carry a `None` path.
 
   Inline image bytes MUST be redacted in the provider's
   serialization step before reaching the typed event's
