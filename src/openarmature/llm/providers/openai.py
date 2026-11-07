@@ -84,6 +84,7 @@ from openarmature.observability.correlation import (
     current_invocation_id,
     current_namespace_prefix,
 )
+from openarmature.observability.diagnostics import STRUCTURED_OUTPUT_SCHEMA_NOT_HONORED, diagnostic
 from openarmature.observability.metadata import AttributeValue, current_invocation_metadata
 
 from .._event_fields import _event_request, _EventRequest
@@ -591,8 +592,8 @@ class OpenAIProvider:
             # LlmRetryAttemptEvent per attempt so the observer can render
             # one openarmature.llm.complete span per attempt. Each describes
             # its attempt's own request, which build_body recorded before the
-            # request went out. No-op outside an invocation (``dispatch`` is
-            # None).
+            # request went out. Outside an invocation (``dispatch`` is None)
+            # nothing is dispatched.
             def emit_attempt(
                 idx: int,
                 attempt_latency_ms: float,
@@ -600,6 +601,12 @@ class OpenAIProvider:
                 attempt_exc: LlmProviderError | None,
                 retry_reason: str | None = None,
             ) -> None:
+                request = _as_sent(reported, attempt_exc)
+                # observability §5.5.7: one record per wire attempt however many
+                # observers are attached, none included, so it precedes the
+                # dispatch check.
+                if _schema_not_honored(request, attempt_exc):
+                    self._warn_schema_not_honored(call_id, idx)
                 if dispatch is None:
                     return
                 dispatch(
@@ -607,7 +614,7 @@ class OpenAIProvider:
                         llm_attempt_index=idx,
                         latency_ms=attempt_latency_ms,
                         call_id=call_id,
-                        request=_as_sent(reported, attempt_exc),
+                        request=request,
                         active_prompt=active_prompt,
                         active_prompt_group=active_prompt_group,
                         token_budget=(active_prompt.token_budget if active_prompt is not None else None),
@@ -1169,6 +1176,24 @@ class OpenAIProvider:
             **response_fields,
         )
 
+    def _warn_schema_not_honored(self, call_id: str, attempt_index: int) -> None:
+        _log.warning(
+            "%s returned content that is not a JSON object on the native structured-output "
+            "path (call %s, attempt %d): the schema constraint did not reach or bind the model",
+            self.model,
+            call_id,
+            attempt_index,
+            extra={
+                **diagnostic(STRUCTURED_OUTPUT_SCHEMA_NOT_HONORED),
+                "openarmature.llm.provider": self._genai_system,
+                # observability §5.5.7: the bound model, as the span's
+                # openarmature.llm.model, not the one the response reports.
+                "openarmature.llm.model": self.model,
+                "openarmature.llm.call_id": call_id,
+                "openarmature.llm.attempt_index": attempt_index,
+            },
+        )
+
     async def _do_complete(
         self,
         body: dict[str, Any],
@@ -1572,6 +1597,40 @@ def _as_sent(request: _EventRequest, exc: LlmProviderError | None) -> _EventRequ
     return request
 
 
+# observability §5.5.7: an attempt on the native path that finished normally,
+# with no stop sequence to end it early, returned content that is not a JSON
+# object. A constraint that bound cannot produce that, since llm-provider §5
+# requires an object at the schema's top level.
+def _schema_not_honored(request: _EventRequest, exc: LlmProviderError | None) -> bool:
+    return (
+        isinstance(exc, StructuredOutputInvalid)
+        and request.structured_output_path == "native"
+        and exc.finish_reason == "stop"
+        and not _carries_stop_sequence(request)
+        and not _is_json_object(exc.output_content)
+    )
+
+
+# A matched stop sequence also reports "stop", so §5.5.7 reads both places a
+# request can carry one: the declared field and §8.1's `stop` in extras. An
+# empty list carries none.
+def _carries_stop_sequence(request: _EventRequest) -> bool:
+    return bool(request.request_params.get("stop_sequences")) or bool(request.request_extras.get("stop"))
+
+
+# Read as the validation reads it, so NaN, a number past a float's range or
+# nesting too deep to parse is malformed here too.
+def _is_json_object(content: str) -> bool:
+    try:
+        return isinstance(_load_json(content), dict)
+    except (ValueError, RecursionError):
+        return False
+
+
+def _load_json(content: str) -> Any:
+    return json.loads(content, parse_constant=_reject_non_json_constant, parse_float=_finite_float)
+
+
 # Parse the model's content string as JSON, then validate it against the
 # schema. The dict-schema path returns the dict; the BaseModel-class path then
 # runs the class's own validation, which produces the instance.
@@ -1581,7 +1640,7 @@ def _parse_and_validate(
     schema_class: type[BaseModel] | None,
 ) -> ParsedValue:
     try:
-        loaded = json.loads(content, parse_constant=_reject_non_json_constant, parse_float=_finite_float)
+        loaded = _load_json(content)
     except (ValueError, RecursionError) as exc:
         raise StructuredOutputInvalid(
             "response content is not valid JSON",

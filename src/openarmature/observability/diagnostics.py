@@ -24,6 +24,7 @@ from typing import Any
 LANGFUSE_SHARED_PROVIDER_ACCEPTED = "openarmature.langfuse.shared_provider_accepted"
 LANGFUSE_PAYLOAD_SUPPRESSED = "openarmature.langfuse.payload_suppressed"
 LANGFUSE_SHARED_PROVIDER_NO_PAYLOAD = "openarmature.langfuse.shared_provider_no_payload"
+STRUCTURED_OUTPUT_SCHEMA_NOT_HONORED = "openarmature.structured_output.schema_not_honored"
 TOKEN_BUDGET_EXCEEDED = "openarmature.token_budget.exceeded"
 
 # The stdlib LogRecord attribute the name rides on. `install_log_bridge` lifts
@@ -58,6 +59,7 @@ __all__ = [
     "LANGFUSE_PAYLOAD_SUPPRESSED",
     "LANGFUSE_SHARED_PROVIDER_ACCEPTED",
     "LANGFUSE_SHARED_PROVIDER_NO_PAYLOAD",
+    "STRUCTURED_OUTPUT_SCHEMA_NOT_HONORED",
     "TOKEN_BUDGET_EXCEEDED",
     "diagnostic",
     "event_name_of",
