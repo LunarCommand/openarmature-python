@@ -3,6 +3,7 @@ messages, the request parameters and the extras."""
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from openarmature.observability.llm_event import serialize_tool_calls
@@ -115,7 +116,28 @@ def _request_extras_from_config(config: RuntimeConfig | None) -> dict[str, Any]:
     return dict(config.extras)
 
 
+@dataclass(frozen=True)
+class _EventRequest:
+    """The request-side fields of a typed LLM event, describing one request."""
+
+    input_messages: list[dict[str, Any]]
+    request_params: dict[str, Any]
+    request_extras: dict[str, Any]
+    structured_output_path: str | None = None
+
+
+def _event_request(messages: Sequence[Message], config: RuntimeConfig | None) -> _EventRequest:
+    """Describe a request by its messages and config, with no structured-output path."""
+    return _EventRequest(
+        input_messages=serialize_messages(messages),
+        request_params=_request_params_from_config(config),
+        request_extras=_request_extras_from_config(config),
+    )
+
+
 __all__ = [
+    "_EventRequest",
+    "_event_request",
     "_request_extras_from_config",
     "_request_params_from_config",
     "serialize_messages",

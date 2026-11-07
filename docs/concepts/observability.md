@@ -712,6 +712,12 @@ namespace: model identifier, finish reason, token counts, prompt
 identity from `with_active_prompt(...)`, error category on failure, and
 `openarmature.llm.attempt_index` (the 0-based call-level attempt
 counter). Set unconditionally whenever the LLM span itself emits.
+A call with a `response_schema` also carries
+`openarmature.llm.structured_output.path`, the way its request asked
+for structured output: `native` when OpenAI's `strict: true` constrained
+decoding, `native_unenforced` when the schema went out with
+`strict: false`, and `prompt_augmentation` on the
+[schema-directive fallback](llms.md#wire-paths-native-and-fallback).
 
 **`gen_ai.*` (OpenTelemetry GenAI semantic conventions, default on).**
 Cross-vendor attribute names every LLM-aware backend reads
@@ -763,6 +769,13 @@ additionally carries the response-side surface (`finish_reason`,
 was intact. The final attempt's span carries the terminal outcome
 (`OK` on success, `ERROR` on an exhausted or non-transient failure).
 
+Each span describes the request its attempt sent. A
+`per_attempt_override` shows on the retries it applies to (a
+`gen_ai.request.temperature` that escalates across the spans, say), and
+with payload attributes on, a reask retry's
+`openarmature.llm.input.messages` includes the earlier attempts' output
+and the corrections your `reask` builder returned.
+
 `openarmature.llm.attempt_index` is the **call-level** attempt counter,
 [independent of the node-level `attempt_index`](llms.md#call-level-vs-node-level-retry):
 the former counts attempts inside one `complete()` call, the latter
@@ -786,7 +799,8 @@ observer = OTelObserver(
 This surfaces four attributes:
 
 - `openarmature.llm.input.messages`: JSON-encoded message array
-  (the spec §3 message shape: `{role, content, tool_calls?, …}`).
+  (the spec §3 message shape: `{role, content, tool_calls?, …}`), as
+  sent, so on the schema-directive fallback it includes the directive.
 - `openarmature.llm.output.content`: the assistant's response
   content string verbatim. Omitted for tool-call-only responses
   with empty content.
@@ -1069,6 +1083,16 @@ response whose content failed downstream parse or validation, so
 `finish_reason` (`"length"` signals a truncation) and the token usage
 genuinely exist; they are `None` for every other category, where there
 was no response to record.
+
+The request-side fields (`input_messages`, `request_params`,
+`request_extras`) describe the request the outcome came from, not the
+arguments the caller passed. Under call-level retry that is the last
+attempt's request, with its reask turns and any `per_attempt_override`
+merged in. On the schema-directive fallback `input_messages` includes
+the directive, and a call rejected before sending carries the caller's
+messages. `structured_output_path` names the path that request took
+(`"native"`, `"native_unenforced"` or `"prompt_augmentation"`), and is
+`None` when no `response_schema` was supplied or nothing was sent.
 
 A custom `Provider` that wants observers to see the same events
 dispatches `LlmCompletionEvent(...)` on success and

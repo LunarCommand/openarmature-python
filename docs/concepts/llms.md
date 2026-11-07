@@ -109,7 +109,10 @@ retried on transient errors per the config's classifier and backoff; a
 non-transient error (a bad request, an auth failure) propagates
 immediately without retrying. From observability's point of view the
 call stays a single unit: exactly one completion-or-failure event fires
-for the terminal outcome, regardless of how many attempts it took.
+for the terminal outcome, regardless of how many attempts it took. That
+event describes the request of the attempt whose outcome it reports, so
+after an override or a reask it shows what the last attempt sent, and
+each attempt's span shows its own request.
 
 ### Varying the request across attempts
 
@@ -420,13 +423,22 @@ provider = OpenAIProvider(
 )
 ```
 
-In fallback mode the provider prepends a system directive containing
-the serialized schema, omits `response_format` from the wire, and
-parses-and-validates the response post-receive. The behavioral contract
-is identical: `Response.parsed` populates the same way; failures raise
-`StructuredOutputInvalid` the same way. The
+In fallback mode the provider adds a system directive containing the
+serialized schema: appended to a leading system message, or as a new
+first message when there is none. It also omits `response_format` from
+the wire and parses-and-validates the response post-receive. The
+behavioral contract is identical: `Response.parsed` populates the same
+way; failures raise `StructuredOutputInvalid` the same way. The
 `uses_prompt_augmentation_fallback` read-only property lets callers
 inspect which path is active.
+
+Each call also reports the path its request took, as
+`structured_output_path` on its typed event and
+`openarmature.llm.structured_output.path` on its span:
+`"prompt_augmentation"` for the fallback, and `"native"` or
+`"native_unenforced"` for the native path, depending on strict mode
+(below). On the fallback, the event's `input_messages` includes the
+directive, since it records the messages as sent.
 
 ### Strict mode
 
@@ -436,7 +448,10 @@ non-conforming tokens. The framework decides `strict: true` vs
 `strict: false` automatically based on whether your schema satisfies
 strict-mode constraints. Either way, the framework validates the
 response post-receive against the supplied schema; strict is a
-wire-level optimization, not a correctness requirement.
+wire-level optimization, not a correctness requirement. A call sent
+with `strict: true` reports the `"native"` path, and one sent with
+`strict: false` reports `"native_unenforced"`, since OpenAI documents
+constrained decoding only for strict mode.
 
 `strict_mode_supported(schema)` (exported from `openarmature.llm`)
 performs the deep recursive check. The heuristic is conservative:

@@ -225,6 +225,12 @@ of:
   as `str(jsonschema_error)`, names only one violation and falls short.
   Use `validate_response_schema` and `strict_mode_supported` from
   `openarmature.llm` to share the provider-agnostic boundary checks.
+  Report the path each request took as the typed events'
+  `structured_output_path`: `"native"` when the provider's native
+  constraint governs decoding, `"native_unenforced"` when the schema
+  goes out natively in a form that does not, `"tool_coercion"` when it
+  rides as a synthetic tool's input schema, and `"prompt_augmentation"`
+  on the fallback.
 - **Observability events.** Opt-in typed-event dispatch around the
   wire call so the bundled OTel and Langfuse observers (plus any
   custom observer using type discrimination) can build LLM spans
@@ -325,7 +331,7 @@ of:
       return response
   ```
 
-  Two contracts the bundled provider follows that custom providers
+  Three contracts the bundled provider follows that custom providers
   SHOULD match:
 
   - **Mutual exclusion.** A single `complete()` call emits exactly
@@ -337,6 +343,14 @@ of:
     exception still raises out of `complete()`; caller-side error
     handling is unchanged. The typed event is on the observer
     queue.
+  - **The request as sent.** `input_messages`, `request_params` and
+    `request_extras` describe the request the reported outcome came
+    from. Messages your mapping rewrote, such as a schema directive,
+    appear as sent. If your provider retries inside one call, the
+    call's event describes the last attempt's request. A call you
+    reject before sending carries the caller's messages and a `None`
+    `structured_output_path`. A request whose connection never opened
+    was not sent either, so its events also carry a `None` path.
 
   Inline image bytes MUST be redacted in the provider's
   serialization step before reaching the typed event's

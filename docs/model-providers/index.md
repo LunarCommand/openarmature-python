@@ -155,7 +155,7 @@ request body by default. Some OpenAI-compatible servers (older vLLM,
 some LM Studio releases, llama.cpp variants) either reject
 `response_format` or silently ignore it. Construct the provider with
 `force_prompt_augmentation_fallback=True` to switch to a
-prompt-augmentation path that prepends a system directive with the
+prompt-augmentation path that adds a system directive with the
 serialized schema and parses-and-validates post-receive. The behavioral
 contract is identical across both paths; the
 `uses_prompt_augmentation_fallback` read-only property lets callers

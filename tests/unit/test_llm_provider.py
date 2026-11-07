@@ -56,6 +56,7 @@ from openarmature.llm import (
     validate_message_list,
     validate_tools,
 )
+from openarmature.llm._event_fields import _EventRequest
 from openarmature.observability.correlation import (
     _set_active_dispatch,
     _set_attempt_index,
@@ -1495,9 +1496,7 @@ def test_structured_output_builder_projects_empty_content_to_none() -> None:
         exc,
         latency_ms=1.0,
         call_id="cc",
-        input_messages=[],
-        request_params={},
-        request_extras={},
+        request=_EventRequest(input_messages=[], request_params={}, request_extras={}),
         active_prompt=None,
         active_prompt_group=None,
         token_budget=None,
@@ -2293,6 +2292,357 @@ async def test_call_level_retry_plain_config_replays_identically() -> None:
 
 
 # ---------------------------------------------------------------------------
+# The request each typed event describes (proposal 0126)
+# ---------------------------------------------------------------------------
+
+# Not strict: no additionalProperties: false, and "name" is not required.
+_LOOSE_SCHEMA = {"type": "object", "properties": {"name": {"type": "string"}}}
+
+
+def _unreached(_req: httpx.Request) -> httpx.Response:
+    raise AssertionError("the call is rejected before any request is sent")
+
+
+@pytest.mark.parametrize(
+    ("schema", "fallback", "path"),
+    [
+        pytest.param(_PERSON_SCHEMA, False, "native", id="strict"),
+        pytest.param(_LOOSE_SCHEMA, False, "native_unenforced", id="not-strict"),
+        pytest.param(_PERSON_SCHEMA, True, "prompt_augmentation", id="fallback"),
+        pytest.param(None, False, None, id="no-schema"),
+    ],
+)
+async def test_events_report_the_structured_output_path(
+    schema: dict[str, Any] | None, fallback: bool, path: str | None
+) -> None:
+    # graph-engine §6 and llm-provider §8.1.5: the path follows the strict flag
+    # the request carried. The wire flag is asserted beside the path so the two
+    # cannot drift: flipping either one alone fails the first two cases.
+    bodies: list[dict[str, Any]] = []
+    events, token = _collecting_dispatch()
+    provider = OpenAIProvider(
+        base_url="http://test",
+        model="m",
+        api_key="k",
+        transport=httpx.MockTransport(_seq_handler(bodies, [0], [(200, '{"name":"Alice","age":30}')])),
+        force_prompt_augmentation_fallback=fallback,
+    )
+    try:
+        await provider.complete([UserMessage(content="go")], response_schema=schema)
+    finally:
+        await provider.aclose()
+        _release_dispatch(token)
+
+    attempt = next(e for e in events if isinstance(e, LlmRetryAttemptEvent))
+    completion = next(e for e in events if isinstance(e, LlmCompletionEvent))
+    assert attempt.structured_output_path == path
+    assert completion.structured_output_path == path
+    if path in ("native", "native_unenforced"):
+        assert bodies[0]["response_format"]["json_schema"]["strict"] is (path == "native")
+    else:
+        assert "response_format" not in bodies[0]
+
+
+async def test_a_call_rejected_before_sending_reports_no_path() -> None:
+    # graph-engine §6: no request went out, so the path is null although a schema
+    # was supplied, and the event describes the caller's request. The extras
+    # response_format conflicts with the one the mapping manages (§8.1.5), which
+    # only the body build detects. The same schema reports "native" once a
+    # request is sent (the parametrized test above).
+    events, token = _collecting_dispatch()
+    provider = OpenAIProvider(
+        base_url="http://test", model="m", api_key="k", transport=httpx.MockTransport(_unreached)
+    )
+    try:
+        with pytest.raises(ProviderInvalidRequest):
+            await provider.complete(
+                [UserMessage(content="go")],
+                config=RuntimeConfig(extras={"response_format": {"type": "json_object"}}),
+                response_schema=_PERSON_SCHEMA,
+            )
+    finally:
+        await provider.aclose()
+        _release_dispatch(token)
+
+    assert not [e for e in events if isinstance(e, LlmRetryAttemptEvent)]
+    failed = next(e for e in events if isinstance(e, LlmFailedEvent))
+    assert failed.error_category == "provider_invalid_request"
+    assert failed.structured_output_path is None
+    assert failed.input_messages == [{"role": "user", "content": "go"}]
+    assert failed.request_extras == {"response_format": {"type": "json_object"}}
+
+
+async def test_a_call_validation_rejects_reports_the_callers_list() -> None:
+    # graph-engine §6: a call rejected before any request was sent reports the
+    # caller's message list. Validation rejects this one, which ends on an
+    # assistant message, before the schema or the body is looked at.
+    #
+    # Killed by rendering the caller's list after validation instead of before
+    # it: the event then carries an empty list.
+    events, token = _collecting_dispatch()
+    provider = OpenAIProvider(
+        base_url="http://test", model="m", api_key="k", transport=httpx.MockTransport(_unreached)
+    )
+    try:
+        with pytest.raises(ProviderInvalidRequest):
+            await provider.complete(
+                [UserMessage(content="go"), AssistantMessage(content="partial")],
+                config=RuntimeConfig(temperature=0.2),
+            )
+    finally:
+        await provider.aclose()
+        _release_dispatch(token)
+
+    failed = next(e for e in events if isinstance(e, LlmFailedEvent))
+    assert failed.input_messages == [
+        {"role": "user", "content": "go"},
+        {"role": "assistant", "content": "partial"},
+    ]
+    assert failed.request_params == {"temperature": 0.2}
+    assert failed.structured_output_path is None
+
+
+async def test_a_first_attempt_rejected_before_sending_reports_the_callers_list() -> None:
+    # graph-engine §6: the fallback's request carries the schema directive, but
+    # this one never went out, so the event reports the caller's list without
+    # it. The base config sets temperature both as a field and as an extras key,
+    # a collision only the body build detects (§8.1).
+    #
+    # Killed by recording the attempt's own request before the build on attempt
+    # 0 as well as on a retry: the event then leads with the directive.
+    events, token = _collecting_dispatch()
+    provider = OpenAIProvider(
+        base_url="http://test",
+        model="m",
+        api_key="k",
+        transport=httpx.MockTransport(_unreached),
+        force_prompt_augmentation_fallback=True,
+    )
+    try:
+        with pytest.raises(ProviderInvalidRequest):
+            await provider.complete(
+                [UserMessage(content="go")],
+                config=RuntimeConfig(temperature=0.2, extras={"temperature": 0.9}),
+                response_schema=_PERSON_SCHEMA,
+            )
+    finally:
+        await provider.aclose()
+        _release_dispatch(token)
+
+    failed = next(e for e in events if isinstance(e, LlmFailedEvent))
+    assert failed.input_messages == [{"role": "user", "content": "go"}]
+    assert failed.structured_output_path is None
+
+
+async def test_a_retry_rejected_before_sending_reports_its_own_request() -> None:
+    # Attempt 0 goes out on the base config. Attempt 1's override declares
+    # temperature, which collides on the merge with the base's extras key of
+    # that name (§8.1), so attempt 1 is rejected before sending. graph-engine §6
+    # does not say which request this case describes. The event takes attempt
+    # 1's, which holds both halves of the collision, with a null path, since
+    # attempt 1 sent nothing.
+    #
+    # Not vacuous: attempt 0's event reports the base config and "native", so a
+    # terminal event describing the last request sent fails every assertion on
+    # it. Killed by not recording a retry's request before its body is built.
+    from openarmature.llm import LlmRetryConfig
+
+    def handler(_req: httpx.Request) -> httpx.Response:
+        return httpx.Response(503, json={"error": {"message": "upstream"}})
+
+    events, token = _collecting_dispatch()
+    provider = _collision_provider(handler)
+    try:
+        with pytest.raises(ProviderInvalidRequest):
+            await provider.complete(
+                [UserMessage(content="go")],
+                config=RuntimeConfig(extras={"temperature": 0.9}),
+                response_schema=_PERSON_SCHEMA,
+                retry=LlmRetryConfig(
+                    max_attempts=2,
+                    backoff=deterministic_backoff(0),
+                    per_attempt_override=[RuntimeConfig(temperature=0.3)],
+                ),
+            )
+    finally:
+        await provider.aclose()
+        _release_dispatch(token)
+
+    attempts = [e for e in events if isinstance(e, LlmRetryAttemptEvent)]
+    assert [(a.request_params, a.structured_output_path) for a in attempts] == [({}, "native")]
+    failed = next(e for e in events if isinstance(e, LlmFailedEvent))
+    assert failed.request_params == {"temperature": 0.3}
+    assert failed.request_extras == {"temperature": 0.9}
+    assert failed.structured_output_path is None
+
+
+async def test_each_attempt_and_the_call_describe_the_request_sent() -> None:
+    # llm-provider §7.1 and graph-engine §6: each attempt's event describes the
+    # request that attempt sent, and the call's event the last attempt's.
+    # Attempt 1 differs from attempt 0 in every way a retry can: the override
+    # adds stop sequences and an extras key, and the reask turns extend the
+    # messages.
+    from openarmature.llm import LlmRetryConfig
+
+    events, token = _collecting_dispatch()
+    provider = OpenAIProvider(
+        base_url="http://test",
+        model="m",
+        api_key="k",
+        transport=httpx.MockTransport(
+            _seq_handler([], [0], [(200, "Alice is thirty"), (200, "Alice is thirty")])
+        ),
+    )
+    try:
+        with pytest.raises(StructuredOutputInvalid):
+            await provider.complete(
+                [UserMessage(content="Generate a person record.")],
+                config=RuntimeConfig(extras={"keep": 1}),
+                response_schema=_PERSON_SCHEMA,
+                retry=LlmRetryConfig(
+                    max_attempts=2,
+                    backoff=deterministic_backoff(0),
+                    reask=lambda _e: "Return only the JSON object.",
+                    per_attempt_override=[RuntimeConfig(stop_sequences=["END"], extras={"relaxed": True})],
+                ),
+            )
+    finally:
+        await provider.aclose()
+        _release_dispatch(token)
+
+    caller = [{"role": "user", "content": "Generate a person record."}]
+    retried = [
+        *caller,
+        {"role": "assistant", "content": "Alice is thirty"},
+        {"role": "user", "content": "Return only the JSON object."},
+    ]
+    attempts = [e for e in events if isinstance(e, LlmRetryAttemptEvent)]
+    assert [a.input_messages for a in attempts] == [caller, retried]
+    assert [a.request_params for a in attempts] == [{}, {"stop_sequences": ["END"]}]
+    assert [a.request_extras for a in attempts] == [{"keep": 1}, {"keep": 1, "relaxed": True}]
+    assert [a.structured_output_path for a in attempts] == ["native", "native"]
+    failed = next(e for e in events if isinstance(e, LlmFailedEvent))
+    assert failed.input_messages == retried
+    assert failed.request_params == {"stop_sequences": ["END"]}
+    assert failed.request_extras == {"keep": 1, "relaxed": True}
+    assert failed.structured_output_path == "native"
+
+
+async def test_events_carry_the_schema_directive_the_fallback_sent() -> None:
+    # graph-engine §6: input_messages is the list as sent, so on the fallback it
+    # leads with the schema directive, as the wire does. The directive's wording
+    # is the implementation's, so the events are compared with the wire rather
+    # than with a copy of it. The caller's own list is left as it was.
+    bodies: list[dict[str, Any]] = []
+    events, token = _collecting_dispatch()
+    provider = OpenAIProvider(
+        base_url="http://test",
+        model="m",
+        api_key="k",
+        transport=httpx.MockTransport(_seq_handler(bodies, [0], [(200, "Alice is thirty")])),
+        force_prompt_augmentation_fallback=True,
+    )
+    caller_messages = [UserMessage(content="Generate a person record.")]
+    try:
+        with pytest.raises(StructuredOutputInvalid):
+            await provider.complete(caller_messages, response_schema=_PERSON_SCHEMA)
+    finally:
+        await provider.aclose()
+        _release_dispatch(token)
+
+    sent = bodies[0]["messages"]
+    assert [m["role"] for m in sent] == ["system", "user"]
+    attempt = next(e for e in events if isinstance(e, LlmRetryAttemptEvent))
+    failed = next(e for e in events if isinstance(e, LlmFailedEvent))
+    assert attempt.input_messages == sent
+    assert failed.input_messages == sent
+    assert caller_messages == [UserMessage(content="Generate a person record.")]
+
+
+@pytest.mark.parametrize(
+    ("error", "path"),
+    [
+        pytest.param(httpx.ConnectError, None, id="connect-error"),
+        pytest.param(httpx.ConnectTimeout, None, id="connect-timeout"),
+        pytest.param(httpx.PoolTimeout, None, id="pool-timeout"),
+        pytest.param(httpx.ProxyError, None, id="proxy-error"),
+        pytest.param(httpx.UnsupportedProtocol, None, id="unsupported-protocol"),
+        pytest.param(httpx.WriteError, "native", id="write-error"),
+        pytest.param(httpx.ReadTimeout, "native", id="read-timeout"),
+    ],
+)
+async def test_a_transport_failure_reports_the_path_only_if_sending_began(
+    error: type[httpx.TransportError], path: str | None
+) -> None:
+    # graph-engine §6: the path is null when no request was sent. httpx raises
+    # the first five before writing any of the request. A write error may have
+    # sent part of it, and a read timeout comes after all of it, so both keep
+    # the path. Those two controls are what show the five nulls are not the
+    # field's default showing through.
+    def handler(_req: httpx.Request) -> httpx.Response:
+        raise error("boom")
+
+    events, token = _collecting_dispatch()
+    provider = OpenAIProvider(
+        base_url="http://test", model="m", api_key="k", transport=httpx.MockTransport(handler)
+    )
+    try:
+        with pytest.raises(ProviderUnavailable):
+            await provider.complete([UserMessage(content="go")], response_schema=_PERSON_SCHEMA)
+    finally:
+        await provider.aclose()
+        _release_dispatch(token)
+
+    attempt = next(e for e in events if isinstance(e, LlmRetryAttemptEvent))
+    failed = next(e for e in events if isinstance(e, LlmFailedEvent))
+    assert attempt.structured_output_path == path
+    assert failed.structured_output_path == path
+
+
+async def test_a_retry_after_a_connection_failure_reports_its_own_path() -> None:
+    # Attempt 0's connection never opens, so its event describes its request
+    # with no path. Attempt 1 goes out with the override's temperature and
+    # reports "native", as does the call.
+    from openarmature.llm import LlmRetryConfig
+
+    calls = [0]
+
+    def handler(_req: httpx.Request) -> httpx.Response:
+        calls[0] += 1
+        if calls[0] == 1:
+            raise httpx.ConnectError("refused")
+        return httpx.Response(200, json=_person_completion('{"name":"Alice","age":30}'))
+
+    events, token = _collecting_dispatch()
+    provider = OpenAIProvider(
+        base_url="http://test", model="m", api_key="k", transport=httpx.MockTransport(handler)
+    )
+    try:
+        await provider.complete(
+            [UserMessage(content="go")],
+            config=RuntimeConfig(temperature=0.2),
+            response_schema=_PERSON_SCHEMA,
+            retry=LlmRetryConfig(
+                max_attempts=2,
+                backoff=deterministic_backoff(0),
+                per_attempt_override=[RuntimeConfig(temperature=0.3)],
+            ),
+        )
+    finally:
+        await provider.aclose()
+        _release_dispatch(token)
+
+    attempts = [e for e in events if isinstance(e, LlmRetryAttemptEvent)]
+    assert [(a.request_params, a.structured_output_path) for a in attempts] == [
+        ({"temperature": 0.2}, None),
+        ({"temperature": 0.3}, "native"),
+    ]
+    completion = next(e for e in events if isinstance(e, LlmCompletionEvent))
+    assert completion.request_params == {"temperature": 0.3}
+    assert completion.structured_output_path == "native"
+
+
+# ---------------------------------------------------------------------------
 # Proposal 0058: per-category field-mapping + pre-send + mutual exclusion
 # ---------------------------------------------------------------------------
 
@@ -2338,9 +2688,7 @@ def test_build_llm_failed_event_maps_category_and_type_per_exception(
         exc,
         latency_ms=12.0,
         call_id="cc-test",
-        input_messages=[],
-        request_params={},
-        request_extras={},
+        request=_EventRequest(input_messages=[], request_params={}, request_extras={}),
         active_prompt=None,
         active_prompt_group=None,
         token_budget=None,
@@ -3719,11 +4067,9 @@ async def test_a_pre_send_collision_on_a_retry_emits_no_attempt_event() -> None:
     #
     # `build_body` runs outside the attempt's try block, so a pre-send raise on a
     # retry leaves the loop without emitting that attempt's LlmRetryAttemptEvent
-    # and without chaining the transient it was retrying. The terminal
-    # LlmFailedEvent carries provider_invalid_request, and its request_params and
-    # request_extras were snapshotted from the base config before the loop, so a
-    # trace shows the base's extras next to a failure about a collision that is
-    # not in them.
+    # and without chaining the transient it was retrying. Only the terminal
+    # LlmFailedEvent reports it, describing the request attempt 1 was building
+    # (test_a_retry_rejected_before_sending_reports_its_own_request).
     #
     # Asserted so the gap is recorded where someone will see it: moving the build
     # inside the try is what makes this go red, and then this test is the thing
@@ -3759,12 +4105,9 @@ async def test_a_pre_send_collision_on_a_retry_emits_no_attempt_event() -> None:
     # Attempt 0 reached the wire and reported; attempt 1 raised before sending
     # and reported nothing.
     assert len(attempts) == 1, f"expected only attempt 0 to report, got {len(attempts)}"
-    assert attempts[0].attempt_index == 0
+    assert attempts[0].llm_attempt_index == 0
     assert len(failures) == 1, "exactly one terminal failure event"
     assert failures[0].error_category == "provider_invalid_request"
-    # The terminal event describes the base config, not the merged body that
-    # actually collided, so the trace cannot show the colliding pair.
-    assert failures[0].request_extras == {"temperature": 0.9}
 
 
 async def test_override_keeping_both_values_in_one_channel_retries_cleanly() -> None:

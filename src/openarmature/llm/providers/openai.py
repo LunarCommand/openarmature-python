@@ -59,6 +59,7 @@ import re
 import time
 import uuid
 from collections.abc import Callable, Mapping, Sequence
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any, Literal, cast
 from urllib.parse import urlparse
 
@@ -85,7 +86,7 @@ from openarmature.observability.correlation import (
 )
 from openarmature.observability.metadata import AttributeValue, current_invocation_metadata
 
-from .._event_fields import _request_extras_from_config, _request_params_from_config, serialize_messages
+from .._event_fields import _event_request, _EventRequest
 from .._schema_violations import _clip, describe, model_violations, response_violations
 
 # ``current_prompt_group`` / ``current_prompt_result`` are imported
@@ -429,17 +430,20 @@ class OpenAIProvider:
         When ``retry`` is supplied, the wire call is retried on
         transient provider errors per the config's classifier and
         backoff (defaulting to the canonical transient categories with
-        exponential jittered backoff). The request is built and
-        validated once; pre-send validation errors are never retried.
-        Exactly one terminal observability event (LlmCompletionEvent or
-        LlmFailedEvent) fires for the call's terminal outcome regardless
-        of attempt count, and its ``latency_ms`` covers the whole call,
-        retries and backoff included. A per-attempt LlmRetryAttemptEvent
-        also fires for each attempt (driving the per-attempt LLM span
-        surface), each carrying just that attempt's latency. The
-        ``on_retry`` hook is not exception-isolated (mirroring
-        ``RetryMiddleware``); an exception raised by it propagates out
-        of the call.
+        exponential jittered backoff). The call is validated once and
+        each attempt's body built from that attempt's config and
+        messages; an error raised before a request is sent is never
+        retried. Exactly one terminal observability event
+        (LlmCompletionEvent or LlmFailedEvent) fires for the call's
+        terminal outcome regardless of attempt count. It describes the
+        request of the attempt whose outcome it reports, and its
+        ``latency_ms`` covers the whole call, retries and backoff
+        included. A per-attempt LlmRetryAttemptEvent also fires for
+        each attempt that sends its request (driving the per-attempt
+        LLM span surface), each describing that attempt's request and
+        carrying just its latency. The ``on_retry`` hook is not
+        exception-isolated (mirroring ``RetryMiddleware``); an exception
+        raised by it propagates out of the call.
         """
         # §5.5: emit the typed completion / failure event around the wire call
         # so a backend can build the span. Queue-mediated so §6 serial ordering
@@ -466,18 +470,14 @@ class OpenAIProvider:
 
         active_prompt = current_prompt_result()
         active_prompt_group = current_prompt_group()
-        # Resolve request-side fields up-front. These don't raise §7
-        # category exceptions; safe to compute outside the try-block.
-        # The serialized_messages projection runs INSIDE the try-block
-        # below — it can raise on malformed input that would also
-        # trigger a pre-send §7 raise, and we want both raises to
-        # surface through the same LlmFailedEvent path. Default to an
-        # empty list so the failure event always has a populated
-        # ``input_messages`` field even when serialization couldn't
-        # complete.
-        request_params = _request_params_from_config(config)
-        request_extras = _request_extras_from_config(config)
-        serialized_messages: list[dict[str, Any]] = []
+        # graph-engine §6: the call's typed event describes the request of the
+        # attempt whose outcome it reports, and a call rejected before any
+        # request was sent describes the caller's own. So this starts as the
+        # caller's request, which is what a call rejected in validation reports,
+        # and ``build_body`` moves it to each attempt's request in turn. Only a
+        # non-Message object makes rendering raise, which is no §7 failure for
+        # the event path below to report, so it sits outside the try.
+        reported = _event_request(messages, config)
         # Wall-clock latency measured at the adapter boundary per
         # proposal 0049's LlmCompletionEvent.latency_ms contract /
         # proposal 0058's LlmFailedEvent.latency_ms contract. Window
@@ -501,13 +501,6 @@ class OpenAIProvider:
             # tools list.
             validate_tool_choice(tool_choice, tools)
             schema_dict, schema_class = _normalize_response_schema(response_schema)
-            # Image redaction (per §5.5.5) happens inside
-            # ``serialize_messages`` — image bytes never
-            # leave the provider in event form. ``input_messages``
-            # mirrors the caller's messages list; the wire-side body
-            # may be augmented (schema directive on the fallback path)
-            # but the OBSERVED messages are the spec-§3 logical inputs.
-            serialized_messages = serialize_messages(messages)
             # On the fallback path, the wire-side messages list is an
             # augmented COPY of the caller's messages — original
             # messages MUST NOT be mutated.
@@ -518,8 +511,20 @@ class OpenAIProvider:
             # calls (schema_dict is None) must preserve any caller-supplied
             # response_format from RuntimeConfig extras.
             include_response_format = schema_dict is None or not self._force_prompt_augmentation_fallback
+            # §8.1.5: the strict flag the request carries decides the path the
+            # call reports, so the body and the path both read this one value.
+            # Only the native path sends the flag.
+            strict = (
+                schema_dict is not None
+                and not self._force_prompt_augmentation_fallback
+                and strict_mode_supported(schema_dict)
+            )
+            path = _structured_output_path(
+                schema_dict, fallback=self._force_prompt_augmentation_fallback, strict=strict
+            )
 
             def build_body(
+                attempt: int,
                 attempt_config: RuntimeConfig | None,
                 attempt_messages: Sequence[Message],
                 inherited_extras: frozenset[str] | None,
@@ -528,8 +533,8 @@ class OpenAIProvider:
                 # retry can vary sampling (0095a per-attempt override) and/or the
                 # messages (0095b reask transcript). tools / schema are fixed
                 # across attempts. Absent an override and a reask, every attempt
-                # passes the base config + base messages -> identical body
-                # (today's byte-identical replay).
+                # passes the base config + base messages, so a retry resends a
+                # byte-identical body.
                 #
                 # A collision reads as a bug in one config, and on a retry it
                 # can instead be a mismatch between two: the base supplied the
@@ -561,21 +566,33 @@ class OpenAIProvider:
                         "an extras key; remove one"
                     )
 
-                return self._build_request_body(
+                nonlocal reported
+                # graph-engine §6: a retry rejected before sending reports the
+                # request it was building, with no path since none went out. A
+                # first attempt rejected here leaves the caller's own in place.
+                request = _event_request(attempt_messages, attempt_config)
+                if attempt > 0:
+                    reported = request
+                body = self._build_request_body(
                     attempt_messages,
                     tools,
                     attempt_config,
                     schema_dict,
                     include_response_format=include_response_format,
+                    strict=strict,
                     tool_choice=tool_choice,
                     collision_hint=hint,
                 )
+                reported = replace(request, structured_output_path=path)
+                return body
 
             # Per-attempt LLM span surface (observability §5.5 under
             # llm-provider §7.1 call-level retry): dispatch one
             # LlmRetryAttemptEvent per attempt so the observer can render
-            # one openarmature.llm.complete span per attempt. No-op
-            # outside an invocation (``dispatch`` is None).
+            # one openarmature.llm.complete span per attempt. Each describes
+            # its attempt's own request, which build_body recorded before the
+            # request went out. No-op outside an invocation (``dispatch`` is
+            # None).
             def emit_attempt(
                 idx: int,
                 attempt_latency_ms: float,
@@ -590,9 +607,7 @@ class OpenAIProvider:
                         llm_attempt_index=idx,
                         latency_ms=attempt_latency_ms,
                         call_id=call_id,
-                        input_messages=serialized_messages,
-                        request_params=request_params,
-                        request_extras=request_extras,
+                        request=_as_sent(reported, attempt_exc),
                         active_prompt=active_prompt,
                         active_prompt_group=active_prompt_group,
                         token_budget=(active_prompt.token_budget if active_prompt is not None else None),
@@ -620,9 +635,7 @@ class OpenAIProvider:
                         exc,
                         latency_ms_failed,
                         call_id=call_id,
-                        input_messages=serialized_messages,
-                        request_params=request_params,
-                        request_extras=request_extras,
+                        request=_as_sent(reported, exc),
                         active_prompt=active_prompt,
                         active_prompt_group=active_prompt_group,
                         token_budget=(active_prompt.token_budget if active_prompt is not None else None),
@@ -642,9 +655,7 @@ class OpenAIProvider:
                     response,
                     latency_ms,
                     call_id=call_id,
-                    input_messages=serialized_messages,
-                    request_params=request_params,
-                    request_extras=request_extras,
+                    request=reported,
                     active_prompt=active_prompt,
                     active_prompt_group=active_prompt_group,
                     token_budget=(active_prompt.token_budget if active_prompt is not None else None),
@@ -737,7 +748,7 @@ class OpenAIProvider:
     async def _do_complete_with_retry(
         self,
         build_body: Callable[
-            [RuntimeConfig | None, Sequence[Message], frozenset[str] | None], dict[str, Any]
+            [int, RuntimeConfig | None, Sequence[Message], frozenset[str] | None], dict[str, Any]
         ],
         base_config: RuntimeConfig | None,
         base_messages: Sequence[Message],
@@ -750,8 +761,8 @@ class OpenAIProvider:
         """Run the wire call with optional call-level retry.
 
         Loops the underlying wire call on transient provider errors per the
-        retry config. ``build_body`` assembles the outbound body for a given
-        per-attempt config + messages (proposal 0095: retries MAY vary sampling
+        retry config. ``build_body`` assembles the outbound body for an attempt
+        from its index, config and messages (proposal 0095: retries MAY vary sampling
         via ``per_attempt_override`` and/or the messages via ``reask``); absent
         both, every attempt uses ``base_config`` + ``base_messages`` unchanged,
         preserving the byte-identical replay. ``emit_attempt`` (when supplied)
@@ -764,7 +775,7 @@ class OpenAIProvider:
         terminal event still fires per ``complete()`` call.
         """
         if retry is None:
-            body = build_body(base_config, base_messages, None)
+            body = build_body(0, base_config, base_messages, None)
             attempt_start = time.perf_counter()
             try:
                 response = await self._do_complete(body, schema_dict, schema_class)
@@ -806,7 +817,7 @@ class OpenAIProvider:
             # Attempt 0 runs the caller's config untouched, so no override is in
             # play and a collision there has only one channel to report.
             merged = attempt > 0 and bool(overrides)
-            body = build_body(attempt_config, transcript, inherited_extras if merged else None)
+            body = build_body(attempt, attempt_config, transcript, inherited_extras if merged else None)
             attempt_start = time.perf_counter()
             try:
                 response = await self._do_complete(body, schema_dict, schema_class)
@@ -880,9 +891,7 @@ class OpenAIProvider:
         latency_ms: float,
         *,
         call_id: str,
-        input_messages: list[dict[str, Any]],
-        request_params: dict[str, Any],
-        request_extras: dict[str, Any],
+        request: _EventRequest,
         active_prompt: Any,
         active_prompt_group: Any,
         token_budget: Any,
@@ -891,11 +900,9 @@ class OpenAIProvider:
 
         Sources identity / scoping fields from the calling-node
         ContextVars and outcome fields from the response. Request-side
-        fields are passed through from the
-        provider's complete() local state — serialized message list,
-        the gen_ai.request.* parameter mapping, the RuntimeConfig
-        extras, the prompt-context snapshots taken at dispatch time,
-        and the call-id minted at the call's start.
+        fields come from ``request``, the request the event describes;
+        the prompt-context snapshots were taken at dispatch time and the
+        call-id minted at the call's start.
 
         The calling-node namespace is the FULL namespace tuple (not
         the legacy sentinel pseudo-namespace); node_name is the last
@@ -949,13 +956,14 @@ class OpenAIProvider:
             usage=response.usage,
             latency_ms=latency_ms,
             finish_reason=response.finish_reason,
-            input_messages=input_messages,
+            input_messages=request.input_messages,
             output_content=output_content,
             # Proposal 0076: the model's output tool calls, populated
             # unconditionally (empty list on a no-tool completion).
             output_tool_calls=list(response.message.tool_calls or []),
-            request_params=request_params,
-            request_extras=request_extras,
+            request_params=request.request_params,
+            request_extras=request.request_extras,
+            structured_output_path=request.structured_output_path,
             active_prompt=active_prompt,
             active_prompt_group=active_prompt_group,
             # Proposal 0083: the active prompt's advisory token budget, sourced
@@ -971,9 +979,7 @@ class OpenAIProvider:
         latency_ms: float,
         *,
         call_id: str,
-        input_messages: list[dict[str, Any]],
-        request_params: dict[str, Any],
-        request_extras: dict[str, Any],
+        request: _EventRequest,
         active_prompt: Any,
         active_prompt_group: Any,
         token_budget: Any,
@@ -981,9 +987,10 @@ class OpenAIProvider:
         """Construct the typed LlmFailedEvent for the failure path.
 
         Sources identity / scoping fields from the calling-node
-        ContextVars and failure fields from the raised exception.
-        Field set mirrors LlmCompletionEvent (identity + request-side)
-        plus the three failure-specific fields.
+        ContextVars, failure fields from the raised exception, and
+        request-side fields from ``request``, the request the event
+        describes. Field set mirrors LlmCompletionEvent (identity +
+        request-side) plus the three failure-specific fields.
 
         ``error_type`` defaults to the exception class name — falls
         into the "upstream exception class name" style documented in
@@ -1038,9 +1045,10 @@ class OpenAIProvider:
             provider=self._genai_system,
             model=self.model,
             latency_ms=latency_ms,
-            input_messages=input_messages,
-            request_params=request_params,
-            request_extras=request_extras,
+            input_messages=request.input_messages,
+            request_params=request.request_params,
+            request_extras=request.request_extras,
+            structured_output_path=request.structured_output_path,
             active_prompt=active_prompt,
             active_prompt_group=active_prompt_group,
             # Proposal 0083: advisory budget carried on the failure event too;
@@ -1066,9 +1074,7 @@ class OpenAIProvider:
         llm_attempt_index: int,
         latency_ms: float,
         call_id: str,
-        input_messages: list[dict[str, Any]],
-        request_params: dict[str, Any],
-        request_extras: dict[str, Any],
+        request: _EventRequest,
         active_prompt: Any,
         active_prompt_group: Any,
         token_budget: Any,
@@ -1078,8 +1084,9 @@ class OpenAIProvider:
     ) -> LlmRetryAttemptEvent:
         """Construct an LlmRetryAttemptEvent for one in-call attempt.
 
-        Identity / scoping + request-side fields mirror the terminal
-        events; the outcome comes from ``response`` (a successful
+        Identity / scoping fields mirror the terminal events, and the
+        request-side fields come from ``request``, the request this
+        attempt sent. The outcome comes from ``response`` (a successful
         attempt) or ``exc`` (a failed attempt). Exactly one of the two
         is supplied. ``llm_attempt_index`` is the call-level retry
         index, distinct from the node-level ``attempt_index`` sourced
@@ -1109,9 +1116,10 @@ class OpenAIProvider:
             "call_id": call_id,
             "llm_attempt_index": llm_attempt_index,
             "latency_ms": latency_ms,
-            "input_messages": input_messages,
-            "request_params": request_params,
-            "request_extras": request_extras,
+            "input_messages": request.input_messages,
+            "request_params": request.request_params,
+            "request_extras": request.request_extras,
+            "structured_output_path": request.structured_output_path,
             "active_prompt": active_prompt,
             "active_prompt_group": active_prompt_group,
             # Proposal 0083: advisory per-prompt token budget snapshot.
@@ -1197,6 +1205,7 @@ class OpenAIProvider:
         config: RuntimeConfig | None,
         schema_dict: dict[str, Any] | None,
         include_response_format: bool = True,
+        strict: bool = False,
         tool_choice: ToolChoice | None = None,
         collision_hint: Callable[[str], str | None] | None = None,
     ) -> dict[str, Any]:
@@ -1239,7 +1248,7 @@ class OpenAIProvider:
                 "json_schema": {
                     "name": _derive_schema_name(schema_dict),
                     "schema": _canonicalize_dict_keys(schema_dict),
-                    "strict": strict_mode_supported(schema_dict),
+                    "strict": strict,
                 },
             }
         # On the free-form call and the §8.1.5.1 prompt-augmentation fallback
@@ -1526,6 +1535,41 @@ def _derive_schema_name(schema: dict[str, Any]) -> str:
         return title
     canonical = json.dumps(schema, sort_keys=True).encode("utf-8")
     return f"oa_schema_{hashlib.sha256(canonical).hexdigest()[:16]}"
+
+
+# §8.1.5: OpenAI documents schema-constrained decoding only for strict: true,
+# so a strict request reports "native" and any other native request
+# "native_unenforced". The fallback reports "prompt_augmentation" whatever the
+# request's extras carry (graph-engine §6).
+def _structured_output_path(
+    schema_dict: dict[str, Any] | None, *, fallback: bool, strict: bool
+) -> str | None:
+    if schema_dict is None:
+        return None
+    if fallback:
+        return "prompt_augmentation"
+    return "native" if strict else "native_unenforced"
+
+
+# Raised before any of the request is written: no connection opened, none came
+# free in the pool, the proxy refused the tunnel, or no transport serves the
+# URL's scheme.
+_UNSENT_TRANSPORT_ERRORS = (
+    httpx.ConnectError,
+    httpx.ConnectTimeout,
+    httpx.PoolTimeout,
+    httpx.ProxyError,
+    httpx.UnsupportedProtocol,
+)
+
+
+# graph-engine §6: a request that was never sent reports no path. A failure
+# after the connection opened keeps it, since the provider may have received
+# some or all of the request.
+def _as_sent(request: _EventRequest, exc: LlmProviderError | None) -> _EventRequest:
+    if exc is not None and isinstance(exc.__cause__, _UNSENT_TRANSPORT_ERRORS):
+        return replace(request, structured_output_path=None)
+    return request
 
 
 # Parse the model's content string as JSON, then validate it against the

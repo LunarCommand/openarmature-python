@@ -457,6 +457,12 @@ class LlmCompletionEvent:
     impl-current sentinel-namespace string match the legacy
     NodeEvent pattern uses.
 
+    The request-side fields describe the request the reported outcome
+    came from. Under call-level retry the event reports the call's last
+    attempt, so they describe that attempt's request: its messages,
+    reask turns included, and its config after any per-attempt override
+    is merged.
+
     Field set:
 
     - ``invocation_id``: the outer invocation's identifier.
@@ -486,11 +492,13 @@ class LlmCompletionEvent:
       measured.
     - ``finish_reason``: the call's finish reason; ``None`` when
       the call did not complete normally.
-    - ``input_messages``: the message list the call was made with,
-      serialized to the plain-dict shape. Non-nullable; empty list
-      when the call had no history. Inline image bytes are
-      redacted before population (see the comment block above for
-      the redaction contract).
+    - ``input_messages``: the message list as sent, serialized to the
+      plain-dict shape. It includes the schema directive when the
+      call took the prompt-augmentation fallback. A call rejected
+      before any request was sent carries the caller's list.
+      Non-nullable; empty list when the call had no history. Inline
+      image bytes are redacted before population (see the comment
+      block above for the redaction contract).
     - ``output_content``: the assistant message's content string
       from the response. ``None`` on tool-call-only responses
       (the structured-response and tool-call paths are mutually
@@ -500,14 +508,24 @@ class LlmCompletionEvent:
       empty list when the response carried no tool calls. The output
       tool calls live here rather than in ``output_content`` (which
       is the response text and is empty on a tool-call-only response).
-    - ``request_params``: the GenAI request-parameter set the
-      caller supplied. Absence-is-meaningful: only caller-supplied
-      keys appear; empty mapping when none supplied. Keys are the
+    - ``request_params``: the GenAI request-parameter set supplied
+      for the request. Absence-is-meaningful: only supplied keys
+      appear; empty mapping when none supplied. Keys are the
       cross-vendor parameter names without the ``gen_ai.request.``
       prefix (e.g. ``temperature``, ``max_tokens``).
-    - ``request_extras``: the ``RuntimeConfig`` extras pass-
-      through bag in native mapping form (not JSON-encoded).
+    - ``request_extras``: the request's ``RuntimeConfig`` extras
+      pass-through bag in native mapping form (not JSON-encoded).
       Empty mapping when no extras supplied.
+    - ``structured_output_path``: how the request asked for
+      structured output when the call supplied a ``response_schema``.
+      ``"native"`` when the schema constrained decoding,
+      ``"native_unenforced"`` when it was sent natively in a form that
+      does not, ``"tool_coercion"`` when it was sent as a synthetic
+      tool's input schema, and ``"prompt_augmentation"`` when the call
+      took the schema-directive fallback. ``None`` when no schema was
+      supplied or no request was sent. It names a path rather than
+      carrying request content, so ``disable_provider_payload`` does
+      not gate it.
     - ``active_prompt``: 5-field identity snapshot of the active
       ``PromptResult`` at LLM-call time (``name`` / ``version`` /
       ``label`` / ``template_hash`` / ``rendered_hash``).
@@ -593,6 +611,10 @@ class LlmCompletionEvent:
     # a top-level (non-nested) call; the scalars above carry the innermost value.
     fan_out_index_chain: tuple[int | None, ...] = ()
     branch_name_chain: tuple[str | None, ...] = ()
+    # graph-engine §6: the structured-output path of the request this event
+    # describes. Defaulted to None, the value for a call without a
+    # response_schema, so a custom provider that never takes one need not set it.
+    structured_output_path: str | None = None
 
 
 # graph-engine §6 + observability §5.5.7. Dispatched whenever `complete()`
@@ -694,6 +716,9 @@ class LlmFailedEvent:
     # chains parallel to ``namespace`` (see LlmCompletionEvent).
     fan_out_index_chain: tuple[int | None, ...] = ()
     branch_name_chain: tuple[str | None, ...] = ()
+    # graph-engine §6: as on LlmCompletionEvent, and None also when the request
+    # this event describes was rejected before it was sent.
+    structured_output_path: str | None = None
 
 
 # Python-internal per-attempt LLM event. NOT a spec-normative event type
@@ -725,10 +750,14 @@ class LlmRetryAttemptEvent:
       call-level retry. Distinct from ``attempt_index`` (the node-level
       retry index used for calling-span resolution); the two are
       independent.
-    - identity / scoping (``invocation_id`` ... ``call_id``) and the
-      request side (``input_messages`` / ``request_params`` /
-      ``request_extras`` / ``active_prompt`` / ``active_prompt_group``)
-      mirror :class:`LlmCompletionEvent`, carried on every attempt.
+    - identity / scoping (``invocation_id`` ... ``call_id``) and
+      ``active_prompt`` / ``active_prompt_group`` mirror
+      :class:`LlmCompletionEvent`, carried on every attempt.
+    - request side (``input_messages`` / ``request_params`` /
+      ``request_extras`` / ``structured_output_path``): the same
+      fields as on :class:`LlmCompletionEvent`, describing the request
+      this attempt sent. A retry's messages include the reask turns
+      before it, and its config has the per-attempt override merged.
     - response side (``response_id`` / ``response_model`` / ``usage`` /
       ``finish_reason`` / ``output_content`` / ``output_tool_calls``):
       populated on a successful attempt; ``None`` / empty list on a
@@ -795,6 +824,10 @@ class LlmRetryAttemptEvent:
     # openarmature.llm.retry_reason (present only on retries); the detailed
     # §5.5 / Langfuse mapping is a tracked follow-on.
     retry_reason: str | None = None
+    # The structured-output path of this attempt's request, which the OTel
+    # span renders as openarmature.llm.structured_output.path (observability
+    # §5.5).
+    structured_output_path: str | None = None
 
 
 # Spec: realizes graph-engine §6 + observability §5.5.9 -- the typed
