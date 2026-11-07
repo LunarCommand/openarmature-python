@@ -523,6 +523,7 @@ class OpenAIProvider:
             path = _structured_output_path(
                 schema_dict, fallback=self._force_prompt_augmentation_fallback, strict=strict
             )
+            stop_sent = False
 
             def build_body(
                 attempt: int,
@@ -567,7 +568,7 @@ class OpenAIProvider:
                         "an extras key; remove one"
                     )
 
-                nonlocal reported
+                nonlocal reported, stop_sent
                 # graph-engine §6: a retry rejected before sending reports the
                 # request it was building, with no path since none went out. A
                 # first attempt rejected here leaves the caller's own in place.
@@ -585,6 +586,7 @@ class OpenAIProvider:
                     collision_hint=hint,
                 )
                 reported = replace(request, structured_output_path=path)
+                stop_sent = _carries_stop_sequence(body.get("stop"))
                 return body
 
             # Per-attempt LLM span surface (observability §5.5 under
@@ -605,7 +607,7 @@ class OpenAIProvider:
                 # observability §5.5.7: one record per wire attempt however many
                 # observers are attached, none included, so it precedes the
                 # dispatch check.
-                if _schema_not_honored(request, attempt_exc):
+                if _schema_not_honored(request, attempt_exc, stop_sent=stop_sent):
                     self._warn_schema_not_honored(call_id, idx)
                 if dispatch is None:
                     return
@@ -1601,21 +1603,22 @@ def _as_sent(request: _EventRequest, exc: LlmProviderError | None) -> _EventRequ
 # with no stop sequence to end it early, returned content that is not a JSON
 # object. A constraint that bound cannot produce that, since llm-provider §5
 # requires an object at the schema's top level.
-def _schema_not_honored(request: _EventRequest, exc: LlmProviderError | None) -> bool:
+def _schema_not_honored(request: _EventRequest, exc: LlmProviderError | None, *, stop_sent: bool) -> bool:
     return (
         isinstance(exc, StructuredOutputInvalid)
         and request.structured_output_path == "native"
         and exc.finish_reason == "stop"
-        and not _carries_stop_sequence(request)
+        and not stop_sent
         and not _is_json_object(exc.output_content)
     )
 
 
-# A matched stop sequence also reports "stop", so §5.5.7 reads both places a
-# request can carry one: the declared field and §8.1's `stop` in extras. An
-# empty list carries none.
-def _carries_stop_sequence(request: _EventRequest) -> bool:
-    return bool(request.request_params.get("stop_sequences")) or bool(request.request_extras.get("stop"))
+# A matched stop sequence also reports "stop", so §5.5.7 skips an attempt whose
+# request carried one. Read from the body as sent, after the extras' `stop` has
+# been merged into the declared list or dropped as malformed. OpenAI's `stop` is
+# a string or a list, and only an empty list carries none.
+def _carries_stop_sequence(stop: Any) -> bool:
+    return isinstance(stop, str) or (isinstance(stop, list) and len(cast("list[Any]", stop)) > 0)
 
 
 # Read as the validation reads it, so NaN, a number past a float's range or

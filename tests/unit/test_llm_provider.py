@@ -2741,6 +2741,33 @@ def _not_honored(caplog: pytest.LogCaptureFixture) -> list[logging.LogRecord]:
             True,
             id="empty-extras-stop",
         ),
+        pytest.param(
+            _PROSE,
+            "stop",
+            _PERSON_SCHEMA,
+            RuntimeConfig(stop_sequences=[], extras={"stop": [123]}),
+            False,
+            True,
+            id="malformed-extras-stop-dropped",
+        ),
+        pytest.param(
+            _PROSE,
+            "stop",
+            _PERSON_SCHEMA,
+            RuntimeConfig(extras={"stop": ""}),
+            False,
+            False,
+            id="empty-string-extras-stop",
+        ),
+        pytest.param(
+            _PROSE,
+            "stop",
+            _PERSON_SCHEMA,
+            RuntimeConfig(stop_sequences=[], extras={"stop": ""}),
+            False,
+            False,
+            id="empty-string-merged-into-empty-list",
+        ),
         pytest.param(_PROSE, "stop", _LOOSE_SCHEMA, None, False, False, id="native-unenforced"),
         pytest.param(_PROSE, "stop", _PERSON_SCHEMA, None, True, False, id="prompt-augmentation"),
     ],
@@ -2758,7 +2785,9 @@ async def test_the_record_fires_only_for_malformed_content_on_a_normal_native_fi
     # No invocation is active, so the cases that emit also show the record does
     # not wait for an observer (case 14): moving the check after the dispatch
     # check fails every one of them. NaN is malformed because the check reads
-    # content the way the validation does.
+    # content the way the validation does. The stop cases read the body as
+    # sent: a malformed extra beside a declared list is dropped, so none goes
+    # out, and any string is a sequence, since only an empty list carries none.
     caplog.set_level(logging.DEBUG)
     provider = OpenAIProvider(
         base_url="http://test",
