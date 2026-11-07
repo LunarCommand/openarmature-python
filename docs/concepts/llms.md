@@ -453,6 +453,17 @@ with `strict: true` reports the `"native"` path, and one sent with
 `strict: false` reports `"native_unenforced"`, since OpenAI documents
 constrained decoding only for strict mode.
 
+Strict mode cannot produce content that is not a JSON object. So when
+a `strict: true` attempt finishes with `finish_reason` `"stop"`, no
+stop sequence set, and content that is prose, a bare array or anything
+else that is not a JSON object, the provider logs one `WARNING` with
+the event name `openarmature.structured_output.schema_not_honored`. It
+names the model, the call's `call_id` and the attempt's index. One
+cause is an endpoint that accepts `response_format` and ignores it. A
+JSON object that fails validation does not trigger the warning. The
+warning is advisory: the call still raises `StructuredOutputInvalid`,
+and nothing is retried or switched to the fallback because of it.
+
 `strict_mode_supported(schema)` (exported from `openarmature.llm`)
 performs the deep recursive check. The heuristic is conservative:
 anything not on the list below trips to `strict: false`:

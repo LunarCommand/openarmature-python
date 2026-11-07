@@ -6717,6 +6717,91 @@ async def test_the_token_budget_diagnostic_carries_its_event_name() -> None:
     assert event_name_of(breaches[0]) == TOKEN_BUDGET_EXCEEDED
 
 
+async def test_the_schema_not_honored_record_reaches_the_otel_log_with_its_fields() -> None:
+    # observability §5.5.7 and §7: the provider's record arrives through the
+    # bridge with its event name on the OTel field, the four attributes and the
+    # correlation id. Driven through the provider, so the emitter's own extra=
+    # is what is checked.
+    import httpx
+    from opentelemetry._logs import SeverityNumber
+    from opentelemetry.sdk._logs import LoggerProvider
+    from opentelemetry.sdk._logs.export import (
+        InMemoryLogRecordExporter,
+        SimpleLogRecordProcessor,
+    )
+
+    from openarmature.llm.errors import StructuredOutputInvalid
+    from openarmature.llm.messages import UserMessage
+    from openarmature.llm.providers.openai import OpenAIProvider
+    from openarmature.observability.correlation import (
+        _reset_correlation_id,
+        _set_correlation_id,
+    )
+    from openarmature.observability.diagnostics import STRUCTURED_OUTPUT_SCHEMA_NOT_HONORED
+
+    def handler(_req: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "id": "cc-1",
+                "object": "chat.completion",
+                "model": "gpt-test",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "Alice is thirty"},
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {"prompt_tokens": 5, "completion_tokens": 1, "total_tokens": 6},
+            },
+        )
+
+    schema = {
+        "type": "object",
+        "properties": {"name": {"type": "string"}},
+        "required": ["name"],
+        "additionalProperties": False,
+    }
+    root = logging.getLogger()
+    prior_handlers = list(root.handlers)
+    prior_level = root.level
+    prior_factory = logging.getLogRecordFactory()
+    exporter = InMemoryLogRecordExporter()
+    log_provider = LoggerProvider()
+    log_provider.add_log_record_processor(SimpleLogRecordProcessor(exporter))
+    try:
+        install_log_bridge(log_provider)
+        root.setLevel(logging.INFO)
+        provider = OpenAIProvider(
+            base_url="http://test", model="gpt-test", api_key="k", transport=httpx.MockTransport(handler)
+        )
+        token = _set_correlation_id("cid-not-honored")
+        try:
+            with pytest.raises(StructuredOutputInvalid):
+                await provider.complete([UserMessage(content="go")], response_schema=schema)
+        finally:
+            _reset_correlation_id(token)
+            await provider.aclose()
+        log_provider.force_flush()
+
+        emitted = [d.log_record for d in exporter.get_finished_logs()]
+        records = [r for r in emitted if r.event_name == STRUCTURED_OUTPUT_SCHEMA_NOT_HONORED]
+        assert len(records) == 1, f"expected one record; got {[str(r.body) for r in emitted]}"
+        attrs = dict(records[0].attributes or {})
+        assert records[0].severity_number == SeverityNumber.WARN
+        assert attrs["openarmature.llm.provider"] == "openai"
+        assert attrs["openarmature.llm.model"] == "gpt-test"
+        assert attrs["openarmature.llm.attempt_index"] == 0
+        assert attrs["openarmature.llm.call_id"]
+        assert attrs["openarmature.correlation_id"] == "cid-not-honored"
+    finally:
+        root.handlers[:] = prior_handlers
+        root.setLevel(prior_level)
+        logging.setLogRecordFactory(prior_factory)
+        log_provider.shutdown()
+
+
 def test_event_name_bridge_degrades_when_the_upstream_seam_is_gone() -> None:
     # The lift subclasses the OTel handler's `_translate`, which is its private
     # surface. Once that method no longer exists, `super()._translate(...)`

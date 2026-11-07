@@ -639,6 +639,7 @@ correlation:
 | `openarmature.langfuse.payload_suppressed` | `WARNING` | OA cannot establish the Langfuse client's provider binding and suppresses every harvested-payload channel |
 | `openarmature.langfuse.shared_provider_accepted` | `WARNING` | You accepted a shared provider and OA proceeded onto it |
 | `openarmature.langfuse.shared_provider_no_payload` | `INFO` | OA's client is on a provider it did not isolate, but no payload channel is live, so nothing is exported to it |
+| `openarmature.structured_output.schema_not_honored` | `WARNING` | A `strict: true` structured-output attempt finished normally with content that is not a JSON object, so the schema did not bind ([details](llms.md#strict-mode)) |
 | `openarmature.token_budget.exceeded` | `WARNING` | An active prompt's token budget was exceeded |
 
   The no-payload one is `INFO` because nothing is leaking on that arm: it

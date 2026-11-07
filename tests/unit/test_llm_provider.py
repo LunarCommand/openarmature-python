@@ -66,6 +66,7 @@ from openarmature.observability.correlation import (
     _set_invocation_id,
     _set_namespace_prefix,
 )
+from openarmature.observability.diagnostics import STRUCTURED_OUTPUT_SCHEMA_NOT_HONORED, event_name_of
 from openarmature.observability.metadata import set_invocation_metadata
 
 _DispatchToken = Token[Callable[[ObserverEvent], None] | None]
@@ -2640,6 +2641,332 @@ async def test_a_retry_after_a_connection_failure_reports_its_own_path() -> None
     completion = next(e for e in events if isinstance(e, LlmCompletionEvent))
     assert completion.request_params == {"temperature": 0.3}
     assert completion.structured_output_path == "native"
+
+
+# ---------------------------------------------------------------------------
+# A schema the provider did not honor (observability §5.5.7, proposal 0126)
+# ---------------------------------------------------------------------------
+
+_PROSE = "Alice is thirty"
+_REASK = "Return only the JSON object."
+
+
+def _replies(*replies: tuple[str, str]) -> Callable[[httpx.Request], httpx.Response]:
+    # Each wire attempt takes the next (content, finish_reason). The response
+    # names a dated model, which the record must not report.
+    calls = [0]
+
+    def handler(_req: httpx.Request) -> httpx.Response:
+        content, finish_reason = replies[calls[0]]
+        calls[0] += 1
+        return httpx.Response(
+            200,
+            json={
+                "id": f"cc-{calls[0]}",
+                "object": "chat.completion",
+                "model": "gpt-test-2026-01-01",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": content},
+                        "finish_reason": finish_reason,
+                    }
+                ],
+                "usage": {"prompt_tokens": 5, "completion_tokens": 1, "total_tokens": 6},
+            },
+        )
+
+    return handler
+
+
+def _not_honored(caplog: pytest.LogCaptureFixture) -> list[logging.LogRecord]:
+    # Every record carrying the name, at any level, so a second record at
+    # another level fails a count.
+    return [r for r in caplog.records if event_name_of(r) == STRUCTURED_OUTPUT_SCHEMA_NOT_HONORED]
+
+
+@pytest.mark.parametrize(
+    ("content", "finish_reason", "schema", "config", "fallback", "emitted"),
+    [
+        pytest.param(_PROSE, "stop", _PERSON_SCHEMA, None, False, True, id="prose"),
+        pytest.param("[1, 2]", "stop", _PERSON_SCHEMA, None, False, True, id="array"),
+        pytest.param('{"name": NaN}', "stop", _PERSON_SCHEMA, None, False, True, id="nan-is-malformed"),
+        pytest.param(
+            '{"name": "Alice"}', "stop", _PERSON_SCHEMA, None, False, False, id="object-failing-schema"
+        ),
+        pytest.param('{"name": "Ali', "length", _PERSON_SCHEMA, None, False, False, id="length"),
+        pytest.param(_PROSE, "content_filter", _PERSON_SCHEMA, None, False, False, id="content-filter"),
+        pytest.param(
+            _PROSE,
+            "stop",
+            _PERSON_SCHEMA,
+            RuntimeConfig(stop_sequences=["END"]),
+            False,
+            False,
+            id="declared-stop",
+        ),
+        pytest.param(
+            _PROSE,
+            "stop",
+            _PERSON_SCHEMA,
+            RuntimeConfig(extras={"stop": ["END"]}),
+            False,
+            False,
+            id="extras-stop",
+        ),
+        pytest.param(
+            _PROSE,
+            "stop",
+            _PERSON_SCHEMA,
+            RuntimeConfig(extras={"stop": "END"}),
+            False,
+            False,
+            id="extras-stop-string",
+        ),
+        pytest.param(
+            _PROSE,
+            "stop",
+            _PERSON_SCHEMA,
+            RuntimeConfig(stop_sequences=[]),
+            False,
+            True,
+            id="empty-declared-stop",
+        ),
+        pytest.param(
+            _PROSE,
+            "stop",
+            _PERSON_SCHEMA,
+            RuntimeConfig(extras={"stop": []}),
+            False,
+            True,
+            id="empty-extras-stop",
+        ),
+        pytest.param(
+            _PROSE,
+            "stop",
+            _PERSON_SCHEMA,
+            RuntimeConfig(stop_sequences=[], extras={"stop": [123]}),
+            False,
+            True,
+            id="malformed-extras-stop-dropped",
+        ),
+        pytest.param(
+            _PROSE,
+            "stop",
+            _PERSON_SCHEMA,
+            RuntimeConfig(extras={"stop": ""}),
+            False,
+            False,
+            id="empty-string-extras-stop",
+        ),
+        pytest.param(
+            _PROSE,
+            "stop",
+            _PERSON_SCHEMA,
+            RuntimeConfig(stop_sequences=[], extras={"stop": ""}),
+            False,
+            False,
+            id="empty-string-merged-into-empty-list",
+        ),
+        pytest.param(_PROSE, "stop", _LOOSE_SCHEMA, None, False, False, id="native-unenforced"),
+        pytest.param(_PROSE, "stop", _PERSON_SCHEMA, None, True, False, id="prompt-augmentation"),
+    ],
+)
+async def test_the_record_fires_only_for_malformed_content_on_a_normal_native_finish(
+    caplog: pytest.LogCaptureFixture,
+    content: str,
+    finish_reason: str,
+    schema: dict[str, Any],
+    config: RuntimeConfig | None,
+    fallback: bool,
+    emitted: bool,
+) -> None:
+    # observability §5.5.7, as fixture 161 cases 1 to 8, 15 and 18 exercise it.
+    # No invocation is active, so the cases that emit also show the record does
+    # not wait for an observer (case 14): moving the check after the dispatch
+    # check fails every one of them. NaN is malformed because the check reads
+    # content the way the validation does. The stop cases read the body as
+    # sent: a malformed extra beside a declared list is dropped, so none goes
+    # out, and any string is a sequence, since only an empty list carries none.
+    caplog.set_level(logging.DEBUG)
+    provider = OpenAIProvider(
+        base_url="http://test",
+        model="m",
+        api_key="k",
+        transport=httpx.MockTransport(_replies((content, finish_reason))),
+        force_prompt_augmentation_fallback=fallback,
+    )
+    try:
+        with pytest.raises(StructuredOutputInvalid):
+            await provider.complete([UserMessage(content="go")], config=config, response_schema=schema)
+    finally:
+        await provider.aclose()
+
+    assert len(_not_honored(caplog)) == (1 if emitted else 0)
+
+
+async def test_the_record_names_the_call_its_attempt_and_the_bound_model(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # observability §5.5.7: one WARNING record carrying the provider, the bound
+    # model rather than the dated one the response reports, the call id that
+    # joins it to the call's typed event, and the attempt's index. The provider
+    # is not the default, so a hardcoded "openai" fails.
+    caplog.set_level(logging.DEBUG)
+    events, token = _collecting_dispatch()
+    provider = OpenAIProvider(
+        base_url="http://test",
+        model="m",
+        api_key="k",
+        transport=httpx.MockTransport(_replies((_PROSE, "stop"))),
+        genai_system="vllm",
+    )
+    try:
+        with pytest.raises(StructuredOutputInvalid):
+            await provider.complete([UserMessage(content="go")], response_schema=_PERSON_SCHEMA)
+    finally:
+        await provider.aclose()
+        _release_dispatch(token)
+
+    failed = next(e for e in events if isinstance(e, LlmFailedEvent))
+    [record] = _not_honored(caplog)
+    assert record.levelno == logging.WARNING
+    assert getattr(record, "openarmature.llm.provider") == "vllm"
+    assert getattr(record, "openarmature.llm.model") == "m"
+    assert getattr(record, "openarmature.llm.call_id") == failed.call_id
+    assert getattr(record, "openarmature.llm.attempt_index") == 0
+
+
+async def test_a_refusal_openai_reports_as_stop_emits_no_record(caplog: pytest.LogCaptureFixture) -> None:
+    # Fixture 161 case 16: OpenAI reports a refusal with finish_reason "stop",
+    # and the mapping reports it as "content_filter" (llm-provider §8.1.6). The
+    # check reads the mapped value, so the refusal text, which is not JSON,
+    # emits nothing.
+    def handler(_req: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "id": "cc-refusal",
+                "object": "chat.completion",
+                "model": "gpt-test",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": None,
+                            "refusal": "I can't help with that.",
+                        },
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {"prompt_tokens": 5, "completion_tokens": 1, "total_tokens": 6},
+            },
+        )
+
+    caplog.set_level(logging.DEBUG)
+    provider = OpenAIProvider(
+        base_url="http://test", model="m", api_key="k", transport=httpx.MockTransport(handler)
+    )
+    try:
+        with pytest.raises(StructuredOutputInvalid) as raised:
+            await provider.complete([UserMessage(content="go")], response_schema=_PERSON_SCHEMA)
+    finally:
+        await provider.aclose()
+
+    assert raised.value.finish_reason == "content_filter"
+    assert _not_honored(caplog) == []
+
+
+async def test_a_reask_that_recovers_still_records_the_failed_attempt(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # Fixture 161 case 12: the check runs per attempt, so attempt 1's valid
+    # answer does not hide attempt 0's prose, and the valid attempt itself
+    # emits nothing.
+    from openarmature.llm import LlmRetryConfig
+
+    caplog.set_level(logging.DEBUG)
+    provider = OpenAIProvider(
+        base_url="http://test",
+        model="m",
+        api_key="k",
+        transport=httpx.MockTransport(_replies((_PROSE, "stop"), ('{"name": "Alice", "age": 30}', "stop"))),
+    )
+    try:
+        response = await provider.complete(
+            [UserMessage(content="go")],
+            response_schema=_PERSON_SCHEMA,
+            retry=LlmRetryConfig(max_attempts=2, backoff=deterministic_backoff(0), reask=lambda _e: _REASK),
+        )
+    finally:
+        await provider.aclose()
+
+    assert response.parsed == {"name": "Alice", "age": 30}
+    assert [getattr(r, "openarmature.llm.attempt_index") for r in _not_honored(caplog)] == [0]
+
+
+async def test_each_attempt_that_qualifies_gets_its_own_record(caplog: pytest.LogCaptureFixture) -> None:
+    # Fixture 161 case 19: two attempts return prose, so there are two records,
+    # each with its own attempt's index and both with the call's id.
+    from openarmature.llm import LlmRetryConfig
+
+    caplog.set_level(logging.DEBUG)
+    provider = OpenAIProvider(
+        base_url="http://test",
+        model="m",
+        api_key="k",
+        transport=httpx.MockTransport(_replies((_PROSE, "stop"), (_PROSE, "stop"))),
+    )
+    try:
+        with pytest.raises(StructuredOutputInvalid):
+            await provider.complete(
+                [UserMessage(content="go")],
+                response_schema=_PERSON_SCHEMA,
+                retry=LlmRetryConfig(
+                    max_attempts=2, backoff=deterministic_backoff(0), reask=lambda _e: _REASK
+                ),
+            )
+    finally:
+        await provider.aclose()
+
+    records = _not_honored(caplog)
+    assert [getattr(r, "openarmature.llm.attempt_index") for r in records] == [0, 1]
+    assert len({getattr(r, "openarmature.llm.call_id") for r in records}) == 1
+
+
+async def test_a_stop_sequence_on_one_attempt_suppresses_only_its_record(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # Fixture 161 case 13: the override adds a stop sequence to attempt 1 only.
+    # Both attempts return prose, and only attempt 0 is recorded, since the
+    # check reads each attempt's own request. Reading the base config instead
+    # adds a record for attempt 1, and only this test catches that.
+    from openarmature.llm import LlmRetryConfig
+
+    caplog.set_level(logging.DEBUG)
+    provider = OpenAIProvider(
+        base_url="http://test",
+        model="m",
+        api_key="k",
+        transport=httpx.MockTransport(_replies((_PROSE, "stop"), (_PROSE, "stop"))),
+    )
+    try:
+        with pytest.raises(StructuredOutputInvalid):
+            await provider.complete(
+                [UserMessage(content="go")],
+                response_schema=_PERSON_SCHEMA,
+                retry=LlmRetryConfig(
+                    max_attempts=2,
+                    backoff=deterministic_backoff(0),
+                    reask=lambda _e: _REASK,
+                    per_attempt_override=[RuntimeConfig(stop_sequences=["END"])],
+                ),
+            )
+    finally:
+        await provider.aclose()
+
+    assert [getattr(r, "openarmature.llm.attempt_index") for r in _not_honored(caplog)] == [0]
 
 
 # ---------------------------------------------------------------------------
