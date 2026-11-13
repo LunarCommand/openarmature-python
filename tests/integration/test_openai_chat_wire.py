@@ -15,6 +15,7 @@ events, since the provider dispatches them only inside an invocation.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 from collections.abc import Mapping
@@ -115,6 +116,13 @@ def _assert_moon_answer(parsed: dict[str, Any]) -> None:
     assert "armstrong" in str(parsed["name"]).lower()
 
 
+def _is_json_object(content: str) -> bool:
+    try:
+        return isinstance(json.loads(content), dict)
+    except ValueError:
+        return False
+
+
 @pytest.mark.integration
 @requires_openai
 @pytest.mark.parametrize(
@@ -169,11 +177,13 @@ async def test_a_truncated_native_reply_logs_no_schema_not_honored_record(
             schema=_STRICT_SCHEMA, config=RuntimeConfig(max_tokens=5)
         )
 
-    # The reply is cut-off JSON on the native path, so every other arm of the
-    # diagnostic's condition holds and only the finish_reason arm keeps the
-    # record off. Without the length finish this asserts nothing.
+    # Every other arm of the diagnostic's condition holds here: native path, no
+    # stop sequence, content that is not a JSON object. So only the
+    # finish_reason arm keeps the record off. A complete object would keep it
+    # off by itself, which is why the content is checked.
     assert error is not None, "expected the truncated reply to fail validation"
     assert error.finish_reason == "length"
+    assert not _is_json_object(error.output_content), error.output_content
     [failed] = collector.of(LlmFailedEvent)
     assert failed.error_category == "structured_output_invalid"
     assert failed.structured_output_path == "native"
