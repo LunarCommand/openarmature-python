@@ -122,7 +122,8 @@ class _ProviderBase[PlanT: _StructuredPlan](ABC):
         *,
         tools: Sequence[Tool] | None,
         tool_choice: ToolChoice | None,
-    ) -> PlanT: ...
+    ) -> PlanT:
+        raise NotImplementedError
 
     @abstractmethod
     def _build_request_body(
@@ -135,10 +136,12 @@ class _ProviderBase[PlanT: _StructuredPlan](ABC):
         plan: PlanT | None = None,
         tool_choice: ToolChoice | None = None,
         collision_hint: Callable[[str], str | None] | None = None,
-    ) -> dict[str, Any]: ...
+    ) -> dict[str, Any]:
+        raise NotImplementedError
 
     @abstractmethod
-    def _stop_sequence_sent(self, body: Mapping[str, Any]) -> bool: ...
+    def _stop_sequence_sent(self, body: Mapping[str, Any]) -> bool:
+        raise NotImplementedError
 
     @abstractmethod
     def _parse_response(
@@ -148,10 +151,12 @@ class _ProviderBase[PlanT: _StructuredPlan](ABC):
         schema_class: type[BaseModel] | None,
         *,
         plan: PlanT | None = None,
-    ) -> Response: ...
+    ) -> Response:
+        raise NotImplementedError
 
     @abstractmethod
-    def _classify_http_error(self, resp: httpx.Response) -> LlmProviderError: ...
+    def _classify_http_error(self, resp: httpx.Response) -> LlmProviderError:
+        raise NotImplementedError
 
     async def complete(
         self,
