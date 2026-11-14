@@ -3,7 +3,7 @@
 When you target a wire format that isn't OpenAI Chat Completions
 (Anthropic Messages, Bedrock, an internal gateway, a hand-rolled
 inference service), implement the `Provider` Protocol yourself. The
-shipped `OpenAIProvider` is ~465 lines because it handles every
+shipped `OpenAIProvider` is much larger because it handles every
 edge case; a minimum-viable Provider is closer to 60 lines.
 
 If you're new to Providers, read [Model Providers](index.md) for the
@@ -238,9 +238,11 @@ of:
   `openarmature.graph.events.LlmCompletionEvent` on successful
   calls and `LlmFailedEvent` alongside any `LlmProviderError` your
   adapter raises. The sketch below is the success and failure
-  emission shape inside `complete()`; the bundled
-  `OpenAIProvider._build_llm_completion_event` and
-  `_build_llm_failed_event` are the reference implementations.
+  emission shape inside `complete()`. The bundled providers share
+  their call machinery, and its `_build_llm_completion_event` and
+  `_build_llm_failed_event` in
+  `src/openarmature/llm/providers/_base.py` are the reference
+  implementations.
 
   ```python
   import time

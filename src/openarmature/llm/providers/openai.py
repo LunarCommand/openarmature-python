@@ -175,6 +175,7 @@ class OpenAIProvider(_ProviderBase[_OpenAIPlan]):
     """
 
     _completions_path = "/v1/chat/completions"
+    _logger_name = __name__
 
     def __init__(
         self,
@@ -364,7 +365,12 @@ class OpenAIProvider(_ProviderBase[_OpenAIPlan]):
     # ------------------------------------------------------------------
 
     def _plan_structured_output(
-        self, messages: Sequence[Message], schema_dict: dict[str, Any] | None
+        self,
+        messages: Sequence[Message],
+        schema_dict: dict[str, Any] | None,
+        *,
+        tools: Sequence[Tool] | None,
+        tool_choice: ToolChoice | None,
     ) -> _OpenAIPlan:
         fallback = self._force_prompt_augmentation_fallback
         # On the fallback path, the wire-side messages list is an
@@ -504,6 +510,8 @@ class OpenAIProvider(_ProviderBase[_OpenAIPlan]):
         payload: dict[str, Any],
         schema_dict: dict[str, Any] | None,
         schema_class: type[BaseModel] | None,
+        *,
+        plan: _OpenAIPlan | None = None,
     ) -> Response:
         try:
             choices = cast("list[dict[str, Any]]", payload["choices"])

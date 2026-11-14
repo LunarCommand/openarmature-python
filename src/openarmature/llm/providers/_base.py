@@ -66,7 +66,7 @@ if TYPE_CHECKING:
 class _StructuredPlan:
     """How one call obtains structured output: the messages its first attempt
     sends and the path it reports. A mapping subclasses this to carry what its
-    body builder needs."""
+    body builder and response parser need."""
 
     messages: Sequence[Message]
     path: str | None
@@ -75,23 +75,38 @@ class _StructuredPlan:
 class _ProviderBase[PlanT: _StructuredPlan](ABC):
     """Shared ``complete()`` for the bundled wire mappings.
 
-    A subclass sets ``model``, ``_genai_system``, ``_populate_caller_metadata``
-    and ``_client`` in its constructor, and implements the abstract methods.
+    A concrete subclass sets the ``_completions_path`` and ``_logger_name``
+    class attributes, sets ``model``, ``_genai_system``,
+    ``_populate_caller_metadata`` and ``_client`` in its constructor, and
+    implements the abstract methods.
     """
 
     # The endpoint path ``complete()`` posts to, relative to the client's base URL.
     _completions_path: ClassVar[str]
+    # The logger the shared code's warnings go to. Fixed per mapping, so a
+    # caller's subclass still logs under ``openarmature``.
+    _logger_name: ClassVar[str]
 
     model: str
     _genai_system: str
     _populate_caller_metadata: bool
     _client: httpx.AsyncClient
 
+    def __init_subclass__(cls, **kwargs: Any) -> None:
+        super().__init_subclass__(**kwargs)
+        # ABCMeta sets __abstractmethods__ only after this runs, so abstractness
+        # is read from the members. A missing attribute would otherwise surface
+        # as an AttributeError on the first call, outside the typed-event path.
+        abstract = any(getattr(getattr(cls, name, None), "__isabstractmethod__", False) for name in dir(cls))
+        if abstract:
+            return
+        missing = [name for name in ("_completions_path", "_logger_name") if not hasattr(cls, name)]
+        if missing:
+            raise TypeError(f"{cls.__name__} must set the class attribute(s) {', '.join(missing)}")
+
     @property
     def _log(self) -> logging.Logger:
-        # Records name the concrete provider's module, so a caller filtering on
-        # it sees the same logger whichever class holds the code.
-        return logging.getLogger(type(self).__module__)
+        return logging.getLogger(self._logger_name)
 
     async def aclose(self) -> None:
         """Close the underlying HTTP client. Optional; async clients
@@ -101,7 +116,12 @@ class _ProviderBase[PlanT: _StructuredPlan](ABC):
 
     @abstractmethod
     def _plan_structured_output(
-        self, messages: Sequence[Message], schema_dict: dict[str, Any] | None
+        self,
+        messages: Sequence[Message],
+        schema_dict: dict[str, Any] | None,
+        *,
+        tools: Sequence[Tool] | None,
+        tool_choice: ToolChoice | None,
     ) -> PlanT: ...
 
     @abstractmethod
@@ -126,6 +146,8 @@ class _ProviderBase[PlanT: _StructuredPlan](ABC):
         payload: dict[str, Any],
         schema_dict: dict[str, Any] | None,
         schema_class: type[BaseModel] | None,
+        *,
+        plan: PlanT | None = None,
     ) -> Response: ...
 
     @abstractmethod
@@ -236,7 +258,7 @@ class _ProviderBase[PlanT: _StructuredPlan](ABC):
             # tools list.
             validate_tool_choice(tool_choice, tools)
             schema_dict, schema_class = _normalize_response_schema(response_schema)
-            plan = self._plan_structured_output(messages, schema_dict)
+            plan = self._plan_structured_output(messages, schema_dict, tools=tools, tool_choice=tool_choice)
             stop_sent = False
 
             def build_body(
@@ -340,7 +362,7 @@ class _ProviderBase[PlanT: _StructuredPlan](ABC):
                 )
 
             response = await self._do_complete_with_retry(
-                build_body, config, plan.messages, schema_dict, schema_class, retry, emit_attempt
+                build_body, config, plan, schema_dict, schema_class, retry, emit_attempt
             )
         except LlmProviderError as exc:
             # Failure path: dispatch a typed LlmFailedEvent per
@@ -473,7 +495,7 @@ class _ProviderBase[PlanT: _StructuredPlan](ABC):
             [int, RuntimeConfig | None, Sequence[Message], frozenset[str] | None], dict[str, Any]
         ],
         base_config: RuntimeConfig | None,
-        base_messages: Sequence[Message],
+        plan: PlanT,
         schema_dict: dict[str, Any] | None,
         schema_class: type[BaseModel] | None,
         retry: RetryConfig | None,
@@ -486,7 +508,7 @@ class _ProviderBase[PlanT: _StructuredPlan](ABC):
         retry config. ``build_body`` assembles the outbound body for an attempt
         from its index, config and messages (proposal 0095: retries MAY vary sampling
         via ``per_attempt_override`` and/or the messages via ``reask``); absent
-        both, every attempt uses ``base_config`` + ``base_messages`` unchanged,
+        both, every attempt uses ``base_config`` + ``plan.messages`` unchanged,
         preserving the byte-identical replay. ``emit_attempt`` (when supplied)
         fires once per attempt with that attempt's index, latency, outcome
         (response on success, exception on failure), and ``retry_reason`` (None
@@ -496,11 +518,12 @@ class _ProviderBase[PlanT: _StructuredPlan](ABC):
         ``complete()`` for the single terminal typed event, so exactly one
         terminal event still fires per ``complete()`` call.
         """
+        base_messages = plan.messages
         if retry is None:
             body = build_body(0, base_config, base_messages, None)
             attempt_start = time.perf_counter()
             try:
-                response = await self._do_complete(body, schema_dict, schema_class)
+                response = await self._do_complete(body, schema_dict, schema_class, plan)
             except LlmProviderError as exc:
                 if emit_attempt is not None:
                     emit_attempt(0, (time.perf_counter() - attempt_start) * 1000.0, None, exc, None)
@@ -542,7 +565,7 @@ class _ProviderBase[PlanT: _StructuredPlan](ABC):
             body = build_body(attempt, attempt_config, transcript, inherited_extras if merged else None)
             attempt_start = time.perf_counter()
             try:
-                response = await self._do_complete(body, schema_dict, schema_class)
+                response = await self._do_complete(body, schema_dict, schema_class, plan)
             except LlmProviderError as exc:
                 # Per-attempt event fires for every attempt, including this
                 # failed one (the terminal failed attempt's span carries the
@@ -914,6 +937,7 @@ class _ProviderBase[PlanT: _StructuredPlan](ABC):
         body: dict[str, Any],
         schema_dict: dict[str, Any] | None,
         schema_class: type[BaseModel] | None,
+        plan: PlanT,
     ) -> Response:
         """Wire-call helper: separated from ``complete()`` so the
         LLM-provider span hook in ``complete()`` can wrap success and
@@ -932,7 +956,7 @@ class _ProviderBase[PlanT: _StructuredPlan](ABC):
             raise ProviderInvalidResponse(f"POST {self._completions_path} returned non-JSON body") from exc
         if not isinstance(payload_raw, dict):
             raise ProviderInvalidResponse(f"POST {self._completions_path} returned a non-object body")
-        return self._parse_response(cast("dict[str, Any]", payload_raw), schema_dict, schema_class)
+        return self._parse_response(cast("dict[str, Any]", payload_raw), schema_dict, schema_class, plan=plan)
 
 
 __all__ = ["_ProviderBase", "_StructuredPlan"]

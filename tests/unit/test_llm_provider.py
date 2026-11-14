@@ -11,6 +11,7 @@ the canonical category-string contract, and the
 
 from __future__ import annotations
 
+import inspect
 import json
 import logging
 from collections.abc import Callable
@@ -2876,6 +2877,96 @@ async def test_a_refusal_openai_reports_as_stop_emits_no_record(caplog: pytest.L
 
     assert raised.value.finish_reason == "content_filter"
     assert _not_honored(caplog) == []
+
+
+class _CallersProvider(OpenAIProvider):
+    """A caller's subclass, defined outside the openarmature package."""
+
+
+async def test_a_callers_subclass_still_logs_under_openarmature(caplog: pytest.LogCaptureFixture) -> None:
+    # The shared base reads the mapping's fixed logger name. Naming the logger
+    # after the subclass's module would move the record out of the
+    # ``openarmature`` tree, past any level or filter a caller set there.
+    caplog.set_level(logging.DEBUG)
+    provider = _CallersProvider(
+        base_url="http://test",
+        model="m",
+        api_key="k",
+        transport=httpx.MockTransport(_replies((_PROSE, "stop"))),
+    )
+    try:
+        with pytest.raises(StructuredOutputInvalid):
+            await provider.complete([UserMessage(content="go")], response_schema=_PERSON_SCHEMA)
+    finally:
+        await provider.aclose()
+
+    [record] = _not_honored(caplog)
+    assert record.name == "openarmature.llm.providers.openai"
+
+
+class _AllHooks:
+    # Every abstract hook, so a mapping built on it lacks only the class
+    # attributes.
+    def _plan_structured_output(self, *a: Any, **k: Any) -> Any: ...
+    def _build_request_body(self, *a: Any, **k: Any) -> Any: ...
+    def _stop_sequence_sent(self, *a: Any, **k: Any) -> Any: ...
+    def _parse_response(self, *a: Any, **k: Any) -> Any: ...
+    def _classify_http_error(self, *a: Any, **k: Any) -> Any: ...
+
+
+def test_a_concrete_mapping_must_name_its_endpoint_and_logger() -> None:
+    from openarmature.llm.providers._base import _ProviderBase
+
+    def mapping(attrs: dict[str, Any]) -> Any:
+        return type("_Mapping", (_AllHooks, _ProviderBase), attrs)
+
+    with pytest.raises(TypeError, match="_completions_path, _logger_name"):
+        mapping({})
+    with pytest.raises(TypeError, match="_logger_name"):
+        mapping({"_completions_path": "/v1/x"})
+    assert mapping({"_completions_path": "/v1/x", "_logger_name": "x"})._logger_name == "x"
+
+    # An abstract intermediate may leave them to its subclasses.
+    assert inspect.isabstract(type("_Intermediate", (_ProviderBase,), {}))
+
+
+async def test_the_plan_sees_the_tools_and_reaches_the_parser() -> None:
+    # A mapping's fallback can depend on the caller's tools, and its parser on
+    # the path the plan chose, so both hooks get them.
+    seen: dict[str, Any] = {}
+    tool = Tool(name="lookup", description="d", parameters={"type": "object", "properties": {}})
+
+    class _Spy(OpenAIProvider):
+        def _plan_structured_output(
+            self, messages: Any, schema_dict: Any, *, tools: Any, tool_choice: Any
+        ) -> Any:
+            seen["tools"], seen["tool_choice"] = tools, tool_choice
+            return super()._plan_structured_output(
+                messages, schema_dict, tools=tools, tool_choice=tool_choice
+            )
+
+        def _parse_response(
+            self, payload: Any, schema_dict: Any, schema_class: Any, *, plan: Any = None
+        ) -> Any:
+            seen["plan"] = plan
+            return super()._parse_response(payload, schema_dict, schema_class, plan=plan)
+
+    provider = _Spy(
+        base_url="http://test",
+        model="m",
+        api_key="k",
+        transport=httpx.MockTransport(_replies(('{"name": "Alice", "age": 30}', "stop"))),
+    )
+    try:
+        await provider.complete(
+            [UserMessage(content="go")], tools=[tool], tool_choice="auto", response_schema=_PERSON_SCHEMA
+        )
+    finally:
+        await provider.aclose()
+
+    assert seen["tools"] == [tool]
+    assert seen["tool_choice"] == "auto"
+    assert seen["plan"].path == "native"
 
 
 async def test_a_reask_that_recovers_still_records_the_failed_attempt(
