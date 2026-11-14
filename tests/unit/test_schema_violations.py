@@ -25,7 +25,7 @@ from pydantic_core import PydanticCustomError
 from openarmature.llm._schema_violations import _missing, describe, model_violations, schema_violations
 from openarmature.llm.errors import StructuredOutputInvalid
 from openarmature.llm.provider import _validator_class
-from openarmature.llm.providers.openai import _parse_and_validate
+from openarmature.llm.providers._common import _parse_and_validate
 
 _DRAFT_03 = "http://json-schema.org/draft-03/schema#"
 _DRAFT_04 = "http://json-schema.org/draft-04/schema#"
@@ -588,7 +588,7 @@ def test_a_model_failure_that_cannot_be_described_keeps_pydantic_text(
     def undescribable(*_: Any) -> list[Any]:
         raise RuntimeError("no location")
 
-    monkeypatch.setattr("openarmature.llm.providers.openai.model_violations", undescribable)
+    monkeypatch.setattr("openarmature.llm.providers._common.model_violations", undescribable)
     with pytest.raises(StructuredOutputInvalid) as excinfo:
         _parse_and_validate('{"name": "rex9"}', Pet.model_json_schema(), Pet)
     assert excinfo.value.error_message.startswith("1 validation error for Pet")
