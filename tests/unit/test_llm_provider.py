@@ -2907,11 +2907,20 @@ async def test_a_callers_subclass_still_logs_under_openarmature(caplog: pytest.L
 class _AllHooks:
     # Every abstract hook, so a mapping built on it lacks only the class
     # attributes.
-    def _plan_structured_output(self, *a: Any, **k: Any) -> Any: ...
-    def _build_request_body(self, *a: Any, **k: Any) -> Any: ...
-    def _stop_sequence_sent(self, *a: Any, **k: Any) -> Any: ...
-    def _parse_response(self, *a: Any, **k: Any) -> Any: ...
-    def _classify_http_error(self, *a: Any, **k: Any) -> Any: ...
+    def _plan_structured_output(self, *a: Any, **k: Any) -> Any:
+        pass
+
+    def _build_request_body(self, *a: Any, **k: Any) -> Any:
+        pass
+
+    def _stop_sequence_sent(self, *a: Any, **k: Any) -> Any:
+        pass
+
+    def _parse_response(self, *a: Any, **k: Any) -> Any:
+        pass
+
+    def _classify_http_error(self, *a: Any, **k: Any) -> Any:
+        pass
 
 
 def test_a_concrete_mapping_must_name_its_endpoint_and_logger() -> None:
