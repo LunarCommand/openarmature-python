@@ -27,10 +27,8 @@ from openarmature.llm import (
     strict_mode_supported,
     validate_response_schema,
 )
-from openarmature.llm.providers.openai import (
-    _augment_messages_with_schema_directive,
-    _derive_schema_name,
-)
+from openarmature.llm.providers._common import _augment_messages_with_schema_directive
+from openarmature.llm.providers.openai import _derive_schema_name
 
 # ---------------------------------------------------------------------------
 # validate_response_schema

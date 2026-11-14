@@ -3912,7 +3912,7 @@ def test_canonicalize_dict_keys_sorts_recursively_and_preserves_lists() -> None:
     # Locks down the helper's contract directly — defensive in case
     # the wire-byte tests above ever miss a regression that surfaces
     # only in deeply nested or list-of-objects shapes.
-    from openarmature.llm.providers.openai import _canonicalize_dict_keys
+    from openarmature.llm.providers._common import _canonicalize_dict_keys
 
     src: dict[str, Any] = {
         "z": 1,
