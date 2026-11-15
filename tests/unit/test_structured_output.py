@@ -767,7 +767,9 @@ async def test_a_reask_builder_written_against_the_documented_fields_recovers() 
         await provider.aclose()
 
     assert len(bodies) == 2, f"expected one reask attempt, got {len(bodies)} call(s)"
-    assert json.loads(response.message.content or "{}")["mass_kg"] == 1340
+    content = response.message.content
+    assert isinstance(content, str)
+    assert json.loads(content)["mass_kg"] == 1340
     # The builder saw both documented fields populated, not empty strings.
     assert len(seen) == 1
     invalid_output, complaint = seen[0]

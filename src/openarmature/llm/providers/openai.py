@@ -89,6 +89,7 @@ from ..messages import (
     ToolCall,
     ToolChoice,
     UserMessage,
+    _assistant_text,
 )
 from ..provider import strict_mode_supported
 from ..response import FinishReason, ParsedValue, Response, RuntimeConfig, Usage
@@ -630,7 +631,9 @@ class OpenAIProvider(_ProviderBase[_OpenAIPlan]):
         parsed: ParsedValue = None
         if schema_dict is not None and finish_reason_typed != "tool_calls":
             try:
-                parsed = _parse_and_validate(assistant_msg.content, schema_dict, schema_class)
+                parsed = _parse_and_validate(
+                    _assistant_text(assistant_msg.content), schema_dict, schema_class
+                )
             except StructuredOutputInvalid as exc:
                 # The wire response is intact; attach its response-side
                 # context so the failed event / §7 error carries finish_reason
@@ -757,11 +760,17 @@ def _message_to_wire(msg: Message) -> dict[str, Any]:
             "content": [_block_to_wire(block) for block in msg.content],
         }
     if isinstance(msg, AssistantMessage):
+        # §8.1.1 strip-on-send: thinking and redacted-thinking blocks have no
+        # OpenAI wire form, so they are dropped and the text blocks go out as
+        # one string.
+        text = _assistant_text(msg.content)
         # Tool-call-only assistants emit ``"content": null`` on the
         # wire — that's the OpenAI convention for "no textual reply,
         # only tool calls." Don't "fix" this to an empty string; the
-        # API rejects empty-string content alongside tool_calls.
-        wire: dict[str, Any] = {"role": "assistant", "content": msg.content or None}
+        # API rejects empty-string content alongside tool_calls. A message
+        # the strip left with neither text nor tool calls sends "", since
+        # §8.1.1 makes stripping raise no error.
+        wire: dict[str, Any] = {"role": "assistant", "content": text or (None if msg.tool_calls else "")}
         if msg.tool_calls:
             wire["tool_calls"] = [
                 {

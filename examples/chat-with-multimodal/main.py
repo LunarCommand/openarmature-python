@@ -391,7 +391,9 @@ def _truncate(s: str, cap: int = _TRANSCRIPT_LINE_CAP) -> str:
 def _format_turn(turn_index: int, turn: UserTurn, assistant: AssistantMessage) -> str:
     image_tag = " [+image]" if turn.image_url is not None else ""
     user_short = _truncate(turn.text)
-    assistant_short = _truncate(assistant.content or "")
+    assistant_text = assistant.content
+    assert isinstance(assistant_text, str)
+    assistant_short = _truncate(assistant_text)
     return f"\n--- Turn {turn_index}{image_tag} ---\nUSER:      {user_short}\nASSISTANT: {assistant_short}"
 
 

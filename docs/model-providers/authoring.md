@@ -33,6 +33,7 @@ from openarmature.llm import (
     Response,
     RuntimeConfig,
     SystemMessage,
+    TextBlock,
     Tool,
     ToolMessage,
     Usage,
@@ -126,7 +127,11 @@ def _msg_to_wire(msg: Message) -> dict[str, Any]:
     if isinstance(msg, UserMessage):
         return {"role": "user", "content": msg.content}
     if isinstance(msg, AssistantMessage):
-        return {"role": "assistant", "content": msg.content or ""}
+        # This wire has no form for thinking blocks, so only the text goes out.
+        content = msg.content
+        if not isinstance(content, str):
+            content = "".join(b.text for b in content if isinstance(b, TextBlock))
+        return {"role": "assistant", "content": content}
     if isinstance(msg, ToolMessage):
         return {
             "role": "tool",
@@ -249,7 +254,7 @@ of:
   import uuid
 
   from openarmature.graph.events import LlmCompletionEvent, LlmFailedEvent
-  from openarmature.llm import serialize_messages
+  from openarmature.llm import TextBlock, serialize_messages
   from openarmature.llm.errors import LlmProviderError
   from openarmature.observability.correlation import (
       current_attempt_index,
@@ -304,6 +309,11 @@ of:
               ))
           raise
 
+      # A block list contributes only its text blocks.
+      content = response.message.content
+      response_text = content if isinstance(content, str) else "".join(
+          b.text for b in content if isinstance(b, TextBlock)
+      )
       if dispatch is not None:
           latency_ms = (time.perf_counter() - adapter_start) * 1000.0
           dispatch(LlmCompletionEvent(
@@ -322,7 +332,7 @@ of:
               latency_ms=latency_ms,
               finish_reason=response.finish_reason,
               input_messages=serialized_messages,
-              output_content=response.message.content or None,
+              output_content=response_text or None,
               output_tool_calls=list(response.message.tool_calls or []),
               request_params=request_params,
               request_extras=request_extras,

@@ -117,7 +117,9 @@ async def _chat(system: str, user: str) -> str:
     response = await _get_provider().complete(
         [SystemMessage(content=system), UserMessage(content=user)],
     )
-    return (response.message.content or "").strip()
+    content = response.message.content
+    assert isinstance(content, str)
+    return content.strip()
 
 
 # ---------------------------------------------------------------------------

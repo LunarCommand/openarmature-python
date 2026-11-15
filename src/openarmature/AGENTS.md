@@ -1512,6 +1512,8 @@ The failure mode without `append` is silent and easy to misdiagnose: the final s
 After `await provider.complete(messages, tools=[...])` returns, the shape of `Response` varies by `finish_reason`:
 
 - `finish_reason == "stop"`: assistant produced a content response. `message.content` carries the text; `message.tool_calls` is empty.
+
+`message.content` is typed as a string or a list of blocks. It is a list only when the provider surfaces reasoning, with `ThinkingBlock` / `RedactedThinkingBlock` entries beside `TextBlock`s; `OpenAIProvider` always returns a string. Narrow before treating it as text (`assert isinstance(content, str)`), and pass a list back unchanged in the next request to the same provider.
 - `finish_reason == "tool_calls"`: assistant emitted tool calls. `message.tool_calls` carries the list; `message.content` is typically empty (model didn't say anything beyond the tool calls).
 - `finish_reason == "length"` / `"content_filter"` / `"error"`: completion was cut off or refused; `message.content` may be partial or empty. A refusal from OpenAI arrives as `"content_filter"` with the refusal text as `message.content`.
 
@@ -1527,7 +1529,9 @@ if response.finish_reason == "tool_calls":
         messages.append(ToolMessage(content=result, tool_call_id=tc.id))
     response = await provider.complete(messages, tools=tools)
 elif response.finish_reason == "stop":
-    handle_text(response.message.content)
+    content = response.message.content
+    assert isinstance(content, str)  # a list only from a provider that surfaces reasoning
+    handle_text(content)
 else:
     handle_error_or_partial(response)
 ```

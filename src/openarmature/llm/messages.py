@@ -251,6 +251,61 @@ ContentBlock = Annotated[
 ]
 
 
+class ThinkingBlock(BaseModel):
+    """Reasoning content a provider emitted, on an assistant message.
+
+    Send the block back unchanged on the next call to the same provider:
+    the provider uses ``signature`` to verify it. A provider that does not
+    surface reasoning content drops the block when the message is sent to
+    it.
+
+    Attributes:
+        type: The discriminator literal ``"thinking"``.
+        text: The reasoning text. A non-empty string.
+        signature: The provider's opaque verification token, or ``None``
+            when the provider carries none on the block. Never construct
+            or change it.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal["thinking"] = "thinking"
+    text: str
+    signature: str | None = None
+
+    @model_validator(mode="after")
+    def _check_text(self) -> ThinkingBlock:
+        if not self.text:
+            raise ValueError("thinking block: text MUST be a non-empty string")
+        return self
+
+
+class RedactedThinkingBlock(BaseModel):
+    """Reasoning content the provider withheld, on an assistant message.
+
+    It holds the reasoning's place in the conversation so the next call to
+    the same provider can continue it. Send it back unchanged.
+
+    Attributes:
+        type: The discriminator literal ``"redacted_thinking"``.
+        data: The provider's opaque blob. Never construct or change it.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal["redacted_thinking"] = "redacted_thinking"
+    data: str
+
+
+# The blocks an assistant message may carry (llm-provider §3, §3.1.4, §3.1.5).
+# Image blocks are user-only, and thinking blocks are assistant-only, so the
+# two unions are separate.
+AssistantContentBlock = Annotated[
+    TextBlock | ThinkingBlock | RedactedThinkingBlock,
+    Field(discriminator="type"),
+]
+
+
 class UserMessage(_MessageBase):
     """User messages carry content as either a non-empty text string
     or a non-empty ordered sequence of content blocks (text and/or
@@ -271,13 +326,19 @@ class UserMessage(_MessageBase):
 
 
 class AssistantMessage(_MessageBase):
-    """Assistant messages MAY carry ``tool_calls``. If ``tool_calls``
-    is present and non-empty, ``content`` MAY be empty (the assistant
-    is purely calling tools); otherwise ``content`` MUST be a
-    non-empty string. ``tool_call_id`` MUST be absent."""
+    """Assistant messages carry content as a text string or an ordered
+    list of text, thinking and redacted-thinking blocks, and MAY carry
+    ``tool_calls``. If ``tool_calls`` is present and non-empty,
+    ``content`` MAY be empty (the assistant is purely calling tools);
+    otherwise ``content`` MUST be a non-empty string or a non-empty list.
+    ``tool_call_id`` MUST be absent.
+
+    A response carries a block list only from a provider that surfaces
+    reasoning content.
+    """
 
     role: Literal["assistant"] = "assistant"
-    content: str = ""
+    content: str | list[AssistantContentBlock] = ""
     tool_calls: list[ToolCall] | None = None
 
     @model_validator(mode="after")
@@ -285,9 +346,18 @@ class AssistantMessage(_MessageBase):
         has_tool_calls = bool(self.tool_calls)
         if not has_tool_calls and not self.content:
             raise ValueError(
-                "assistant message: content MUST be a non-empty string when tool_calls is absent or empty"
+                "assistant message: content MUST be a non-empty string or a non-empty list "
+                "of blocks when tool_calls is absent or empty"
             )
         return self
+
+
+# The text of an assistant message's content: a string as it is, a block list
+# as its text blocks joined in order with no separator, thinking left out.
+def _assistant_text(content: str | list[AssistantContentBlock]) -> str:
+    if isinstance(content, str):
+        return content
+    return "".join(block.text for block in content if isinstance(block, TextBlock))
 
 
 class ToolMessage(_MessageBase):
@@ -312,6 +382,8 @@ Message = Annotated[
 
 
 __all__ = [
+    "_assistant_text",
+    "AssistantContentBlock",
     "AssistantMessage",
     "ContentBlock",
     "ForceTool",
@@ -320,8 +392,10 @@ __all__ = [
     "ImageSourceInline",
     "ImageSourceURL",
     "Message",
+    "RedactedThinkingBlock",
     "SystemMessage",
     "TextBlock",
+    "ThinkingBlock",
     "Tool",
     "ToolCall",
     "ToolChoice",

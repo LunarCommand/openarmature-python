@@ -143,7 +143,9 @@ async def classify(s: AlertState) -> Mapping[str, Any]:
                 # `temperature` in both is the error the next node demonstrates.
                 config=RuntimeConfig(temperature=0.0, extras=VENDOR_KNOBS),
             )
-            severities.append((response.message.content or "").strip())
+            content = response.message.content
+            assert isinstance(content, str)
+            severities.append(content.strip())
     finally:
         await provider.aclose()
     return {"severities": severities}

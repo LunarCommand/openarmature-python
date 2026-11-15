@@ -284,7 +284,9 @@ async def extract(s: FeedState) -> Mapping[str, Any]:
             # the log.
             failures.append(f"{exc.error_message}: {exc.output_content[:90]}")
             continue
-        records.append(json.loads(response.message.content or "{}"))
+        content = response.message.content
+        assert isinstance(content, str)
+        records.append(json.loads(content))
 
     return {"records": records, "failures": failures}
 

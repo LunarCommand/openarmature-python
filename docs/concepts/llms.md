@@ -47,7 +47,9 @@ async def analyze(state: AnalysisState) -> dict:
     response = await _get_provider().complete(
         [UserMessage(content=state.text)],
     )
-    return {"raw": response.message.content}
+    content = response.message.content
+    assert isinstance(content, str)
+    return {"raw": content}
 
 
 async def main() -> None:
@@ -583,17 +585,19 @@ honored the constraint is observable from the returned
 `finish_reason` and `tool_calls` fields; the framework does NOT
 re-validate the response against the constraint.
 
-## Content blocks (multimodal user messages)
+## Content blocks
 
-User messages carry content in one of two shapes: a plain text string,
-or an ordered sequence of typed content blocks. The string form is the
-common case. Blocks are how you mix non-text modalities into a single
-turn. v1 defines two block types: text and image. Audio and video are
+User and assistant messages carry content in one of two shapes: a
+plain text string, or an ordered sequence of typed content blocks. The
+string form is the common case. User messages use blocks to mix text
+and images in one turn. Assistant messages use them to carry a
+provider's reasoning beside its text (see
+[Thinking blocks](#thinking-blocks) below). Audio and video are
 deferred to future proposals.
 
-System, assistant, and tool messages stay text-string only. Image
-inputs are user-only in v1; image outputs (assistant-message-borne
-images, e.g. DALL-E-style generation) are out of scope.
+System and tool messages stay text-string only. Image inputs are
+user-only; image outputs (assistant-message-borne images, e.g.
+DALL-E-style generation) are out of scope.
 
 ### Text and image blocks
 
@@ -630,7 +634,9 @@ async def describe_image(provider: OpenAIProvider) -> str:
             )
         ]
     )
-    return response.message.content
+    content = response.message.content
+    assert isinstance(content, str)
+    return content
 ```
 
 Block order is preserved on the wire. Providers vary in whether they
@@ -693,6 +699,41 @@ checks (failing fast before the wire trip when you know the model
 doesn't support images) live above the provider as userland
 middleware; the provider doesn't ship a static model-capability
 catalog.
+
+### Thinking blocks
+
+Providers that surface reasoning return it on the assistant message
+as `ThinkingBlock` entries (the reasoning text, plus an opaque
+`signature` the provider uses to verify it) and `RedactedThinkingBlock`
+entries (reasoning the provider withheld, as an opaque `data` blob).
+`message.content` is then a list of blocks rather than a string:
+
+```python
+from openarmature.llm import TextBlock, ThinkingBlock
+
+content = response.message.content
+if isinstance(content, str):
+    answer = content
+else:
+    answer = "".join(b.text for b in content if isinstance(b, TextBlock))
+    reasoning = [b.text for b in content if isinstance(b, ThinkingBlock)]
+```
+
+`OpenAIProvider` never returns thinking blocks, so its replies are
+always strings.
+
+To continue the conversation, append the assistant message as you
+received it. The provider that issued the blocks checks them on the
+next call, so never build or edit one yourself. Sending the same
+history to a provider that does not surface reasoning is safe: that
+provider drops the thinking and redacted-thinking blocks before
+sending and keeps the text. `OpenAIProvider` sends the remaining text
+blocks as one string, joined without separators.
+
+On the typed LLM events, `input_messages` renders a thinking block as
+its type and text and a redacted-thinking block as its type alone,
+leaving out the provider's tokens. `output_content` is the reply's
+text blocks joined, without the reasoning.
 
 ## Routing on parsed fields
 
