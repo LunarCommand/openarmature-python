@@ -4,13 +4,14 @@ messages, the request parameters and the extras."""
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, assert_never
 
 from openarmature.observability.llm_event import serialize_tool_calls
 
 from .messages import (
     AssistantMessage,
     ImageSourceInline,
+    RedactedThinkingBlock,
     SystemMessage,
     TextBlock,
     ThinkingBlock,
@@ -96,12 +97,15 @@ def _assistant_content(content: str | list[AssistantContentBlock]) -> str | list
         return content
     rendered: list[dict[str, Any]] = []
     for block in content:
-        if isinstance(block, TextBlock):
-            rendered.append({"type": "text", "text": block.text})
-        elif isinstance(block, ThinkingBlock):
-            rendered.append({"type": "thinking", "text": block.text})
-        else:  # RedactedThinkingBlock
-            rendered.append({"type": "redacted_thinking"})
+        match block:
+            case TextBlock():
+                rendered.append({"type": "text", "text": block.text})
+            case ThinkingBlock():
+                rendered.append({"type": "thinking", "text": block.text})
+            case RedactedThinkingBlock():
+                rendered.append({"type": "redacted_thinking"})
+            case _:
+                assert_never(block)
     return rendered
 
 

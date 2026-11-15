@@ -239,7 +239,9 @@ since = "0.10.0"
 
 # Spec v0.28.0-v0.31.0 (proposals 0037, 0039, 0040, 0041).
 [proposals."0037"]
-status = "not-yet"
+status = "partial"
+since = "0.18.0"
+note = "Anthropic Messages mapping, partly implemented. Done: thinking and redacted-thinking blocks on assistant messages (llm-provider 3.1.4 / 3.1.5), which the OpenAI mapping strips on send (8.1.1); fixture 043 runs. Missing: the 8.2 Anthropic provider itself (request, response, errors and structured output), so fixtures 033 to 042 stay deferred."
 
 [proposals."0039"]
 status = "implemented"

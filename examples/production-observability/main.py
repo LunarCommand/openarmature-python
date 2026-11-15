@@ -441,8 +441,10 @@ async def respond(state: BriefingState) -> dict[str, Any]:
         ],
         config=RuntimeConfig(temperature=0.0, max_tokens=300),
     )
+    content = response.message.content
+    assert isinstance(content, str)
     return {
-        "answer": response.message.content or "",
+        "answer": content,
         # ``response.response_model`` is the version-specific
         # identifier the provider echoes back on the response body
         # (e.g., ``gpt-4o-mini-2024-07-18``); falling back to

@@ -101,10 +101,10 @@ class Response(BaseModel):
     # "tool_calls" — the tool-call path and the structured-content
     # path are mutually exclusive at the response level.
     #
-    # message.content carries the model's content string verbatim.
-    # parsed is the post-receive deserialization of that content
-    # against the schema; the provider's content string is NOT
-    # re-serialized from parsed.
+    # message.content carries the model's content verbatim: a string,
+    # or a block list when the provider surfaces reasoning. parsed is
+    # the post-receive deserialization of its text against the schema;
+    # the content is NOT re-serialized from parsed.
     model_config = ConfigDict(extra="forbid", arbitrary_types_allowed=True)
 
     message: AssistantMessage

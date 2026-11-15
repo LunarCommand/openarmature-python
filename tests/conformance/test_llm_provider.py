@@ -68,19 +68,19 @@ CONFORMANCE_DIR = (
 # claim to implement passes." Each subsequent PR drops its own rows as it
 # lands the underlying support.
 _DEFERRED_FIXTURES: dict[str, str] = {
-    # Proposal 0037 (Anthropic Messages mapping) shipped in spec v0.28.0
-    # but python marks it not-yet in conformance.toml — the Anthropic
-    # provider isn't implemented yet.
-    "033-anthropic-basic-message-round-trip": "Anthropic provider not implemented (0037 not-yet)",
-    "034-anthropic-tool-call-flow": "Anthropic provider not implemented (0037 not-yet)",
-    "035-anthropic-image-content-blocks": "Anthropic provider not implemented (0037 not-yet)",
-    "036-anthropic-tool-choice-modes": "Anthropic provider not implemented (0037 not-yet)",
-    "037-anthropic-runtime-config-mapping": "Anthropic provider not implemented (0037 not-yet)",
-    "038-anthropic-max-tokens-required": "Anthropic provider not implemented (0037 not-yet)",
-    "039-anthropic-error-mapping": "Anthropic provider not implemented (0037 not-yet)",
-    "040-anthropic-structured-output-native": "Anthropic provider not implemented (0037 not-yet)",
-    "041-anthropic-structured-output-fallback": "Anthropic provider not implemented (0037 not-yet)",
-    "042-anthropic-thinking-block-round-trip": "Anthropic provider not implemented (0037 not-yet)",
+    # Proposal 0037 (Anthropic Messages mapping) is partial in
+    # conformance.toml: the thinking blocks ship (fixture 043 runs), the
+    # Anthropic provider does not yet.
+    "033-anthropic-basic-message-round-trip": "Anthropic provider not implemented",
+    "034-anthropic-tool-call-flow": "Anthropic provider not implemented",
+    "035-anthropic-image-content-blocks": "Anthropic provider not implemented",
+    "036-anthropic-tool-choice-modes": "Anthropic provider not implemented",
+    "037-anthropic-runtime-config-mapping": "Anthropic provider not implemented",
+    "038-anthropic-max-tokens-required": "Anthropic provider not implemented",
+    "039-anthropic-error-mapping": "Anthropic provider not implemented",
+    "040-anthropic-structured-output-native": "Anthropic provider not implemented",
+    "041-anthropic-structured-output-fallback": "Anthropic provider not implemented",
+    "042-anthropic-thinking-block-round-trip": "Anthropic provider not implemented",
     # Proposal 0038 (Google Gemini wire-format mapping) shipped in spec
     # v0.32.0 but python marks it not-yet — the Gemini provider isn't
     # implemented in this release.
@@ -148,7 +148,7 @@ _DEFERRED_FIXTURES: dict[str, str] = {
     ),
     # Proposal 0101 (spec v0.96.0) malformed usage counter.
     "070-usage-counter-derived-total-unreported-addend": (
-        "Proposal 0101 derived-total addend; Anthropic provider not implemented (0037 not-yet)"
+        "Proposal 0101 derived-total addend; Anthropic provider not implemented"
     ),
     "071-usage-counter-malformed-streaming-terminal-chunk": (
         "Proposal 0101 malformed streaming terminal chunk; streaming not implemented (0062)"
@@ -161,11 +161,9 @@ _DEFERRED_FIXTURES: dict[str, str] = {
         "Proposal 0108 stream collision; streaming not implemented (0062)"
     ),
     "078-managed-anthropic-stream-reject": (
-        "Proposal 0108 managed stream reject; Anthropic provider not implemented (0037 not-yet)"
+        "Proposal 0108 managed stream reject; Anthropic provider not implemented"
     ),
-    "079-managed-anthropic-stop-merge": (
-        "Proposal 0108 stop merge; Anthropic provider not implemented (0037 not-yet)"
-    ),
+    "079-managed-anthropic-stop-merge": ("Proposal 0108 stop merge; Anthropic provider not implemented"),
     "080-managed-gemini-stop-merge": (
         "Proposal 0108 stop merge; Gemini provider not implemented (0038 not-yet)"
     ),

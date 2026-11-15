@@ -379,7 +379,9 @@ async def evaluate_product(state: PipelineState) -> dict[str, Any]:
     # Spans emitted AFTER this call carry productId + productCategory
     # in addition to whatever the original invoke() metadata supplied.
     response = await provider.complete(messages)
-    return {"score": parse_score(response.message.content)}
+    content = response.message.content
+    assert isinstance(content, str)
+    return {"score": parse_score(content)}
 ```
 
 Spans already closed are NOT retroactively updated. Spans emitted
@@ -802,9 +804,13 @@ This surfaces four attributes:
 - `openarmature.llm.input.messages`: JSON-encoded message array
   (the spec §3 message shape: `{role, content, tool_calls?, …}`), as
   sent, so on the schema-directive fallback it includes the directive.
+  Thinking blocks on assistant messages keep their text here even
+  when the provider strips them from the request; their signatures
+  and redacted data are left out.
 - `openarmature.llm.output.content`: the assistant's response
-  content string verbatim. Omitted for tool-call-only responses
-  with empty content.
+  text: the content string verbatim, or the text blocks joined when
+  the content is a block list, without any thinking. Omitted when
+  the response has no text, as on tool-call-only responses.
 - `openarmature.llm.output.tool_calls`: JSON-encoded `[{id, name,
   arguments}]` array of the tool calls the model requested (the same
   encoding `tool_calls` uses inside `input.messages`). This is the

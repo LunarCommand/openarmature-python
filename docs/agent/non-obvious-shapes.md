@@ -26,10 +26,10 @@ The failure mode without `append` is silent and easy to misdiagnose: the final s
 After `await provider.complete(messages, tools=[...])` returns, the shape of `Response` varies by `finish_reason`:
 
 - `finish_reason == "stop"`: assistant produced a content response. `message.content` carries the text; `message.tool_calls` is empty.
-
-`message.content` is typed as a string or a list of blocks. It is a list only when the provider surfaces reasoning, with `ThinkingBlock` / `RedactedThinkingBlock` entries beside `TextBlock`s; `OpenAIProvider` always returns a string. Narrow before treating it as text (`assert isinstance(content, str)`), and pass a list back unchanged in the next request to the same provider.
 - `finish_reason == "tool_calls"`: assistant emitted tool calls. `message.tool_calls` carries the list; `message.content` is typically empty (model didn't say anything beyond the tool calls).
 - `finish_reason == "length"` / `"content_filter"` / `"error"`: completion was cut off or refused; `message.content` may be partial or empty. A refusal from OpenAI arrives as `"content_filter"` with the refusal text as `message.content`.
+
+`message.content` is typed as a string or a list of blocks. It is a list only when the provider surfaces reasoning, with `ThinkingBlock` / `RedactedThinkingBlock` entries beside `TextBlock`s; `OpenAIProvider` always returns a string. Narrow before treating it as text (`assert isinstance(content, str)`), and pass a list back unchanged in the next request to the same provider.
 
 Post-LLM logic that reads `message.content` without checking `finish_reason` misses the entire tool-calling path:
 
