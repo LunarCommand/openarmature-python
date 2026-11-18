@@ -46,7 +46,7 @@ from ..errors import (
     ProviderUnavailable,
     StructuredOutputInvalid,
 )
-from ..messages import AssistantMessage, Message, Tool, ToolChoice, UserMessage
+from ..messages import AssistantMessage, Message, Tool, ToolChoice, UserMessage, _assistant_text
 from ..provider import validate_message_list, validate_tool_choice, validate_tools
 from ..response import Response, RuntimeConfig, Usage
 from ._common import _as_sent, _normalize_response_schema, _schema_not_honored
@@ -686,8 +686,9 @@ class _ProviderBase[PlanT: _StructuredPlan](ABC):
         # exclusive at the response level, and provider.complete()
         # leaves the AssistantMessage.content as the empty string on
         # the tool-call path (which we project to None per the
-        # typed-event contract).
-        output_content = response.message.content or None
+        # typed-event contract). A block list contributes its text blocks;
+        # thinking is not part of the output content.
+        output_content = _assistant_text(response.message.content) or None
         return LlmCompletionEvent(
             invocation_id=invocation_id,
             correlation_id=current_correlation_id(),
@@ -886,7 +887,7 @@ class _ProviderBase[PlanT: _StructuredPlan](ABC):
                 response_model=response.response_model,
                 usage=response.usage,
                 finish_reason=response.finish_reason,
-                output_content=response.message.content or None,
+                output_content=_assistant_text(response.message.content) or None,
                 # Proposal 0076: the attempt's output tool calls — the
                 # OTel observer renders the output tool-call span
                 # attributes from this per-attempt event.

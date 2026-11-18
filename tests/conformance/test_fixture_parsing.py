@@ -116,42 +116,20 @@ _DEFERRED_FIXTURES: dict[str, str] = {
     "prompt-management/016-prompt-observability-entities-propagation": (
         "Cases shape models live in the PM-specific capability harness"
     ),
-    # Proposal 0037 (Anthropic Messages mapping) shipped in spec v0.28.0
-    # but python marks it not-yet in conformance.toml — the Anthropic
-    # provider isn't implemented in this release. Defer the
-    # cross-capability parse tests for the 033-042 fixtures until that
-    # lands; the openai-strips-thinking-blocks side (043) is in
-    # test_llm_provider.py's own deferral.
-    "llm-provider/033-anthropic-basic-message-round-trip": (
-        "Anthropic provider not implemented (0037 not-yet in conformance.toml)"
-    ),
-    "llm-provider/034-anthropic-tool-call-flow": (
-        "Anthropic provider not implemented (0037 not-yet in conformance.toml)"
-    ),
-    "llm-provider/035-anthropic-image-content-blocks": (
-        "Anthropic provider not implemented (0037 not-yet in conformance.toml)"
-    ),
-    "llm-provider/036-anthropic-tool-choice-modes": (
-        "Anthropic provider not implemented (0037 not-yet in conformance.toml)"
-    ),
-    "llm-provider/037-anthropic-runtime-config-mapping": (
-        "Anthropic provider not implemented (0037 not-yet in conformance.toml)"
-    ),
-    "llm-provider/038-anthropic-max-tokens-required": (
-        "Anthropic provider not implemented (0037 not-yet in conformance.toml)"
-    ),
-    "llm-provider/039-anthropic-error-mapping": (
-        "Anthropic provider not implemented (0037 not-yet in conformance.toml)"
-    ),
-    "llm-provider/040-anthropic-structured-output-native": (
-        "Anthropic provider not implemented (0037 not-yet in conformance.toml)"
-    ),
-    "llm-provider/041-anthropic-structured-output-fallback": (
-        "Anthropic provider not implemented (0037 not-yet in conformance.toml)"
-    ),
-    "llm-provider/042-anthropic-thinking-block-round-trip": (
-        "Anthropic provider not implemented (0037 not-yet in conformance.toml)"
-    ),
+    # Proposal 0037 (Anthropic Messages mapping) is partial in
+    # conformance.toml: the Anthropic provider isn't implemented yet.
+    # Defer the cross-capability parse tests for the 033-042 fixtures
+    # until it lands.
+    "llm-provider/033-anthropic-basic-message-round-trip": ("Anthropic provider not implemented"),
+    "llm-provider/034-anthropic-tool-call-flow": ("Anthropic provider not implemented"),
+    "llm-provider/035-anthropic-image-content-blocks": ("Anthropic provider not implemented"),
+    "llm-provider/036-anthropic-tool-choice-modes": ("Anthropic provider not implemented"),
+    "llm-provider/037-anthropic-runtime-config-mapping": ("Anthropic provider not implemented"),
+    "llm-provider/038-anthropic-max-tokens-required": ("Anthropic provider not implemented"),
+    "llm-provider/039-anthropic-error-mapping": ("Anthropic provider not implemented"),
+    "llm-provider/040-anthropic-structured-output-native": ("Anthropic provider not implemented"),
+    "llm-provider/041-anthropic-structured-output-fallback": ("Anthropic provider not implemented"),
+    "llm-provider/042-anthropic-thinking-block-round-trip": ("Anthropic provider not implemented"),
     # Proposal 0038 (Google Gemini wire-format mapping) shipped in spec
     # v0.32.0 but python marks it not-yet in conformance.toml — the
     # Gemini provider isn't implemented in this release. Defer the

@@ -262,7 +262,9 @@ async def answer(state: SearchState) -> Mapping[str, Any]:
         ],
         config=RuntimeConfig(temperature=0.0),
     )
-    return {"answer": response.message.content}
+    content = response.message.content
+    assert isinstance(content, str)
+    return {"answer": content}
 
 
 async def trace(event: ObserverEvent) -> None:

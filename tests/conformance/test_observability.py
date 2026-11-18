@@ -2470,7 +2470,9 @@ def _build_graph_with_mock_llm(case: Mapping[str, Any]) -> tuple[Any, list[Any]]
             tracer = otel_trace.get_tracer(_EXTERNAL_TRACER_SCOPE)
             with tracer.start_as_current_span(cast("str", global_span["span_name"])):
                 response = await provider.complete(messages)
-        return {stores_in: response.message.content or ""}
+        content = response.message.content
+        assert isinstance(content, str)
+        return {stores_in: content}
 
     builder = (
         GraphBuilder(state_cls)
@@ -2608,7 +2610,9 @@ async def _run_fixture_038_case(case: Mapping[str, Any]) -> None:
             messages: tuple[Any, ...] = messages_in,
         ) -> dict[str, str]:
             response = await provider.complete(list(messages))
-            return {stores: response.message.content or ""}
+            content = response.message.content
+            assert isinstance(content, str)
+            return {stores: content}
 
         subgraphs[sub_id] = (
             GraphBuilder(inner_state_cls)
@@ -2901,7 +2905,9 @@ async def _run_fixture_132_case(case: Mapping[str, Any], spec: Mapping[str, Any]
             # cannot degenerate silently).
             pass
         response = await provider.complete(list(messages_in))
-        return {stores_in: response.message.content or ""}
+        content = response.message.content
+        assert isinstance(content, str)
+        return {stores_in: content}
 
     leaf_sg = (
         GraphBuilder(leaf_state_cls)
@@ -4481,7 +4487,9 @@ async def _run_llm_payload_case(case: Mapping[str, Any]) -> None:
             cast("Sequence[Any]", materialized_messages),
             config=runtime_config,
         )
-        return {stores_in: response.message.content or ""}
+        content = response.message.content
+        assert isinstance(content, str)
+        return {stores_in: content}
 
     # Build the graph: the calls_llm node uses ``ask_llm_body``; any
     # other node carries an ``update:`` block translated to a simple
@@ -6879,7 +6887,9 @@ def _build_chain_llm_graph(
     def _make_node_body(messages: list[Any], stores_in: str, config: Any) -> Any:
         async def _body(_s: Any) -> dict[str, str]:
             response = await provider.complete(messages, config=config)
-            return {stores_in: response.message.content or ""}
+            content = response.message.content
+            assert isinstance(content, str)
+            return {stores_in: content}
 
         return _body
 
@@ -8152,7 +8162,9 @@ async def _run_llm_cache_fixture_case(case: Mapping[str, Any]) -> None:
     async def ask_body(_s: Any) -> dict[str, str]:
         response = await provider.complete(messages)
         captured_responses.append(response)
-        return {stores_in: response.message.content or ""}
+        content = response.message.content
+        assert isinstance(content, str)
+        return {stores_in: content}
 
     builder = (
         GraphBuilder(state_cls).add_node(entry_name, ask_body).add_edge(entry_name, END).set_entry(entry_name)
@@ -8383,7 +8395,9 @@ async def _run_typed_event_fanout_case(case: Mapping[str, Any]) -> None:
 
     async def _ask_body(_s: Any) -> dict[str, str]:
         response = await provider.complete(inner_messages)
-        return {stores_in: response.message.content or ""}
+        content = response.message.content
+        assert isinstance(content, str)
+        return {stores_in: content}
 
     inner_builder = (
         GraphBuilder(inner_state_cls).add_node("ask", _ask_body).add_edge("ask", END).set_entry("ask")
@@ -8507,7 +8521,9 @@ async def _run_typed_event_branches_case(case: Mapping[str, Any]) -> None:
 
         async def _body(_s: Any, _msgs: Any = msgs, _stores: str = stores_in) -> dict[str, str]:
             response = await provider.complete(list(_msgs))
-            return {_stores: response.message.content or ""}
+            content = response.message.content
+            assert isinstance(content, str)
+            return {_stores: content}
 
         builder = GraphBuilder(inner_state_cls).add_node("ask", _body).add_edge("ask", END).set_entry("ask")
         return builder.compile()

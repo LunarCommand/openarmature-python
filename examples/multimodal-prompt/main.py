@@ -258,8 +258,10 @@ async def describe_surface(s: AnalysisState) -> Mapping[str, Any]:
     with with_active_prompt(rendered):
         response = await _get_provider().complete([multimodal_message])
 
+    content = response.message.content
+    assert isinstance(content, str)
     return {
-        "surface_description": (response.message.content or "").strip(),
+        "surface_description": content.strip(),
         "trace": ["describe_surface"],
     }
 
@@ -281,8 +283,10 @@ async def describe_equipment(s: AnalysisState) -> Mapping[str, Any]:
     with with_active_prompt(rendered):
         response = await _get_provider().complete([multimodal_message])
 
+    content = response.message.content
+    assert isinstance(content, str)
     return {
-        "equipment_description": (response.message.content or "").strip(),
+        "equipment_description": content.strip(),
         "trace": ["describe_equipment"],
     }
 

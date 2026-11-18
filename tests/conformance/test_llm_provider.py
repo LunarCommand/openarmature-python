@@ -68,21 +68,19 @@ CONFORMANCE_DIR = (
 # claim to implement passes." Each subsequent PR drops its own rows as it
 # lands the underlying support.
 _DEFERRED_FIXTURES: dict[str, str] = {
-    # Proposal 0037 (Anthropic Messages mapping) shipped in spec v0.28.0
-    # but python marks it not-yet in conformance.toml — the Anthropic
-    # provider isn't implemented in this release. 043 (the OpenAI side
-    # stripping anthropic thinking-block content) waits with it.
-    "033-anthropic-basic-message-round-trip": "Anthropic provider not implemented (0037 not-yet)",
-    "034-anthropic-tool-call-flow": "Anthropic provider not implemented (0037 not-yet)",
-    "035-anthropic-image-content-blocks": "Anthropic provider not implemented (0037 not-yet)",
-    "036-anthropic-tool-choice-modes": "Anthropic provider not implemented (0037 not-yet)",
-    "037-anthropic-runtime-config-mapping": "Anthropic provider not implemented (0037 not-yet)",
-    "038-anthropic-max-tokens-required": "Anthropic provider not implemented (0037 not-yet)",
-    "039-anthropic-error-mapping": "Anthropic provider not implemented (0037 not-yet)",
-    "040-anthropic-structured-output-native": "Anthropic provider not implemented (0037 not-yet)",
-    "041-anthropic-structured-output-fallback": "Anthropic provider not implemented (0037 not-yet)",
-    "042-anthropic-thinking-block-round-trip": "Anthropic provider not implemented (0037 not-yet)",
-    "043-openai-strips-thinking-blocks": "Anthropic provider not implemented (0037 not-yet)",
+    # Proposal 0037 (Anthropic Messages mapping) is partial in
+    # conformance.toml: the thinking blocks ship (fixture 043 runs), the
+    # Anthropic provider does not yet.
+    "033-anthropic-basic-message-round-trip": "Anthropic provider not implemented",
+    "034-anthropic-tool-call-flow": "Anthropic provider not implemented",
+    "035-anthropic-image-content-blocks": "Anthropic provider not implemented",
+    "036-anthropic-tool-choice-modes": "Anthropic provider not implemented",
+    "037-anthropic-runtime-config-mapping": "Anthropic provider not implemented",
+    "038-anthropic-max-tokens-required": "Anthropic provider not implemented",
+    "039-anthropic-error-mapping": "Anthropic provider not implemented",
+    "040-anthropic-structured-output-native": "Anthropic provider not implemented",
+    "041-anthropic-structured-output-fallback": "Anthropic provider not implemented",
+    "042-anthropic-thinking-block-round-trip": "Anthropic provider not implemented",
     # Proposal 0038 (Google Gemini wire-format mapping) shipped in spec
     # v0.32.0 but python marks it not-yet — the Gemini provider isn't
     # implemented in this release.
@@ -150,7 +148,7 @@ _DEFERRED_FIXTURES: dict[str, str] = {
     ),
     # Proposal 0101 (spec v0.96.0) malformed usage counter.
     "070-usage-counter-derived-total-unreported-addend": (
-        "Proposal 0101 derived-total addend; Anthropic provider not implemented (0037 not-yet)"
+        "Proposal 0101 derived-total addend; Anthropic provider not implemented"
     ),
     "071-usage-counter-malformed-streaming-terminal-chunk": (
         "Proposal 0101 malformed streaming terminal chunk; streaming not implemented (0062)"
@@ -163,11 +161,9 @@ _DEFERRED_FIXTURES: dict[str, str] = {
         "Proposal 0108 stream collision; streaming not implemented (0062)"
     ),
     "078-managed-anthropic-stream-reject": (
-        "Proposal 0108 managed stream reject; Anthropic provider not implemented (0037 not-yet)"
+        "Proposal 0108 managed stream reject; Anthropic provider not implemented"
     ),
-    "079-managed-anthropic-stop-merge": (
-        "Proposal 0108 stop merge; Anthropic provider not implemented (0037 not-yet)"
-    ),
+    "079-managed-anthropic-stop-merge": ("Proposal 0108 stop merge; Anthropic provider not implemented"),
     "080-managed-gemini-stop-merge": (
         "Proposal 0108 stop merge; Gemini provider not implemented (0038 not-yet)"
     ),
@@ -319,10 +315,9 @@ def _build_message(raw: Mapping[str, Any]) -> Message:
                 )
                 for tc in cast("list[Mapping[str, Any]]", tool_calls_raw)
             ]
-        return AssistantMessage(
-            content=cast("str", raw.get("content") or ""),
-            tool_calls=tool_calls,
-        )
+        # A string, or a list of text / thinking / redacted-thinking blocks
+        # that Pydantic parses on the block ``type``.
+        return AssistantMessage(content=raw.get("content") or "", tool_calls=tool_calls)
     if role == "tool":
         return ToolMessage(
             content=cast("str", raw["content"]),
@@ -602,6 +597,19 @@ async def test_llm_provider_fixture(fixture_path: Path) -> None:
     await _run_one_case(spec)
 
 
+# No fixture names the model its provider is bound to; each expects it on the
+# wire. Bind the model the first expected wire request names, so a fixture
+# written for gpt-test or claude-test sees its own, and keep test-model for
+# the rest. The wire assertion still checks the provider sends its bound model.
+def _bound_model(spec: Mapping[str, Any]) -> str:
+    for call_spec in _iter_calls(spec):
+        wire = cast("Mapping[str, Any]", call_spec.get("expected_wire_request") or {})
+        model = wire.get("model")
+        if isinstance(model, str):
+            return model
+    return "test-model"
+
+
 async def _run_one_case(spec: Mapping[str, Any]) -> None:
     """Run one fixture or one case from a cases-shape fixture.
 
@@ -611,7 +619,7 @@ async def _run_one_case(spec: Mapping[str, Any]) -> None:
     - top-level ``mock_provider:`` configures the wire mock
     """
     mock_cfg = cast("Mapping[str, Any]", spec.get("mock_provider") or {})
-    provider, captured, served = _build_provider(mock_cfg)
+    provider, captured, served = _build_provider(mock_cfg, model=_bound_model(spec))
     try:
         for call_spec in _iter_calls(spec):
             await _run_one_call(provider, call_spec, captured, served)

@@ -498,11 +498,16 @@ class LlmCompletionEvent:
       before any request was sent carries the caller's list.
       Non-nullable; empty list when the call had no history. Inline
       image bytes are redacted before population (see the comment
-      block above for the redaction contract).
-    - ``output_content``: the assistant message's content string
-      from the response. ``None`` on tool-call-only responses
-      (the structured-response and tool-call paths are mutually
-      exclusive at the response level).
+      block above for the redaction contract). Thinking blocks on
+      assistant messages appear here with their text even when the
+      provider strips them from the request; their signatures and
+      redacted data do not.
+    - ``output_content``: the text of the response's assistant
+      message: its content string, or its text blocks joined when
+      the content is a block list, without any thinking. ``None``
+      when there is no text, as on tool-call-only responses (the
+      structured-response and tool-call paths are mutually exclusive
+      at the response level).
     - ``output_tool_calls``: the assistant message's output tool
       calls (the ``ToolCall`` records). Populated unconditionally;
       empty list when the response carried no tool calls. The output

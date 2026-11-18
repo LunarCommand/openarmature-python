@@ -3431,7 +3431,9 @@ async def test_prompt_context_propagates_cross_task_via_provider_complete() -> N
         # dispatch worker (a separate task) could not see this set.
         with with_active_prompt(rendered):
             response = await provider.complete(rendered.messages)
-        return {"reply": response.message.content}
+        content = response.message.content
+        assert isinstance(content, str)
+        return {"reply": content}
 
     exporter = InMemorySpanExporter()
     observer = OTelObserver(span_processor=SimpleSpanProcessor(exporter))

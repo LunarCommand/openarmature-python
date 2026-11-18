@@ -1820,7 +1820,9 @@ async def _run_langfuse_134_case1(case: Mapping[str, Any]) -> None:
             # concurrently than total_asks (asserted > 0 above).
             pass
         response = await provider.complete(cast("Sequence[Any]", messages_in))
-        return {stores_in: response.message.content or ""}
+        content = response.message.content
+        assert isinstance(content, str)
+        return {stores_in: content}
 
     leaf_sg = (
         GraphBuilder(leaf_state_cls)

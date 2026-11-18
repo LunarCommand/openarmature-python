@@ -29,6 +29,8 @@ After `await provider.complete(messages, tools=[...])` returns, the shape of `Re
 - `finish_reason == "tool_calls"`: assistant emitted tool calls. `message.tool_calls` carries the list; `message.content` is typically empty (model didn't say anything beyond the tool calls).
 - `finish_reason == "length"` / `"content_filter"` / `"error"`: completion was cut off or refused; `message.content` may be partial or empty. A refusal from OpenAI arrives as `"content_filter"` with the refusal text as `message.content`.
 
+`message.content` is typed as a string or a list of blocks. It is a list only when the provider surfaces reasoning, with `ThinkingBlock` / `RedactedThinkingBlock` entries beside `TextBlock`s; `OpenAIProvider` always returns a string. Narrow before treating it as text (`assert isinstance(content, str)`), and pass a list back unchanged in the next request to the same provider.
+
 Post-LLM logic that reads `message.content` without checking `finish_reason` misses the entire tool-calling path:
 
 ```python
@@ -41,7 +43,9 @@ if response.finish_reason == "tool_calls":
         messages.append(ToolMessage(content=result, tool_call_id=tc.id))
     response = await provider.complete(messages, tools=tools)
 elif response.finish_reason == "stop":
-    handle_text(response.message.content)
+    content = response.message.content
+    assert isinstance(content, str)  # a list only from a provider that surfaces reasoning
+    handle_text(content)
 else:
     handle_error_or_partial(response)
 ```

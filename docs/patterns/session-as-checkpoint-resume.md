@@ -75,7 +75,9 @@ async def handle_turn(session_id: str, user_input: str) -> str:
     # correlation_id; exact lookup is application-side bookkeeping.
     sessions_db.set_invocation_id(session_id, latest_for(session_id))
 
-    return final.messages[-1].content
+    reply = final.messages[-1].content
+    assert isinstance(reply, str)
+    return reply
 ```
 
 `sessions_db` is your application's session-state store (Postgres,

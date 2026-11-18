@@ -167,8 +167,10 @@ async def answer_briefing(s: BriefingState) -> dict[str, Any]:
     provider = _get_provider()
     with with_active_prompt(rendered):
         response = await provider.complete(rendered.messages)
+    content = response.message.content
+    assert isinstance(content, str)
     return {
-        "answer": response.message.content or "",
+        "answer": content,
         "prompt_version": rendered.version,
     }
 

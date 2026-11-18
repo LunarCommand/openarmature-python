@@ -10,7 +10,7 @@ OpenArmature is a workflow framework for LLM pipelines and tool-calling agents: 
 
 ## Capability contracts
 
-_Sourced from openarmature-spec v0.119.1. Each entry below reproduces §1 (Purpose) and §2 (Concepts) of the capability's `spec.md` verbatim — including additions from accepted proposals that this Python implementation may not yet ship. For per-proposal implementation status (implemented / partial / textual-only / not-yet), read the `conformance.toml` manifest. Where it is depends on how you got this package. Installed from PyPI: beside this file, at `importlib.resources.files('openarmature') / 'conformance.toml'`. In a source checkout: at the repository root, since it is added to the distribution at build time rather than committed under `src/`. Check it before planning against a behaviour from an accepted proposal: the spec text above includes proposals this implementation may not ship yet, and a `partial` entry says which half is missing. This release has four. For the full spec text (execution model, error semantics, determinism, observer hooks, etc.) see the linked docs site._
+_Sourced from openarmature-spec v0.119.1. Each entry below reproduces §1 (Purpose) and §2 (Concepts) of the capability's `spec.md` verbatim — including additions from accepted proposals that this Python implementation may not yet ship. For per-proposal implementation status (implemented / partial / textual-only / not-yet), read the `conformance.toml` manifest. Where it is depends on how you got this package. Installed from PyPI: beside this file, at `importlib.resources.files('openarmature') / 'conformance.toml'`. In a source checkout: at the repository root, since it is added to the distribution at build time rather than committed under `src/`. Check it before planning against a behaviour from an accepted proposal: the spec text above includes proposals this implementation may not ship yet, and a `partial` entry says which half is missing. This release has five. For the full spec text (execution model, error semantics, determinism, observer hooks, etc.) see the linked docs site._
 
 ### Capability: `graph-engine`
 
@@ -1184,7 +1184,9 @@ async def handle_turn(session_id: str, user_input: str) -> str:
     # correlation_id; exact lookup is application-side bookkeeping.
     sessions_db.set_invocation_id(session_id, latest_for(session_id))
 
-    return final.messages[-1].content
+    reply = final.messages[-1].content
+    assert isinstance(reply, str)
+    return reply
 ```
 
 `sessions_db` is your application's session-state store (Postgres,
@@ -1515,6 +1517,8 @@ After `await provider.complete(messages, tools=[...])` returns, the shape of `Re
 - `finish_reason == "tool_calls"`: assistant emitted tool calls. `message.tool_calls` carries the list; `message.content` is typically empty (model didn't say anything beyond the tool calls).
 - `finish_reason == "length"` / `"content_filter"` / `"error"`: completion was cut off or refused; `message.content` may be partial or empty. A refusal from OpenAI arrives as `"content_filter"` with the refusal text as `message.content`.
 
+`message.content` is typed as a string or a list of blocks. It is a list only when the provider surfaces reasoning, with `ThinkingBlock` / `RedactedThinkingBlock` entries beside `TextBlock`s; `OpenAIProvider` always returns a string. Narrow before treating it as text (`assert isinstance(content, str)`), and pass a list back unchanged in the next request to the same provider.
+
 Post-LLM logic that reads `message.content` without checking `finish_reason` misses the entire tool-calling path:
 
 ```python
@@ -1527,7 +1531,9 @@ if response.finish_reason == "tool_calls":
         messages.append(ToolMessage(content=result, tool_call_id=tc.id))
     response = await provider.complete(messages, tools=tools)
 elif response.finish_reason == "stop":
-    handle_text(response.message.content)
+    content = response.message.content
+    assert isinstance(content, str)  # a list only from a provider that surfaces reasoning
+    handle_text(content)
 else:
     handle_error_or_partial(response)
 ```

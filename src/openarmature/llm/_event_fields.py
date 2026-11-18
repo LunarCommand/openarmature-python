@@ -4,16 +4,24 @@ messages, the request parameters and the extras."""
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, assert_never
 
 from openarmature.observability.llm_event import serialize_tool_calls
 
-from .messages import AssistantMessage, ImageSourceInline, SystemMessage, TextBlock, UserMessage
+from .messages import (
+    AssistantMessage,
+    ImageSourceInline,
+    RedactedThinkingBlock,
+    SystemMessage,
+    TextBlock,
+    ThinkingBlock,
+    UserMessage,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-    from .messages import Message
+    from .messages import AssistantContentBlock, Message
     from .response import RuntimeConfig
 
 
@@ -35,6 +43,11 @@ def serialize_messages(messages: Sequence[Message]) -> list[dict[str, Any]]:
     ``{"type": "inline_redacted", "byte_count": N}``, where ``N`` is the
     length of the base64 data, and its ``media_type`` and ``detail`` are
     kept. A URL image passes through unchanged.
+
+    An assistant message whose content is a block list renders block by
+    block. A thinking block keeps its text and drops its signature, and a
+    redacted-thinking block renders as its type alone: both tokens are opaque
+    and mean something only to the provider that issued them.
     """
     out: list[dict[str, Any]] = []
     for msg in messages:
@@ -70,13 +83,30 @@ def serialize_messages(messages: Sequence[Message]) -> list[dict[str, Any]]:
                         rendered_blocks.append(image_record)
                 out.append({"role": "user", "content": rendered_blocks})
         elif isinstance(msg, AssistantMessage):
-            entry: dict[str, Any] = {"role": "assistant", "content": msg.content}
+            entry: dict[str, Any] = {"role": "assistant", "content": _assistant_content(msg.content)}
             if msg.tool_calls:
                 entry["tool_calls"] = serialize_tool_calls(msg.tool_calls)
             out.append(entry)
         else:  # ToolMessage
             out.append({"role": "tool", "content": msg.content, "tool_call_id": msg.tool_call_id})
     return out
+
+
+def _assistant_content(content: str | list[AssistantContentBlock]) -> str | list[dict[str, Any]]:
+    if isinstance(content, str):
+        return content
+    rendered: list[dict[str, Any]] = []
+    for block in content:
+        match block:
+            case TextBlock():
+                rendered.append({"type": "text", "text": block.text})
+            case ThinkingBlock():
+                rendered.append({"type": "thinking", "text": block.text})
+            case RedactedThinkingBlock():
+                rendered.append({"type": "redacted_thinking"})
+            case _:
+                assert_never(block)
+    return rendered
 
 
 # Only set fields appear in the result. Absence is meaningful per
